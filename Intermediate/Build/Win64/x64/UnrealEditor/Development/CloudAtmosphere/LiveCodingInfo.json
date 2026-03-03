@@ -1,0 +1,9 @@
+{
+	"RemapUnityFiles": 
+	{
+		"Module.CloudAtmosphere.cpp.obj": [
+			"PerModuleInline.gen.cpp.obj",
+			"CloudAtmosphere.cpp.obj"
+		]
+	}
+}

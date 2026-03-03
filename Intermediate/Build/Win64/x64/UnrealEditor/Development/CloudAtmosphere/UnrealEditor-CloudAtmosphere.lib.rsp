@@ -1,0 +1,13 @@
+/NOLOGO
+/errorReport:prompt
+/MACHINE:x64
+/SUBSYSTEM:WINDOWS
+/DEF
+/NAME:"UnrealEditor-CloudAtmosphere.dll"
+/IGNORE:4221
+/NODEFAULTLIB
+"D:/Projects/vxl/Intermediate/Build/Win64/x64/vxlEditor/Development/UnrealEd/SharedPCH.UnrealEd.Project.ValApi.ValExpApi.Cpp20.h.obj"
+"D:/Projects/vxl/Plugins/CloudAtmosphere/Intermediate/Build/Win64/x64/UnrealEditor/Development/CloudAtmosphere/Module.CloudAtmosphere.cpp.obj"
+"D:/Projects/vxl/Plugins/CloudAtmosphere/Intermediate/Build/Win64/x64/UnrealEditor/Development/CloudAtmosphere/CloudAtmosphere.cpp.obj"
+"D:/Projects/vxl/Plugins/CloudAtmosphere/Intermediate/Build/Win64/x64/UnrealEditor/Development/CloudAtmosphere/Default.rc2.res"
+/OUT:"D:/Projects/vxl/Plugins/CloudAtmosphere/Intermediate/Build/Win64/x64/UnrealEditor/Development/CloudAtmosphere/UnrealEditor-CloudAtmosphere.lib"

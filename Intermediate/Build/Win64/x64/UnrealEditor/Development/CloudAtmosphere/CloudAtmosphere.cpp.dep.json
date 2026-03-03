@@ -1,0 +1,14 @@
+{
+    "Version": "1.2",
+    "Data": {
+        "Source": "d:\\projects\\vxl\\plugins\\cloudatmosphere\\source\\cloudatmosphere\\private\\cloudatmosphere.cpp",
+        "ProvidedModule": "",
+        "PCH": "d:\\projects\\vxl\\intermediate\\build\\win64\\x64\\vxleditor\\development\\unrealed\\sharedpch.unrealed.project.valapi.valexpapi.cpp20.h.pch",
+        "Includes": [
+            "d:\\projects\\vxl\\plugins\\cloudatmosphere\\intermediate\\build\\win64\\x64\\unrealeditor\\development\\cloudatmosphere\\definitions.cloudatmosphere.h",
+            "d:\\projects\\vxl\\plugins\\cloudatmosphere\\source\\cloudatmosphere\\public\\cloudatmosphere.h"
+        ],
+        "ImportedModules": [],
+        "ImportedHeaderUnits": []
+    }
+}
