@@ -10,6 +10,7 @@ struct CloudParams {
     float4 detailNoiseInvert;
     float detailNoiseScale;
     float detailNoiseErode;
+    float4 animationWeights;
     float4 cloudPhaseParams;
     float3 cloudScatBeta;
     float3 cloudAbsBeta;
@@ -19,9 +20,8 @@ struct CloudParams {
 struct PlanetParams{
     float3 planetPos;
     float planetRadius;
-    float planetRadiusSq; //If we are going to calculate this should we just use it everywhere? does it decrease precision to be squaring these large numbers?
+    float planetRadiusSq;
     float atmoRadius;
-    float atmoRadiusSq;
     float cloudOuterRadius;
     float cloudInnerRadius;
     float cloudOuterRadiusSq; 
@@ -46,7 +46,6 @@ struct MainRayParams {
     float3 cameraPos; 
     float3 cameraDir; 
     float3 lightCol;  
-    float3 sceneCol;
     float sceneDepth; 
     int atmoSteps; 
     int cloudSteps;
@@ -56,7 +55,7 @@ struct MainRayParams {
 
 struct LightRayParams {
     float3 samplePos; 
-    float3 lightDir; //Post jitter light direction... guess we could jitter inside the light march itself and remove from main params
+    float3 lightDir;
     float3 sunRight;
     float3 sunUp;
     int atmoLightSteps; 
@@ -113,30 +112,35 @@ struct SharedFunctions {
 
     float CloudDensity(float distFromCenter, float3 samplePos, CompositeParams input) {
         float cloudNormH = (distFromCenter - input.planetParams.cloudInnerRadius) / (input.planetParams.cloudOuterRadius - input.planetParams.cloudInnerRadius);
+        
+        // Flat-top height curve: full density in middle, smooth fade at bottom (0 to curve.x) and top (curve.y to 1)
         float bottomFade = saturate(smoothstep(0.0, input.cloudParams.cloudHeightCurve.x, cloudNormH));
         float topFade = saturate(smoothstep(1.0, input.cloudParams.cloudHeightCurve.y, cloudNormH));
+        
         float heightGradient = bottomFade * topFade;
 
         float3 uvw = samplePos / (input.planetParams.cloudOuterRadius * input.cloudParams.cloudScale);
+
+        uvw += input.cloudParams.animationWeights.rgb * View.RealTime;
+
         float4 cSample = cloudDensityTex.Sample(cloudDensitySampler, uvw);
-        float4 icSample = float4(1,1,1,1) - cSample;
+        float4 icSample = 1 - cSample;
         float4 fcSample = lerp(cSample, icSample, input.cloudParams.cloudNoiseInvert);
 
         float baseNoise = fcSample.r;
         float detail = (fcSample.g * input.cloudParams.cloudNoiseWeights.r + fcSample.b * input.cloudParams.cloudNoiseWeights.g + fcSample.a * input.cloudParams.cloudNoiseWeights.b);
         float noise = saturate(baseNoise - detail * input.cloudParams.cloudNoiseWeights.a);
 
+        // Apply height gradient before coverage threshold so clouds round at edges without shrinking
         float remapped = saturate(heightGradient * (noise - (1.0 - input.cloudParams.cloudCoverage)) / input.cloudParams.cloudCoverage);
 
         if (remapped > 0) {
             float3 uvwDetail = uvw * input.cloudParams.detailNoiseScale;
             float4 dSample = cloudDensityTex.Sample(cloudDensitySampler, uvwDetail);
-            float4 idSample = float4(1,1,1,1) - dSample;
+            float4 idSample = 1 - dSample;
             float4 fdSample = lerp(dSample, idSample, input.cloudParams.detailNoiseInvert);
-
-            float fineDetail = fdSample.r * input.cloudParams.detailNoiseWeights.r + fdSample.g * input.cloudParams.detailNoiseWeights.g + fdSample.b * input.cloudParams.detailNoiseWeights.b + fdSample.a * input.cloudParams.detailNoiseWeights.a; //TODO: PARAMETERIZE multipliers as vector param
-            float detailErode = input.cloudParams.detailNoiseErode;
-            remapped = saturate(remapped - fineDetail * detailErode);
+            float fineDetail = dot(fdSample, input.cloudParams.detailNoiseWeights);
+            remapped = saturate(remapped - fineDetail * input.cloudParams.detailNoiseErode);
         }
 
         return remapped * input.cloudParams.cloudDensityMult;
@@ -222,9 +226,11 @@ struct LightMarchFunctions {
     }
 
     float3 March(CompositeParams input, SharedFunctions sf) {
+        // Jitter light direction per sample position to reduce banding in cloud shadows and add "fuzz" to shadowing
         float seed = frac(sin(dot(input.lightRayParams.samplePos, float3(12.9898, 78.233, 45.164))) * 43758.5453);
         float2 ditherUV = float2(frac(seed * 12.98), frac(seed * 78.23)) * 2.0 - 1.0;
         float3 jitteredLightDir = normalize(input.lightRayParams.lightDir + (input.lightRayParams.sunRight * ditherUV.x + input.lightRayParams.sunUp * ditherUV.y) * (0.01 * input.lightRayParams.jitterFactor));
+
         Plan(input, sf);
         if (planetShadowed) return float3(0.0, 0.0, 0.0);
         if (segmentCount == 0) return float3(1.0, 1.0, 1.0);
@@ -242,11 +248,11 @@ struct LightMarchFunctions {
                 float3 p = input.lightRayParams.samplePos + jitteredLightDir * (pos + currentStep * 0.5);
                 float3 toCenter = p - input.planetParams.planetPos;
                 float distSq = dot(toCenter, toCenter);
-                if (distSq < input.planetParams.planetRadiusSq) return float3(0.0, 0.0, 0.0); //TODO: Again, idk if its worth using sq values.. faster yes but what about precision? if the same should we not switch everywhere to sq values?
+                if (distSq < input.planetParams.planetRadiusSq) return float3(0.0, 0.0, 0.0);
                 float dist = sqrt(distSq);
                 float h = dist - input.planetParams.planetRadius;
                 atmoOptDepth += sf.AtmoDensity(h, input.scatteringParams.rayScaleH, input.scatteringParams.mieScaleH, input.scatteringParams.absHeight, input.scatteringParams.absFalloff) * currentStep;
-                if (distSq >= input.planetParams.cloudInnerRadiusSq && distSq <= input.planetParams.cloudOuterRadiusSq) { //TODO: Again, idk if its worth using sq values.. faster yes but what about precision? if the same should we not switch everywhere to sq values?
+                if (distSq >= input.planetParams.cloudInnerRadiusSq && distSq <= input.planetParams.cloudOuterRadiusSq) {
                     float cDensity = sf.CloudDensity(dist, p, input);
                     if (cDensity > 0.0) {
                         cloudOptDepth += cDensity * currentStep;
@@ -265,7 +271,7 @@ struct MainRayFunctions {
     int segmentCount;
     float3 rayOrigin;
     float3 rayDir;
-    bool depthLimited; // add this
+    bool depthLimited;
 
     void Plan(CompositeParams input, SharedFunctions sf) {
         rayOrigin = input.mainRayParams.cameraPos;
@@ -347,10 +353,12 @@ struct MainRayFunctions {
         float rayStart = segments[0].x;
         float rayEnd = segments[segmentCount - 1].y;
         float rayLength = max(rayEnd - rayStart, 0.0001);
-        
+
+        float phaseDual = sf.PhaseDualLobe(input.scatteringParams.cosTheta, input.cloudParams.cloudPhaseParams.r, input.cloudParams.cloudPhaseParams.g, input.cloudParams.cloudPhaseParams.b);
+        float phaseIsotropic = 1.0 / (4.0 * 3.14159265);
+
         // Stable per-pixel seed for jitter
-        float frameSeed = frac(float(View.StateFrameIndex) * 0.618033); //0; //Set to zero to get rid of temporal jitter
-        float worldSeed = frac(sin(dot(input.mainRayParams.cameraDir, float3(12.9898, 78.233, 45.164))) * 43758.5453 + frameSeed);
+        float worldSeed = frac(sin(dot(input.mainRayParams.cameraDir, float3(12.9898, 78.233, 45.164))) * 43758.5453);
         
         for (int s = 0; s < segmentCount; s++) {
             float segStart = segments[s].x;
@@ -365,7 +373,7 @@ struct MainRayFunctions {
                 float currentStep = sf.AdaptiveStepSize(baseStepSize, pos, rayStart, rayLength, input.mainRayParams.stepScaleFactor);
                 
                 // Per-step jitter using golden ratio sequence
-                float stepSeed = frac(worldSeed + float(stepIndex) * 0.618033); //TODO: PASS IN BLUE NOISE TEX SO WE CAN SAMPLE IT FOR RANDOM VALUES
+                float stepSeed = frac(worldSeed + float(stepIndex) * 0.618033);
                 float jitterAmount = input.mainRayParams.jitterFactor;
                 float stepSizeMultiplier = 1.0 + (stepSeed - 0.5) * 2.0 * jitterAmount;
                 float jitteredStep = currentStep * stepSizeMultiplier;
@@ -383,7 +391,10 @@ struct MainRayFunctions {
                     
                     float3 atmoDens = sf.AtmoDensity(height, input.scatteringParams.rayScaleH, input.scatteringParams.mieScaleH, input.scatteringParams.absHeight, input.scatteringParams.absFalloff);
                     float3 rayleighScatter = input.scatteringParams.rayBeta * input.scatteringParams.phaseR * atmoDens.x;
+
+                    // Suppress mie scattering when depth-limited (behind geometry) to avoid glow bleeding through objects
                     float3 mieScatter = depthLimited ? float3(0,0,0) :input.scatteringParams.mieBeta * input.scatteringParams.phaseM * atmoDens.y;
+                    
                     float3 directScatter = (rayleighScatter + mieScatter) * sunTransmittance * input.mainRayParams.lightCol;
                     float3 ambientScatter = input.scatteringParams.rayBeta * atmoDens.x * input.scatteringParams.atmoAmbient;
                     float3 inscattered = (directScatter + ambientScatter) * jitteredStep;
@@ -396,8 +407,6 @@ struct MainRayFunctions {
                         float cloudDensity = sf.CloudDensity(distFromCenter, samplePos, input);
                         if (cloudDensity > 0) {
                             float3 incomingLight = input.mainRayParams.lightCol * sunTransmittance;
-                            float phaseDual = sf.PhaseDualLobe(input.scatteringParams.cosTheta, input.cloudParams.cloudPhaseParams.r, input.cloudParams.cloudPhaseParams.g, input.cloudParams.cloudPhaseParams.b);
-                            float phaseIsotropic = 1.0 / (4.0 * 3.14159265);
                             float3 multiScatter = incomingLight * phaseIsotropic * input.cloudParams.cloudPhaseParams.a;
                             float3 cloudLight = incomingLight * phaseDual + multiScatter + input.mainRayParams.lightCol * input.cloudParams.cloudAmb;                        
                             float3 cloudExtinction = cloudDensity * input.cloudParams.cloudScatBeta * jitteredStep;
@@ -409,6 +418,7 @@ struct MainRayFunctions {
                     }
                 }
                 
+                // Early exit when ray is fully opaque
                 if (max(Transmittance.x, max(Transmittance.y, Transmittance.z)) < 0.001) {
                     Transmittance = float3(0, 0, 0);
                     break;
@@ -418,6 +428,7 @@ struct MainRayFunctions {
                 stepIndex++;
             }
             
+            // Early exit when ray is fully opaque
             if (max(Transmittance.x, max(Transmittance.y, Transmittance.z)) < 0.001) {
                 Transmittance = float3(0, 0, 0);
                 break;
@@ -435,7 +446,12 @@ SharedFunctions sf;
 sf.cloudDensityTex = cloudDensityTexture;
 sf.cloudDensitySampler = cloudDensityTextureSampler;
 
-//TODO: SET BLUE NOISE TEX AND SWITCH TO IT FOR RANDOM VALUES INSTEAD OF FRACS
+//HAVE TO JUMP THROUGH A LOT OF HOOPS TO HAVE THE DOWNSAMPLED USER TEXTURE GENERATE WITH THE PROPER DATA
+//WE ARE BASICALLY RENDERING THE ENTIRE MARCH IN THE TOP LEFT 1/4TH OF THE SCREEN WITH DIMENSIONS RTSIZE 
+float2 screenUV = Parameters.SvPosition.xy / rtSize;
+float2 ClipXY = screenUV * float2(2, -2) + float2(-1, 1);
+float4 WorldDir = mul(float4(ClipXY, 0.5, 1.0), View.ClipToTranslatedWorld);
+float3 FinalRayDir = normalize(WorldDir.xyz / WorldDir.w);
 
 float atmoThickness = atmoRadius - planetRadius;
 float rayleighScaleHeight = atmoThickness * rayleighHeight;
@@ -447,23 +463,11 @@ float absHeight = atmoThickness * absorptionHeight;
 float absFalloff = atmoThickness * absorptionFalloff;
 float3 scaledCloudScatBeta = cloudScatterBeta / atmoThickness;
 float3 scaledCloudAbsBeta = cloudAbsorptionBeta / atmoThickness;
-float cosTheta = dot(cameraDir, lightDirection);
+float cosTheta = dot(FinalRayDir, lightDirection);
 float phaseR = sf.PhaseRayleigh(cosTheta);
 float phaseM = sf.PhaseHG(cosTheta, mieG);
 
-//HAVE TO JUMP THROUGH A LOT OF HOOPS TO HAVE THE DOWNSAMPLED USER TEXTURE GENERATE WITH THE PROPER DATA
-//WE ARE BASICALLY RENDERING THE ENTIRE MARCH IN THE TOP LEFT 1/4TH OF THE SCREEN WITH DIMENSIONS RTSIZE 
-float2 screenUV = Parameters.SvPosition.xy / rtSize;
-float2 ClipXY = screenUV * float2(2, -2) + float2(-1, 1);
-float4 WorldDir = mul(float4(ClipXY, 0.5, 1.0), View.ClipToTranslatedWorld);
-float3 FinalRayDir = normalize(WorldDir.xyz / WorldDir.w);
-float deviceZ = LookupDeviceZ(screenUV);
-float2 fullResSvPos = screenUV * View.ViewSizeAndInvSize.xy + View.ViewRectMin.xy;
-float4 virtualSvPos = float4(fullResSvPos, deviceZ, 1.0);
-float3 TranslatedWorldPos = SvPositionToTranslatedWorld(virtualSvPos);
-float reconstructedDepth = length(TranslatedWorldPos);
-
-//SWITCHES BETWEEN DEPTH MODELS, OUR MAIN METHOD BREAKS DOWN AT LARGE DISTANCES - SO OUTSIDE THE ATMOSPHERE WE JUST IGNORE DEPTH TRACE
+//Blend between ignoring depth (outside atmo) and using scene depth (inside atmo) to avoid precision breakdown at large distances
 float camDist = length(cameraPos - atmoPos);
 float outerBlend = saturate((atmoRadius - camDist) / (atmoRadius - cloudOuterRadius));
 float correctedDepth = lerp(camDist * 2, sceneDepth, outerBlend);
@@ -471,18 +475,17 @@ float correctedDepth = lerp(camDist * 2, sceneDepth, outerBlend);
 //INIT MAIN PARAMS
 CompositeParams params;
 
-//Planet params
+//PLANET PARAMS
 params.planetParams.planetPos = atmoPos; 
 params.planetParams.planetRadius = planetRadius;
 params.planetParams.atmoRadius = atmoRadius; 
 params.planetParams.cloudOuterRadius = cloudOuterRadius; 
 params.planetParams.cloudInnerRadius = cloudInnerRadius;
 params.planetParams.planetRadiusSq = planetRadius * planetRadius;
-params.planetParams.atmoRadiusSq = atmoRadius * atmoRadius; 
 params.planetParams.cloudOuterRadiusSq = cloudOuterRadius * cloudOuterRadius; 
 params.planetParams.cloudInnerRadiusSq = cloudInnerRadius * cloudInnerRadius; 
 
-//Scattering Params
+//SCATTERING PARAMS
 params.scatteringParams.cosTheta = cosTheta;
 params.scatteringParams.rayBeta = scaledRayleighBeta; 
 params.scatteringParams.mieBeta = scaledMieBeta; 
@@ -495,13 +498,13 @@ params.scatteringParams.absFalloff = absFalloff;
 params.scatteringParams.phaseR = phaseR; 
 params.scatteringParams.phaseM = phaseM; 
 
-//Cloud params
+//CLOUD PARAMS
 params.cloudParams.cloudScatBeta = scaledCloudScatBeta; 
 params.cloudParams.cloudAbsBeta = scaledCloudAbsBeta; 
 params.cloudParams.cloudAmb = cloudAmbient;
 params.cloudParams.cloudPhaseParams = cloudPhaseParams;
 params.cloudParams.cloudScale = cloudScale; 
-params.cloudParams.cloudHeightCurve = float2(.3,.7);
+params.cloudParams.cloudHeightCurve = cloudHeightCurve;
 params.cloudParams.cloudCoverage = cloudCoverage; 
 params.cloudParams.cloudDensityMult = cloudDensityMult;
 params.cloudParams.cloudNoiseWeights = cloudNoiseWeights;
@@ -510,19 +513,19 @@ params.cloudParams.detailNoiseWeights = detailNoiseWeights;
 params.cloudParams.detailNoiseInvert = detailNoiseInvert;
 params.cloudParams.detailNoiseScale = detailNoiseScale;
 params.cloudParams.detailNoiseErode = detailNoiseErode;
+params.cloudParams.animationWeights = animationWeights;
 
-//Main Ray Params
+//MAIN RAY PARAMS
 params.mainRayParams.cameraPos = cameraPos; 
 params.mainRayParams.cameraDir = FinalRayDir; 
 params.mainRayParams.lightCol = lightColor; 
-params.mainRayParams.sceneCol = sceneColor;
 params.mainRayParams.sceneDepth = correctedDepth;
 params.mainRayParams.atmoSteps = mainAtmoSteps; 
 params.mainRayParams.cloudSteps = mainCloudSteps;
 params.mainRayParams.jitterFactor = jitterFactor;
 params.mainRayParams.stepScaleFactor = stepScaleFactor; 
 
-//Light Ray Params
+//LIGHT RAY PARAMS
 params.lightRayParams.lightDir = lightDirection; 
 params.lightRayParams.sunRight = normalize(cross(abs(params.lightRayParams.lightDir.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0), params.lightRayParams.lightDir));
 params.lightRayParams.sunUp = cross(params.lightRayParams.lightDir, params.lightRayParams.sunRight);
