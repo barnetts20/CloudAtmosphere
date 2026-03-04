@@ -1,114 +1,77 @@
 //PARAM STRUCTS SO WE DONT HAVE TO PASS IN A BILLION PARAMETERS TO THE MAIN FUNCTION CALLS
-struct MainRayParams {
+struct CloudParams {
+    float cloudScale;
+    float2 cloudHeightCurve;
+    float cloudCoverage;
+    float cloudDensityMult;
+    float4 cloudNoiseWeights;
+    float4 cloudNoiseInvert;
+    float4 detailNoiseWeights;
+    float4 detailNoiseInvert;
+    float detailNoiseScale;
+    float detailNoiseErode;
+    float4 cloudPhaseParams;
+    float3 cloudScatBeta;
+    float3 cloudAbsBeta;
+    float3 cloudAmb;
+};
+
+struct PlanetParams{
+    float3 planetPos;
+    float planetRadius;
+    float planetRadiusSq; //If we are going to calculate this should we just use it everywhere? does it decrease precision to be squaring these large numbers?
+    float atmoRadius;
+    float atmoRadiusSq;
+    float cloudOuterRadius;
+    float cloudInnerRadius;
+    float cloudOuterRadiusSq; 
+    float cloudInnerRadiusSq; 
+};
+
+struct ScatterParams {
     float cosTheta;
-    float3 cameraPos; 
-    float3 cameraDir; 
-    float3 planetPos; 
-    float planetRadius; 
-    float atmoRadius; 
-    float cloudOuterRadius; 
-    float cloudInnerRadius; 
-    float sceneDepth; 
-    int atmoSteps; 
-    int cloudSteps; 
-    int atmoLightSteps; 
-    int cloudLightSteps; 
-    float3 lightDir; 
-    float3 lightCol; 
-    float3 scaledRayBeta; 
-    float3 scaledMieBeta; 
-    float3 scaledAbsBeta; 
+    float3 rayBeta; 
+    float3 mieBeta; 
+    float3 absBeta; 
     float atmoAmbient; 
     float rayScaleH; 
     float mieScaleH; 
     float absHeight; 
     float absFalloff; 
-    float3 cloudScatBeta; 
-    float3 cloudAbsBeta; 
-    float3 cloudAmb;
-    float4 cloudPhaseParams;
     float phaseR; 
     float phaseM; 
-    float blueNoiseFactor; 
-    float stepScaleFactor; 
-    float3 sceneCol; 
-    float cloudScale; 
-    float cloudCoverage; 
-    float cloudDensityMult;
-    float4 cloudNoiseWeights;
-    float4 cloudNoiseInvert;
-    float4 detailNoiseWeights;
-    float4 detailNoiseInvert;
-    float detailNoiseScale;
-    float detailNoiseErode;
 };
 
-struct LightMarchParams {
-    float3 samplePos; 
-    float3 lightDir; 
-    float3 planetPos; 
-    float planetRadius; 
-    float planetRadiusSq; 
-    float atmoRadius; 
-    float cloudOuterRadius; 
-    float cloudInnerRadius; 
-    float cloudInnerRSq; 
-    float cloudOuterRSq; 
+struct MainRayParams {
+    float3 cameraPos; 
+    float3 cameraDir; 
+    float3 lightCol;  
+    float3 sceneCol;
+    float sceneDepth; 
     int atmoSteps; 
-    int cloudSteps; 
-    float3 rayBeta; 
-    float3 mieBetaVec; 
-    float3 absBeta; 
-    float rayScaleH; 
-    float mieScaleH; 
-    float absHeight; 
-    float absFalloff; 
-    float3 cloudAbsBeta; 
-    float4 cloudPhaseParams;
-    float blueFactor;  
-    float cloudScale; 
-    float cloudCoverage; 
-    float cloudDensityMult;
-    float4 cloudNoiseWeights;
-    float4 cloudNoiseInvert;
-    float4 detailNoiseWeights;
-    float4 detailNoiseInvert;
-    float detailNoiseScale;
-    float detailNoiseErode;
-    
-    static LightMarchParams FromMainRayParams(MainRayParams input){
-        LightMarchParams lmp;
-        lmp.planetPos = input.planetPos;
-        lmp.planetRadius = input.planetRadius;
-        lmp.planetRadiusSq = input.planetRadius * input.planetRadius;
-        lmp.atmoRadius = input.atmoRadius;
-        lmp.cloudOuterRadius = input.cloudOuterRadius;
-        lmp.cloudInnerRadius = input.cloudInnerRadius;
-        lmp.cloudInnerRSq = input.cloudInnerRadius * input.cloudInnerRadius;
-        lmp.cloudOuterRSq = input.cloudOuterRadius * input.cloudOuterRadius;
-        lmp.atmoSteps = input.atmoLightSteps;
-        lmp.cloudSteps = input.cloudLightSteps;
-        lmp.rayBeta = input.scaledRayBeta;
-        lmp.mieBetaVec = input.scaledMieBeta;
-        lmp.absBeta = input.scaledAbsBeta;
-        lmp.rayScaleH = input.rayScaleH;
-        lmp.mieScaleH = input.mieScaleH;
-        lmp.absHeight = input.absHeight;
-        lmp.absFalloff = input.absFalloff;
-        lmp.cloudAbsBeta = input.cloudAbsBeta;
-        lmp.cloudPhaseParams = input.cloudPhaseParams;            
-        lmp.cloudScale = input.cloudScale;
-        lmp.cloudCoverage = input.cloudCoverage;
-        lmp.cloudDensityMult = input.cloudDensityMult;
-        lmp.cloudNoiseWeights = input.cloudNoiseWeights;
-        lmp.cloudNoiseInvert = input.cloudNoiseInvert;
-        lmp.detailNoiseWeights = input.detailNoiseWeights;
-        lmp.detailNoiseInvert = input.detailNoiseInvert;
-        lmp.detailNoiseScale = input.detailNoiseScale;
-        lmp.detailNoiseErode = input.detailNoiseErode;
-        return lmp;
-    }
+    int cloudSteps;
+    float jitterFactor; 
+    float stepScaleFactor; 
 };
+
+struct LightRayParams {
+    float3 samplePos; 
+    float3 lightDir; //Post jitter light direction... guess we could jitter inside the light march itself and remove from main params
+    float3 sunRight;
+    float3 sunUp;
+    int atmoLightSteps; 
+    int cloudLightSteps; 
+    float jitterFactor;  
+};
+
+struct CompositeParams{
+    PlanetParams planetParams;
+    ScatterParams scatteringParams;
+    CloudParams cloudParams;
+    MainRayParams mainRayParams;
+    LightRayParams lightRayParams;
+};
+
 //HELPER METHODS
 struct SharedFunctions {
     Texture3D cloudDensityTex;
@@ -148,35 +111,35 @@ struct SharedFunctions {
         return max(lerp(back, forward, forwardWeight), .05);
     }
 
-    float CloudDensity(float distFromCenter, float3 samplePos, LightMarchParams lmp) {
-        float cloudNormH = (distFromCenter - lmp.cloudInnerRadius) / (lmp.cloudOuterRadius - lmp.cloudInnerRadius);
-        //TODO: use height curve to round top/bottoms of clouds
-        float heightGradient = saturate(1.0 - abs(cloudNormH * 2.0 - 1.0));
-        heightGradient = heightGradient * heightGradient;
+    float CloudDensity(float distFromCenter, float3 samplePos, CompositeParams input) {
+        float cloudNormH = (distFromCenter - input.planetParams.cloudInnerRadius) / (input.planetParams.cloudOuterRadius - input.planetParams.cloudInnerRadius);
+        float bottomFade = saturate(smoothstep(0.0, input.cloudParams.cloudHeightCurve.x, cloudNormH));
+        float topFade = saturate(smoothstep(1.0, input.cloudParams.cloudHeightCurve.y, cloudNormH));
+        float heightGradient = bottomFade * topFade;
 
-        float3 uvw = samplePos / (lmp.cloudOuterRadius * lmp.cloudScale);
+        float3 uvw = samplePos / (input.planetParams.cloudOuterRadius * input.cloudParams.cloudScale);
         float4 cSample = cloudDensityTex.Sample(cloudDensitySampler, uvw);
         float4 icSample = float4(1,1,1,1) - cSample;
-        float4 fcSample = lerp(cSample, icSample, lmp.cloudNoiseInvert);
+        float4 fcSample = lerp(cSample, icSample, input.cloudParams.cloudNoiseInvert);
 
         float baseNoise = fcSample.r;
-        float detail = (fcSample.g * lmp.cloudNoiseWeights.r + fcSample.b * lmp.cloudNoiseWeights.g + fcSample.a * lmp.cloudNoiseWeights.b);
-        float noise = saturate(baseNoise - detail * lmp.cloudNoiseWeights.a);
+        float detail = (fcSample.g * input.cloudParams.cloudNoiseWeights.r + fcSample.b * input.cloudParams.cloudNoiseWeights.g + fcSample.a * input.cloudParams.cloudNoiseWeights.b);
+        float noise = saturate(baseNoise - detail * input.cloudParams.cloudNoiseWeights.a);
 
-        float remapped = saturate((noise - (1.0 - lmp.cloudCoverage)) / lmp.cloudCoverage);
+        float remapped = saturate(heightGradient * (noise - (1.0 - input.cloudParams.cloudCoverage)) / input.cloudParams.cloudCoverage);
 
         if (remapped > 0) {
-            float3 uvwDetail = uvw * lmp.detailNoiseScale;
+            float3 uvwDetail = uvw * input.cloudParams.detailNoiseScale;
             float4 dSample = cloudDensityTex.Sample(cloudDensitySampler, uvwDetail);
             float4 idSample = float4(1,1,1,1) - dSample;
-            float4 fdSample = lerp(dSample, idSample, lmp.detailNoiseInvert);
+            float4 fdSample = lerp(dSample, idSample, input.cloudParams.detailNoiseInvert);
 
-            float fineDetail = fdSample.r * lmp.detailNoiseWeights.r + fdSample.g * lmp.detailNoiseWeights.g + fdSample.b * lmp.detailNoiseWeights.b + fdSample.a * lmp.detailNoiseWeights.a; //TODO: PARAMETERIZE multipliers as vector param
-            float detailErode = lmp.detailNoiseErode;
+            float fineDetail = fdSample.r * input.cloudParams.detailNoiseWeights.r + fdSample.g * input.cloudParams.detailNoiseWeights.g + fdSample.b * input.cloudParams.detailNoiseWeights.b + fdSample.a * input.cloudParams.detailNoiseWeights.a; //TODO: PARAMETERIZE multipliers as vector param
+            float detailErode = input.cloudParams.detailNoiseErode;
             remapped = saturate(remapped - fineDetail * detailErode);
         }
 
-        return remapped * heightGradient * lmp.cloudDensityMult;
+        return remapped * input.cloudParams.cloudDensityMult;
     }
 
     float AdaptiveStepSize(float baseStep, float pos, float rayStart, float rayLength, float growthRate) {
@@ -189,31 +152,27 @@ struct SharedFunctions {
 struct LightMarchFunctions {
     float4 segments[5];
     int segmentCount;
-    float3 rayOrigin;
-    float3 rayDir;
     bool planetShadowed;
 
-    void Plan(LightMarchParams input, SharedFunctions sf) {
-        rayOrigin = input.samplePos;
-        rayDir = input.lightDir;
+    void Plan(CompositeParams input, SharedFunctions sf) {
         segmentCount = 0;
         planetShadowed = false;
-        float2 planetHit = sf.RaySphere(input.samplePos, input.lightDir, input.planetPos, input.planetRadius);
+        float2 planetHit = sf.RaySphere(input.lightRayParams.samplePos, input.lightRayParams.lightDir, input.planetParams.planetPos, input.planetParams.planetRadius);
         if (planetHit.x > 0.0) {
             planetShadowed = true;
             return;
         }
-        float2 atmoHit = sf.RaySphere(input.samplePos, input.lightDir, input.planetPos, input.atmoRadius);
+        float2 atmoHit = sf.RaySphere(input.lightRayParams.samplePos, input.lightRayParams.lightDir, input.planetParams.planetPos, input.planetParams.atmoRadius);
         if (atmoHit.y < 0.0) return;
-        float2 cloudOHit = sf.RaySphere(input.samplePos, input.lightDir, input.planetPos, input.cloudOuterRadius);
-        float2 cloudIHit = sf.RaySphere(input.samplePos, input.lightDir, input.planetPos, input.cloudInnerRadius);
+        float2 cloudOHit = sf.RaySphere(input.lightRayParams.samplePos, input.lightRayParams.lightDir, input.planetParams.planetPos, input.planetParams.cloudOuterRadius);
+        float2 cloudIHit = sf.RaySphere(input.lightRayParams.samplePos, input.lightRayParams.lightDir, input.planetParams.planetPos, input.planetParams.cloudInnerRadius);
         float atmoStart = max(atmoHit.x, 0.0);
         float atmoEnd = atmoHit.y;
         if (atmoStart >= atmoEnd) return;
         bool hasCloudOuter = cloudOHit.y > 0.0;
         bool hasCloudInner = cloudIHit.y > 0.0;
         if (!hasCloudOuter) {
-            float stepSize = (atmoEnd - atmoStart) / float(input.atmoSteps);
+            float stepSize = (atmoEnd - atmoStart) / float(input.lightRayParams.atmoLightSteps);
             segments[0] = float4(atmoStart, atmoEnd, stepSize, 0.0);
             segmentCount = 1;
             return;
@@ -237,32 +196,35 @@ struct LightMarchFunctions {
             float segEnd = boundaries[i + 1];
             if (segEnd <= segStart) continue;
             float midDist = (segStart + segEnd) * 0.5;
-            float3 midPos = input.samplePos + input.lightDir * midDist;
-            float midRadius = length(midPos - input.planetPos);
-            bool inCloudBand = (midRadius >= input.cloudInnerRadius && midRadius <= input.cloudOuterRadius);
+            float3 midPos = input.lightRayParams.samplePos + input.lightRayParams.lightDir * midDist;
+            float midRadius = length(midPos - input.planetParams.planetPos);
+            bool inCloudBand = (midRadius >= input.planetParams.cloudInnerRadius && midRadius <= input.planetParams.cloudOuterRadius);
             if (inCloudBand) {
                 totalCloudDist += (segEnd - segStart);
             } else {
                 totalAtmoDist += (segEnd - segStart);
             }
         }
-        float coarseStep = totalAtmoDist > 0.0 ? totalAtmoDist / float(input.atmoSteps) : 1.0;
-        float fineStep = totalCloudDist > 0.0 ? totalCloudDist / float(input.cloudSteps) : 1.0;
+        float coarseStep = totalAtmoDist > 0.0 ? totalAtmoDist / float(input.lightRayParams.atmoLightSteps) : 1.0;
+        float fineStep = totalCloudDist > 0.0 ? totalCloudDist / float(input.lightRayParams.cloudLightSteps) : 1.0;
         for (int j = 0; j < bCount - 1; j++) {
             float segStart = boundaries[j];
             float segEnd = boundaries[j + 1];
             if (segEnd <= segStart) continue;
             float midDist = (segStart + segEnd) * 0.5;
-            float3 midPos = input.samplePos + input.lightDir * midDist;
-            float midRadius = length(midPos - input.planetPos);
-            bool inCloudBand = (midRadius >= input.cloudInnerRadius && midRadius <= input.cloudOuterRadius);
+            float3 midPos = input.lightRayParams.samplePos + input.lightRayParams.lightDir * midDist;
+            float midRadius = length(midPos - input.planetParams.planetPos);
+            bool inCloudBand = (midRadius >= input.planetParams.cloudInnerRadius && midRadius <= input.planetParams.cloudOuterRadius);
             segments[segmentCount] = float4(segStart, segEnd, inCloudBand ? fineStep : coarseStep, inCloudBand ? 1.0 : 0.0);
             segmentCount++;
             if (segmentCount >= 5) break;
         }
     }
 
-    float3 March(LightMarchParams input, SharedFunctions sf) {
+    float3 March(CompositeParams input, SharedFunctions sf) {
+        float seed = frac(sin(dot(input.lightRayParams.samplePos, float3(12.9898, 78.233, 45.164))) * 43758.5453);
+        float2 ditherUV = float2(frac(seed * 12.98), frac(seed * 78.23)) * 2.0 - 1.0;
+        float3 jitteredLightDir = normalize(input.lightRayParams.lightDir + (input.lightRayParams.sunRight * ditherUV.x + input.lightRayParams.sunUp * ditherUV.y) * (0.01 * input.lightRayParams.jitterFactor));
         Plan(input, sf);
         if (planetShadowed) return float3(0.0, 0.0, 0.0);
         if (segmentCount == 0) return float3(1.0, 1.0, 1.0);
@@ -271,20 +233,20 @@ struct LightMarchFunctions {
         for (int s = 0; s < segmentCount; s++) {
             float segStart = segments[s].x;
             float segEnd = segments[s].y;
-            float stepSize = segments[s].z * (1.0 + input.blueFactor);
+            float stepSize = segments[s].z * (1.0 + input.lightRayParams.jitterFactor);
             float pos = segStart;
             int iter = 0;
             while (pos < segEnd && iter < 256) {
                 iter++;
                 float currentStep = min(stepSize, segEnd - pos);
-                float3 p = rayOrigin + rayDir * (pos + currentStep * 0.5);
-                float3 toCenter = p - input.planetPos;
+                float3 p = input.lightRayParams.samplePos + jitteredLightDir * (pos + currentStep * 0.5);
+                float3 toCenter = p - input.planetParams.planetPos;
                 float distSq = dot(toCenter, toCenter);
-                if (distSq < input.planetRadiusSq) return float3(0.0, 0.0, 0.0);
+                if (distSq < input.planetParams.planetRadiusSq) return float3(0.0, 0.0, 0.0); //TODO: Again, idk if its worth using sq values.. faster yes but what about precision? if the same should we not switch everywhere to sq values?
                 float dist = sqrt(distSq);
-                float h = dist - input.planetRadius;
-                atmoOptDepth += sf.AtmoDensity(h, input.rayScaleH, input.mieScaleH, input.absHeight, input.absFalloff) * currentStep;
-                if (distSq >= input.cloudInnerRSq && distSq <= input.cloudOuterRSq) {
+                float h = dist - input.planetParams.planetRadius;
+                atmoOptDepth += sf.AtmoDensity(h, input.scatteringParams.rayScaleH, input.scatteringParams.mieScaleH, input.scatteringParams.absHeight, input.scatteringParams.absFalloff) * currentStep;
+                if (distSq >= input.planetParams.cloudInnerRadiusSq && distSq <= input.planetParams.cloudOuterRadiusSq) { //TODO: Again, idk if its worth using sq values.. faster yes but what about precision? if the same should we not switch everywhere to sq values?
                     float cDensity = sf.CloudDensity(dist, p, input);
                     if (cDensity > 0.0) {
                         cloudOptDepth += cDensity * currentStep;
@@ -293,7 +255,7 @@ struct LightMarchFunctions {
                 pos += currentStep;
             }
         }
-        return exp(-(input.rayBeta * atmoOptDepth.x + input.mieBetaVec * atmoOptDepth.y + input.absBeta * atmoOptDepth.z + input.cloudAbsBeta * cloudOptDepth));
+        return exp(-(input.scatteringParams.rayBeta * atmoOptDepth.x + input.scatteringParams.mieBeta * atmoOptDepth.y + input.scatteringParams.absBeta * atmoOptDepth.z + input.cloudParams.cloudAbsBeta * cloudOptDepth));
     }
 };
 
@@ -305,14 +267,14 @@ struct MainRayFunctions {
     float3 rayDir;
     bool depthLimited; // add this
 
-    void Plan(MainRayParams input, SharedFunctions sf) {
-        rayOrigin = input.cameraPos;
-        rayDir = input.cameraDir;
+    void Plan(CompositeParams input, SharedFunctions sf) {
+        rayOrigin = input.mainRayParams.cameraPos;
+        rayDir = input.mainRayParams.cameraDir;
         segmentCount = 0;
-        float2 atmoHit = sf.RaySphere(input.cameraPos, input.cameraDir, input.planetPos, input.atmoRadius);
+        float2 atmoHit = sf.RaySphere(input.mainRayParams.cameraPos, input.mainRayParams.cameraDir, input.planetParams.planetPos, input.planetParams.atmoRadius);
         if (atmoHit.y < 0.0) return;
-        float2 planetHit = sf.RaySphere(input.cameraPos, input.cameraDir, input.planetPos, input.planetRadius);
-        float maxDist = input.sceneDepth;
+        float2 planetHit = sf.RaySphere(input.mainRayParams.cameraPos, input.mainRayParams.cameraDir, input.planetParams.planetPos, input.planetParams.planetRadius);
+        float maxDist = input.mainRayParams.sceneDepth;
         if (planetHit.x > 0.0) {
             maxDist = min(maxDist, planetHit.x);
         }
@@ -320,12 +282,12 @@ struct MainRayFunctions {
         float atmoEnd = min(atmoHit.y, maxDist);
         depthLimited = (maxDist < atmoHit.y); 
         if (atmoStart >= atmoEnd) return;
-        float2 cloudOHit = sf.RaySphere(input.cameraPos, input.cameraDir, input.planetPos, input.cloudOuterRadius);
-        float2 cloudIHit = sf.RaySphere(input.cameraPos, input.cameraDir, input.planetPos, input.cloudInnerRadius);
+        float2 cloudOHit = sf.RaySphere(input.mainRayParams.cameraPos, input.mainRayParams.cameraDir, input.planetParams.planetPos, input.planetParams.cloudOuterRadius);
+        float2 cloudIHit = sf.RaySphere(input.mainRayParams.cameraPos, input.mainRayParams.cameraDir, input.planetParams.planetPos, input.planetParams.cloudInnerRadius);
         bool hasCloudOuter = cloudOHit.y > 0.0 && cloudOHit.x < maxDist;
         bool hasCloudInner = cloudIHit.y > 0.0 && cloudIHit.x < maxDist;
         if (!hasCloudOuter) {
-            float stepSize = (atmoEnd - atmoStart) / float(input.atmoSteps);
+            float stepSize = (atmoEnd - atmoStart) / float(input.mainRayParams.atmoSteps);
             segments[0] = float4(atmoStart, atmoEnd, stepSize, 0.0);
             segmentCount = 1;
             return;
@@ -349,32 +311,32 @@ struct MainRayFunctions {
             float segEnd = boundaries[i + 1];
             if (segEnd <= segStart) continue;
             float midDist = (segStart + segEnd) * 0.5;
-            float3 midPos = input.cameraPos + input.cameraDir * midDist;
-            float midRadius = length(midPos - input.planetPos);
-            bool inCloudBand = (midRadius >= input.cloudInnerRadius && midRadius <= input.cloudOuterRadius);
+            float3 midPos = input.mainRayParams.cameraPos + input.mainRayParams.cameraDir * midDist;
+            float midRadius = length(midPos - input.planetParams.planetPos);
+            bool inCloudBand = (midRadius >= input.planetParams.cloudInnerRadius && midRadius <= input.planetParams.cloudOuterRadius);
             if (inCloudBand) {
                 totalCloudDist += (segEnd - segStart);
             } else {
                 totalAtmoDist += (segEnd - segStart);
             }
         }
-        float coarseStep = totalAtmoDist > 0.0 ? totalAtmoDist / float(input.atmoSteps) : 1.0;
-        float fineStep = totalCloudDist > 0.0 ? totalCloudDist / float(input.cloudSteps) : 1.0;
+        float coarseStep = totalAtmoDist > 0.0 ? totalAtmoDist / float(input.mainRayParams.atmoSteps) : 1.0;
+        float fineStep = totalCloudDist > 0.0 ? totalCloudDist / float(input.mainRayParams.cloudSteps) : 1.0;
         for (int j = 0; j < bCount - 1; j++) {
             float segStart = boundaries[j];
             float segEnd = boundaries[j + 1];
             if (segEnd <= segStart) continue;
             float midDist = (segStart + segEnd) * 0.5;
-            float3 midPos = input.cameraPos + input.cameraDir * midDist;
-            float midRadius = length(midPos - input.planetPos);
-            bool inCloudBand = (midRadius >= input.cloudInnerRadius && midRadius <= input.cloudOuterRadius);
+            float3 midPos = input.mainRayParams.cameraPos + input.mainRayParams.cameraDir * midDist;
+            float midRadius = length(midPos - input.planetParams.planetPos);
+            bool inCloudBand = (midRadius >= input.planetParams.cloudInnerRadius && midRadius <= input.planetParams.cloudOuterRadius);
             segments[segmentCount] = float4(segStart, segEnd, inCloudBand ? fineStep : coarseStep, inCloudBand ? 1.0 : 0.0);
             segmentCount++;
             if (segmentCount >= 5) break;
         }
     }
 
-    float4 March(MainRayParams input, SharedFunctions sf) {
+    float4 March(CompositeParams input, SharedFunctions sf) {
         Plan(input, sf);
         if (segmentCount == 0) return float4(0, 0, 0, 1.0);
         
@@ -388,14 +350,7 @@ struct MainRayFunctions {
         
         // Stable per-pixel seed for jitter
         float frameSeed = frac(float(View.StateFrameIndex) * 0.618033); //0; //Set to zero to get rid of temporal jitter
-        float worldSeed = frac(sin(dot(input.cameraDir, float3(12.9898, 78.233, 45.164))) * 43758.5453 + frameSeed);
-        
-        // Orthogonal basis for light direction jitter
-        float3 sunRight = normalize(cross(abs(input.lightDir.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0), input.lightDir));
-        float3 sunUp = cross(input.lightDir, sunRight);
-        
-        // Build light march params once
-        LightMarchParams lmp = LightMarchParams::FromMainRayParams(input);
+        float worldSeed = frac(sin(dot(input.mainRayParams.cameraDir, float3(12.9898, 78.233, 45.164))) * 43758.5453 + frameSeed);
         
         for (int s = 0; s < segmentCount; s++) {
             float segStart = segments[s].x;
@@ -407,52 +362,45 @@ struct MainRayFunctions {
             int iter = 0;
             while (pos < segEnd && iter < 256) {
                 iter++;
-                float currentStep = sf.AdaptiveStepSize(baseStepSize, pos, rayStart, rayLength, input.stepScaleFactor);
+                float currentStep = sf.AdaptiveStepSize(baseStepSize, pos, rayStart, rayLength, input.mainRayParams.stepScaleFactor);
                 
                 // Per-step jitter using golden ratio sequence
                 float stepSeed = frac(worldSeed + float(stepIndex) * 0.618033); //TODO: PASS IN BLUE NOISE TEX SO WE CAN SAMPLE IT FOR RANDOM VALUES
-                float jitterAmount = input.blueNoiseFactor;
+                float jitterAmount = input.mainRayParams.jitterFactor;
                 float stepSizeMultiplier = 1.0 + (stepSeed - 0.5) * 2.0 * jitterAmount;
                 float jitteredStep = currentStep * stepSizeMultiplier;
                 jitteredStep = max(0.001, min(jitteredStep, segEnd - pos));
                 
                 float3 samplePos = rayOrigin + rayDir * (pos + jitteredStep * 0.5);
-                float distFromCenter = length(samplePos - input.planetPos);
-                float height = distFromCenter - input.planetRadius;
-                
-                // Jittered light direction
-                float2 ditherUV = float2(frac(stepSeed * 12.98), frac(stepSeed * 78.23)) * 2.0 - 1.0;
-                float3 jitteredLightDir = normalize(input.lightDir + (sunRight * ditherUV.x + sunUp * ditherUV.y) * (0.01 * jitterAmount));
+                float distFromCenter = length(samplePos - input.planetParams.planetPos);
+                float height = distFromCenter - input.planetParams.planetRadius;
                 
                 float3 sunTransmittance = float3(1.0, 1.0, 1.0);
                 if (height > 0) {
-                    lmp.samplePos = samplePos;
-                    lmp.lightDir = jitteredLightDir;
-                    lmp.blueFactor = 0.0;
+                    input.lightRayParams.samplePos = samplePos;
                     LightMarchFunctions lightRay;
-                    sunTransmittance = lightRay.March(lmp, sf);
+                    sunTransmittance = lightRay.March(input, sf);
                     
-                    float3 atmoDens = sf.AtmoDensity(height, input.rayScaleH, input.mieScaleH, input.absHeight, input.absFalloff);
-                    float3 rayleighScatter = input.scaledRayBeta * input.phaseR * atmoDens.x;
-                    float3 mieScatter = depthLimited ? float3(0,0,0) :input.scaledMieBeta * input.phaseM * atmoDens.y;
-                    float3 directScatter = (rayleighScatter + mieScatter) * sunTransmittance * input.lightCol;
-                    float3 ambientScatter = input.scaledRayBeta * atmoDens.x * input.atmoAmbient;
+                    float3 atmoDens = sf.AtmoDensity(height, input.scatteringParams.rayScaleH, input.scatteringParams.mieScaleH, input.scatteringParams.absHeight, input.scatteringParams.absFalloff);
+                    float3 rayleighScatter = input.scatteringParams.rayBeta * input.scatteringParams.phaseR * atmoDens.x;
+                    float3 mieScatter = depthLimited ? float3(0,0,0) :input.scatteringParams.mieBeta * input.scatteringParams.phaseM * atmoDens.y;
+                    float3 directScatter = (rayleighScatter + mieScatter) * sunTransmittance * input.mainRayParams.lightCol;
+                    float3 ambientScatter = input.scatteringParams.rayBeta * atmoDens.x * input.scatteringParams.atmoAmbient;
                     float3 inscattered = (directScatter + ambientScatter) * jitteredStep;
-                    float3 extinction = (input.scaledRayBeta * atmoDens.x + input.scaledMieBeta * atmoDens.y + input.scaledAbsBeta * atmoDens.z) * jitteredStep;
+                    float3 extinction = (input.scatteringParams.rayBeta * atmoDens.x + input.scatteringParams.mieBeta * atmoDens.y + input.scatteringParams.absBeta * atmoDens.z) * jitteredStep;
                     float3 atmoStepTransmittance = exp(-extinction);
                     AccumLight += Transmittance * inscattered;
                     Transmittance *= atmoStepTransmittance;
                     
                     if (isCloudBand) {
-                        float cloudDensity = sf.CloudDensity(distFromCenter, samplePos, lmp);
+                        float cloudDensity = sf.CloudDensity(distFromCenter, samplePos, input);
                         if (cloudDensity > 0) {
-                            float shadowFactor = max(sunTransmittance.x, max(sunTransmittance.y, sunTransmittance.z));
-                            float3 incomingLight = input.lightCol * sunTransmittance;
-                            float phaseDual = sf.PhaseDualLobe(input.cosTheta, input.cloudPhaseParams.r, input.cloudPhaseParams.g, input.cloudPhaseParams.b);
+                            float3 incomingLight = input.mainRayParams.lightCol * sunTransmittance;
+                            float phaseDual = sf.PhaseDualLobe(input.scatteringParams.cosTheta, input.cloudParams.cloudPhaseParams.r, input.cloudParams.cloudPhaseParams.g, input.cloudParams.cloudPhaseParams.b);
                             float phaseIsotropic = 1.0 / (4.0 * 3.14159265);
-                            float3 multiScatter = incomingLight * phaseIsotropic * input.cloudPhaseParams.a;
-                            float3 cloudLight = incomingLight * phaseDual + multiScatter + input.lightCol * input.cloudAmb;                        
-                            float3 cloudExtinction = cloudDensity * input.cloudScatBeta * jitteredStep;
+                            float3 multiScatter = incomingLight * phaseIsotropic * input.cloudParams.cloudPhaseParams.a;
+                            float3 cloudLight = incomingLight * phaseDual + multiScatter + input.mainRayParams.lightCol * input.cloudParams.cloudAmb;                        
+                            float3 cloudExtinction = cloudDensity * input.cloudParams.cloudScatBeta * jitteredStep;
                             float3 cloudStepTransmittance = exp(-cloudExtinction);
                             float3 cloudStepLight = cloudLight * (1.0 - cloudStepTransmittance);
                             AccumLight += Transmittance * cloudStepLight;
@@ -486,6 +434,9 @@ struct MainRayFunctions {
 SharedFunctions sf;
 sf.cloudDensityTex = cloudDensityTexture;
 sf.cloudDensitySampler = cloudDensityTextureSampler;
+
+//TODO: SET BLUE NOISE TEX AND SWITCH TO IT FOR RANDOM VALUES INSTEAD OF FRACS
+
 float atmoThickness = atmoRadius - planetRadius;
 float rayleighScaleHeight = atmoThickness * rayleighHeight;
 float mieScaleHeight = atmoThickness * mieHeight;
@@ -518,49 +469,67 @@ float outerBlend = saturate((atmoRadius - camDist) / (atmoRadius - cloudOuterRad
 float correctedDepth = lerp(camDist * 2, sceneDepth, outerBlend);
 
 //INIT MAIN PARAMS
-MainRayParams mrp;
-mrp.cosTheta = cosTheta;
-mrp.cameraPos = cameraPos; 
-mrp.cameraDir = FinalRayDir; 
-mrp.planetPos = atmoPos; 
-mrp.planetRadius = planetRadius; 
-mrp.atmoRadius = atmoRadius; 
-mrp.cloudOuterRadius = cloudOuterRadius; 
-mrp.cloudInnerRadius = cloudInnerRadius; 
-mrp.sceneDepth = correctedDepth;
-mrp.atmoSteps = mainAtmoSteps; 
-mrp.cloudSteps = mainCloudSteps;
-mrp.atmoLightSteps = atmoLightSteps; 
-mrp.cloudLightSteps = cloudLightSteps; 
-mrp.lightDir = lightDirection; 
-mrp.lightCol = lightColor; 
-mrp.scaledRayBeta = scaledRayleighBeta; 
-mrp.scaledMieBeta = scaledMieBeta; 
-mrp.scaledAbsBeta = scaledAbsBeta; 
-mrp.atmoAmbient = atmoAmbient; 
-mrp.stepScaleFactor = stepScaleFactor; 
-mrp.rayScaleH = rayleighScaleHeight; 
-mrp.mieScaleH = mieScaleHeight; 
-mrp.absHeight = absHeight; 
-mrp.absFalloff = absFalloff; 
-mrp.cloudScatBeta = scaledCloudScatBeta; 
-mrp.cloudAbsBeta = scaledCloudAbsBeta; 
-mrp.cloudAmb = cloudAmbient;
-mrp.cloudPhaseParams = cloudPhaseParams;
-mrp.phaseR = phaseR; 
-mrp.phaseM = phaseM; 
-mrp.blueNoiseFactor = blueNoiseFactor; 
-mrp.sceneCol = sceneColor;
-mrp.cloudScale = cloudScale; 
-mrp.cloudCoverage = cloudCoverage; 
-mrp.cloudDensityMult = cloudDensityMult;
-mrp.cloudNoiseWeights = cloudNoiseWeights;
-mrp.cloudNoiseInvert = cloudNoiseInvert;
-mrp.detailNoiseWeights = detailNoiseWeights;
-mrp.detailNoiseInvert = detailNoiseInvert;
-mrp.detailNoiseScale = detailNoiseScale;
-mrp.detailNoiseErode = detailNoiseErode;
+CompositeParams params;
+
+//Planet params
+params.planetParams.planetPos = atmoPos; 
+params.planetParams.planetRadius = planetRadius;
+params.planetParams.atmoRadius = atmoRadius; 
+params.planetParams.cloudOuterRadius = cloudOuterRadius; 
+params.planetParams.cloudInnerRadius = cloudInnerRadius;
+params.planetParams.planetRadiusSq = planetRadius * planetRadius;
+params.planetParams.atmoRadiusSq = atmoRadius * atmoRadius; 
+params.planetParams.cloudOuterRadiusSq = cloudOuterRadius * cloudOuterRadius; 
+params.planetParams.cloudInnerRadiusSq = cloudInnerRadius * cloudInnerRadius; 
+
+//Scattering Params
+params.scatteringParams.cosTheta = cosTheta;
+params.scatteringParams.rayBeta = scaledRayleighBeta; 
+params.scatteringParams.mieBeta = scaledMieBeta; 
+params.scatteringParams.absBeta = scaledAbsBeta; 
+params.scatteringParams.atmoAmbient = atmoAmbient; 
+params.scatteringParams.rayScaleH = rayleighScaleHeight; 
+params.scatteringParams.mieScaleH = mieScaleHeight; 
+params.scatteringParams.absHeight = absHeight; 
+params.scatteringParams.absFalloff = absFalloff;
+params.scatteringParams.phaseR = phaseR; 
+params.scatteringParams.phaseM = phaseM; 
+
+//Cloud params
+params.cloudParams.cloudScatBeta = scaledCloudScatBeta; 
+params.cloudParams.cloudAbsBeta = scaledCloudAbsBeta; 
+params.cloudParams.cloudAmb = cloudAmbient;
+params.cloudParams.cloudPhaseParams = cloudPhaseParams;
+params.cloudParams.cloudScale = cloudScale; 
+params.cloudParams.cloudHeightCurve = float2(.3,.7);
+params.cloudParams.cloudCoverage = cloudCoverage; 
+params.cloudParams.cloudDensityMult = cloudDensityMult;
+params.cloudParams.cloudNoiseWeights = cloudNoiseWeights;
+params.cloudParams.cloudNoiseInvert = cloudNoiseInvert;
+params.cloudParams.detailNoiseWeights = detailNoiseWeights;
+params.cloudParams.detailNoiseInvert = detailNoiseInvert;
+params.cloudParams.detailNoiseScale = detailNoiseScale;
+params.cloudParams.detailNoiseErode = detailNoiseErode;
+
+//Main Ray Params
+params.mainRayParams.cameraPos = cameraPos; 
+params.mainRayParams.cameraDir = FinalRayDir; 
+params.mainRayParams.lightCol = lightColor; 
+params.mainRayParams.sceneCol = sceneColor;
+params.mainRayParams.sceneDepth = correctedDepth;
+params.mainRayParams.atmoSteps = mainAtmoSteps; 
+params.mainRayParams.cloudSteps = mainCloudSteps;
+params.mainRayParams.jitterFactor = jitterFactor;
+params.mainRayParams.stepScaleFactor = stepScaleFactor; 
+
+//Light Ray Params
+params.lightRayParams.lightDir = lightDirection; 
+params.lightRayParams.sunRight = normalize(cross(abs(params.lightRayParams.lightDir.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0), params.lightRayParams.lightDir));
+params.lightRayParams.sunUp = cross(params.lightRayParams.lightDir, params.lightRayParams.sunRight);
+params.lightRayParams.atmoLightSteps = atmoLightSteps; 
+params.lightRayParams.cloudLightSteps = cloudLightSteps;
+params.lightRayParams.jitterFactor = jitterFactor;
 
 //RAYMARCH
 MainRayFunctions mainRay;
-return mainRay.March(mrp, sf);
+return mainRay.March(params, sf);
