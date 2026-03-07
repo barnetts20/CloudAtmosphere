@@ -61,6 +61,7 @@ struct LightRayParams {
     int atmoLightSteps; 
     int cloudLightSteps; 
     float jitterFactor;
+    float stepSizeMult;
     int parentStepIndex;
 };
 
@@ -271,9 +272,9 @@ struct LightMarchFunctions {
         //uint2 pixelCoord, used in our hash function
         uint2 pixelCoord = uint2(input.mainRayParams.svxy);
         
-float rayStart = segments[0].x;
-float rayEnd = segments[segmentCount - 1].y;
-float rayLength = max(rayEnd - rayStart, 0.0001);
+        float rayStart = segments[0].x;
+        float rayEnd = segments[segmentCount - 1].y;
+        float rayLength = max(rayEnd - rayStart, 0.0001);
 
         for (int s = 0; s < segmentCount; s++) {
             //Extract segment values for this segment
@@ -285,7 +286,7 @@ float rayLength = max(rayEnd - rayStart, 0.0001);
             // Iteration cap safegaurd against infinite loops
             int iter = 0;
             while (pos < segEnd && iter < 256) {
-                float currentStep = min(sf.AdaptiveStepSize(stepSize, pos, rayStart, rayLength, input.mainRayParams.stepScaleFactor), segEnd - pos);
+                float currentStep = min(sf.AdaptiveStepSize(stepSize, pos, rayStart, rayLength, input.mainRayParams.stepScaleFactor) * input.lightRayParams.stepSizeMult, segEnd - pos);
 
                 // Pseudo random hash
                 uint seed = pixelCoord.x * 1664525u + pixelCoord.y * 1013904223u + uint(input.lightRayParams.parentStepIndex) * 214013u + uint(pos * 100.0) * 2531011u;
@@ -445,7 +446,7 @@ struct MainRayFunctions {
                 iter++;
                 // Get adaptive step size
                 float currentStep = min(sf.AdaptiveStepSize(baseStepSize, pos, rayStart, rayLength, input.mainRayParams.stepScaleFactor), segEnd - pos);
-                
+                float stepSizeMult = currentStep / baseStepSize;
                 // Randomize sample position within the ray
                 float stepSeed = frac(worldSeed + float(stepIndex) * 0.618033);
                 float sampleOffset = (stepSeed - 0.5) * currentStep * input.mainRayParams.jitterFactor; //1 is kinda the only value that makes sense now, we could get rid of both jitter factors
@@ -461,7 +462,7 @@ struct MainRayFunctions {
                     // Set step specific input.lightRayParams values
                     input.lightRayParams.samplePos = samplePos;
                     input.lightRayParams.parentStepIndex = stepIndex;
-
+                    input.lightRayParams.stepSizeMult = stepSizeMult;
                     // Do light march
                     LightMarchFunctions lightRay;
                     sunTransmittance = lightRay.March(input, sf);
