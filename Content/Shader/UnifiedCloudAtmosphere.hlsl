@@ -158,7 +158,7 @@ struct SharedFunctions {
             float3 uvwDetail = uvw * input.cloudParams.detailNoiseScale;
             // Apply another layer of animation offsets, scaled by a factor. 
             // This will cause the detail to scroll at different speeds from the larger noise, creating a "churning" effect
-            uvwDetail += input.cloudParams.animationWeights.rgb * View.RealTime * -5; //TODO: PARAMETERIZE MULTIPLIER AND EXPOSE
+            uvwDetail += input.cloudParams.animationWeights.rgb * View.RealTime * input.cloudParams.animationWeights.a; //TODO: PARAMETERIZE MULTIPLIER AND EXPOSE
 
             // Sample second layer of noise, calculate inverted value, blend between the two based on detailNoiseInvert channel values
             float4 dSample = cloudDensityTex.Sample(cloudDensitySampler, uvwDetail);
