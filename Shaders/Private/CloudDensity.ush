@@ -1,0 +1,108 @@
+#pragma once
+
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
+
+// ---------------------------------------------------------------------------
+// Terrestrial cloud density.
+//
+// ISOLATED IN ITS OWN FILE BECAUSE IT IS THE PART THAT GETS REPLACED.
+//
+// Everything else in the marcher -- the plan, the phase functions, the
+// scattering accumulation, the light march -- is geometry-independent and
+// serves both cloud models. This function is the only thing a gas giant does
+// differently, and it differs completely: a band with holes in it against a
+// deck with none.
+//
+// So it lives here alone, behind a define at the march's call site, and the two
+// models share one march rather than forking it. That is what stops them
+// drifting, which they would otherwise, because one is under active development
+// and the other is not.
+//
+// COVERAGE IS THE WHOLE STRUCTURE HERE, AND THAT IS THE DIFFERENCE.
+//
+// Most of this function decides where there is cloud and where there is sky:
+// the height gradient, the coverage remap, the erosion. A gas giant has no
+// holes at all, so its density function has no threshold, no remap and no
+// cloud/no-cloud decision -- and in exchange every visible feature has to come
+// from relief in a top surface rather than from variation in opacity.
+//
+// Worth knowing when reading both: they are not variations on a theme.
+// ---------------------------------------------------------------------------
+
+/** Cloud density at a point in the band, in [0, cloudDensityMult].
+ *
+ *  distFromCenter is passed in rather than recomputed because the caller
+ *  already has it -- the march needs the radius for its own band test, and a
+ *  second length() per sample is not free at this call frequency. */
+float Cloud_Density(
+	Texture3D cloudDensityTex,
+	SamplerState cloudDensitySampler,
+	float distFromCenter,
+	float3 samplePos,
+	CompositeParams input)
+{
+	float cloudNormH = (distFromCenter - input.planetParams.cloudInnerRadius)
+		/ (input.planetParams.cloudOuterRadius - input.planetParams.cloudInnerRadius);
+
+	// Flat-top height curve: full density through the middle, smooth fades at
+	// the bottom (0 to curve.x) and the top (curve.y to 1).
+	float bottomFade = saturate(smoothstep(0.0, input.cloudParams.cloudHeightCurve.x, cloudNormH));
+	float topFade = saturate(smoothstep(1.0, input.cloudParams.cloudHeightCurve.y, cloudNormH));
+	float heightGradient = bottomFade * topFade;
+
+	// Reconstructed to world space. The march runs camera-relative for
+	// precision, but the noise has to be sampled somewhere fixed or the whole
+	// cloud field slides with the viewer.
+	float3 worldPos = samplePos + input.mainRayParams.originalCameraPos;
+
+	float3 uvw = worldPos / (input.planetParams.cloudOuterRadius * input.cloudParams.cloudScale);
+
+	uvw += input.cloudParams.animationWeights.rgb * View.RealTime;
+
+	// Per-channel inversion, blended rather than branched, so a channel can be
+	// used either way round without a second bake.
+	float4 cSample = cloudDensityTex.Sample(cloudDensitySampler, uvw);
+	float4 icSample = 1 - cSample;
+	float4 fcSample = lerp(cSample, icSample, input.cloudParams.cloudNoiseInvert);
+
+	// R is the largest octave, so it blocks out the overall shapes.
+	float baseNoise = fcSample.r;
+
+	// Modulated by the finer GBA channels.
+	float detail = (fcSample.g * input.cloudParams.cloudNoiseWeights.r
+		+ fcSample.b * input.cloudParams.cloudNoiseWeights.g
+		+ fcSample.a * input.cloudParams.cloudNoiseWeights.b);
+
+	float noise = saturate(baseNoise - detail * input.cloudParams.cloudNoiseWeights.a);
+
+	// HEIGHT GRADIENT BEFORE THE COVERAGE THRESHOLD, NOT AFTER.
+	//
+	// Applied afterwards it would scale a cloud that already exists, thinning
+	// it uniformly toward the band edges. Applied before, it lowers the value
+	// being thresholded, so the cloud SHRINKS toward its edges instead --
+	// rounding off at top and bottom rather than fading out at full size.
+	float remapped = saturate(heightGradient * (noise - (1.0 - input.cloudParams.cloudCoverage))
+		/ input.cloudParams.cloudCoverage);
+
+	// Thresholded first, which skips the second fetch entirely for any sample
+	// that is not inside a cloud. At typical coverage that is most of them.
+	if (remapped > 0)
+	{
+		float3 uvwDetail = uvw * input.cloudParams.detailNoiseScale;
+
+		// A second animation rate, so the detail scrolls at a different speed
+		// from the base shape. That difference is what reads as churning; equal
+		// rates would just translate the whole field.
+		uvwDetail += input.cloudParams.animationWeights.rgb * View.RealTime * input.cloudParams.animationWeights.a;
+
+		float4 dSample = cloudDensityTex.Sample(cloudDensitySampler, uvwDetail);
+		float4 idSample = 1 - dSample;
+		float4 fdSample = lerp(dSample, idSample, input.cloudParams.detailNoiseInvert);
+
+		float fineDetail = dot(fdSample, input.cloudParams.detailNoiseWeights);
+
+		remapped = saturate(remapped - fineDetail * input.cloudParams.detailNoiseErode);
+	}
+
+	return remapped * input.cloudParams.cloudDensityMult;
+}

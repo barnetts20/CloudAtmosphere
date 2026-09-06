@@ -1,0 +1,89 @@
+#pragma once
+
+// ---------------------------------------------------------------------------
+// Composite: the third pass.
+//
+// Upscales and blurs the quarter-resolution march back over the scene. It is
+// doing two jobs, and only one of them is what it looks like.
+//
+// The obvious one is upsampling. The other is hiding the march's sampling
+// noise -- and that is worth being explicit about, because it means the blur
+// radius is currently paying for undersampling in the march rather than for
+// resolution. Fixing the step sizing (see the note in AtmosphereMarch.ush)
+// should let this radius come down, which is a real saving: the cost here is
+// quadratic in the radius.
+// ---------------------------------------------------------------------------
+
+/** Depth-aware blur of the atmosphere buffer, composited over the scene.
+ *
+ *  Radius is in SOURCE pixels, so at quarter resolution a radius of 6 reaches
+ *  twelve full-resolution pixels. The loop is (2r+1)^2 taps -- 169 at r=6 --
+ *  which is why the radius matters more than it looks.
+ *
+ *  invW is the spatial falloff: weight = exp(-dist^2 * invW).
+ *
+ *  PARAMETERS AND THE TEXTURE ID HAVE TO BE PASSED IN.
+ *
+ *  SceneTextureFetch is a MACRO, not a function -- it expands to
+ *  SceneTextureFetchFunc(Parameters, id, offset), and both Parameters and the
+ *  Tex struct are locals of the generated custom-expression function. Neither
+ *  exists in an included file, so the macro cannot be used here at all.
+ *
+ *  Calling the underlying function directly does work, because that IS declared
+ *  by the time material includes are emitted. It just needs the two locals
+ *  handed to it explicitly, which is what these arguments are for. */
+float4 Atmo_Composite(
+	FMaterialPixelParameters Parameters,
+	int SceneTextureId,
+	float4 center,
+	float centerDepth,
+	float3 sceneColor,
+	float2 screenUV,
+	float invW,
+	int radius,
+	float depthSharpness)
+{
+	float4 sum = center;
+	float totalWeight = 1.0;
+
+	for (int x = -radius; x <= radius; x++)
+	{
+		for (int y = -radius; y <= radius; y++)
+		{
+			if (x == 0 && y == 0) continue;
+
+			float2 offset = float2(x, y);
+			float4 s = SceneTextureFetchFunc(Parameters, SceneTextureId, offset);
+
+			float dist2 = float(x * x + y * y);
+			float spatialW = exp(-dist2 * invW);
+
+			// DEPTH WEIGHT, and it is what stops the blur bleeding atmosphere
+			// across a silhouette. Normalized by the centre depth so the
+			// tolerance is relative -- an absolute threshold would be far too
+			// tight at planetary distance and far too loose up close.
+			float2 sampleUV = screenUV + offset * View.ViewSizeAndInvSize.zw;
+			float sampleDepth = CalcSceneDepth(sampleUV);
+			float depthDiff = abs(centerDepth - sampleDepth) / max(centerDepth, 1.0);
+			float depthW = exp(-depthDiff * depthDiff * depthSharpness);
+
+			float w = spatialW * depthW;
+
+			sum += s * w;
+			totalWeight += w;
+		}
+	}
+
+	float4 atmo = sum / totalWeight;
+
+	// THE ALPHA IS TAKEN UNBLURRED, AND THAT IS DELIBERATE.
+	//
+	// Blurring the transmittance would soften the boundary between "atmosphere
+	// in front of this pixel" and "clear", which is exactly the edge the depth
+	// weight above is working to preserve. Colour can bleed; occlusion cannot.
+	float centerAlpha = center.a;
+
+	float3 finalColor = atmo.rgb + sceneColor * centerAlpha;
+
+	return float4(finalColor, 1.0);
+}

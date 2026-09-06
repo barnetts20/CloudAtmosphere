@@ -38,6 +38,8 @@ public class CloudAtmosphere : ModuleRules
 				"Engine",
 				"Slate",
 				"SlateCore",
+				"RenderCore",
+                "Projects",
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);

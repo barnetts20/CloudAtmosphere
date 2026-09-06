@@ -1,0 +1,525 @@
+#pragma once
+
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
+#include "/Plugin/CloudAtmosphere/Private/CloudDensity.ush"
+
+// ---------------------------------------------------------------------------
+// The march.
+//
+// TWO PLANS AND TWO LOOPS. The main ray crosses the atmosphere toward the
+// camera; the light ray leaves each of its samples toward the sun. They share
+// the planning logic and the density functions and differ in what they
+// accumulate: the main ray gathers light, the light ray gathers only optical
+// depth.
+//
+// SEGMENTS, AND WHY THE PLAN EXISTS AT ALL.
+//
+// The atmosphere is thick and mostly empty; the cloud band is thin and mostly
+// not. Marching both at one step size is either too coarse for the clouds or
+// ruinous for the atmosphere. So the ray is cut at the shell boundaries and
+// each piece gets its own step size.
+//
+// THE STEP SIZING WAS SPAN-RELATIVE, AND IT IS NOT ANY MORE.
+//
+// One mistake in three places, and it is worth naming because it has now been
+// found in two separate marchers:
+//
+//   ANYTHING DERIVED FROM A PER-RAY SPAN BECOMES A LOCUS.
+//
+// If a quantity depends on where THIS ray started or how long ITS path is, then
+// the surface across which that quantity changes is a curve on screen, and it
+// will be visible. In the gas giant marcher it drew hard lines along sphere
+// silhouettes; here it did something quieter and more expensive.
+//
+//   fineStep was totalCloudDist / cloudSteps
+//
+//     The ray's own chord through the band, divided by a fixed count. A grazing
+//     chord through a thin shell is 2*sqrt(2*R*d) -- at Earth radius with a
+//     4 km band, about 113x the radial thickness. So a limb ray got steps 113x
+//     longer than an overhead one, at exactly the angle where its path through
+//     cloud is longest and the integral hardest.
+//
+//     That is what the composite blur has been hiding, and why raising
+//     cloudSteps felt expensive: it paid everywhere to fix only the limb.
+//
+//   coarseStep was totalAtmoDist / atmoSteps
+//
+//     Same fault, quieter, because the atmosphere integral is smooth.
+//
+//   Atmo_AdaptiveStepSize divided by the ray's own rayLength
+//
+//     So two rays crossing the same world point at different angles sat at
+//     different points on the growth ramp.
+//
+// All three now take their scale from the SHELLS: band thickness, atmosphere
+// thickness. cloudSteps means samples across the band's depth for every ray,
+// and a grazing ray takes more steps because it genuinely traverses more cloud
+// rather than being handed coarser ones to compensate.
+//
+// WHAT THIS COSTS, AND WHY IT IS LESS THAN THE 113x SUGGESTS.
+//
+// Two existing mechanisms bound it. A ray crossing thin or empty cloud fails
+// Cloud_Density's coverage threshold and returns before the second fetch, so
+// its steps are cheap; a ray crossing dense cloud loses transmittance and takes
+// the early-out. The worst case needs a ray both grazing AND marginally dense
+// along its whole path, which is a thin set.
+//
+// ATMO_MAX_ITER is what actually catches the tail, and it is the number to
+// watch if the limb goes dark: a ray that runs out of iterations stops with
+// whatever transmittance it had, which reads as a hard edge.
+//
+/** Slots in the segment array. Six boundaries give at most five spans: atmo
+ *  entry, cloud outer near, cloud inner near, cloud inner far, cloud outer far,
+ *  atmo exit. */
+#ifndef ATMO_MAX_SEGMENTS
+#define ATMO_MAX_SEGMENTS 5
+#endif
+
+/** Safety bound on either march loop. The loops are while() on distance, so
+ *  this is what stops a degenerate step size from hanging the shader. */
+#ifndef ATMO_MAX_ITER
+#define ATMO_MAX_ITER 256
+#endif
+
+// ---------------------------------------------------------------------------
+// Planning
+// ---------------------------------------------------------------------------
+
+/** Builds the segment list for a ray, shared by both marches.
+ *
+ *  Returns the count. Each segment is (start, end, stepSize, isCloudBand).
+ *
+ *  The boundary list is built in ORDER and never sorted, which works only
+ *  because the guards below enforce the ordering as they go -- each candidate
+ *  is admitted only if it lies beyond the previous one. A sort would be more
+ *  obviously correct and would cost more than the guards do. */
+int Atmo_Plan(
+	float3 origin,
+	float3 dir,
+	float maxDist,
+	PlanetParams planet,
+	int atmoSteps,
+	int cloudSteps,
+	out float4 segments[ATMO_MAX_SEGMENTS])
+{
+	int segmentCount = 0;
+
+	[unroll]
+	for (int Clear = 0; Clear < ATMO_MAX_SEGMENTS; Clear++)
+	{
+		segments[Clear] = 0.0;
+	}
+
+	float2 atmoHit = Atmo_RaySphere(origin, dir, planet.planetPos, planet.atmoRadius);
+	if (atmoHit.y < 0.0)
+	{
+		return 0;
+	}
+
+	float atmoStart = max(atmoHit.x, 0.0);
+	float atmoEnd = min(atmoHit.y, maxDist);
+	if (atmoStart >= atmoEnd)
+	{
+		return 0;
+	}
+
+	float2 cloudOHit = Atmo_RaySphere(origin, dir, planet.planetPos, planet.cloudOuterRadius);
+	float2 cloudIHit = Atmo_RaySphere(origin, dir, planet.planetPos, planet.cloudInnerRadius);
+
+	bool hasCloudOuter = cloudOHit.y > 0.0 && cloudOHit.x < maxDist;
+	bool hasCloudInner = cloudIHit.y > 0.0 && cloudIHit.x < maxDist;
+
+	// No cloud band on this ray: one segment, whole atmosphere, coarse.
+	//
+	// Sized from the atmosphere's thickness for the same reason as below --
+	// (atmoEnd - atmoStart) is this ray's chord, so a grazing ray got coarser
+	// steps through more atmosphere.
+	if (!hasCloudOuter)
+	{
+		float stepSize = max(planet.atmoRadius - planet.planetRadius, 1e-4f) / float(atmoSteps);
+		segments[0] = float4(atmoStart, atmoEnd, stepSize, 0.0);
+		return 1;
+	}
+
+	float co_near = max(cloudOHit.x, 0.0);
+	float co_far = min(cloudOHit.y, maxDist);
+	float ci_near = hasCloudInner ? max(cloudIHit.x, 0.0) : -1.0;
+	float ci_far = hasCloudInner ? min(cloudIHit.y, maxDist) : -1.0;
+
+	float boundaries[6];
+	int bCount = 0;
+
+	boundaries[bCount++] = atmoStart;
+	if (co_near > atmoStart && co_near < atmoEnd) boundaries[bCount++] = co_near;
+	if (hasCloudInner && ci_near > atmoStart && ci_near < atmoEnd && ci_near > co_near) boundaries[bCount++] = ci_near;
+	if (hasCloudInner && ci_far > atmoStart && ci_far < atmoEnd && ci_far > ci_near) boundaries[bCount++] = ci_far;
+	if (co_far > atmoStart && co_far < atmoEnd) boundaries[bCount++] = co_far;
+	boundaries[bCount++] = atmoEnd;
+
+	// STEP SIZES FROM THE SHELLS THEMSELVES, NOT FROM THIS RAY'S CHORD.
+	//
+	// These were totalCloudDist / cloudSteps and totalAtmoDist / atmoSteps,
+	// where the totals were the distance THIS ray spent in each medium. That is
+	// the single worst fault in the original marcher.
+	//
+	// A grazing chord through a thin shell is 2*sqrt(2*R*d). At Earth radius
+	// with a 4 km band that is about 113x the radial thickness -- so a limb ray
+	// received steps 113x longer than an overhead one, at exactly the angle
+	// where its path through cloud is longest and the integral hardest. The
+	// composite blur has been hiding that, and raising cloudSteps to fix it
+	// pays everywhere to help only the limb.
+	//
+	// Sized from the band and atmosphere THICKNESSES instead, cloudSteps means
+	// samples across the band's depth for every ray, and a grazing ray takes
+	// more steps because it genuinely traverses more cloud rather than being
+	// given coarser ones to compensate.
+	//
+	// THE COST IS BOUNDED BY TWO THINGS ALREADY PRESENT. Rays that stay
+	// transparent are crossing thin or empty cloud, where Cloud_Density fails
+	// its coverage threshold and returns before the second fetch; rays that hit
+	// dense cloud lose transmittance and take the early-out. The 113x worst
+	// case needs a ray that is both grazing and marginally dense the whole way,
+	// which is a thin set.
+	const float bandThickness = max(planet.cloudOuterRadius - planet.cloudInnerRadius, 1e-4f);
+	const float atmoThickness = max(planet.atmoRadius - planet.planetRadius, 1e-4f);
+
+	const float coarseStep = atmoThickness / float(atmoSteps);
+	const float fineStep = bandThickness / float(cloudSteps);
+
+	// Emit the segments with their step sizes.
+	for (int j = 0; j < bCount - 1; j++)
+	{
+		float segStart = boundaries[j];
+		float segEnd = boundaries[j + 1];
+		if (segEnd <= segStart) continue;
+
+		float midDist = (segStart + segEnd) * 0.5;
+		float3 midPos = origin + dir * midDist;
+		float midRadius = length(midPos - planet.planetPos);
+
+		bool inCloudBand = (midRadius >= planet.cloudInnerRadius && midRadius <= planet.cloudOuterRadius);
+
+		segments[segmentCount] = float4(segStart, segEnd, inCloudBand ? fineStep : coarseStep, inCloudBand ? 1.0 : 0.0);
+		segmentCount++;
+
+		if (segmentCount >= ATMO_MAX_SEGMENTS) break;
+	}
+
+	return segmentCount;
+}
+
+// ---------------------------------------------------------------------------
+// Light march
+// ---------------------------------------------------------------------------
+
+/** Transmittance from a sample toward the light.
+ *
+ *  Returns per-channel transmittance, so a wavelength-dependent extinction
+ *  reddens the light rather than merely dimming it -- which is the whole reason
+ *  sunsets work.
+ *
+ *  Accumulates OPTICAL DEPTH and exponentiates once at the end, rather than
+ *  multiplying a transmittance per step. Mathematically the same for a
+ *  homogeneous step, and one exp() instead of N of them. */
+float3 Atmo_LightMarch(
+	Texture3D cloudDensityTex,
+	SamplerState cloudDensitySampler,
+	CompositeParams input)
+{
+	// Planet shadow first, before any planning. A sample on the night side is
+	// fully shadowed and no amount of marching will change that.
+	float2 planetHit = Atmo_RaySphere(
+		input.lightRayParams.samplePos, input.lightRayParams.lightDir,
+		input.planetParams.planetPos, input.planetParams.planetRadius);
+
+	if (planetHit.x > 0.0)
+	{
+		return float3(0.0, 0.0, 0.0);
+	}
+
+	float4 segments[ATMO_MAX_SEGMENTS];
+
+	// The light ray is unbounded by scene depth: it leaves the atmosphere.
+	const int segmentCount = Atmo_Plan(
+		input.lightRayParams.samplePos, input.lightRayParams.lightDir,
+		1e30f, input.planetParams,
+		input.lightRayParams.atmoLightSteps, input.lightRayParams.cloudLightSteps,
+		segments);
+
+	// Outside the atmosphere entirely: nothing between here and the sun.
+	if (segmentCount == 0)
+	{
+		return float3(1.0, 1.0, 1.0);
+	}
+
+	float3 atmoOptDepth = float3(0.0, 0.0, 0.0);
+	float cloudOptDepth = 0.0;
+
+	uint2 pixelCoord = uint2(input.mainRayParams.svxy);
+
+	float rayStart = segments[0].x;
+
+	// Fixed reference for the growth ramp, identical for every ray. Was this
+	// ray's own plan length.
+	float referenceLength = max(input.planetParams.atmoRadius - input.planetParams.planetRadius, 0.0001);
+
+	for (int s = 0; s < segmentCount; s++)
+	{
+		float segStart = segments[s].x;
+		float segEnd = segments[s].y;
+		float stepSize = segments[s].z;
+		float pos = segStart;
+
+		int iter = 0;
+		while (pos < segEnd && iter < ATMO_MAX_ITER)
+		{
+			// stepSizeMult carries the PARENT step's growth down into the light
+			// ray, so a coarsely sampled main ray does not spawn finely sampled
+			// light rays. Without it the light march cost stays flat while the
+			// main march thins out, and it comes to dominate at distance.
+			float currentStep = min(
+				Atmo_AdaptiveStepSize(stepSize, pos, rayStart, referenceLength, input.mainRayParams.stepScaleFactor)
+					* input.lightRayParams.stepSizeMult,
+				segEnd - pos);
+
+			// Seeded on the parent step index and the position as well as the
+			// pixel, so successive light rays from one pixel do not all sample
+			// in the same phase.
+			uint seed = pixelCoord.x * 1664525u + pixelCoord.y * 1013904223u
+				+ uint(input.lightRayParams.parentStepIndex) * 214013u
+				+ uint(pos * 100.0) * 2531011u;
+			seed = (seed ^ (seed >> 16)) * 2654435769u;
+			seed = (seed ^ (seed >> 16));
+			float stepSeed = float(seed) / 4294967295.0;
+
+			float sampleOffset = (stepSeed - 0.5) * currentStep * input.lightRayParams.jitterFactor;
+			float3 p = input.lightRayParams.samplePos + input.lightRayParams.lightDir * (pos + currentStep * 0.5 + sampleOffset);
+
+			// Squared comparison, so the common case costs no sqrt.
+			float3 toCenter = p - input.planetParams.planetPos;
+			float distSq = dot(toCenter, toCenter);
+
+			if (distSq < input.planetParams.planetRadiusSq)
+			{
+				return float3(0.0, 0.0, 0.0);
+			}
+
+			float dist = sqrt(distSq);
+			float h = dist - input.planetParams.planetRadius;
+
+			atmoOptDepth += Atmo_Density(h,
+				input.scatteringParams.rayScaleH, input.scatteringParams.mieScaleH,
+				input.scatteringParams.absHeight, input.scatteringParams.absFalloff) * currentStep;
+
+			if (distSq >= input.planetParams.cloudInnerRadiusSq && distSq <= input.planetParams.cloudOuterRadiusSq)
+			{
+				float cDensity = Cloud_Density(cloudDensityTex, cloudDensitySampler, dist, p, input);
+
+				if (cDensity > 0.0)
+				{
+					cloudOptDepth += cDensity * currentStep;
+				}
+			}
+
+			pos += currentStep;
+			iter++;
+		}
+	}
+
+	// Cloud uses its ABSORPTION coefficient here, not its scattering one: light
+	// scattered out of this ray is gone from it either way, but light scattered
+	// INTO it is what the multiple-scattering term in the main march stands in
+	// for. Using the scattering coefficient here would count that loss twice.
+	return exp(-(input.scatteringParams.rayBeta * atmoOptDepth.x
+		+ input.scatteringParams.mieBeta * atmoOptDepth.y
+		+ input.scatteringParams.absBeta * atmoOptDepth.z
+		+ input.cloudParams.cloudAbsBeta * cloudOptDepth));
+}
+
+// ---------------------------------------------------------------------------
+// Main march
+// ---------------------------------------------------------------------------
+
+/** Marches the atmosphere and clouds toward the camera.
+ *
+ *  Returns float4(accumulated light, transmittance). */
+float4 Atmo_MainMarch(
+	Texture3D cloudDensityTex,
+	SamplerState cloudDensitySampler,
+	CompositeParams input)
+{
+	float3 rayOrigin = input.mainRayParams.cameraPos;
+	float3 rayDir = input.mainRayParams.cameraDir;
+
+	// Scene depth bounds the ray, and so does the planet. Both, because a
+	// pixel with nothing drawn in it still must not march through the planet.
+	float2 planetHit = Atmo_RaySphere(rayOrigin, rayDir, input.planetParams.planetPos, input.planetParams.planetRadius);
+
+	float maxDist = input.mainRayParams.sceneDepth;
+	if (planetHit.x > 0.0)
+	{
+		maxDist = min(maxDist, planetHit.x);
+	}
+
+	float2 atmoHit = Atmo_RaySphere(rayOrigin, rayDir, input.planetParams.planetPos, input.planetParams.atmoRadius);
+
+	// Whether something in the scene cut the ray short. Mie is suppressed when
+	// it did: the forward lobe is enormous, and a ray terminating on geometry
+	// has not travelled the distance that lobe assumes, so it reads as a bright
+	// halo pasted over whatever was in front.
+	bool depthLimited = (maxDist < atmoHit.y);
+
+	float4 segments[ATMO_MAX_SEGMENTS];
+
+	const int segmentCount = Atmo_Plan(
+		rayOrigin, rayDir, maxDist, input.planetParams,
+		input.mainRayParams.atmoSteps, input.mainRayParams.cloudSteps,
+		segments);
+
+	if (segmentCount == 0)
+	{
+		return float4(0, 0, 0, 1.0);
+	}
+
+	float3 AccumLight = float3(0, 0, 0);
+	float3 Transmittance = float3(1.0, 1.0, 1.0);
+
+	float rayStart = segments[0].x;
+
+	// Fixed reference for the growth ramp, identical for every ray.
+	float referenceLength = max(input.planetParams.atmoRadius - input.planetParams.planetRadius, 0.0001);
+
+	// Phase is constant along the ray: it depends only on the angle between the
+	// view and the light, and both are fixed per pixel. Hoisted out of the loop.
+	float phaseDual = Atmo_PhaseDualLobe(input.scatteringParams.cosTheta,
+		input.cloudParams.cloudPhaseParams.r,
+		input.cloudParams.cloudPhaseParams.g,
+		input.cloudParams.cloudPhaseParams.b);
+
+	float phaseIsotropic = 1.0 / (4.0 * 3.14159265);
+
+	float worldSeed = Atmo_RaySeed(input.mainRayParams.svxy);
+
+	int stepIndex = 0;
+
+	for (int s = 0; s < segmentCount; s++)
+	{
+		float segStart = segments[s].x;
+		float segEnd = segments[s].y;
+		float baseStepSize = segments[s].z;
+		bool isCloudBand = segments[s].w > 0.5;
+
+		float pos = segStart;
+
+		int iter = 0;
+		while (pos < segEnd && iter < ATMO_MAX_ITER)
+		{
+			iter++;
+
+			float currentStep = min(
+				Atmo_AdaptiveStepSize(baseStepSize, pos, rayStart, referenceLength, input.mainRayParams.stepScaleFactor),
+				segEnd - pos);
+
+			float stepSizeMult = currentStep / baseStepSize;
+
+			float stepSeed = Atmo_StepJitter(worldSeed, stepIndex);
+			float sampleOffset = (stepSeed - 0.5) * currentStep * input.mainRayParams.jitterFactor;
+
+			float3 samplePos = rayOrigin + rayDir * (pos + currentStep * 0.5 + sampleOffset);
+
+			float distFromCenter = length(samplePos - input.planetParams.planetPos);
+			float height = distFromCenter - input.planetParams.planetRadius;
+
+			float3 sunTransmittance = float3(1.0, 1.0, 1.0);
+
+			if (height > 0)
+			{
+				input.lightRayParams.samplePos = samplePos;
+				input.lightRayParams.parentStepIndex = stepIndex;
+				input.lightRayParams.stepSizeMult = stepSizeMult;
+
+				sunTransmittance = Atmo_LightMarch(cloudDensityTex, cloudDensitySampler, input);
+
+				float3 atmoDens = Atmo_Density(height,
+					input.scatteringParams.rayScaleH, input.scatteringParams.mieScaleH,
+					input.scatteringParams.absHeight, input.scatteringParams.absFalloff);
+
+				float3 rayleighScatter = input.scatteringParams.rayBeta * input.scatteringParams.phaseR * atmoDens.x;
+				float3 mieScatter = depthLimited ? float3(0, 0, 0)
+					: input.scatteringParams.mieBeta * input.scatteringParams.phaseM * atmoDens.y;
+
+				float3 directScatter = (rayleighScatter + mieScatter) * sunTransmittance * input.mainRayParams.lightCol;
+				float3 ambientScatter = input.scatteringParams.rayBeta * atmoDens.x * input.scatteringParams.atmoAmbient;
+
+				float3 inscattered = (directScatter + ambientScatter) * currentStep;
+
+				float3 extinction = (input.scatteringParams.rayBeta * atmoDens.x
+					+ input.scatteringParams.mieBeta * atmoDens.y
+					+ input.scatteringParams.absBeta * atmoDens.z) * currentStep;
+
+				float3 atmoStepTransmittance = exp(-extinction);
+
+				// Light added BEFORE transmittance is updated, so this step's
+				// contribution is weighted by the transmittance in front of it
+				// rather than including its own extinction. Reversing the two
+				// darkens every step by its own opacity, which reads as an
+				// atmosphere that is too thin and cannot be tuned back.
+				AccumLight += Transmittance * inscattered;
+				Transmittance *= atmoStepTransmittance;
+
+				if (isCloudBand)
+				{
+					float cloudDensity = Cloud_Density(cloudDensityTex, cloudDensitySampler, distFromCenter, samplePos, input);
+
+					if (cloudDensity > 0)
+					{
+						float3 incomingLight = input.mainRayParams.lightCol * sunTransmittance;
+
+						// Isotropic multiple scattering, standing in for the
+						// light that bounced several times before arriving.
+						// Without it a cloud's shadow side goes black, because
+						// single scattering has nothing to deliver there.
+						float3 multiScatter = incomingLight * phaseIsotropic * input.cloudParams.cloudPhaseParams.a;
+
+						float3 cloudLight = incomingLight * phaseDual + multiScatter
+							+ input.mainRayParams.lightCol * input.cloudParams.cloudAmb;
+
+						float3 cloudExtinction = cloudDensity * input.cloudParams.cloudScatBeta * currentStep;
+						float3 cloudStepTransmittance = exp(-cloudExtinction);
+
+						// Energy-conserving form: what this step scatters IN is
+						// exactly what it takes OUT, so the cloud cannot emit
+						// more than it receives however dense it gets.
+						float3 cloudStepLight = cloudLight * (1.0 - cloudStepTransmittance);
+
+						AccumLight += Transmittance * cloudStepLight;
+						Transmittance *= cloudStepTransmittance;
+					}
+				}
+			}
+
+			if (max(Transmittance.x, max(Transmittance.y, Transmittance.z)) < 0.001)
+			{
+				Transmittance = float3(0, 0, 0);
+				break;
+			}
+
+			pos += currentStep;
+			stepIndex++;
+		}
+
+		if (max(Transmittance.x, max(Transmittance.y, Transmittance.z)) < 0.001)
+		{
+			Transmittance = float3(0, 0, 0);
+			break;
+		}
+	}
+
+	// The MOST opaque channel, because the alpha is a single value composited
+	// against the scene behind. Taking the least opaque would let the scene
+	// through in the channel the atmosphere blocks hardest, which desaturates
+	// exactly the effect the per-channel extinction exists to produce.
+	float minTrans = min(Transmittance.x, min(Transmittance.y, Transmittance.z));
+
+	return float4(AccumLight, minTrans);
+}
