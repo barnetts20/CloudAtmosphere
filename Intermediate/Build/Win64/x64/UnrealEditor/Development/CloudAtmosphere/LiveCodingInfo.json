@@ -2,8 +2,16 @@
 	"RemapUnityFiles": 
 	{
 		"Module.CloudAtmosphere.cpp.obj": [
+			"CloudAtmosphere.init.gen.cpp.obj",
+			"GasGiantSimSettings.gen.cpp.obj",
+			"GasGiantSimSubsystem.gen.cpp.obj",
+			"GasGiantSimTypes.gen.cpp.obj",
+			"GasGiantSnapshot.gen.cpp.obj",
 			"PerModuleInline.gen.cpp.obj",
-			"CloudAtmosphere.cpp.obj"
+			"CloudAtmosphere.cpp.obj",
+			"GasGiantSimShaders.cpp.obj",
+			"GasGiantSimSubsystem.cpp.obj",
+			"GasGiantSimulation.cpp.obj"
 		]
 	}
 }

@@ -40,6 +40,8 @@ public class CloudAtmosphere : ModuleRules
 				"SlateCore",
 				"RenderCore",
                 "Projects",
+                "RHI",
+				"DeveloperSettings",
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);

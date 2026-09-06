@@ -1,0 +1,32 @@
+#pragma once
+
+// ---------------------------------------------------------------------------
+// Constants shared by the gas giant material path and the sim compute path.
+//
+// WHY THIS FILE EXISTS AT ALL.
+//
+// PI is defined by /Engine/Private/Common.ush. A material Custom node is
+// compiled inside MaterialTemplate.ush, which has already included that, so
+// anything written for a Custom node gets PI for free and never notices the
+// dependency. A global compute shader includes /Engine/Public/Platform.ush and
+// does not.
+//
+// GasGiantJets.ush is now consumed from BOTH contexts, so it inherited an
+// ambient definition on one path and lost it on the other the moment it was
+// split out of GasGiantFlow.ush. That failed as seven undeclared-identifier
+// errors in a file that had not changed.
+//
+// Pulling Common.ush into the compute path would fix it and is what most
+// engine compute shaders do, but it is the wrong fix here: PeriodicNoise.ush
+// and NoiseBakeCS.usf are deliberately Platform.ush-only, and Common.ush is a
+// large dependency to take on for one constant. It would also be a redundant
+// include on the material path.
+//
+// So: define it, guarded, in one place both sides include. The guard is
+// load-bearing rather than defensive -- on the material path Common.ush has
+// already defined PI, and this file is included after it.
+// ---------------------------------------------------------------------------
+
+#ifndef PI
+#define PI 3.1415926535897932f
+#endif

@@ -284,6 +284,7 @@
 /I "Editor/SceneDepthPickerMode/Public"
 /I "../Intermediate/Build/Win64/UnrealEditor/Inc/AnimationEditMode/UHT"
 /I "Editor/AnimationEditMode/Public"
+/I "D:/Projects/vxl/Plugins/CloudAtmosphere/Intermediate/Build/Win64/UnrealEditor/Inc/CloudAtmosphere/UHT"
 /I "D:/Projects/vxl/Plugins/CloudAtmosphere/Source"
 /I "D:/Projects/vxl/Plugins/CloudAtmosphere/Source/CloudAtmosphere/Public"
 /I "D:/Projects/vxl/Intermediate/Build/Win64/x64/vxlEditor/Development/UnrealEd"
