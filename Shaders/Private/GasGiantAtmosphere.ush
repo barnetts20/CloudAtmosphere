@@ -16,14 +16,24 @@
 //
 // WHAT Atmo_Plan ALREADY DOES CORRECTLY FOR A DECK. Set
 //
-//     cloudInnerRadius = planetRadius
 //     cloudOuterRadius = planetRadius + Thickness * TopMax
+//     cloudInnerRadius = planetRadius + Thickness * DeckBottom
 //
-// and the planner emits a coarse atmosphere segment down to the cull radius,
-// then a fine segment from there to wherever the ray ends -- which for an
-// inward ray is the planet surface, since the deck is solid all the way down
-// and only transmittance terminates it. No inner boundary, exactly as in
-// GG_March.
+// and the planner emits the three regions the deck actually has: coarse air
+// above the highest column, FINE across the gradient where all the variance
+// is, and coarse below the floor where every column is saturated and uniform.
+// cloudSteps therefore means steps across the GRADIENT rather than across the
+// whole deck.
+//
+// THE FLOOR IS A SAFE PLACE TO CHANGE STEP SIZE, which a fixed radius normally
+// is not. Density is exactly 1 either side of it, so the step change lands
+// where the field is provably constant. The handoff at cloudOuterRadius has no
+// such guarantee and remains the one acknowledged fault here.
+//
+// SEGMENTS[].w IS THE FINE-STEP FLAG, NOT A DECK FLAG. Terrestrially the two
+// coincide because nothing lies below the band; here the solid region does,
+// and it still owes its extinction. The march decides IsDeck from the
+// segment's radius instead.
 //
 // UNITS. Atmo_BuildParams scales the extinction coefficients and scale heights
 // by atmosphere thickness, but leaves the RADII in world units. So
@@ -228,6 +238,29 @@ float3 GGAtmo_ToLocal(float3 WorldPos, GGAtmoParams P)
     return mul(P.WorldToLocal, WorldPos - P.Atmo.planetParams.planetPos);
 }
 
+/** Whether a planned segment lies inside the deck.
+ *
+ *  Segments[].w says only that the planner gave the segment the fine step. The
+ *  deck reaches further down than the fine band does -- below the floor it is
+ *  uniform and coarse, but it is still deck and still extinguishes -- so the
+ *  test is the segment's radius rather than its flag.
+ *
+ *  Everything at or under the cull radius counts. Above it the density is
+ *  provably zero, so the boundary cannot draw an edge whichever side a segment
+ *  lands on. */
+bool GGAtmo_SegmentIsDeck(
+	float3 Origin,
+	float3 Dir,
+	float SegStart,
+	float SegEnd,
+	GGAtmoParams P)
+{
+    const float3 Mid = Origin + Dir * ((SegStart + SegEnd) * 0.5f);
+
+    return length(Mid - P.Atmo.planetParams.planetPos)
+		<= P.Atmo.planetParams.cloudOuterRadius;
+}
+
 /** Distance along the ray at which it first reaches the deck.
  *
  *  The cone trace from GG_March, operating on a segment rather than on a whole
@@ -304,7 +337,7 @@ float GGAtmo_DeckEntry(
     return TSearch;
 }
 
-/** Splits the deck segment at the cone-traced entry.
+/** Splits the fine segment at the cone-traced entry.
  *
  *  IN THE PLAN, NOT IN THE LOOP. The region between the cull radius and the
  *  deck top is empty of cloud but not of air, so a skip inside the march would
@@ -316,8 +349,11 @@ float GGAtmo_DeckEntry(
  *  a locus, and a skip decided per sample against a jittered position is a
  *  dithered one.
  *
- *  The last segment is the deck one whenever cloudInnerRadius equals
- *  planetRadius, which is the arrangement this file assumes. */
+ *  THE FIRST FINE SEGMENT, AND INSERTED IN ORDER. A ray that crosses the band,
+ *  passes below the floor and crosses it again produces two fine segments with
+ *  a coarse one between them, and the march walks the array in order -- so
+ *  appending would put the deck behind the region under it. Only the near
+ *  crossing is worth splitting; the far one lies behind saturated deck. */
 void GGAtmo_SplitDeckSegment(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
@@ -334,16 +370,26 @@ void GGAtmo_SplitDeckSegment(
         return;
     }
 
-    const int Last = SegmentCount - 1;
+    int Band = -1;
 
-    if (Segments[Last].w < 0.5f)
+	[loop]
+    for (int i = 0; i < SegmentCount; i++)
+    {
+        if (Segments[i].w > 0.5f)
+        {
+            Band = i;
+            break;
+        }
+    }
+
+    if (Band < 0)
     {
         return;
     }
 
-    const float SegStart = Segments[Last].x;
-    const float SegEnd = Segments[Last].y;
-    const float FineStep = Segments[Last].z;
+    const float SegStart = Segments[Band].x;
+    const float SegEnd = Segments[Band].y;
+    const float FineStep = Segments[Band].z;
 
     const float Entry = GGAtmo_DeckEntry(
 		FlowField, FlowSampler, LocalOrigin, LocalDir, SegStart, SegEnd, TopMax, F);
@@ -354,18 +400,26 @@ void GGAtmo_SplitDeckSegment(
         return;
     }
 
-	// The ray never reached the deck. Demote the whole segment to coarse rather
-	// than dropping it, so the air along it still scatters.
+	// The ray never reached the deck within this segment. Demote it to coarse
+	// rather than dropping it, so the air along it still scatters.
     if (Entry >= SegEnd - 1e-5f)
     {
-        Segments[Last] = float4(SegStart, SegEnd, CoarseStep, 0.0f);
+        Segments[Band] = float4(SegStart, SegEnd, CoarseStep, 0.0f);
         return;
+    }
+
+	// Open a slot after the band, walking backwards so nothing is overwritten
+	// before it has been copied.
+	[loop]
+    for (int k = SegmentCount; k > Band + 1; k--)
+    {
+        Segments[k] = Segments[k - 1];
     }
 
 	// The deck keeps the fine step the planner assigned; only the empty half
 	// above it drops to coarse.
-    Segments[Last] = float4(SegStart, Entry, CoarseStep, 0.0f);
-    Segments[SegmentCount] = float4(Entry, SegEnd, FineStep, 1.0f);
+    Segments[Band] = float4(SegStart, Entry, CoarseStep, 0.0f);
+    Segments[Band + 1] = float4(Entry, SegEnd, FineStep, 1.0f);
 
     SegmentCount++;
 }
@@ -447,43 +501,21 @@ CompositeParams GGAtmo_BuildAtmo(
 	float stepScaleFactor,
 	GGFieldParams F)
 {
-	// TopMin is not read: the deck's lower extent is the authored floor, which
-	// is exact, rather than a worst-case bound.
+	// TopMin is not read: the deck's lower extent is the authored floor.
     float TopMin, TopMax;
     GG_TopBounds(F, TopMin, TopMax);
 
     const float CloudOuter = F.PlanetRadius + F.Thickness * TopMax;
 
-	// -- Inner cull, from optical depth -------------------------------------
+	// -- The band is the gradient -------------------------------------------
 	//
-	// EXACT, NOT ESTIMATED, WHICH IS WHAT THE FLAT FLOOR BUYS. Below DeckBottom
-	// every column sits at CoreDensity, so the depth needed to go opaque is
-	// arithmetic rather than a guess wanting a safety factor on top.
-	//
-	// cloudScatterBeta is divided by atmosphere thickness downstream and heights
-	// are fractions of that same thickness, so the optical depth a ray gathers
-	// per fraction of solid deck is just CoreDensity * beta.
-	//
-	// The MINIMUM channel, because the span has to cover the slowest one: cull
-	// on the average and the red channel is still transmitting where the blue
-	// has stopped, which reads as a coloured rim at the cull radius.
-    const float BetaMin = min(cloudScatterBeta.r, min(cloudScatterBeta.g, cloudScatterBeta.b));
-
-    const float DepthPerFraction = max(F.Profile.w, 0.0f) * BetaMin;
-
-	// 7 optical depths puts transmittance under 0.001. Measured down from the
-	// floor, and the gradient above it is ignored -- it only ever adds depth, so
-	// leaving it out errs toward a deeper span.
-    const float SaturationDepth = 7.0f / max(DepthPerFraction, 1e-6f);
-
-    const float InnerFraction = F.Profile.y - SaturationDepth;
-
-	// PITFALL: the per-band ScatterX.a multipliers are not visible here, so a
-	// band far below 1 saturates more slowly than this assumes. Harmless while
-	// DeckOpticalDepth carries its usual several-fold headroom over the 7
-	// wanted; a low depth AND a low band alpha together would show as a rim at
-	// the cull radius.
-    const float CloudInner = max(F.PlanetRadius + F.Thickness * InnerFraction, 1e-4f);
+	// NOT AN OPTICAL CULL. Where the deck goes opaque is a property of the
+	// extinction, and deriving a radius from it makes retuning DeckOpticalDepth
+	// move the step size -- a coupling with no visible cause. The floor is a
+	// geometric anchor and says the same thing better: below it the field is
+	// uniform, so a coarse step integrates it exactly and transmittance ends the
+	// ray within a couple of them.
+    const float CloudInner = max(F.PlanetRadius + F.Thickness * F.Profile.y, 1e-4f);
 
     return Atmo_BuildParams(
 		svPosition, rayDir, cameraPos, atmoPos,
@@ -530,21 +562,19 @@ float GGAtmo_DeckDensityForLight(
 
     const float Height = (Radius - F.PlanetRadius) / F.Thickness;
 
-    const float Core = max(F.Profile.w, 0.0f);
-
-	// Below the floor the answer is Core for every column, so the fetch buys
+	// Below the floor the answer is 1 for every column, so the fetch buys
 	// nothing. A shadow ray that has descended this far is already saturated,
 	// which makes this the common case rather than an edge one.
     if (Height <= F.Profile.y)
     {
-        return Core;
+        return 1.0f;
     }
 
     const float3 Direction = LocalPos / max(Radius, 1e-4f);
 
     const float Top = GG_CloudTopUpper(FlowField, FlowSampler, Direction, F);
 
-    return GG_DeckDensity(Height, Top, F.Profile.y, F.DensityCurve, Core);
+    return GG_DeckDensity(Height, Top, F.Profile.y, F.DensityCurve);
 }
 
 /** Transmittance from a sample toward the light, through air and deck.
@@ -703,7 +733,15 @@ float3 GGAtmo_LightMarch(
         const float SegStart = Segments[s].x;
         const float SegEnd = Segments[s].y;
         const float StepSize = Segments[s].z;
-        const bool IsDeck = Segments[s].w > 0.5f;
+
+		// DECK IS A RADIUS, NOT THE FINE-STEP FLAG. Everything at or below the
+		// cull radius owes deck extinction, including the coarse region under the
+		// floor where the field is uniform.
+		//
+		// Decided once per segment from its midpoint, the way Atmo_Plan decides
+		// which side of the shells a segment falls on. Per sample it would be a
+		// threshold against a jittered position, which dithers an edge.
+        const bool IsDeck = GGAtmo_SegmentIsDeck(Start, LightDir, SegStart, SegEnd, P);
 
         float Pos = SegStart;
 
@@ -909,7 +947,8 @@ float4 GGAtmo_MainMarch(
         const float SegStart = Segments[s].x;
         const float SegEnd = Segments[s].y;
         const float BaseStepSize = Segments[s].z;
-        const bool IsDeck = Segments[s].w > 0.5f;
+
+        const bool IsDeck = GGAtmo_SegmentIsDeck(RayOrigin, RayDir, SegStart, SegEnd, P);
 
         float Pos = SegStart;
 

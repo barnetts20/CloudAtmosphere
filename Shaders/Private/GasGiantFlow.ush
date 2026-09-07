@@ -84,7 +84,7 @@
  *  Warps    float4(WarpTime, DetailWarp, BandBias, TurbulenceFloor)
  *  Detail   float4(Ridge, Fluff, Wisp, EdgeBias)
  *  Relief   float4(DeckTop, BandRelief, PressureLift, StormTowers)
- *  Profile  float4(AtmosphereThickness, DeckBottom, VortexThreshold, CoreDensity)
+ *  Profile  float4(AtmosphereThickness, DeckBottom, VortexThreshold, unused)
  *  Layers   float3(FlowLayer, DeepFlowLayer, DeckSlope)
  *
  *  TWO ABSOLUTES AND THE REST DIMENSIONLESS. DeckTop and DeckBottom are
@@ -389,19 +389,23 @@ float3 GG_FlowVelocity(float3 N, float4 Flow)
     return East * Flow.x + North * Flow.y;
 }
 
-/** Density at a height, given the deck top at that column.
+/** Density at a height, given the deck top at that column. Peaks at exactly 1.
  *
  *      t   = (Top - Height) / (Top - Bottom)      clamped to [0,1]
- *      rho = Core * smoothstep(0, 1, t^Curve)
+ *      rho = smoothstep(0, 1, t^Curve)
+ *
+ *  NO PEAK-DENSITY TERM. Only density times an extinction coefficient reaches
+ *  the image, and Cloud Beta is solved from the optical depth wanted, so any
+ *  peak authored here would divide straight back out and move nothing.
  *
  *  ZERO DERIVATIVE AT BOTH ENDS, WHICH IS THE WHOLE POINT. Density is exactly
- *  zero at the top and exactly Core at Bottom, C1 at both, so neither the onset
+ *  zero at the top and exactly 1 at Bottom, C1 at both, so neither the onset
  *  nor the join to the solid region below draws a line. An asymptotic profile
  *  is smooth at the top and never reaches its maximum -- which is why it has no
  *  floor to be smooth at, and why its solid depth is implicit rather than
  *  authored.
  *
- *  THE SPAN IS PER COLUMN, DOWN TO A FLAT FLOOR. Every column reaches Core at
+ *  THE SPAN IS PER COLUMN, DOWN TO A FLAT FLOOR. Every column saturates at
  *  Bottom whatever its top, so the region below is uniform for all of them: the
  *  march can skip six of its seven fetches there and the inner cull is
  *  arithmetic. The gradient compresses in troughs and stretches over crests.
@@ -412,13 +416,13 @@ float3 GG_FlowVelocity(float3 N, float4 Flow)
  *  PITFALL: a column whose Top is below Bottom has no gradient -- the max only
  *  keeps the divide finite, and the solid-region skip fills such a column in.
  *  Keep DeckBottom under the lowest top the field produces. */
-float GG_DeckDensity(float Height, float Top, float Bottom, float Curve, float Core)
+float GG_DeckDensity(float Height, float Top, float Bottom, float Curve)
 {
     const float Span = max(Top - Bottom, 1e-4f);
 
     const float T = saturate((Top - Height) / Span);
 
-    return Core * smoothstep(0.0f, 1.0f, pow(T, max(Curve, 0.5f)));
+    return smoothstep(0.0f, 1.0f, pow(T, max(Curve, 0.5f)));
 }
 
 /** Cloud top altitude, as a fraction of atmosphere thickness. Flow first --
@@ -916,7 +920,7 @@ float GG_Spot(float3 N, float3 Centre, float Radius, float Strength)
  *  radius. The profile is integrated across it so a step straddling the cloud
  *  top is weighted by how much of it lies inside.
  *
- *  ONE FETCH BELOW DeckBottom RATHER THAN SEVEN. Density there is exactly Core
+ *  ONE FETCH BELOW DeckBottom RATHER THAN SEVEN. Density there is exactly 1
  *  for every column and the volumes cannot change it, so only the band and the
  *  pressure are still wanted and one flow read supplies both. The test uses the
  *  step's far edge, so the boundary sits a half step clear of the sampling
@@ -953,12 +957,11 @@ float4 GG_Density(
     const float HalfStep = max(StepHalfLength, 0.0f);
 
     const float Bottom = F.Profile.y;
-    const float Core = max(F.Profile.w, 0.0f);
 
 	// -- Solid region -------------------------------------------------------
 	//
-	// The whole step lies below the floor, so every column is at Core across it
-	// and erosion has run out with the gradient it is normalized against.
+	// The whole step lies below the floor, so every column is saturated across
+	// it and erosion has run out with the gradient it is normalized against.
 	// Nothing the volumes could say changes the density, so their six fetches
 	// are pure cost.
     BRANCH
@@ -967,7 +970,7 @@ float4 GG_Density(
     {
         const GGFlowProbe Probe = GG_FlowProbe(FlowField, FlowSampler, Direction, F);
 
-        return float4(Core, Probe.Band, Probe.Pressure, Probe.Top);
+        return float4(1.0f, Probe.Band, Probe.Pressure, Probe.Top);
     }
 
     const GGFieldSample Field = GG_Field(
@@ -985,9 +988,9 @@ float4 GG_Density(
 	// The deck top varies slowly across one step, so Top is evaluated once at
 	// the centre and only the PROFILE is integrated: three closed-form
 	// evaluations, no extra fetches, cheaper than taking more steps.
-    const float RampNear = GG_DeckDensity(Height - HalfStep, Top, Bottom, F.DensityCurve, Core);
-    const float RampMid = GG_DeckDensity(Height, Top, Bottom, F.DensityCurve, Core);
-    const float RampFar = GG_DeckDensity(Height + HalfStep, Top, Bottom, F.DensityCurve, Core);
+    const float RampNear = GG_DeckDensity(Height - HalfStep, Top, Bottom, F.DensityCurve);
+    const float RampMid = GG_DeckDensity(Height, Top, Bottom, F.DensityCurve);
+    const float RampFar = GG_DeckDensity(Height + HalfStep, Top, Bottom, F.DensityCurve);
 
 	// Simpson across the step.
     const float Gradient = (RampNear + 4.0f * RampMid + RampFar) / 6.0f;
@@ -1406,9 +1409,8 @@ float4 GG_March(
 		StructureVolume, StructureSampler,
 			SamplePos, StepHalfHeight, F);
 
-		// No extinction multiplier. CoreDensity is the density the deck reaches,
-		// in world units, so a separate scale would be a second way to say the
-		// same thing.
+		// No extinction multiplier: this path integrates the density field
+		// directly rather than through Cloud Beta.
         const float Alpha = 1.0f - exp(-Field.x * StepLen);
         const float Weight = Alpha * Transmittance;
 
