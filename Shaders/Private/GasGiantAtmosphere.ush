@@ -70,11 +70,17 @@
  *    5  deck ambient only
  *    6  sun transmittance at the first deck sample, as greyscale
  *    7  Mie lobe survival, as greyscale: 1 in clear air, 0 behind deck
+ *    8  DetailFade at the first deck sample, as greyscale
+ *    9  StructureFade at the first deck sample, as greyscale
  *
  *  If the glow is present in 2 and absent in 4 and 5, it is air Mie in front
  *  of the deck. If it is absent from ALL of them but present with the mode
  *  off, it is the stage 3 composite spreading the limb inward rather than
- *  anything this file produced. */
+ *  anything this file produced.
+ *
+ *  8 and 9 answer whether a fade range reached the shader at all. White across
+ *  the disc from orbit means the range arrived far larger than authored, which
+ *  is a material pin rather than anything here. */
 #ifndef GG_DEBUG_TERM
 #define GG_DEBUG_TERM 0
 #endif
@@ -1016,6 +1022,17 @@ float4 GGAtmo_MainMarch(
 
                     FieldLOD.StructureFade = 1.0f - smoothstep(
 						P.Field.StructureFadeNear, P.Field.StructureFadeFar, ViewDistances);
+
+#if GG_DEBUG_TERM == 8 || GG_DEBUG_TERM == 9
+					if (bDebugFirstDeck)
+					{
+						const float DebugFade = (GG_DEBUG_TERM == 8)
+							? FieldLOD.DetailFade : FieldLOD.StructureFade;
+
+						DebugAccum = float3(DebugFade, DebugFade, DebugFade);
+						bDebugFirstDeck = false;
+					}
+#endif
 
                     const float4 Deck = GG_Density(
 						FlowField, FlowSampler, DetailVolume, DetailSampler,

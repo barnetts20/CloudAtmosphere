@@ -103,11 +103,24 @@ struct GGFieldParams
 
     float BandSharpness;
     float ReliefThinning;
-    float DetailVertical;
     float DetailErosion;
     float DetailRelief;
     float DetailDepth;
     float DensityCurve;
+
+	/** Noise units the shell spans, per layer. A layer's ratio to its own
+	 *  horizontal scale is the structure's ASPECT, so the two cannot share one
+	 *  rate once their horizontal scales differ: the finer-tiled layer keeps
+	 *  the authored aspect and the coarser one comes out that many times
+	 *  taller.
+	 *
+	 *  PITFALL: an exaggerated aspect does not read as tall noise. The UVW
+	 *  scale then swings by a large factor across the shell, so the pattern
+	 *  RESCALES with sample altitude -- and since altitude within a step moves
+	 *  with step size, which grows with distance, it swims as the camera pulls
+	 *  back. */
+    float DetailVertical;
+    float StructureVertical;
 
 	/** How far the PACKED layer carves the deck top, as a shell fraction, and
 	 *  how far it erodes density. Separate from the detail layer's because the
@@ -207,6 +220,14 @@ GGFieldParams GG_BuildField(
     F.BandSharpness = BandSharpness;
     F.ReliefThinning = ReliefThinning;
     F.DetailVertical = DetailVertical;
+
+	// SAME ASPECT, NOT SAME RATE. DetailVertical is authored against Scales.x,
+	// so scaling it by the ratio of the horizontal scales gives the structure
+	// layer the aspect that was authored rather than the detail layer's
+	// absolute vertical rate. Derived rather than a second pin, since one
+	// aspect for both layers is the useful default; an independent
+	// StructureAspect is the durable form once the scales settle.
+    F.StructureVertical = DetailVertical * (Scales.y / max(Scales.x, 1e-4f));
     F.DetailErosion = DetailErosion;
     F.DetailRelief = DetailRelief;
     F.DetailDepth = DetailDepth;
@@ -608,7 +629,7 @@ GGFieldSample GG_Field(
 
         const float3 PStructure = normalize(N + (FlowWarp + DetailWarp) * F.Scales.w);
 
-        const float3 StructureUVW = PStructure * (F.Scales.y + Height * F.DetailVertical);
+        const float3 StructureUVW = PStructure * (F.Scales.y + Height * F.StructureVertical);
         Structure = StructureVolume.SampleLevel(StructureSampler, StructureUVW, 0.0f);
     }
 #endif
