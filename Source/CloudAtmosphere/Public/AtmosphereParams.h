@@ -523,11 +523,9 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 /** Per-band scattering for the deck, plus the shared cloud lighting the gas
  *  giant path tunes differently from the terrestrial one.
  *
- *  Alpha on each set MULTIPLIES CloudBeta rather than replacing it, so the deck
- *  stays on the same thickness-relative footing as the air: an absolute
- *  coefficient would change the deck's opacity on a resize while leaving the
- *  atmosphere's alone. RGB is single-scattering albedo, and it has no
- *  terrestrial equivalent.
+ *  Alpha on each set MULTIPLIES the base extinction rather than replacing it,
+ *  so the deck stays on the same footing as the air. RGB is single-scattering
+ *  albedo, and it has no terrestrial equivalent.
  *
  *  All three equal gives a single-material deck. Split Negative from Positive
  *  only once relief is visible -- before that, a colour difference and a
@@ -556,17 +554,45 @@ struct CLOUDATMOSPHERE_API FGasGiantScatterParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bands", meta = (ClampMin = "0.0"))
 	float BandScale = 1.0f;
 
-	// -- Lighting -----------------------------------------------------------
+	// -- Extinction ---------------------------------------------------------
 	//
-	// Duplicated from the terrestrial struct because the values do not
-	// transfer. 150 against a deck at 100% coverage is opaque in one step.
+	// AUTHORED AS TOTAL OPTICAL DEPTH, NOT AS A COEFFICIENT. Atmo_BuildParams
+	// divides Cloud Beta by atmosphere thickness, and the shell thickness the
+	// deck spans is itself derived from DeckTopFraction and TopMax -- so the
+	// depth a ray actually accumulates is
+	//
+	//     tau = CoreDensity * ScatterX.a * CloudBeta * DeckTopFraction / TopMax
+	//
+	// An absolute CloudBeta therefore means something different after every
+	// resize, every Relief retune and every CoreDensity change. Solving for it
+	// from the depth wanted is the only form that survives all three.
+	//
+	// PITFALL: too low and the deck never saturates, which is a PERFORMANCE bug
+	// as much as a visual one. Both early-outs -- the main march's transmittance
+	// test and the light march's saturation cutoff -- are dead code until a ray
+	// can actually go opaque, so every ray burns its full step budget and
+	// spawns a full light march. A deck you can see the sky through is a deck
+	// costing several times what it should.
 
-	/** Base extinction. The per-band alphas multiply this. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lighting")
-	FLinearColor CloudBeta = FLinearColor(1.0f, 1.0f, 1.0f, 1.0f);
+	/** Total optical depth from the deck top to the surface at core density.
+	 *  30 is transmittance 1e-13 at the base, saturating within a few percent
+	 *  of the deck depth. Below about 8 the sky starts showing through. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Extinction", meta = (ClampMin = "0.1"))
+	float DeckOpticalDepth = 50.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lighting")
-	FLinearColor CloudAbsorptionBeta = FLinearColor(0.5f, 0.5f, 0.5f, 0.0f);
+	/** Per-channel tint on that depth. Wavelength-dependent extinction, on top
+	 *  of the albedo in the scatter sets. Neutral at (1,1,1). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Extinction")
+	FLinearColor ExtinctionTint = FLinearColor(1.0f, 0.969f, 0.938f, 1.0f);
+
+	/** Light-ray extinction as a fraction of the view ray's.
+	 *
+	 *  Below 1 on purpose: light scattered INTO the ray is what the
+	 *  multiple-scattering term stands in for, so the full coefficient would
+	 *  count that loss twice and the deck would read as flat black on the
+	 *  shadow side. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Extinction", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float LightExtinctionFraction = 0.35f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lighting")
 	FLinearColor CloudAmbient = FLinearColor(0.04f, 0.04f, 0.05f, 0.0f);
@@ -576,4 +602,26 @@ struct CLOUDATMOSPHERE_API FGasGiantScatterParams
 	 *  scattering has nothing to deliver there. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lighting")
 	FLinearColor CloudPhaseParams = FLinearColor(0.9f, 0.1f, 0.5f, 0.5f);
+
+	// -- Derivations --------------------------------------------------------
+
+	/** Cloud Beta, solved so a ray crossing the deck at core density
+	 *  accumulates DeckOpticalDepth.
+	 *
+	 *  The ScatterX.a multipliers ride on top, so they stay relative: at 1.0 a
+	 *  band gets exactly the authored depth, and Neg against Pos is how much
+	 *  more one band family absorbs than the other. */
+	FLinearColor GetCloudBeta(float DeckTopFraction, float TopMax, float CoreDensity) const
+	{
+		const float Denom = FMath::Max(DeckTopFraction * CoreDensity, KINDA_SMALL_NUMBER);
+		const float Scale = DeckOpticalDepth * FMath::Max(TopMax, KINDA_SMALL_NUMBER) / Denom;
+
+		return ExtinctionTint * Scale;
+	}
+
+	/** Cloud Absorption Beta. Same solve, scaled down for the light ray. */
+	FLinearColor GetCloudAbsorptionBeta(float DeckTopFraction, float TopMax, float CoreDensity) const
+	{
+		return GetCloudBeta(DeckTopFraction, TopMax, CoreDensity) * LightExtinctionFraction;
+	}
 };

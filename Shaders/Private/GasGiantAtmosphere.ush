@@ -35,6 +35,39 @@
 // a planet whose axis is world Z it is the identity.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Detail level of detail
+//
+// The detail volumes carve the deck top and erode the density. Both are high
+// frequency, and past some distance one march sample stands for many features
+// at once -- which is undersampling the FIELD rather than the ray, so raising
+// step counts does not quiet it. Fading the detail out is the mip chain the
+// volume does not have, and it drops three of the seven fetches per sample.
+//
+// DISTANCE, NOT FOOTPRINT. Measuring the pixel's angular footprint against the
+// noise scale is the principled form, but Scales.x is noise units per RADIAN
+// and a noise unit holds several features -- so the threshold carries an
+// unknown calibration constant and lands somewhere around 0.02, which is not a
+// number anyone can author against. Distance in atmosphere thicknesses is the
+// same decision expressed in a unit with meaning.
+//
+// The trade is resolution independence: at a higher march resolution the same
+// distance resolves more detail than this admits. If 4K and 1080p visibly
+// disagree, the fix is to scale these two against the march target's pixel
+// count rather than to go back to footprint.
+// ---------------------------------------------------------------------------
+
+/** Distance at which detail starts fading, in atmosphere thicknesses. */
+#ifndef GG_DETAIL_LOD_NEAR
+#define GG_DETAIL_LOD_NEAR 0.25f
+#endif
+
+/** Distance at which it is fully gone. Wide against the near threshold so the
+ *  transition is a gradient across the disc rather than a ring. */
+#ifndef GG_DETAIL_LOD_FAR
+#define GG_DETAIL_LOD_FAR 1.0f
+#endif
+
 /** Per-band scattering, blended by the signed band channel.
  *
  *  Three sets rather than one because zones and belts are different material,
@@ -330,6 +363,42 @@ CompositeParams GGAtmo_BuildAtmo(
 		jitterFactor, lightJitterFactor, stepScaleFactor);
 }
 
+/** Deck density for a SHADOW ray. One fetch, against seven for GG_Density.
+ *
+ *  SHADOWING IS LOW FREQUENCY. What a light ray needs is how much deck lies
+ *  between the sample and the star, not what the filaments look like along the
+ *  way -- the detail it would resolve is finer than the shadow it casts.
+ *  Reading GG_CloudTopUpper instead of the full field drops the warp loop and
+ *  both volume samples.
+ *
+ *  BOTH OMISSIONS DARKEN, WHICH IS THE SAFE DIRECTION. The upper bound sits
+ *  above the true deck, and the detail carve only ever lowers it, so this
+ *  overestimates depth rather than underestimating it. An underestimate would
+ *  let light through where the deck is solid, which reads as holes.
+ *
+ *  No Simpson integration either: that exists to stop the deck top being a
+ *  near-binary decision per step against the sampling lattice, and a shadow
+ *  ray's contribution is an integral over its whole path rather than a visible
+ *  surface. */
+float GGAtmo_DeckDensityForLight(
+	Texture2DArray FlowField,
+	SamplerState FlowSampler,
+	float3 LocalPos,
+	GGFieldParams F)
+{
+    const float Radius = length(LocalPos);
+    const float3 Direction = LocalPos / max(Radius, 1e-4f);
+
+    const float Height = (Radius - F.PlanetRadius) / F.Thickness;
+    const float Top = GG_CloudTopUpper(FlowField, FlowSampler, Direction, F);
+
+    return GG_DensityRamp(
+		Top - Height,
+		max(F.Profile.y, 1e-4f),
+		F.DensityCurve,
+		max(F.Profile.w, 0.0f));
+}
+
 /** Transmittance from a sample toward the light, through air and deck.
  *
  *  Optical depth accumulated and exponentiated once, as in Atmo_LightMarch.
@@ -381,12 +450,45 @@ float3 GGAtmo_LightMarch(
 		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f)
 		/ float(max(P.Atmo.lightRayParams.atmoLightSteps, 1));
 
-    GGAtmo_SplitDeckSegment(
-		FlowField, FlowSampler, LocalOrigin, LocalDir, TopMax, CoarseStep,
-		P.Field, Segments, SegmentCount);
+	// A SAMPLE ABOVE THE DECK WITH A CLIMBING LIGHT RAY NEVER RE-ENTERS IT, so
+	// the search has nothing to find and the segment is pure air. Both
+	// conditions are needed: a climbing ray still inside the deck's range can
+	// meet a taller column ahead.
+    const float StartRadius = length(LocalOrigin);
+    const float StartHeight = (StartRadius - P.Field.PlanetRadius) / P.Field.Thickness;
+    const float ClimbRate = dot(LocalDir, LocalOrigin / max(StartRadius, 1e-4f));
+
+    if (StartHeight > TopMax && ClimbRate >= 0.0f)
+    {
+        const int LastSeg = SegmentCount - 1;
+        if (LastSeg >= 0 && Segments[LastSeg].w > 0.5f)
+        {
+            Segments[LastSeg] = float4(Segments[LastSeg].x, Segments[LastSeg].y, CoarseStep, 0.0f);
+        }
+    }
+    else
+    {
+        GGAtmo_SplitDeckSegment(
+			FlowField, FlowSampler, LocalOrigin, LocalDir, TopMax, CoarseStep,
+			P.Field, Segments, SegmentCount);
+    }
 
     float3 AtmoOptDepth = float3(0.0f, 0.0f, 0.0f);
     float DeckOptDepth = 0.0f;
+
+	// SATURATION CUTOFF. The deck has no holes, so a shadow ray goes opaque
+	// within a few steps and every step after that is spent on light already
+	// extinguished. Accumulating optical depth and exponentiating once at the
+	// end -- correct for a medium with gaps -- has no early exit at all, which
+	// is what makes cloudLightSteps expensive here.
+	//
+	// 5 is transmittance 0.007: below anything visible, and far enough above
+	// zero that the cutoff itself cannot draw an edge.
+    const float3 AbsBeta = P.Atmo.cloudParams.cloudAbsBeta;
+    const float AbsMax = max(AbsBeta.x, max(AbsBeta.y, AbsBeta.z));
+    const float SaturationDepth = 5.0f / max(AbsMax, 1e-8f);
+
+    bool bSaturated = false;
 
     const uint2 PixelCoord = uint2(P.Atmo.mainRayParams.svxy);
 
@@ -445,28 +547,41 @@ float3 GGAtmo_LightMarch(
             if (IsDeck)
             {
                 const float3 LocalPos = GGAtmo_ToLocal(SamplePos, P);
-                const float3 LocalUp = LocalPos / max(Dist, 1e-4f);
 
-				// The step's altitude extent, which is the step projected onto
-				// the radius. A grazing ray covers almost no altitude however
-				// long the step is.
-                const float RadialRate = abs(dot(LocalDir, LocalUp));
-                const float StepHalfHeight = RadialRate * CurrentStep * 0.5f / P.Field.Thickness;
+                const float Density = GGAtmo_DeckDensityForLight(
+					FlowField, FlowSampler, LocalPos, P.Field);
 
-                const float4 Deck = GG_Density(
-					FlowField, FlowSampler, PackedDetail, PackedSampler,
-					LocalPos, StepHalfHeight, P.Field);
-
-                if (Deck.x > 0.0f)
+                if (Density > 0.0f)
                 {
-                    const float4 S = GGAtmo_BandScatter(Deck.y, P.Scatter);
+					// The band still scales extinction, so a belt shadows more
+					// than a zone. That difference is exactly the kind of
+					// low-frequency signal a shadow ray should carry, and the
+					// band comes from the same fetch the density used.
+                    const float3 SampleDir = LocalPos / max(length(LocalPos), 1e-4f);
+                    const float4 Flow = GG_SampleFlow(
+						FlowField, FlowSampler,
+						normalize(GG_RotateZ(SampleDir, P.Field.SpinAngle)),
+						P.Field.Layers.x);
 
-                    DeckOptDepth += Deck.x * S.a * CurrentStep;
+                    const float Band = (Flow.w + P.Field.Warps.z) * P.Field.BandSharpness;
+                    const float4 S = GGAtmo_BandScatter(Band, P.Scatter);
+
+                    DeckOptDepth += Density * S.a * CurrentStep;
+
+                    if (DeckOptDepth > SaturationDepth)
+                    {
+                        bSaturated = true;
+                        break;
+                    }
                 }
-
             }
 
             Pos += CurrentStep;
+        }
+
+        if (bSaturated)
+        {
+            break;
         }
     }
 
@@ -527,9 +642,13 @@ float4 GGAtmo_MainMarch(
     const float3 LocalOrigin = GGAtmo_ToLocal(RayOrigin, P);
     const float3 LocalDir = mul(P.WorldToLocal, RayDir);
 
-    const float CoarseStep = max(
-		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f)
-		/ float(max(P.Atmo.mainRayParams.atmoSteps, 1));
+    const float AtmoThickness = max(
+		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f);
+
+	// The detail fade's unit. Reciprocal here so the loop multiplies.
+    const float InvAtmoThickness = 1.0f / AtmoThickness;
+
+    const float CoarseStep = AtmoThickness / float(max(P.Atmo.mainRayParams.atmoSteps, 1));
 
     GGAtmo_SplitDeckSegment(
 		FlowField, FlowSampler, LocalOrigin, LocalDir, TopMax, CoarseStep,
@@ -628,9 +747,20 @@ float4 GGAtmo_MainMarch(
                     const float RadialRate = abs(dot(LocalDir, LocalUp));
                     const float StepHalfHeight = RadialRate * CurrentStep * 0.5f / P.Field.Thickness;
 
+					// Distance from the camera to THIS SAMPLE, not to the
+					// planet: a grazing ray's near end stays detailed while its
+					// far end fades, which is what a per-pixel measure would
+					// have done anyway.
+                    const float ViewDistances =
+						(Pos + CurrentStep * 0.5f) * InvAtmoThickness;
+
+                    GGFieldParams FieldLOD = P.Field;
+                    FieldLOD.DetailFade = 1.0f - smoothstep(
+						GG_DETAIL_LOD_NEAR, GG_DETAIL_LOD_FAR, ViewDistances);
+
                     const float4 Deck = GG_Density(
 						FlowField, FlowSampler, PackedDetail, PackedSampler,
-						LocalPos, StepHalfHeight, P.Field);
+						LocalPos, StepHalfHeight, FieldLOD);
 
                     if (Deck.x > 0.0f)
                     {

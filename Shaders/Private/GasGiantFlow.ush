@@ -33,7 +33,7 @@
  *  one step moves material once and stops, so the shape of the streamline never
  *  reaches the output. One fetch per step. */
 #ifndef GG_WARP_ITERATIONS
-#define GG_WARP_ITERATIONS 4
+#define GG_WARP_ITERATIONS 2
 #endif
 
 /** Replace the returned cloud top with the step count, normalized against
@@ -46,7 +46,7 @@
  *  volume and the deeper sim layer that advects it. First thing to switch off
  *  if the march gets expensive. */
 #ifndef GG_DETAIL_OCTAVE
-#define GG_DETAIL_OCTAVE 1
+#define GG_DETAIL_OCTAVE 0
 #endif
 
 /** Include the packed detail layer. One extra fetch. */
@@ -97,6 +97,16 @@ struct GGFieldParams
     float DetailRelief;
     float DetailDepth;
     float DensityCurve;
+
+	/** Detail level of detail, 1 at full strength and 0 fully faded.
+	 *
+	 *  Scales the two places detail reaches the image -- the deck carve and the
+	 *  density erosion -- and gates the two volume fetches that feed them, so a
+	 *  faded sample costs four fetches instead of seven.
+	 *
+	 *  The march sets this from the ray's footprint. Defaults to 1 so anything
+	 *  not doing LOD gets full detail. */
+    float DetailFade;
 };
 
 /** Sampling controls. Separate from the field because a light march reuses the
@@ -154,6 +164,7 @@ GGFieldParams GG_BuildField(
     F.DetailRelief = DetailRelief;
     F.DetailDepth = DetailDepth;
     F.DensityCurve = DensityCurve;
+    F.DetailFade = 1.0f;
 
     return F;
 }
@@ -335,7 +346,7 @@ float GG_CloudTop(
 	// this "top" is a threshold shifting along the ray rather than a single
 	// surface. That softens the top instead of defining it -- a look decision,
 	// not an error. At zero the deck is a true heightfield.
-    Top -= F.DetailRelief * (1.0f - Shape);
+    Top -= F.DetailRelief * F.DetailFade * (1.0f - Shape);
 
     Top += F.Relief.z * Pressure;
 
@@ -454,7 +465,16 @@ float4 GG_Field(
     float Ridge = 0.5f;
     float3 DetailWarp = 0.0f;
 
+	// FADED DETAIL IS SKIPPED, NOT JUST SCALED. Below the threshold the carve
+	// and the relief are both multiplied to nothing, so the three fetches that
+	// produce Shape buy nothing at all. 0.5 rather than 0.5f-of-something
+	// keeps the neutral value the unfetched branches already use.
+    const bool bWantDetail = (F.DetailFade > 1e-3f);
+
 #if GG_DETAIL_OCTAVE
+    BRANCH
+    if (bWantDetail)
+    {
 
 	// -- Detail: baked, warped by a DEEPER simulated layer -------------------
 	//
@@ -465,9 +485,9 @@ float4 GG_Field(
 	// with a large gradient IS strain, so inheriting one whole imposes an
 	// order-one strain on the fine layer regardless of its own flow.
 
-    float3 PDetail = normalize(N + FlowWarp * F.Scales.z);
+        float3 PDetail = normalize(N + FlowWarp * F.Scales.z);
 
-    const float4 DeepFlow = GG_SampleFlow(FlowField, FlowSampler, PDetail, F.Layers.y);
+        const float4 DeepFlow = GG_SampleFlow(FlowField, FlowSampler, PDetail, F.Layers.y);
 
 	// SAMPLED IN TRUE 3D. PDetail is a unit direction, so PDetail * Scale traces
 	// a sphere through the volume -- a 2D slice discarding all the vertical
@@ -477,23 +497,27 @@ float4 GG_Field(
 	// NO INDEPENDENT DRIFT. A clock scrolling the volume through its own domain
 	// makes the detail change whether or not anything is happening to it, which
 	// is grain by definition. If it looks pinned, raise Warps.x.
-    const float3 DetailUVW = PDetail * (F.Scales.x + Height * F.DetailVertical);
-    const float4 DetailSample = PackedDetail.SampleLevel(PackedSampler, DetailUVW, 0.0f);
+        const float3 DetailUVW = PDetail * (F.Scales.x + Height * F.DetailVertical);
+        const float4 DetailSample = PackedDetail.SampleLevel(PackedSampler, DetailUVW, 0.0f);
 
-    DetailWarp = GG_FlowVelocity(PDetail, DeepFlow) * (F.Warps.y * Turbulence);
-    Pos = normalize(Warped + DetailWarp);
+        DetailWarp = GG_FlowVelocity(PDetail, DeepFlow) * (F.Warps.y * Turbulence);
+        Pos = normalize(Warped + DetailWarp);
 
 	// Alpha carries Worley F2-F1, the filament network -- minimal ON cell walls,
 	// so it arrives dark and reads as bright wisps once weighted.
 	//
 	// SAME VOLUME AS THE PACKED SAMPLE BELOW, read at a DIFFERENT POSITION, so
 	// this is a separate fetch rather than a swizzle.
-    Ridge = DetailSample.a;
+        Ridge = DetailSample.a;
+    }
 #endif
 
     float4 Packed = 0.5f;
 
 #if GG_PACKED_DETAIL
+    BRANCH
+    if (bWantDetail)
+    {
 
 	// -- Packed: chemistry riding on top, held nearly rigid -------------------
 	//
@@ -501,10 +525,11 @@ float4 GG_Field(
 	// layer breaks the flow into rounded shapes, and a shape dragged through
 	// the flow field is no longer round.
 
-    const float3 PPacked = normalize(N + (FlowWarp + DetailWarp) * F.Scales.w);
+        const float3 PPacked = normalize(N + (FlowWarp + DetailWarp) * F.Scales.w);
 
-    const float3 PackedUVW = PPacked * (F.Scales.y + Height * F.DetailVertical);
-    Packed = PackedDetail.SampleLevel(PackedSampler, PackedUVW, 0.0f);
+        const float3 PackedUVW = PPacked * (F.Scales.y + Height * F.DetailVertical);
+        Packed = PackedDetail.SampleLevel(PackedSampler, PackedUVW, 0.0f);
+    }
 #endif
 
 	// RELIEF THINNING, MEASURED FROM THE FLOW RATHER THAN PRESCRIBED. An
@@ -740,7 +765,8 @@ float4 GG_Density(
 	// zero. There is no lower cloud shell, so a fully transparent column would
 	// let a ray run to the far side of the planet; the lerp cannot produce one
 	// however dark the noise gets, as long as DetailErosion stays below 1.
-    const float Density = Gradient * lerp(1.0f, Field.w, saturate(F.DetailErosion) * CarveWeight);
+    const float Density = Gradient
+		* lerp(1.0f, Field.w, saturate(F.DetailErosion * F.DetailFade) * CarveWeight);
 
 	// W IS THE DECK TOP AT THIS COLUMN, which the march cannot compute itself
 	// and needs in order to skip the empty space above the deck.
