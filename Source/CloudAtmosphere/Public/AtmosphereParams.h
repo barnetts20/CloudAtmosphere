@@ -339,37 +339,57 @@ struct CLOUDATMOSPHERE_API FTerrestrialCloudParams
 
 /** The gas giant deck's field: shape, transport, and the volumes it reads.
  *
- *  Relief is (TopBase, BandRelief, PressureLift, StormTowers) in shell
- *  fractions, and GetTopMax below is the closed-form highest the deck can
- *  reach. Every derivation that has to stay inside the atmosphere goes through
- *  it. */
+ *  TWO ABSOLUTES, EVERYTHING ELSE DIMENSIONLESS. DeckTop and DeckBottom are
+ *  fractions of atmosphere height; their difference is the gradient depth, and
+ *  every relief amount and both carves are fractions of THAT.
+ *
+ *  RELIEF RIDES ON THE GRADIENT SO THE DECK CANNOT OUTGROW ITSELF. Containment
+ *  is two-sided -- the deck top has to stay under the atmosphere ceiling and
+ *  above its own floor -- and the floor binds first, because the gradient is a
+ *  fraction of the shell while the headroom above is most of it. Expressed this
+ *  way the floor check is a pure number, GetReliefBudget() <= 1, and it holds
+ *  through any retune of either anchor. Against atmosphere height instead,
+ *  every move of DeckTop needs relief retuned with it or the troughs punch
+ *  through the floor and the solid-region skip fills them in.
+ *
+ *  The ceiling check is unchanged in form: GetTopMax() still returns an
+ *  atmosphere fraction and still has to stay at or below 1. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 {
 	GENERATED_BODY()
 
 	// -- Shell --------------------------------------------------------------
+	//
+	// Measured from the planet surface. GetTopMax() must stay at or below 1:
+	// above it Atmo_Plan clips the tallest columns, slicing the tops off
+	// exactly where features are tallest, which reads as a field bug.
 
-	/** Where the deck's highest possible point sits, as a fraction of the
-	 *  atmosphere height. 1.0 puts it exactly at the atmosphere top.
+	/** Base of the deck top, before relief moves it. Relief adds and subtracts
+	 *  around this, so the highest point is GetTopMax() rather than this. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shell", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float DeckTop = 0.55f;
+
+	/** Where density has reached CoreDensity. Below this the deck is solid, the
+	 *  march skips six of its seven fetches and the inner cull is exact.
 	 *
-	 *  A FRACTION AND NOT A THICKNESS, because the bound is on the deck's TOP,
-	 *  not on its thickness, and the two differ by GetTopMax -- which changes
-	 *  every time Relief is retuned. Authored as a thickness, raising the band
-	 *  relief silently pushes the cull radius above the atmosphere shell, and
-	 *  Atmo_Plan clips there first: the deck tops get sliced off exactly where
-	 *  the features are tallest, which reads as a field bug. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shell", meta = (ClampMin = "0.01", ClampMax = "1.0"))
-	float DeckTopFraction = 0.9f;
+	 *  FLAT, NOT FOLLOWING RELIEF -- a pressure level rather than a cloud
+	 *  surface. Every column reaches core density here however high its top
+	 *  sits, so the gradient compresses in troughs and stretches over crests.
+	 *
+	 *  Relief is a fraction of the distance up to DeckTop, so keeping
+	 *  GetReliefBudget() at or below 1 puts every column's top above this by
+	 *  construction. Past 1 the deepest troughs become steps rather than
+	 *  gradients and the solid-region skip fills them in. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shell", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float DeckBottom = 0.15f;
 
-	/** Inverse depth: larger reaches core density in less depth. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shell", meta = (ClampMin = "0.0001"))
-	float DensityRamp = 10.0f;
-
-	/** Onset sharpness. 1 has zero derivative at the deck top and no crease; 2
-	 *  is a plain exponential whose finite slope meeting the zero outside is a
-	 *  C1 kink along the whole cloud top; above that it hardens further. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shell", meta = (ClampMin = "0.05"))
+	/** Where the mass sits inside the gradient, without moving either boundary.
+	 *  1 is centred, below 1 pulls density toward the top.
+	 *
+	 *  FLOORED AT 0.5: the profile owes zero derivative at both ends, and the
+	 *  exponent preserves it only above a half. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shell", meta = (ClampMin = "0.5", ClampMax = "4.0"))
 	float DensityCurve = 1.0f;
 
 	/** Density the deck reaches. A SHAPE control, not an opacity one --
@@ -378,30 +398,43 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	float CoreDensity = 1.0f;
 
 	// -- Relief -------------------------------------------------------------
+	//
+	// Fractions of the gradient depth, all of them, moving the deck top around
+	// DeckTop. 1 is the whole distance down to the floor, so the downward terms
+	// summed -- GetReliefBudget() -- is what has to stay at or below 1.
 
-	/** (TopBase, BandRelief, PressureLift, StormTowers), shell fractions.
-	 *  BandRelief wants to be large: the point of driving height from the flow
-	 *  is that bands are geometry rather than a pattern painted on a sphere. */
+	/** Height between a jet and a zone. Wants to be large: the point of driving
+	 *  height from the flow is that bands are geometry rather than a pattern
+	 *  painted on a sphere. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief")
-	FLinearColor Relief = FLinearColor(0.5f, 0.6f, 0.15f, 0.1f);
+	float BandRelief = 0.8f;
+
+	/** How far pressure lifts the deck. Anticyclones rise, cyclones sink. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief")
+	float PressureLift = 0.25f;
+
+	/** Added height of a convective tower, where the vortex gate is open. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief")
+	float StormTowers = 0.25f;
 
 	/** How far the flow's strain collapses band relief toward flat. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief", meta = (ClampMin = "0.0"))
 	float ReliefThinning = 0.5f;
 
-	/** How deep the DETAIL layer carves the deck top, as a shell fraction.
+	/** How deep the DETAIL layer carves the deck top.
 	 *
-	 *  NOT A RATIO OF Relief.y, deliberately. Summed before the relief multiply,
-	 *  raising the band relief scales the fine noise by the same factor, and
-	 *  noise stretched vertically but not horizontally becomes spikes. */
+	 *  NOT A RATIO OF BandRelief, deliberately. Summed before the relief
+	 *  multiply, raising the band relief scales the fine noise by the same
+	 *  factor, and noise stretched vertically but not horizontally becomes
+	 *  spikes. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief", meta = (ClampMin = "0.0"))
-	float DetailRelief = 0.06f;
+	float DetailRelief = 0.10f;
 
 	/** How deep the PACKED layer carves it. Larger than the detail layer's:
 	 *  this is the mid-level shaping that gives the deck its silhouette, and it
 	 *  has to survive to a distance where the detail layer is long gone. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief", meta = (ClampMin = "0.0"))
-	float StructureRelief = 0.12f;
+	float StructureRelief = 0.20f;
 
 	/** Vortex strength above which storm towers are allowed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief", meta = (ClampMin = "0.0", ClampMax = "1.0"))
@@ -419,15 +452,25 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.01"))
 	float StructureScaleRatio = 0.25f;
 
-	/** Vertical feature size against the horizontal one. Their ratio IS the
-	 *  aspect of the resulting structure, so the ratio is the real control and
-	 *  the absolute is derived.
+	/** DETAIL layer: vertical feature size against its horizontal one. Their
+	 *  ratio IS the aspect of the resulting structure, so the ratio is the real
+	 *  control and the absolute vertical rate is derived from it.
 	 *
-	 *  Applies to both layers, so the structure layer's effective aspect is this
-	 *  over StructureScaleRatio -- taller than authored when the structure layer is
-	 *  the coarser of the two. */
+	 *  PITFALL: an exaggerated aspect does not read as tall noise. The UVW scale
+	 *  swings by a large factor across the shell, so the pattern RESCALES with
+	 *  sample altitude -- and since altitude within a step moves with step size,
+	 *  which grows with distance, it swims as the camera pulls back. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.01"))
 	float DetailAspect = 0.5f;
+
+	/** STRUCTURE layer: the same, against its own horizontal scale.
+	 *
+	 *  SEPARATE FROM DetailAspect BECAUSE THE LAYERS WANT DIFFERENT SHAPES.
+	 *  Detail is filaments that stretch along the streamlines; structure is
+	 *  rounded mid-level shaping. Tying them means one horizontal scale change
+	 *  retunes the other layer's silhouette. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.01"))
+	float StructureAspect = 0.5f;
 
 	/** How much of the coarse warp the detail layer inherits. A displacement
 	 *  field with a large gradient IS strain, so inheriting one whole imposes
@@ -508,11 +551,15 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.0", ClampMax = "0.99"))
 	float StructureErosion = 0.4f;
 
-	/** Depth over which erosion falls off, as a multiple of the ramp depth
-	 *  (1 / DensityRamp). A ratio so that sharpening the density onset pulls
-	 *  the erosion band in with it, instead of stranding it below the deck. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.01"))
-	float DetailDepthRatio = 1.0f;
+	/** How far down the gradient erosion reaches, as a fraction of it. 0 is
+	 *  surface only, 1 reaches the solid region.
+	 *
+	 *  NORMALIZED AGAINST THE COLUMN'S OWN GRADIENT, so erosion finishes exactly
+	 *  at DeckBottom for every column -- which is what makes the solid-region
+	 *  skip exact. An absolute depth still has carve left at the floor in a
+	 *  trough, where the gradient is compressed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ErosionDepth = 0.4f;
 
 	// -- Flow ---------------------------------------------------------------
 
@@ -556,11 +603,13 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flow", meta = (ClampMin = "0"))
 	int32 DeepFlowLayer = 1;
 
-	/** Bound on the deck's slope, shell fractions per radian. The cone angle
+	/** Bound on the deck's slope, GRADIENT DEPTHS per radian -- the same unit as
+	 *  the relief that produces the slope, so it stays in step through an anchor
+	 *  retune instead of silently becoming an under-declaration. The cone angle
 	 *  for the entry search: under-declaring it is the one way the search steps
 	 *  over the surface, so raise it first if tangent-angle slicing appears. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flow", meta = (ClampMin = "0.1"))
-	float DeckSlope = 4.0f;
+	float DeckSlope = 8.0f;
 
 	// -- Sources ------------------------------------------------------------
 
@@ -592,41 +641,84 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 
 	// -- Derivations --------------------------------------------------------
 
-	/** The highest the deck can reach, in shell fractions. Closed form, and it
-	 *  must match GG_TopBounds in GasGiantFlow.ush -- every term in GG_CloudTop
-	 *  appears, each at its most generous.
+	/** Gradient depth at a column with no relief, and the unit every relief
+	 *  amount is a fraction of. The grain handle: widen it and the deck top
+	 *  spreads over more march steps.
 	 *
-	 *  Elevation is in [0,1] so the band contributes half of Relief.y either
-	 *  side of the base. Pressure is soft-saturated to [-1,1] sim-side so it
-	 *  contributes the whole of Relief.z. The detail carve is subtractive and
-	 *  belongs to the lower bound only. */
-	float GetTopMax() const
+	 *  Relief scales with it, so widening to quiet the grain also raises the
+	 *  bands. That is the deck getting deeper rather than a side effect -- the
+	 *  alternative leaves relief fixed while the room it has to move in
+	 *  changes, which is what puts troughs through the floor. */
+	float GetGradientDepth() const
 	{
-		return Relief.R
-			+ 0.5f * FMath::Abs(Relief.G)
-			+ FMath::Abs(Relief.B)
-			+ FMath::Max(Relief.A, 0.0f);
+		return DeckTop - DeckBottom;
 	}
 
-	/** Shell thickness in world units: the one absolute length in the field.
+	/** How much of the gradient the downward relief terms claim between them.
 	 *
-	 *  Solved so the deck's highest possible point lands at DeckTopFraction of
-	 *  the atmosphere height. Everything else in the deck is a shell fraction
-	 *  and rides along. */
-	float GetShellThickness(float PlanetRadius, float AtmosphereHeightScale) const
+	 *  AT OR BELOW 1 AND THE FLOOR IS SAFE: every column's top then sits at or
+	 *  above DeckBottom, which is what keeps the solid-region skip exact. Past
+	 *  1 only the rare joint minimum punches through, so it degrades rather
+	 *  than breaks -- but it degrades invisibly, as troughs quietly filling in
+	 *  with solid deck. */
+	float GetReliefBudget() const
 	{
-		const float TopMax = FMath::Max(GetTopMax(), KINDA_SMALL_NUMBER);
-		return PlanetRadius * AtmosphereHeightScale * DeckTopFraction / TopMax;
+		return 0.5f * FMath::Abs(BandRelief)
+			+ FMath::Abs(PressureLift)
+			+ FMath::Abs(DetailRelief)
+			+ FMath::Abs(StructureRelief);
+	}
+
+	/** The highest the deck can reach, as an atmosphere fraction. Closed form,
+	 *  and it must match GG_TopBounds in GasGiantFlow.ush -- every term in
+	 *  GG_CloudTop appears, each at its most generous.
+	 *
+	 *  Elevation is in [0,1] so the band contributes half of BandRelief either
+	 *  side of the base. Pressure is soft-saturated to [-1,1] sim-side so it
+	 *  contributes the whole of PressureLift. The carves are subtractive and
+	 *  belong to the lower bound only.
+	 *
+	 *  Keep this at or below 1: it is the deck's top against the atmosphere
+	 *  ceiling. */
+	float GetTopMax() const
+	{
+		return DeckTop + GetGradientDepth() * (
+			0.5f * FMath::Abs(BandRelief)
+			+ FMath::Abs(PressureLift)
+			+ FMath::Max(StormTowers, 0.0f));
+	}
+
+	/** The lowest the deck top can fall, both carves included. Equals
+	 *  DeckBottom exactly when GetReliefBudget() is 1. */
+	float GetTopMin() const
+	{
+		return DeckTop - GetGradientDepth() * GetReliefBudget();
+	}
+
+	/** Atmosphere thickness in world units: the one absolute length the field
+	 *  reads, and the unit every fraction above is in. The deck has no shell of
+	 *  its own -- the anchors place it inside the air, so sizing the air does
+	 *  not resize the deck and a thick deck does not force thick air. */
+	float GetAtmosphereThickness(float PlanetRadius, float AtmosphereHeightScale) const
+	{
+		return PlanetRadius * AtmosphereHeightScale;
 	}
 
 	/** Profile, as the material expects it. x is world units. */
 	FLinearColor GetProfile(float PlanetRadius, float AtmosphereHeightScale) const
 	{
 		return FLinearColor(
-			GetShellThickness(PlanetRadius, AtmosphereHeightScale),
-			DensityRamp,
+			GetAtmosphereThickness(PlanetRadius, AtmosphereHeightScale),
+			DeckBottom,
 			VortexThreshold,
 			CoreDensity);
+	}
+
+	/** Relief, as the material expects it. x is the base the other three move
+	 *  around, so it belongs in the same float4 as they do. */
+	FLinearColor GetRelief() const
+	{
+		return FLinearColor(DeckTop, BandRelief, PressureLift, StormTowers);
 	}
 
 	FLinearColor GetScales() const
@@ -656,7 +748,15 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 			0.0f);
 	}
 
+	/** Noise units the shell spans, per layer. Each aspect rides on its own
+	 *  layer's horizontal scale, so retuning one scale leaves the other layer's
+	 *  shape alone. */
 	float GetDetailVertical() const { return DetailScale * DetailAspect; }
+
+	float GetStructureVertical() const
+	{
+		return DetailScale * StructureScaleRatio * StructureAspect;
+	}
 
 	/** (DetailNear, DetailFar, StructureNear, StructureFar), as the shader wants
 	 *  it. Planet radii. */
@@ -669,10 +769,6 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 			StructureFadeNear + StructureFadeSpan);
 	}
 
-	float GetDetailDepth() const
-	{
-		return DetailDepthRatio / FMath::Max(DensityRamp, KINDA_SMALL_NUMBER);
-	}
 };
 
 /** Per-band scattering and extinction for the deck.
@@ -711,14 +807,17 @@ struct CLOUDATMOSPHERE_API FGasGiantScatterParams
 	// -- Extinction ---------------------------------------------------------
 	//
 	// AUTHORED AS TOTAL OPTICAL DEPTH, NOT AS A COEFFICIENT. Atmo_BuildParams
-	// divides Cloud Beta by atmosphere thickness, and the shell thickness the
-	// deck spans is itself derived from DeckTopFraction and TopMax -- so the
-	// depth a ray actually accumulates is
+	// divides Cloud Beta by atmosphere thickness, and the deck's heights are
+	// fractions of that same thickness, so a vertical ray from the deck top to
+	// the surface accumulates
 	//
-	//     tau = CoreDensity * ScatterX.a * CloudBeta * DeckTopFraction / TopMax
+	//     tau = CoreDensity * ScatterX.a * CloudBeta * (DeckTop + DeckBottom)/2
+	//
+	// -- the gradient integrates to half its span because the profile is
+	// symmetric across it, plus the solid region from DeckBottom down.
 	//
 	// An absolute CloudBeta therefore means something different after every
-	// resize, every Relief retune and every CoreDensity change. Solving for it
+	// resize, every anchor move and every CoreDensity change. Solving for it
 	// from the depth wanted is the only form that survives all three.
 	//
 	// PITFALL: too low and the deck never saturates, which is a PERFORMANCE bug
@@ -756,17 +855,17 @@ struct CLOUDATMOSPHERE_API FGasGiantScatterParams
 	 *  The ScatterX.a multipliers ride on top, so they stay relative: at 1.0 a
 	 *  band gets exactly the authored depth, and Neg against Pos is how much
 	 *  more one band family absorbs than the other. */
-	FLinearColor GetCloudBeta(float DeckTopFraction, float TopMax, float CoreDensity) const
+	FLinearColor GetCloudBeta(float DeckTop, float DeckBottom, float CoreDensity) const
 	{
-		const float Denom = FMath::Max(DeckTopFraction * CoreDensity, KINDA_SMALL_NUMBER);
-		const float Scale = DeckOpticalDepth * FMath::Max(TopMax, KINDA_SMALL_NUMBER) / Denom;
+		const float Path = 0.5f * FMath::Max(DeckTop + DeckBottom, 0.0f);
+		const float Denom = FMath::Max(Path * CoreDensity, KINDA_SMALL_NUMBER);
 
-		return ExtinctionTint * Scale;
+		return ExtinctionTint * (DeckOpticalDepth / Denom);
 	}
 
 	/** Cloud Absorption Beta. Same solve, scaled down for the light ray. */
-	FLinearColor GetCloudAbsorptionBeta(float DeckTopFraction, float TopMax, float CoreDensity) const
+	FLinearColor GetCloudAbsorptionBeta(float DeckTop, float DeckBottom, float CoreDensity) const
 	{
-		return GetCloudBeta(DeckTopFraction, TopMax, CoreDensity) * LightExtinctionFraction;
+		return GetCloudBeta(DeckTop, DeckBottom, CoreDensity) * LightExtinctionFraction;
 	}
 };

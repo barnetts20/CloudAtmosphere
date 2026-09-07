@@ -83,11 +83,16 @@
  *                  StructureWarpInherit)
  *  Warps    float4(WarpTime, DetailWarp, BandBias, TurbulenceFloor)
  *  Detail   float4(Ridge, Fluff, Wisp, EdgeBias)
- *  Relief   float4(TopBase, BandRelief, PressureLift, StormTowers), shell fractions
- *  Profile  float4(ShellThickness, DensityRamp, VortexThreshold, CoreDensity)
+ *  Relief   float4(DeckTop, BandRelief, PressureLift, StormTowers)
+ *  Profile  float4(AtmosphereThickness, DeckBottom, VortexThreshold, CoreDensity)
  *  Layers   float3(FlowLayer, DeepFlowLayer, DeckSlope)
  *
- *  Thickness and SpinAngle are derived in GG_BuildField. */
+ *  TWO ABSOLUTES AND THE REST DIMENSIONLESS. DeckTop and DeckBottom are
+ *  fractions of atmosphere thickness; the three relief amounts, both carves and
+ *  DeckSlope are fractions of GradientDepth, the distance between them. Relief
+ *  therefore cannot outgrow the room the deck has, whichever anchor moves.
+ *
+ *  Thickness, GradientDepth and SpinAngle are derived in GG_BuildField. */
 struct GGFieldParams
 {
     float4 Scales;
@@ -99,20 +104,37 @@ struct GGFieldParams
 
     float PlanetRadius;
     float Thickness;
+
+	/** DeckTop - DeckBottom, and the unit every relief amount is a fraction of.
+	 *  Also the profile's nominal span, so relief and gradient stay tied and the
+	 *  floor cannot be crossed while the relief budget is under 1. */
+    float GradientDepth;
+
     float SpinAngle;
 
     float BandSharpness;
     float ReliefThinning;
     float DetailErosion;
     float DetailRelief;
-    float DetailDepth;
+
+	/** How far down the gradient erosion reaches, as a fraction of it.
+	 *  Normalized against the COLUMN'S own gradient, so it finishes exactly at
+	 *  DeckBottom for every column -- which keeps the solid-region skip exact
+	 *  where the gradient is compressed. */
+    float ErosionDepth;
+
+	/** Where the mass sits inside the gradient. Floored at 0.5 in the profile. */
     float DensityCurve;
 
 	/** Noise units the shell spans, per layer. A layer's ratio to its own
-	 *  horizontal scale is the structure's ASPECT, so the two cannot share one
-	 *  rate once their horizontal scales differ: the finer-tiled layer keeps
-	 *  the authored aspect and the coarser one comes out that many times
-	 *  taller.
+	 *  horizontal scale is the structure's ASPECT.
+	 *
+	 *  ONE RATE PER LAYER, BOTH AUTHORED. Sharing a single rate across scales
+	 *  that differ leaves the finer-tiled layer at its authored aspect and the
+	 *  coarser one that many times taller; deriving the second from the first
+	 *  fixes that but pins the two aspects together, which the layers do not
+	 *  want -- detail filaments stretch along the flow while structure shapes
+	 *  stay round.
 	 *
 	 *  PITFALL: an exaggerated aspect does not read as tall noise. The UVW
 	 *  scale then swings by a large factor across the shell, so the pattern
@@ -122,8 +144,8 @@ struct GGFieldParams
     float DetailVertical;
     float StructureVertical;
 
-	/** How far the PACKED layer carves the deck top, as a shell fraction, and
-	 *  how far it erodes density. Separate from the detail layer's because the
+	/** How far the PACKED layer carves the deck top, as an atmosphere fraction,
+	 *  and how far it erodes density. Separate from the detail layer's because the
 	 *  two do different jobs at different scales: structure is mid-level shaping
 	 *  that has to read from any distance, detail is micro variance that only
 	 *  matters up close. */
@@ -196,9 +218,10 @@ GGFieldParams GG_BuildField(
 	float BandSharpness,
 	float ReliefThinning,
 	float DetailVertical,
+	float StructureVertical,
 	float DetailErosion,
 	float DetailRelief,
-	float DetailDepth,
+	float ErosionDepth,
 	float DensityCurve,
 	float StructureRelief,
 	float StructureErosion,
@@ -214,23 +237,22 @@ GGFieldParams GG_BuildField(
     F.Layers = Layers;
 
     F.PlanetRadius = PlanetRadius;
+
+	// The atmosphere's own depth, and the unit the two anchors are fractions of.
     F.Thickness = max(Profile.x, 1e-4f);
+
+	// Floored only to keep the relief multiply finite; an inverted pair is an
+	// authoring error, not a case to support.
+    F.GradientDepth = max(Relief.x - Profile.y, 1e-4f);
     F.SpinAngle = -RigidRate * Time;
 
     F.BandSharpness = BandSharpness;
     F.ReliefThinning = ReliefThinning;
     F.DetailVertical = DetailVertical;
-
-	// SAME ASPECT, NOT SAME RATE. DetailVertical is authored against Scales.x,
-	// so scaling it by the ratio of the horizontal scales gives the structure
-	// layer the aspect that was authored rather than the detail layer's
-	// absolute vertical rate. Derived rather than a second pin, since one
-	// aspect for both layers is the useful default; an independent
-	// StructureAspect is the durable form once the scales settle.
-    F.StructureVertical = DetailVertical * (Scales.y / max(Scales.x, 1e-4f));
+    F.StructureVertical = StructureVertical;
     F.DetailErosion = DetailErosion;
     F.DetailRelief = DetailRelief;
-    F.DetailDepth = DetailDepth;
+    F.ErosionDepth = ErosionDepth;
     F.DensityCurve = DensityCurve;
     F.StructureRelief = StructureRelief;
     F.StructureErosion = StructureErosion;
@@ -367,34 +389,39 @@ float3 GG_FlowVelocity(float3 N, float4 Flow)
     return East * Flow.x + North * Flow.y;
 }
 
-/** Density as a function of depth below the cloud top.
+/** Density at a height, given the deck top at that column.
  *
- *      rho(d) = Core * (1 - exp(-(d * Ramp)^(2/Curve)))
+ *      t   = (Top - Height) / (Top - Bottom)      clamped to [0,1]
+ *      rho = Core * smoothstep(0, 1, t^Curve)
  *
- *  ONE CURVE, STARTING AT EXACTLY ZERO. Density that arrives at the deck top
- *  already finite draws a hard line there, and a two-mechanism profile whose
- *  fade completes before its gain begins has a shoulder at the handover.
- *  Ramp is an inverse depth: larger reaches core density in less depth.
+ *  ZERO DERIVATIVE AT BOTH ENDS, WHICH IS THE WHOLE POINT. Density is exactly
+ *  zero at the top and exactly Core at Bottom, C1 at both, so neither the onset
+ *  nor the join to the solid region below draws a line. An asymptotic profile
+ *  is smooth at the top and never reaches its maximum -- which is why it has no
+ *  floor to be smooth at, and why its solid depth is implicit rather than
+ *  authored.
  *
- *  CURVE IS ONSET SHARPNESS AND THE EXPONENT IS INVERTED FOR IT, since raising
- *  the power on (d*Ramp) makes it smaller near the top, where d*Ramp is below
- *  one. Written as 2/Curve: 1 gives exponent 2, zero derivative at the top and
- *  no crease; 2 gives a plain exponential, whose finite slope meeting the zero
- *  outside is a C1 kink along the whole cloud top; 4 gives infinite slope, a
- *  hard edge. The crease this exists to avoid arrives at 2 and worsens above --
- *  a real trade, since a sharp cloud top IS a discontinuity. */
-float GG_DensityRamp(float Depth, float Ramp, float Curve, float Core)
+ *  THE SPAN IS PER COLUMN, DOWN TO A FLAT FLOOR. Every column reaches Core at
+ *  Bottom whatever its top, so the region below is uniform for all of them: the
+ *  march can skip six of its seven fetches there and the inner cull is
+ *  arithmetic. The gradient compresses in troughs and stretches over crests.
+ *
+ *  PITFALL: below 0.5 the exponent's slope at t = 0 outruns smoothstep's zero
+ *  and the deck top creases, so Curve is floored here rather than by callers.
+ *
+ *  PITFALL: a column whose Top is below Bottom has no gradient -- the max only
+ *  keeps the divide finite, and the solid-region skip fills such a column in.
+ *  Keep DeckBottom under the lowest top the field produces. */
+float GG_DeckDensity(float Height, float Top, float Bottom, float Curve, float Core)
 {
-    const float D = max(Depth, 0.0f) * max(Ramp, 0.0f);
+    const float Span = max(Top - Bottom, 1e-4f);
 
-	// Clamped because a non-positive exponent makes pow(0, k) return one, which
-	// would put full core density above the deck.
-    const float Exponent = 2.0f / max(Curve, 0.05f);
+    const float T = saturate((Top - Height) / Span);
 
-    return Core * (1.0f - exp(-pow(D, Exponent)));
+    return Core * smoothstep(0.0f, 1.0f, pow(T, max(Curve, 0.5f)));
 }
 
-/** Cloud top altitude, as a fraction of the shell thickness. Flow first --
+/** Cloud top altitude, as a fraction of atmosphere thickness. Flow first --
  *  band elevation, pressure lift, storm towers -- then the detail carve.
  *
  *  DetailRelief is separate from Relief.y on purpose. Summed before the relief
@@ -419,11 +446,15 @@ float GG_CloudTop(
 	float ReliefScale,
 	GGFieldParams F)
 {
-	// Elevation runs 0 at a band boundary to 1 in a band interior, so Relief.y
-	// is the whole height between a jet and a zone. It wants to be large: the
+	// Relief.x is DeckTop, the base the other three move around, and every one of
+	// them is a fraction of the gradient depth. Elevation runs 0 at a band
+	// boundary to 1 in a band interior, so Relief.y is the whole height between a
+	// jet and a zone -- 1 spans the entire gradient. It wants to be large: the
 	// point of driving height from the flow is that bands are geometry rather
 	// than a pattern painted on a sphere.
-    float Top = F.Relief.x + ReliefScale * F.Relief.y * (Elevation - 0.5f);
+    const float D = F.GradientDepth;
+
+    float Top = F.Relief.x + D * ReliefScale * F.Relief.y * (Elevation - 0.5f);
 
 	// DETAIL AS SURFACE RELIEF, A DIFFERENT EFFECT FROM THE DENSITY CARVE.
 	// Displacing the deck gives a lumpy surface with a sharp top; eroding the
@@ -442,10 +473,10 @@ float GG_CloudTop(
 	// Each layer carves by its own amount. Summed rather than mixed, so the
 	// structure layer's mid-level shaping survives at a distance where the detail
 	// layer has already faded out from under it.
-    Top -= F.DetailRelief * (1.0f - ShapeDetail);
-    Top -= F.StructureRelief * (1.0f - ShapeStructure);
+    Top -= D * F.DetailRelief * (1.0f - ShapeDetail);
+    Top -= D * F.StructureRelief * (1.0f - ShapeStructure);
 
-    Top += F.Relief.z * Pressure;
+    Top += D * F.Relief.z * Pressure;
 
 	// Convective towers, only where the circulation supports one. Ungated,
 	// Worley F1 is polka dots; gated on vortex strength it becomes storms that
@@ -453,14 +484,77 @@ float GG_CloudTop(
 	// cell CENTRES, which is where the tower belongs.
     const float Vortex = smoothstep(F.Profile.z, 1.0f, abs(Pressure));
 
-    Top += F.Relief.w * (1.0f - StormCells) * Vortex;
+    Top += D * F.Relief.w * (1.0f - StormCells) * Vortex;
 
     return Top;
 }
 
 
+/** What one flow fetch yields: the band, the pressure, and a conservative
+ *  upper bound on the cloud top. */
+struct GGFlowProbe
+{
+    float Band;
+    float Pressure;
+    float Top;
+};
+
+/** The cheap read of the field, for the two jobs that do not need the volumes:
+ *  finding where a ray enters the deck, and shading the solid region below
+ *  DeckBottom where the volumes cannot change the density.
+ *
+ *  WHY AN UPPER BOUND AND NOT THE VALUE. A search that overestimates the deck
+ *  stops short and takes another iteration; one that underestimates steps over
+ *  the surface and misses cloud entirely. Only one is recoverable, so every
+ *  term is at its most generous: the band contributes max(Relief.y *
+ *  (Elevation - 0.5), 0), since ReliefScale is in [0,1] and multiplies a term
+ *  that changes sign; the storm tower is at full height wherever its gate is
+ *  open; the carves are omitted, safe because they only ever LOWER the deck.
+ *
+ *  Band and Pressure MUST MATCH GG_Field's, or the two paths disagree about
+ *  which band a column is and the solid region tints differently from the
+ *  gradient above it. */
+GGFlowProbe GG_FlowProbe(
+	Texture2DArray FlowField,
+	SamplerState FlowSampler,
+	float3 P,
+	GGFieldParams F)
+{
+    const float3 N = normalize(GG_RotateZ(P, F.SpinAngle));
+
+    const float4 Flow = GG_SampleFlow(FlowField, FlowSampler, N, F.Layers.x);
+
+    GGFlowProbe Probe;
+
+    Probe.Band = (Flow.w + F.Warps.z) * F.BandSharpness;
+    Probe.Pressure = Flow.z;
+
+    const float Elevation = 1.0f - exp(-Probe.Band * Probe.Band);
+
+    const float D = F.GradientDepth;
+
+    Probe.Top = F.Relief.x + D * max(F.Relief.y * (Elevation - 0.5f), 0.0f);
+
+    Probe.Top += D * F.Relief.z * Probe.Pressure;
+
+    Probe.Top += D * max(F.Relief.w, 0.0f)
+		* smoothstep(F.Profile.z, 1.0f, abs(Probe.Pressure));
+
+    return Probe;
+}
+
+/** The bound alone, for callers that want nothing else. */
+float GG_CloudTopUpper(
+	Texture2DArray FlowField,
+	SamplerState FlowSampler,
+	float3 P,
+	GGFieldParams F)
+{
+    return GG_FlowProbe(FlowField, FlowSampler, P, F).Top;
+}
+
 /** Evaluates the cloud field at a direction on the sphere. Height is the
- *  shading point's shell fraction and only affects the 3D detail lookups.
+ *  shading point's atmosphere fraction and only affects the 3D detail lookups.
  *
  *  Returns Top, Pressure, Band and the two layer shapes. Both shapes are in
  *  [0,1] where 1 is solid and 0 is clear, already scaled by their layer's fade
@@ -720,8 +814,8 @@ GGFieldSample GG_Field(
  *  stretches toward the limb. Inverting the screen-to-surface Jacobian is the
  *  correct construction, and the basis below is that inverse.
  *
- *  HeightScale converts shell fractions to world units: Profile.x times the
- *  actor's scale. Wrong values scale the bumpiness, not its direction.
+ *  HeightScale converts atmosphere fractions to world units: Profile.x times
+ *  the actor's scale. Wrong values scale the bumpiness, not its direction.
  *
  *  TWO LIMITS THAT LOOK LIKE BUGS. Screen derivatives are per 2x2 quad, so the
  *  normal is constant across each quad and shows as blockiness under
@@ -818,15 +912,22 @@ float GG_Spot(float3 N, float3 Centre, float Radius, float Strength)
  *  thin enough that the true radius shifts UVW by far less than one lattice
  *  cell, so it would cost the same and change nothing.
  *
- *  StepHalfLength is half the march step in SHELL FRACTIONS along the radius.
- *  The ramp is integrated across it so a step straddling the cloud top is
- *  weighted by how much of it lies inside.
+ *  StepHalfLength is half the march step in ATMOSPHERE FRACTIONS along the
+ *  radius. The profile is integrated across it so a step straddling the cloud
+ *  top is weighted by how much of it lies inside.
+ *
+ *  ONE FETCH BELOW DeckBottom RATHER THAN SEVEN. Density there is exactly Core
+ *  for every column and the volumes cannot change it, so only the band and the
+ *  pressure are still wanted and one flow read supplies both. The test uses the
+ *  step's far edge, so the boundary sits a half step clear of the sampling
+ *  lattice and the two paths never disagree inside one step.
  *
  *  Returns:
  *    x  Density in [0,1]. Multiply by an extinction coefficient in the march.
  *    y  BAND, signed. For GG_BandColour. NOT a density term.
  *    z  Pressure, for tinting vortices.
- *    w  The deck top at this column, as a shell fraction.
+ *    w  The deck top at this column. An upper bound on the solid path, where
+ *       the true top is above the sample by more than the gradient anyway.
  *
  *  BandSharpness multiplies already-normalized vorticity, so 1 is neutral and
  *  the useful range is roughly 0.5 to 3. Too high flattens the elevation to its
@@ -846,8 +947,28 @@ float4 GG_Density(
     const float Radius = length(LocalPos);
     const float3 Direction = LocalPos / max(Radius, 1e-4f);
 
-	// Shell fraction. 0 at the deck base, 1 at the top of the modelled shell.
+	// Atmosphere fraction. 0 at the planet surface, 1 at the top of the air.
     const float Height = (Radius - F.PlanetRadius) / F.Thickness;
+
+    const float HalfStep = max(StepHalfLength, 0.0f);
+
+    const float Bottom = F.Profile.y;
+    const float Core = max(F.Profile.w, 0.0f);
+
+	// -- Solid region -------------------------------------------------------
+	//
+	// The whole step lies below the floor, so every column is at Core across it
+	// and erosion has run out with the gradient it is normalized against.
+	// Nothing the volumes could say changes the density, so their six fetches
+	// are pure cost.
+    BRANCH
+
+    if (Height + HalfStep <= Bottom)
+    {
+        const GGFlowProbe Probe = GG_FlowProbe(FlowField, FlowSampler, Direction, F);
+
+        return float4(Core, Probe.Band, Probe.Pressure, Probe.Top);
+    }
 
     const GGFieldSample Field = GG_Field(
 		FlowField, FlowSampler, DetailVolume, DetailSampler,
@@ -856,35 +977,34 @@ float4 GG_Density(
 
     const float Top = Field.Top;
 
-	// THE RAMP IS INTEGRATED ACROSS THE STEP, NOT SAMPLED AT ITS MIDPOINT. One
-	// midpoint sample makes the deck a near-binary decision per step, and as
+	// THE PROFILE IS INTEGRATED ACROSS THE STEP, NOT SAMPLED AT ITS MIDPOINT.
+	// One midpoint sample makes the deck a near-binary decision per step, and as
 	// the surface drifts against the step lattice that decision flips along a
 	// locus that is a line on screen.
 	//
 	// The deck top varies slowly across one step, so Top is evaluated once at
-	// the centre and only the RAMP is integrated: three closed-form
+	// the centre and only the PROFILE is integrated: three closed-form
 	// evaluations, no extra fetches, cheaper than taking more steps.
-    const float HalfStep = max(StepHalfLength, 0.0f);
-
-    const float Ramp = max(F.Profile.y, 1e-4f);
-    const float Core = max(F.Profile.w, 0.0f);
-
-    const float RampNear = GG_DensityRamp(Top - (Height - HalfStep), Ramp, F.DensityCurve, Core);
-    const float RampMid = GG_DensityRamp(Top - Height, Ramp, F.DensityCurve, Core);
-    const float RampFar = GG_DensityRamp(Top - (Height + HalfStep), Ramp, F.DensityCurve, Core);
+    const float RampNear = GG_DeckDensity(Height - HalfStep, Top, Bottom, F.DensityCurve, Core);
+    const float RampMid = GG_DeckDensity(Height, Top, Bottom, F.DensityCurve, Core);
+    const float RampFar = GG_DeckDensity(Height + HalfStep, Top, Bottom, F.DensityCurve, Core);
 
 	// Simpson across the step.
     const float Gradient = (RampNear + 4.0f * RampMid + RampFar) / 6.0f;
 
-	// Depth at the sample centre, for the carve falloff only.
-    const float Depth = Top - Height;
+	// How far down the gradient the sample centre sits, 0 at the top and 1 at
+	// the floor. The same normalization the profile uses, so the two agree about
+	// where the gradient ends whatever the column's top.
+    const float DepthFraction =
+		saturate((Top - Height) / max(Top - Bottom, 1e-4f));
 
-	// Full erosion at the surface, none below DetailDepth. Without it the deck
+	// Full erosion at the surface, none below ErosionDepth. Without it the deck
 	// is uniformly pitted rather than solid material with a worked surface.
 	// Smoothstep rather than linear: where erosion stops is a density
 	// discontinuity in the depth direction, and a linear falloff leaves it C0 --
 	// a faint shelf, edge-on, at a constant altitude.
-    const float CarveWeight = 1.0f - smoothstep(0.0f, max(F.DetailDepth, 1e-4f), Depth);
+    const float CarveWeight =
+		1.0f - smoothstep(0.0f, max(F.ErosionDepth, 1e-4f), DepthFraction);
 
 	// THE CARVE MODULATES THE GRADIENT AND NOTHING ELSE. Multiplicative, and the
 	// gradient is exactly zero above Top, so nothing the noise does can put
@@ -998,58 +1118,31 @@ bool GG_RaySphere(float3 Origin, float3 Dir, float Radius, out float T0, out flo
     return true;
 }
 
-/** A conservative UPPER BOUND on the cloud top at one direction, from a single
- *  flow fetch. Finding where a ray enters the deck is a different job from
- *  integrating it and wants a different tool.
- *
- *  WHY AN UPPER BOUND AND NOT THE VALUE. A search that overestimates the deck
- *  stops short and takes another iteration; one that underestimates steps over
- *  the surface and misses cloud entirely. Only one is recoverable, so every
- *  term is at its most generous: the band contributes max(Relief.y *
- *  (Elevation - 0.5), 0), since ReliefScale is in [0,1] and multiplies a term
- *  that changes sign; the storm tower is at full height wherever its gate is
- *  open; the detail carve is omitted, safe because it only ever LOWERS the
- *  deck.
- *
- *  ONE FETCH, not three -- the baked volume reads only refine a deck the flow
- *  dominates, and refinement is what a conservative search does not need. */
-float GG_CloudTopUpper(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	float3 P,
-	GGFieldParams F)
-{
-    const float3 N = normalize(GG_RotateZ(P, F.SpinAngle));
-
-    const float4 Flow = GG_SampleFlow(FlowField, FlowSampler, N, F.Layers.x);
-
-    const float Zeta = (Flow.w + F.Warps.z) * F.BandSharpness;
-    const float Elevation = 1.0f - exp(-Zeta * Zeta);
-    const float Pressure = Flow.z;
-
-    float Top = F.Relief.x + max(F.Relief.y * (Elevation - 0.5f), 0.0f);
-
-    Top += F.Relief.z * Pressure;
-
-    Top += max(F.Relief.w, 0.0f) * smoothstep(F.Profile.z, 1.0f, abs(Pressure));
-
-    return Top;
-}
-
 /** Closed-form bounds on the cloud top, used to make the marched span thin.
+ *  Atmosphere fractions, so OutMax is directly the deck's top against the
+ *  ceiling at 1.
  *
- *  EVERY TERM IN GG_CloudTop HAS TO APPEAR HERE. An underestimate is not a
- *  conservative error, it is a clipping one: the outer radius comes from
- *  TopMax, so a term left out slices the tops off exactly the features it
- *  belongs to and reads as a geometry bug rather than a bounds one.
+ *  EVERY TERM IN GG_CloudTop HAS TO APPEAR HERE, and it must stay in step with
+ *  GetTopMax/GetTopMin in AtmosphereParams.h, which say the same thing in
+ *  another language. An underestimate is not a conservative error, it is a
+ *  clipping one: the outer radius comes from TopMax, so a term left out slices
+ *  the tops off exactly the features it belongs to and reads as a geometry bug
+ *  rather than a bounds one.
  *
  *  Elevation is in [0,1], so the band contributes half of Relief.y either side
  *  of the base. Pressure is soft-saturated to [-1,1] sim-side, so it
  *  contributes the whole of Relief.z. ReliefScale never exceeds one, so
- *  ignoring it errs in the safe direction. */
+ *  ignoring it errs in the safe direction.
+ *
+ *  OutMin is the WORST CASE, every term at its most negative at once, so it
+ *  sits well below anything the field produces. It sizes the march reference
+ *  rather than bounding the solid region -- the floor does that, and does it
+ *  exactly. */
 void GG_TopBounds(GGFieldParams F, out float OutMin, out float OutMax)
 {
-    const float Span = 0.5f * abs(F.Relief.y) + abs(F.Relief.z);
+    const float D = F.GradientDepth;
+
+    const float Span = D * (0.5f * abs(F.Relief.y) + abs(F.Relief.z));
 
 	// Both carves are subtractive -- each shape is in [0,1] and enters as
 	// (1 - Shape) -- so together they lower the deck by at most the sum, and
@@ -1059,8 +1152,8 @@ void GG_TopBounds(GGFieldParams F, out float OutMin, out float OutMax)
 	//
 	// BOTH LAYERS HAVE TO APPEAR. The inner cull is measured down from OutMin,
 	// so a carve left out of this bound cuts low columns off mid-ramp.
-    OutMin = F.Relief.x - Span - abs(F.DetailRelief) - abs(F.StructureRelief);
-    OutMax = F.Relief.x + Span + max(F.Relief.w, 0.0f);
+    OutMin = F.Relief.x - Span - D * (abs(F.DetailRelief) + abs(F.StructureRelief));
+    OutMax = F.Relief.x + Span + D * max(F.Relief.w, 0.0f);
 }
 
 /** Marches the cloud shell and integrates density.
@@ -1116,6 +1209,9 @@ float4 GG_March(
     float TopMin, TopMax;
     GG_TopBounds(F, TopMin, TopMax);
 
+	// TopMin is unused here: the marched span ends at transmittance, and the
+	// deck's lower extent is the authored floor rather than a bound.
+
 	// THE ONLY SPHERE, AND IT IS A CULL, NOT A BOUNDARY. Everything outside this
 	// radius is provably empty; nothing is clipped by it and nothing terminates
 	// on it.
@@ -1125,9 +1221,10 @@ float4 GG_March(
 	// each step.
     const float OuterRadius = F.PlanetRadius + Thickness * TopMax;
 
-	// Used only for step sizing, where the ramp's own depth is the scale the
-	// deck has to be resolved against.
-    const float RampDepth = 1.0f / max(F.Profile.y, 1e-4f);
+	// The deck's own vertical extent: from the highest a column can reach down
+	// to the floor, below which every column is uniform. That is the region the
+	// step budget has to resolve.
+    const float DeckExtent = max(TopMax - F.Profile.y, 1e-4f);
 
     float TEnter, TExit;
     if (!GG_RaySphere(Origin, Dir, OuterRadius, TEnter, TExit))
@@ -1156,8 +1253,8 @@ float4 GG_March(
 	// step-size jump in an integral this sparse does not average out: it shows
 	// as a clean line along the silhouette of whatever clipped the span. The
 	// reference is the deck's own vertical extent, identical for every ray, so
-	// StepBudget means steps across the DECK.
-    const float ReferenceSpan = max(Thickness * (TopMax - TopMin + RampDepth), 1e-6f);
+	// StepBudget means steps from the highest column down to the floor.
+    const float ReferenceSpan = max(Thickness * DeckExtent, 1e-6f);
 
     const float BaseStep = ReferenceSpan / max(M.StepBudget, 1.0f);
 
@@ -1232,8 +1329,9 @@ float4 GG_March(
 		// THE DECK RISES TO MEET THE RAY, AND THAT HAS TO BE IN THE DENOMINATOR.
 		// A ray closes the gap at the sum of two rates: its own descent, and
 		// the deck's rise across the ground it covers. Layers.z bounds the
-		// slope in shell fractions per radian, and the horizontal half converts
-		// through Thickness / Radius. At tangent the descent term vanishes and
+		// slope in GRADIENT DEPTHS per radian -- the unit the relief producing
+		// that slope is in -- and the horizontal half converts through
+		// GradientDepth * Thickness / Radius. At tangent the descent term vanishes and
 		// the slope term carries it. A cone trace, not a sphere trace.
 		//
 		// PITFALL: dividing by the descent rate alone assumes the ray closes
@@ -1245,7 +1343,8 @@ float4 GG_March(
         const float Horizontal = sqrt(max(1.0f - ProbeRate * ProbeRate, 0.0f));
 
         const float ClosingRate = -ProbeRate
-			+ Horizontal * max(F.Layers.z, 0.1f) * Thickness / max(ProbeRadius, 1e-4f);
+			+ Horizontal * max(F.Layers.z, 0.1f) * F.GradientDepth * Thickness
+				/ max(ProbeRadius, 1e-4f);
 
         const float Advance = (ProbeHeight - TopUpper) * Thickness / max(ClosingRate, 1e-5f);
 

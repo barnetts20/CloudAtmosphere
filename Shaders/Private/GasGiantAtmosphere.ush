@@ -28,7 +28,10 @@
 // UNITS. Atmo_BuildParams scales the extinction coefficients and scale heights
 // by atmosphere thickness, but leaves the RADII in world units. So
 // GGFieldParams.PlanetRadius is the same value as the planetRadius pin, and
-// Profile.x is a shell thickness in world units alongside it.
+// Profile.x is the atmosphere thickness in world units alongside it -- the
+// deck has no shell of its own, and DeckTop and DeckBottom place it inside the
+// air as fractions of that thickness. Relief is a fraction of the distance
+// between the two, not of the thickness.
 //
 // SPACE. The march runs camera-relative and world-oriented; the field is
 // planet-local with the spin axis on Z. WorldToLocal carries that rotation. For
@@ -144,22 +147,6 @@
  *  only its tail is crushed. 6 takes 10% residual to 1e-6. */
 #ifndef GG_LOBE_SHADOW_POWER
 #define GG_LOBE_SHADOW_POWER 6.0f
-#endif
-
-/** How many saturation depths below the deck's lowest possible top the marched
- *  span extends. 1 is the depth at which a ray is already invisible, so this is
- *  pure margin against the estimate being optimistic somewhere -- a band with a
- *  lower ScatterX.a, or a column the detail carve dropped. */
-#ifndef GG_INNER_CULL_SAFETY
-#define GG_INNER_CULL_SAFETY 2.0f
-#endif
-
-/** Floor on the inner cull, as a fraction of planet radius. Only stops the
- *  radius going negative or degenerate; it is deliberately far below the
- *  surface, because a deck culled at the surface is the geometry deciding
- *  where the cloud ends. */
-#ifndef GG_INNER_CULL_FLOOR
-#define GG_INNER_CULL_FLOOR 0.05f
 #endif
 
 // The two layers fade on their own schedules because they do different jobs.
@@ -296,10 +283,13 @@ float GGAtmo_DeckEntry(
 		// The deck rises to meet the ray, so the closing rate is the sum of the
 		// ray's descent and the deck's rise across the ground it covers.
 		// Dividing by the descent alone overshoots without bound at tangent.
+		// Layers.z is in gradient depths per radian, matching the relief that
+		// produces the slope.
         const float Horizontal = sqrt(max(1.0f - ProbeRate * ProbeRate, 0.0f));
 
         const float ClosingRate = -ProbeRate
-			+ Horizontal * max(F.Layers.z, 0.1f) * F.Thickness / max(ProbeRadius, 1e-4f);
+			+ Horizontal * max(F.Layers.z, 0.1f) * F.GradientDepth * F.Thickness
+				/ max(ProbeRadius, 1e-4f);
 
         const float Advance = (ProbeHeight - TopUpper) * F.Thickness / max(ClosingRate, 1e-5f);
 
@@ -457,6 +447,8 @@ CompositeParams GGAtmo_BuildAtmo(
 	float stepScaleFactor,
 	GGFieldParams F)
 {
+	// TopMin is not read: the deck's lower extent is the authored floor, which
+	// is exact, rather than a worst-case bound.
     float TopMin, TopMax;
     GG_TopBounds(F, TopMin, TopMax);
 
@@ -464,35 +456,34 @@ CompositeParams GGAtmo_BuildAtmo(
 
 	// -- Inner cull, from optical depth -------------------------------------
 	//
-	// cloudScatterBeta is divided by atmosphere thickness downstream, so the
-	// optical depth a ray gathers per shell fraction of deck is
+	// EXACT, NOT ESTIMATED, WHICH IS WHAT THE FLAT FLOOR BUYS. Below DeckBottom
+	// every column sits at CoreDensity, so the depth needed to go opaque is
+	// arithmetic rather than a guess wanting a safety factor on top.
 	//
-	//     CoreDensity * beta * Thickness / atmoThickness
+	// cloudScatterBeta is divided by atmosphere thickness downstream and heights
+	// are fractions of that same thickness, so the optical depth a ray gathers
+	// per fraction of solid deck is just CoreDensity * beta.
 	//
 	// The MINIMUM channel, because the span has to cover the slowest one: cull
 	// on the average and the red channel is still transmitting where the blue
 	// has stopped, which reads as a coloured rim at the cull radius.
-    const float AtmoThickness = max(atmoRadius - F.PlanetRadius, 1e-4f);
-
     const float BetaMin = min(cloudScatterBeta.r, min(cloudScatterBeta.g, cloudScatterBeta.b));
 
-    const float DepthPerFraction =
-		max(F.Profile.w, 0.0f) * BetaMin * F.Thickness / AtmoThickness;
+    const float DepthPerFraction = max(F.Profile.w, 0.0f) * BetaMin;
 
-	// The ramp reaches core density about one 1/DensityRamp below the top and
-	// contributes almost nothing above that, so the depth to opacity is that
-	// onset plus the 7 optical depths that put transmittance under 0.001.
-    const float SaturationDepth =
-		1.0f / max(F.Profile.y, 1e-4f) + 7.0f / max(DepthPerFraction, 1e-6f);
+	// 7 optical depths puts transmittance under 0.001. Measured down from the
+	// floor, and the gradient above it is ignored -- it only ever adds depth, so
+	// leaving it out errs toward a deeper span.
+    const float SaturationDepth = 7.0f / max(DepthPerFraction, 1e-6f);
 
-	// From the LOWEST the deck can sit, not the highest: a column in a band
-	// trough starts its ramp lower, and culling against the high columns would
-	// cut the low ones off mid-ramp.
-    const float InnerFraction = TopMin - SaturationDepth * GG_INNER_CULL_SAFETY;
+    const float InnerFraction = F.Profile.y - SaturationDepth;
 
-    const float CloudInner = max(
-		F.PlanetRadius + F.Thickness * InnerFraction,
-		F.PlanetRadius * GG_INNER_CULL_FLOOR);
+	// PITFALL: the per-band ScatterX.a multipliers are not visible here, so a
+	// band far below 1 saturates more slowly than this assumes. Harmless while
+	// DeckOpticalDepth carries its usual several-fold headroom over the 7
+	// wanted; a low depth AND a low band alpha together would show as a rim at
+	// the cull radius.
+    const float CloudInner = max(F.PlanetRadius + F.Thickness * InnerFraction, 1e-4f);
 
     return Atmo_BuildParams(
 		svPosition, rayDir, cameraPos, atmoPos,
@@ -511,16 +502,17 @@ CompositeParams GGAtmo_BuildAtmo(
 		jitterFactor, lightJitterFactor, stepScaleFactor);
 }
 
-/** Deck density for a SHADOW ray. One fetch, against seven for GG_Density.
+/** Deck density for a SHADOW ray. One fetch, against seven for GG_Density, and
+ *  none at all below the floor.
  *
  *  SHADOWING IS LOW FREQUENCY. What a light ray needs is how much deck lies
  *  between the sample and the star, not what the filaments look like along the
  *  way -- the detail it would resolve is finer than the shadow it casts.
- *  Reading GG_CloudTopUpper instead of the full field drops the warp loop and
+ *  Reading the flow probe instead of the full field drops the warp loop and
  *  both volume samples.
  *
  *  BOTH OMISSIONS DARKEN, WHICH IS THE SAFE DIRECTION. The upper bound sits
- *  above the true deck, and the detail carve only ever lowers it, so this
+ *  above the true deck, and the carves only ever lower it, so this
  *  overestimates depth rather than underestimating it. An underestimate would
  *  let light through where the deck is solid, which reads as holes.
  *
@@ -535,16 +527,24 @@ float GGAtmo_DeckDensityForLight(
 	GGFieldParams F)
 {
     const float Radius = length(LocalPos);
-    const float3 Direction = LocalPos / max(Radius, 1e-4f);
 
     const float Height = (Radius - F.PlanetRadius) / F.Thickness;
+
+    const float Core = max(F.Profile.w, 0.0f);
+
+	// Below the floor the answer is Core for every column, so the fetch buys
+	// nothing. A shadow ray that has descended this far is already saturated,
+	// which makes this the common case rather than an edge one.
+    if (Height <= F.Profile.y)
+    {
+        return Core;
+    }
+
+    const float3 Direction = LocalPos / max(Radius, 1e-4f);
+
     const float Top = GG_CloudTopUpper(FlowField, FlowSampler, Direction, F);
 
-    return GG_DensityRamp(
-		Top - Height,
-		max(F.Profile.y, 1e-4f),
-		F.DensityCurve,
-		max(F.Profile.w, 0.0f));
+    return GG_DeckDensity(Height, Top, F.Profile.y, F.DensityCurve, Core);
 }
 
 /** Transmittance from a sample toward the light, through air and deck.
