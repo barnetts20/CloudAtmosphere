@@ -25,10 +25,10 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/ObjectMacros.h"
 #include "AtmosphereParams.generated.h"
 
 class UGasGiantSimConfig;
-class UTexture;
 class UVolumeTexture;
 
 /** Which cloud model the march stage uses.
@@ -45,7 +45,7 @@ enum class EPlanetAtmosphereType : uint8
 /** The air, the geometry, the light and the composite. Both march materials
  *  declare every one of these and read them the same way. */
 USTRUCT(BlueprintType)
-struct VOXELPLUGIN_API FAtmosphereSharedParams
+struct CLOUDATMOSPHERE_API FAtmosphereSharedParams
 {
 	GENERATED_BODY()
 
@@ -151,7 +151,7 @@ struct VOXELPLUGIN_API FAtmosphereSharedParams
  *  That is the point -- these are the values tuned for a cloud with holes, and
  *  they do not transfer to a solid deck. */
 USTRUCT(BlueprintType)
-struct VOXELPLUGIN_API FTerrestrialCloudParams
+struct CLOUDATMOSPHERE_API FTerrestrialCloudParams
 {
 	GENERATED_BODY()
 
@@ -265,7 +265,7 @@ struct VOXELPLUGIN_API FTerrestrialCloudParams
  *  reach. Every derivation that has to stay inside the atmosphere goes through
  *  it. */
 USTRUCT(BlueprintType)
-struct VOXELPLUGIN_API FGasGiantDeckParams
+struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 {
 	GENERATED_BODY()
 
@@ -533,7 +533,7 @@ struct VOXELPLUGIN_API FGasGiantDeckParams
  *  only once relief is visible -- before that, a colour difference and a
  *  geometry failure look alike. */
 USTRUCT(BlueprintType)
-struct VOXELPLUGIN_API FGasGiantScatterParams
+struct CLOUDATMOSPHERE_API FGasGiantScatterParams
 {
 	GENERATED_BODY()
 
