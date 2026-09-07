@@ -310,13 +310,19 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief", meta = (ClampMin = "0.0"))
 	float ReliefThinning = 0.5f;
 
-	/** How deep the detail carves the deck top, as a shell fraction.
+	/** How deep the DETAIL layer carves the deck top, as a shell fraction.
 	 *
 	 *  NOT A RATIO OF Relief.y, deliberately. Summed before the relief multiply,
 	 *  raising the band relief scales the fine noise by the same factor, and
 	 *  noise stretched vertically but not horizontally becomes spikes. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief", meta = (ClampMin = "0.0"))
-	float DetailRelief = 0.12f;
+	float DetailRelief = 0.06f;
+
+	/** How deep the PACKED layer carves it. Larger than the detail layer's:
+	 *  this is the mid-level shaping that gives the deck its silhouette, and it
+	 *  has to survive to a distance where the detail layer is long gone. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief", meta = (ClampMin = "0.0"))
+	float PackedRelief = 0.12f;
 
 	/** Vortex strength above which storm towers are allowed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief", meta = (ClampMin = "0.0", ClampMax = "1.0"))
@@ -328,13 +334,19 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.01"))
 	float DetailScale = 6.0f;
 
-	/** Packed layer scale, as a multiple of DetailScale. */
+	/** Packed layer scale, as a multiple of DetailScale. Below 1 makes it the
+	 *  COARSER layer, which is what its job wants: mid-level shaping that stays
+	 *  resolvable from orbit while the detail layer tiles finely up close. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.01"))
-	float PackedScaleRatio = 0.667f;
+	float PackedScaleRatio = 0.25f;
 
 	/** Vertical feature size against the horizontal one. Their ratio IS the
 	 *  aspect of the resulting structure, so the ratio is the real control and
-	 *  the absolute is derived. */
+	 *  the absolute is derived.
+	 *
+	 *  Applies to both layers, so the packed layer's effective aspect is this
+	 *  over PackedScaleRatio -- taller than authored when the packed layer is
+	 *  the coarser of the two. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.01"))
 	float DetailAspect = 0.5f;
 
@@ -350,17 +362,63 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float PackedWarpInherit = 0.1f;
 
-	/** (Ridge, Fluff, Wisp, EdgeBias). xyz are renormalized by their sum in the
-	 *  shader, so changing the balance does not change how much cloud there is.
-	 *  w is how much detail survives in the flat band interiors. */
+	// -- Level of detail ----------------------------------------------------
+	//
+	// Distances in ATMOSPHERE THICKNESSES from the camera to the sample.
+	//
+	// A FADE RANGE BELONGS WITH ITS SCALE. Tiling frequency scales with the
+	// layer's scale, so the distance at which it starts aliasing goes as one
+	// over that scale: raising DetailScale needs a proportionally tighter fade,
+	// and lowering it lets the fade relax. Retuned independently, a scale
+	// change either leaves visible tiling or throws away structure that was
+	// still resolvable.
+	//
+	// Left as separate handles while the scales are still being explored. Once
+	// they settle, the durable form is Near = constant / scale.
+
+	/** Detail layer: where it starts fading. Small, because this layer is the
+	 *  finer of the two and tiles aggressively -- which is affordable exactly
+	 *  because it is gone within a fraction of an atmosphere thickness. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level Of Detail", meta = (ClampMin = "0.0"))
+	float DetailFadeNear = 0.05f;
+
+	/** Detail layer: fade width, as a multiple of Near. A ratio so the far edge
+	 *  cannot cross the near one, and so the transition stays a gradient across
+	 *  the disc rather than collapsing into a ring. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level Of Detail", meta = (ClampMin = "1.5"))
+	float DetailFadeSpan = 5.0f;
+
+	/** Packed layer: where it starts fading. An order of magnitude further out,
+	 *  because this is the mid-level shaping that has to read from orbit. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level Of Detail", meta = (ClampMin = "0.0"))
+	float PackedFadeNear = 0.5f;
+
+	/** Packed layer: fade width, as a multiple of Near. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level Of Detail", meta = (ClampMin = "1.5"))
+	float PackedFadeSpan = 4.0f;
+
+	/** (Ridge, Fluff, Wisp, EdgeBias).
+	 *
+	 *  Ridge is the DETAIL layer's own amount. Fluff and Wisp belong to the
+	 *  PACKED layer and are renormalized against each other, so shifting their
+	 *  balance does not change how much shaping there is. EdgeBias is how much
+	 *  of either survives in the flat band interiors. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
 	FLinearColor DetailWeights = FLinearColor(0.4f, 0.8f, 0.3f, 0.6f);
 
-	/** How much the detail erodes the density. Below 1: there is no lower cloud
-	 *  shell, so a fully transparent column would let a ray run to the far side
-	 *  of the planet, and the erosion floor is what makes that impossible. */
+	/** How much the DETAIL layer erodes the density. Below 1: there is no lower
+	 *  cloud shell, so a fully transparent column would let a ray run to the far
+	 *  side of the planet, and the erosion floor is what makes that
+	 *  impossible. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.0", ClampMax = "0.99"))
 	float DetailErosion = 0.7f;
+
+	/** How much the PACKED layer erodes the density. Separate because the two
+	 *  layers survive to different distances: the packed one carries shape that
+	 *  has to read from orbit, the detail one is micro variance that is gone
+	 *  within a fraction of an atmosphere thickness. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.0", ClampMax = "0.99"))
+	float PackedErosion = 0.4f;
 
 	/** Depth over which erosion falls off, as a multiple of the ramp depth
 	 *  (1 / DensityRamp). A ratio so that sharpening the density onset pulls
@@ -513,6 +571,16 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	}
 
 	float GetDetailVertical() const { return DetailScale * DetailAspect; }
+
+	/** (DetailNear, DetailFar, PackedNear, PackedFar), as the shader wants it. */
+	FLinearColor GetFadeRanges() const
+	{
+		return FLinearColor(
+			DetailFadeNear,
+			DetailFadeNear * DetailFadeSpan,
+			PackedFadeNear,
+			PackedFadeNear * PackedFadeSpan);
+	}
 
 	float GetDetailDepth() const
 	{

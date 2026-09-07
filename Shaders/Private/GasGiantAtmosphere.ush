@@ -57,6 +57,89 @@
 // count rather than to go back to footprint.
 // ---------------------------------------------------------------------------
 
+/** Isolates one lighting term so a stray glow can be attributed rather than
+ *  guessed at. Every mode returns that term alone, with transmittance
+ *  untouched, so the composite still shapes it the way it shapes the real
+ *  image -- which matters, since the blur is itself a candidate.
+ *
+ *    0  off, normal output
+ *    1  air Rayleigh only
+ *    2  air Mie only          <- the forward lobe, before the blur sees it
+ *    3  air ambient only
+ *    4  deck direct + multiple scattering only
+ *    5  deck ambient only
+ *    6  sun transmittance at the first deck sample, as greyscale
+ *    7  Mie lobe survival, as greyscale: 1 in clear air, 0 behind deck
+ *
+ *  If the glow is present in 2 and absent in 4 and 5, it is air Mie in front
+ *  of the deck. If it is absent from ALL of them but present with the mode
+ *  off, it is the stage 3 composite spreading the limb inward rather than
+ *  anything this file produced. */
+#ifndef GG_DEBUG_TERM
+#define GG_DEBUG_TERM 0
+#endif
+
+/** Width of the ambient terminator, in cosine of sun elevation. 0.15 is about
+ *  9 degrees either side of the geometric terminator.
+ *
+ *  AMBIENT IS STARLIGHT THAT BOUNCED, NOT A FLOOR. Both ambient terms stand in
+ *  for light that scattered several times before arriving, and behind an opaque
+ *  planet there is none. Added unconditionally they wash the night side at a
+ *  fixed brightness, which reads as the star shining through the planet -- and
+ *  on a gas giant, where the deck is opaque to the limb, there is nothing to
+ *  break it up. */
+#ifndef GG_AMBIENT_TERMINATOR
+#define GG_AMBIENT_TERMINATOR 0.15f
+#endif
+
+/** How fast the Mie forward lobe dies behind deck. Optical depths of deck for
+ *  an e-fold, inverted -- 2 means the lobe is at 2% one optical depth in.
+ *
+ *  THE LOBE BELONGS TO SINGLE SCATTERING. Light that has crossed a dense
+ *  medium has bounced several times and lost its direction, so the sharp
+ *  forward peak washes out to something near isotropic. Carrying full phaseM
+ *  through the deck is what makes the glow appear to sit on top of the planet
+ *  rather than in front of it. */
+#ifndef GG_MIE_LOBE_DECAY
+#define GG_MIE_LOBE_DECAY 2.0f
+#endif
+
+/** Width of the planet-shadow falloff, as a fraction of atmosphere thickness.
+ *
+ *  The geometric shadow of a sphere has a hard boundary; a real terminator does
+ *  not, because a grazing sun ray crosses progressively more air before it
+ *  arrives. This stands in for that without marching it.
+ *
+ *  WIDE, because this is what shapes the terminator. Narrowing it to stop the
+ *  forward lobe leaking makes the terminator hard AND exposes the smoothstep's
+ *  own endpoints as edges along the light's tangent cone. The lobe gets its own
+ *  factor below instead. */
+#ifndef GG_TERMINATOR_SOFTNESS
+#define GG_TERMINATOR_SOFTNESS 0.35f
+#endif
+
+/** Exponent applied to the shadow for the ANISOTROPIC terms only.
+ *
+ *  THE FORWARD LOBE AND THE ISOTROPIC TERM WANT DIFFERENT SHADOWS. The lobe is
+ *  single-scattered direct light: it arrives along one path, and behind a
+ *  planet that path is blocked, so it really is hard-shadowed. The isotropic
+ *  term stands in for light that bounced several times, which genuinely wraps
+ *  around the terminator. Sharing one factor forces a choice between a hard
+ *  terminator and a glow.
+ *
+ *  Atmo_PhaseDualLobe at the default (0.9, 0.1, 0.5) returns about 7.6 head-on
+ *  against an isotropic 1/4pi -- a 95x multiplier in exactly the backlit
+ *  geometry where the falloff is widest. A few percent of residual shadow
+ *  becomes a wash across the whole disc, which is why the phase parameters read
+ *  as the cause: they are the gain on the leak.
+ *
+ *  A power on the same smoothstep rather than a narrower one, so no new
+ *  endpoint appears anywhere -- the curve stays C1 where it already was and
+ *  only its tail is crushed. 6 takes 10% residual to 1e-6. */
+#ifndef GG_LOBE_SHADOW_POWER
+#define GG_LOBE_SHADOW_POWER 6.0f
+#endif
+
 /** How many saturation depths below the deck's lowest possible top the marched
  *  span extends. 1 is the depth at which a ray is already invisible, so this is
  *  pure margin against the estimate being optimistic somewhere -- a band with a
@@ -73,16 +156,19 @@
 #define GG_INNER_CULL_FLOOR 0.05f
 #endif
 
-/** Distance at which detail starts fading, in atmosphere thicknesses. */
-#ifndef GG_DETAIL_LOD_NEAR
-#define GG_DETAIL_LOD_NEAR 0.5f
-#endif
+// The two layers fade on their own schedules because they do different jobs.
+//
+// DETAIL is micro variance -- the texture you see standing next to a cloud. It
+// is the finer of the two and tiles aggressively, which is affordable exactly
+// because it is gone within a fraction of an atmosphere thickness. Nothing at
+// orbital range should depend on it.
+//
+// PACKED is mid-level shaping. It has to read from any distance, so it fades
+// an order of magnitude later, and the tiling that the detail layer gets away
+// with would be visible on it.
 
-/** Distance at which it is fully gone. Wide against the near threshold so the
- *  transition is a gradient across the disc rather than a ring. */
-#ifndef GG_DETAIL_LOD_FAR
-#define GG_DETAIL_LOD_FAR 2.0f
-#endif
+// The ranges themselves live on GGFieldParams, since a fade distance is a
+// property of the noise rather than of the march -- see the comment there.
 
 /** Per-band scattering, blended by the signed band channel.
  *
@@ -469,19 +555,75 @@ float3 GGAtmo_LightMarch(
 	SamplerState FlowSampler,
 	Texture3D PackedDetail,
 	SamplerState PackedSampler,
-	GGAtmoParams P)
+	GGAtmoParams P,
+	out float OutLobeShadow)
 {
+    OutLobeShadow = 0.0f;
+
     const float3 LightDir = P.Atmo.lightRayParams.lightDir;
     const float3 Start = P.Atmo.lightRayParams.samplePos;
 
-	// A sample on the night side is fully shadowed however far it is marched.
-    const float2 PlanetHit = Atmo_RaySphere(
-		Start, LightDir, P.Atmo.planetParams.planetPos, P.Atmo.planetParams.planetRadius);
 
-    if (PlanetHit.x > 0.0f)
+	// -- Planet shadow, as a gradient rather than a test --------------------
+	//
+	// PITFALL: returning black on (PlanetHit.x > 0) makes a sample fully lit or
+	// fully dark depending on whether its ray to the star clips a sphere. That
+	// boundary is a curve on screen and it moves with the light, so it reads as
+	// a hard seam across the disc at some angles and none at others.
+	//
+	// The signed distance from the light ray's closest approach to the surface
+	// is the same decision as a continuous quantity, and its sign agrees with
+	// the test exactly. Softened over a fraction of atmosphere thickness, which
+	// is roughly the depth a grazing ray would have had to cross.
+    const float3 ToCentre = P.Atmo.planetParams.planetPos - Start;
+
+    const float Soft = max(
+		(P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius)
+			* GG_TERMINATOR_SOFTNESS,
+		1e-4f);
+
+	// How far ahead the closest approach lies. Negative means the planet is
+	// behind the sample and occludes nothing.
+    const float Along = dot(ToCentre, LightDir);
+
+    const float3 Closest = Start + LightDir * max(Along, 0.0f);
+    const float ClosestDist = length(Closest - P.Atmo.planetParams.planetPos);
+
+    const float RadialShadow = smoothstep(
+		P.Atmo.planetParams.planetRadius - Soft,
+		P.Atmo.planetParams.planetRadius + Soft,
+		ClosestDist);
+
+	// BLENDED IN, NOT BRANCHED ON.
+	//
+	// PITFALL: gating the whole test on (Along > 0) is a step discontinuity on
+	// the plane through the planet centre perpendicular to the light. A sample
+	// on that plane has its closest approach at itself, and for a low-altitude
+	// sample that radius falls INSIDE the smoothstep band -- so it reads below
+	// one, while a sample a hair behind the plane reads exactly one. The plane
+	// projects to a straight line on screen, which is what the seam is.
+	//
+	// max(Along, 0) alone does not fix it: on the lit side the closest approach
+	// becomes the sample's own radius, which is inside the band, and the day
+	// hemisphere darkens. Ramping the front factor over the same width keeps
+	// both ends exact and the middle continuous.
+    const float FrontFactor = smoothstep(0.0f, Soft, Along);
+
+    const float PlanetShadow = lerp(1.0f, RadialShadow, FrontFactor);
+
+    if (PlanetShadow <= 0.0f)
     {
         return float3(0.0f, 0.0f, 0.0f);
     }
+
+	// Set here rather than further down: every return below this point is a
+	// LIT path, and one of them reports full transmittance for a light ray that
+	// never enters the atmosphere. Assigned late, that sample keeps a zero lobe
+	// while being fully lit -- black where it should be brightest.
+	//
+	// The anisotropic terms read this instead of PlanetShadow. Same curve, tail
+	// crushed, so no new endpoint appears at either end.
+    OutLobeShadow = pow(PlanetShadow, GG_LOBE_SHADOW_POWER);
 
     float4 Segments[ATMO_MAX_SEGMENTS];
 
@@ -641,7 +783,7 @@ float3 GGAtmo_LightMarch(
         }
     }
 
-    return exp(-(P.Atmo.scatteringParams.rayBeta * AtmoOptDepth.x
+    return PlanetShadow * exp(-(P.Atmo.scatteringParams.rayBeta * AtmoOptDepth.x
 		+ P.Atmo.scatteringParams.mieBeta * AtmoOptDepth.y
 		+ P.Atmo.scatteringParams.absBeta * AtmoOptDepth.z
 		+ P.Atmo.cloudParams.cloudAbsBeta * DeckOptDepth));
@@ -675,24 +817,21 @@ float4 GGAtmo_MainMarch(
     const float2 AtmoHit = Atmo_RaySphere(
 		RayOrigin, RayDir, P.Atmo.planetParams.planetPos, P.Atmo.planetParams.atmoRadius);
 
-	// MIE SCALES BY HOW MUCH OF THE ATMOSPHERE THE RAY ACTUALLY CROSSED.
+	// MIE IS CONSUMED BY DECK IN FRONT OF IT, NOT BY PATH LENGTH.
 	//
-	// The forward lobe is enormous, and a ray terminating on geometry has not
-	// travelled the distance that lobe assumes -- but that is a FRACTION of the
-	// path, not a yes or no.
+	// The forward lobe is the brightest term in the image facing the light, and
+	// it has to be extinguished by the cloud between the sample and the camera
+	// -- see GG_MIE_LOBE_DECAY. Deck depth is accumulated separately from the
+	// base transmittance in the loop below, because the lobe dies faster than
+	// the light does.
 	//
-	// PITFALL: gating on (MaxDist < AtmoHit.y) switches Mie fully off for rays
-	// that hit the planet and fully on for rays that miss, so the planet's
-	// silhouette becomes a step in the brightest term in the image. It only
-	// shows facing the light, because that is when the forward lobe dominates,
-	// and it does not move when field parameters change -- it is in the
-	// geometry, not the field. A terrestrial cloud band is patchy enough to
-	// hide it; an opaque deck reaching the limb is not.
-    const float AtmoEntry = max(AtmoHit.x, 0.0f);
-    const float ChordFull = max(AtmoHit.y - AtmoEntry, 1e-4f);
-    const float ChordUsed = max(MaxDist - AtmoEntry, 0.0f);
-
-    const float MieFraction = saturate(ChordUsed / ChordFull);
+	// PITFALL: two forms that do not work. Gating on (MaxDist < AtmoHit.y)
+	// switches Mie fully off for rays hitting the planet and fully on for rays
+	// missing it, so the silhouette becomes a step in the brightest term.
+	// Scaling by the fraction of the atmosphere chord traversed removes that
+	// step but answers a geometric question -- how far did the ray get --
+	// rather than the optical one, so a deck the ray never sees through still
+	// glows through its whole disc.
 
     float4 Segments[ATMO_MAX_SEGMENTS];
 
@@ -726,6 +865,17 @@ float4 GGAtmo_MainMarch(
 
     float3 AccumLight = float3(0.0f, 0.0f, 0.0f);
     float3 Transmittance = float3(1.0f, 1.0f, 1.0f);
+
+#if GG_DEBUG_TERM
+	float3 DebugAccum = float3(0.0f, 0.0f, 0.0f);
+	bool bDebugFirstDeck = true;
+#endif
+
+	// Deck optical depth between the camera and the current sample, tracked
+	// apart from Transmittance because only the Mie lobe reads it. Air does not
+	// contribute: haze in front of the planet is genuinely in front of it, and
+	// folding air depth in here would kill the limb glow that should be there.
+    float DeckDepthAhead = 0.0f;
 
     const float RayStart = Segments[0].x;
     const float ReferenceLength = max(
@@ -774,12 +924,25 @@ float4 GGAtmo_MainMarch(
 
             if (Height > 0.0f)
             {
+				// Local sun elevation, for the ambient terms. Sampled from the
+				// sample's own up vector rather than the planet's, so the
+				// terminator follows the sphere instead of sitting at one
+				// screen position.
+                const float3 SampleUp =
+					(SamplePos - P.Atmo.planetParams.planetPos) / max(DistFromCentre, 1e-4f);
+
+                const float SunElevation = dot(SampleUp, P.Atmo.lightRayParams.lightDir);
+
+                const float AmbientFactor = smoothstep(
+					-GG_AMBIENT_TERMINATOR, GG_AMBIENT_TERMINATOR, SunElevation);
+
                 P.Atmo.lightRayParams.samplePos = SamplePos;
                 P.Atmo.lightRayParams.parentStepIndex = StepIndex;
                 P.Atmo.lightRayParams.stepSizeMult = StepSizeMult;
 
+                float LobeShadow;
                 const float3 SunTransmittance = GGAtmo_LightMarch(
-					FlowField, FlowSampler, PackedDetail, PackedSampler, P);
+					FlowField, FlowSampler, PackedDetail, PackedSampler, P, LobeShadow);
 
                 const float3 AtmoDens = Atmo_Density(Height,
 					P.Atmo.scatteringParams.rayScaleH, P.Atmo.scatteringParams.mieScaleH,
@@ -788,14 +951,19 @@ float4 GGAtmo_MainMarch(
                 const float3 RayleighScatter =
 					P.Atmo.scatteringParams.rayBeta * P.Atmo.scatteringParams.phaseR * AtmoDens.x;
 
+				// Evaluated against the deck already crossed, before this step
+				// adds its own -- the lobe is attenuated by what is in FRONT of
+				// the sample, not by the sample itself.
+                const float MieLobe = exp(-DeckDepthAhead * GG_MIE_LOBE_DECAY);
+
                 const float3 MieScatter = P.Atmo.scatteringParams.mieBeta
-					* P.Atmo.scatteringParams.phaseM * AtmoDens.y * MieFraction;
+					* P.Atmo.scatteringParams.phaseM * AtmoDens.y * MieLobe * LobeShadow;
 
                 const float3 DirectScatter =
 					(RayleighScatter + MieScatter) * SunTransmittance * P.Atmo.mainRayParams.lightCol;
 
-                const float3 AmbientScatter =
-					P.Atmo.scatteringParams.rayBeta * AtmoDens.x * P.Atmo.scatteringParams.atmoAmbient;
+                const float3 AmbientScatter = P.Atmo.scatteringParams.rayBeta * AtmoDens.x
+					* P.Atmo.scatteringParams.atmoAmbient * AmbientFactor;
 
                 const float3 Inscattered = (DirectScatter + AmbientScatter) * CurrentStep;
 
@@ -806,6 +974,18 @@ float4 GGAtmo_MainMarch(
 				// Light added BEFORE transmittance is updated, so this step's
 				// contribution is weighted by the transmittance in front of it
 				// rather than including its own extinction.
+#if GG_DEBUG_TERM == 1
+				DebugAccum += Transmittance * RayleighScatter
+					* SunTransmittance * P.Atmo.mainRayParams.lightCol * CurrentStep;
+#elif GG_DEBUG_TERM == 2
+				DebugAccum += Transmittance * MieScatter
+					* SunTransmittance * P.Atmo.mainRayParams.lightCol * CurrentStep;
+#elif GG_DEBUG_TERM == 3
+				DebugAccum += Transmittance * AmbientScatter * CurrentStep;
+#elif GG_DEBUG_TERM == 7
+				DebugAccum = float3(MieLobe, MieLobe, MieLobe);
+#endif
+
                 AccumLight += Transmittance * Inscattered;
                 Transmittance *= exp(-Extinction);
 
@@ -825,8 +1005,12 @@ float4 GGAtmo_MainMarch(
 						(Pos + CurrentStep * 0.5f) * InvAtmoThickness;
 
                     GGFieldParams FieldLOD = P.Field;
+
                     FieldLOD.DetailFade = 1.0f - smoothstep(
-						GG_DETAIL_LOD_NEAR, GG_DETAIL_LOD_FAR, ViewDistances);
+						P.Field.DetailFadeNear, P.Field.DetailFadeFar, ViewDistances);
+
+                    FieldLOD.PackedFade = 1.0f - smoothstep(
+						P.Field.PackedFadeNear, P.Field.PackedFadeFar, ViewDistances);
 
                     const float4 Deck = GG_Density(
 						FlowField, FlowSampler, PackedDetail, PackedSampler,
@@ -850,8 +1034,10 @@ float4 GGAtmo_MainMarch(
                         const float3 MultiScatter = IncomingLight * PhaseIsotropic
 							* P.Atmo.cloudParams.cloudPhaseParams.a;
 
-                        const float3 DeckLight = IncomingLight * PhaseDual + MultiScatter
-							+ P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb;
+                        const float3 DeckLight = IncomingLight * PhaseDual * LobeShadow
+							+ MultiScatter
+							+ P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb
+								* AmbientFactor;
 
 						// Band scales the shared base rather than replacing it,
 						// so the deck stays on the same thickness-relative
@@ -867,8 +1053,29 @@ float4 GGAtmo_MainMarch(
                         const float3 DeckStepLight =
 							DeckLight * S.rgb * (1.0f - DeckStepTransmittance);
 
+#if GG_DEBUG_TERM == 4
+						DebugAccum += Transmittance * (IncomingLight * PhaseDual + MultiScatter)
+							* S.rgb * (1.0f - DeckStepTransmittance);
+#elif GG_DEBUG_TERM == 5
+						DebugAccum += Transmittance
+							* (P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb
+								* AmbientFactor)
+							* S.rgb * (1.0f - DeckStepTransmittance);
+#elif GG_DEBUG_TERM == 6
+						if (bDebugFirstDeck)
+						{
+							DebugAccum = SunTransmittance;
+							bDebugFirstDeck = false;
+						}
+#endif
+
                         AccumLight += Transmittance * DeckStepLight;
                         Transmittance *= DeckStepTransmittance;
+
+						// Mean of the three channels: the lobe is a single
+						// scalar weight, and a per-channel decay would tint the
+						// glow as it faded rather than just dimming it.
+                        DeckDepthAhead += dot(DeckExtinction, (1.0f / 3.0f).xxx);
                     }
                 }
             }
@@ -894,5 +1101,9 @@ float4 GGAtmo_MainMarch(
 	// the scene behind.
     const float MinTrans = min(Transmittance.x, min(Transmittance.y, Transmittance.z));
 
+#if GG_DEBUG_TERM
+	return float4(DebugAccum, MinTrans);
+#else
     return float4(AccumLight, MinTrans);
+#endif
 }
