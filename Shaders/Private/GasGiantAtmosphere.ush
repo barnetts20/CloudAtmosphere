@@ -48,8 +48,8 @@
 // noise scale is the principled form, but Scales.x is noise units per RADIAN
 // and a noise unit holds several features -- so the threshold carries an
 // unknown calibration constant and lands somewhere around 0.02, which is not a
-// number anyone can author against. Distance in atmosphere thicknesses is the
-// same decision expressed in a unit with meaning.
+// number anyone can author against. Distance in planet radii is the same
+// decision expressed in a unit with meaning.
 //
 // The trade is resolution independence: at a higher march resolution the same
 // distance resolves more detail than this admits. If 4K and 1080p visibly
@@ -160,8 +160,8 @@
 //
 // DETAIL is micro variance -- the texture you see standing next to a cloud. It
 // is the finer of the two and tiles aggressively, which is affordable exactly
-// because it is gone within a fraction of an atmosphere thickness. Nothing at
-// orbital range should depend on it.
+// because it is gone within a fraction of a planet radius. Nothing at orbital
+// range should depend on it.
 //
 // PACKED is mid-level shaping. It has to read from any distance, so it fades
 // an order of magnitude later, and the tiling that the detail layer gets away
@@ -553,8 +553,6 @@ float GGAtmo_DeckDensityForLight(
 float3 GGAtmo_LightMarch(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
-	Texture3D PackedDetail,
-	SamplerState PackedSampler,
 	GGAtmoParams P,
 	out float OutLobeShadow)
 {
@@ -796,8 +794,10 @@ float3 GGAtmo_LightMarch(
 float4 GGAtmo_MainMarch(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
-	Texture3D PackedDetail,
-	SamplerState PackedSampler,
+	Texture3D DetailVolume,
+	SamplerState DetailSampler,
+	Texture3D StructureVolume,
+	SamplerState StructureSampler,
 	GGAtmoParams P)
 {
     const float3 RayOrigin = P.Atmo.mainRayParams.cameraPos;
@@ -854,8 +854,13 @@ float4 GGAtmo_MainMarch(
     const float AtmoThickness = max(
 		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f);
 
-	// The detail fade's unit. Reciprocal here so the loop multiplies.
-    const float InvAtmoThickness = 1.0f / AtmoThickness;
+	// The LOD fades' unit. Reciprocal here so the loop multiplies.
+	//
+	// PLANET RADII, NOT ATMOSPHERE THICKNESSES. Both volumes are sampled
+	// against a unit direction, so a feature's world size follows the planet
+	// radius and is independent of the air's depth. Divided by the shell
+	// instead, retuning atmoRadius silently rescales every fade range.
+    const float InvPlanetRadius = 1.0f / max(P.Atmo.planetParams.planetRadius, 1e-4f);
 
     const float CoarseStep = AtmoThickness / float(max(P.Atmo.mainRayParams.atmoSteps, 1));
 
@@ -942,7 +947,7 @@ float4 GGAtmo_MainMarch(
 
                 float LobeShadow;
                 const float3 SunTransmittance = GGAtmo_LightMarch(
-					FlowField, FlowSampler, PackedDetail, PackedSampler, P, LobeShadow);
+					FlowField, FlowSampler, P, LobeShadow);
 
                 const float3 AtmoDens = Atmo_Density(Height,
 					P.Atmo.scatteringParams.rayScaleH, P.Atmo.scatteringParams.mieScaleH,
@@ -1002,18 +1007,19 @@ float4 GGAtmo_MainMarch(
 					// far end fades, which is what a per-pixel measure would
 					// have done anyway.
                     const float ViewDistances =
-						(Pos + CurrentStep * 0.5f) * InvAtmoThickness;
+						(Pos + CurrentStep * 0.5f) * InvPlanetRadius;
 
                     GGFieldParams FieldLOD = P.Field;
 
                     FieldLOD.DetailFade = 1.0f - smoothstep(
 						P.Field.DetailFadeNear, P.Field.DetailFadeFar, ViewDistances);
 
-                    FieldLOD.PackedFade = 1.0f - smoothstep(
-						P.Field.PackedFadeNear, P.Field.PackedFadeFar, ViewDistances);
+                    FieldLOD.StructureFade = 1.0f - smoothstep(
+						P.Field.StructureFadeNear, P.Field.StructureFadeFar, ViewDistances);
 
                     const float4 Deck = GG_Density(
-						FlowField, FlowSampler, PackedDetail, PackedSampler,
+						FlowField, FlowSampler, DetailVolume, DetailSampler,
+			StructureVolume, StructureSampler,
 						LocalPos, StepHalfHeight, FieldLOD);
 
                     if (Deck.x > 0.0f)

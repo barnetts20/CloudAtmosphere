@@ -18,14 +18,24 @@
 //                joins the north pole to the south, and that reads as a
 //                simulation bug rather than a sampler one.
 //
-//   PackedDetail Four independent scalars, BGRA8. The only baked volume.
-//                  R  Perlin        )  combined as Perlin-Worley, the fluffy
-//                  G  Worley F1     )  shape term. G also gates towers.
-//                  B  Ridged        streaks, read raw so they stay wispy
-//                  A  Worley F2-F1  the filament network
-//                Sampled twice: once carrying the flow warp so filaments
-//                stretch along it, once nearly rigid so the chemistry stays
-//                round. SAMPLER: WRAP ON ALL THREE AXES.
+//   DetailVolume    Micro variance. Only .a is read, as the filament network.
+//                   Carries the flow warp at DetailWarpInherit, so filaments
+//                   stretch along the streamlines.
+//
+//   StructureVolume Mid-level shape. Three channels:
+//                     R  Perlin        )  combined as Perlin-Worley, the
+//                     G  Worley F1     )  fluffy term. G also gates towers.
+//                     B  Ridged        streaks, read raw so they stay wispy
+//                   Held nearly rigid, so the shapes stay round rather than
+//                   being dragged into filaments by the flow.
+//
+//                SAMPLER FOR BOTH: WRAP ON ALL THREE AXES, LINEAR COLOR. These
+//                are scalar fields, and an sRGB decode curves every one of them
+//                without erroring.
+//
+// DETAIL AND STRUCTURE ARE SEPARATE VOLUMES BECAUSE THEY ARE SAMPLED AT
+// DIFFERENT POSITIONS. One texture cannot serve both: the whole point of the
+// split is that one inherits most of the flow warp and the other almost none.
 // ---------------------------------------------------------------------------
 
 /** Steps in the warp integration. Each step takes 1/N of the displacement and
@@ -49,9 +59,9 @@
 #define GG_DETAIL_OCTAVE 1
 #endif
 
-/** Include the packed detail layer. One extra fetch. */
-#ifndef GG_PACKED_DETAIL
-#define GG_PACKED_DETAIL 1
+/** Include the structure detail layer. One extra fetch. */
+#ifndef GG_STRUCTURE_LAYER
+#define GG_STRUCTURE_LAYER 1
 #endif
 
 
@@ -69,7 +79,8 @@
 
 /** Everything the field, density and deck-top functions read.
  *
- *  Scales   float4(DetailScale, PackedScale, DetailWarpInherit, PackedWarpInherit)
+ *  Scales   float4(DetailScale, StructureScale, DetailWarpInherit,
+ *                  StructureWarpInherit)
  *  Warps    float4(WarpTime, DetailWarp, BandBias, TurbulenceFloor)
  *  Detail   float4(Ridge, Fluff, Wisp, EdgeBias)
  *  Relief   float4(TopBase, BandRelief, PressureLift, StormTowers), shell fractions
@@ -100,11 +111,11 @@ struct GGFieldParams
 
 	/** How far the PACKED layer carves the deck top, as a shell fraction, and
 	 *  how far it erodes density. Separate from the detail layer's because the
-	 *  two do different jobs at different scales: packed is mid-level shaping
+	 *  two do different jobs at different scales: structure is mid-level shaping
 	 *  that has to read from any distance, detail is micro variance that only
 	 *  matters up close. */
-    float PackedRelief;
-    float PackedErosion;
+    float StructureRelief;
+    float StructureErosion;
 
 	/** Per-layer level of detail, 1 at full strength and 0 fully faded.
 	 *
@@ -114,27 +125,32 @@ struct GGFieldParams
 	 *
 	 *  SEPARATE RANGES, BECAUSE THE LAYERS ALIAS AT DIFFERENT DISTANCES. The
 	 *  detail layer is the finer of the two and tiles aggressively, which is
-	 *  affordable precisely because it fades within a fraction of an atmosphere
-	 *  thickness. The packed layer carries the shape that has to survive to
+	 *  affordable precisely because it fades within a fraction of a planet
+	 *  radius. The structure layer carries the shape that has to survive to
 	 *  orbit, so fading it on the same schedule removes structure that was
 	 *  still resolvable.
 	 *
 	 *  Both default to 1, so anything not doing LOD gets the full field. */
     float DetailFade;
-    float PackedFade;
+    float StructureFade;
 
-	/** Where each layer fades, in atmosphere thicknesses from the camera.
+	/** Where each layer fades, in PLANET RADII from the camera to the sample.
+	 *  Full strength below Near, nothing at or beyond Far.
 	 *
 	 *  Here rather than as march constants because a fade range is a property
 	 *  of the NOISE, not of the camera: tiling frequency scales with the
 	 *  layer's scale, so the distance at which it starts aliasing goes as one
 	 *  over that scale. Retuning a scale without retuning its fade either
 	 *  leaves visible tiling or throws away structure that was still
-	 *  resolvable. */
+	 *  resolvable.
+	 *
+	 *  Measured against the planet rather than the air shell, since both
+	 *  volumes are sampled against a unit direction and a feature's world size
+	 *  follows the radius. */
     float DetailFadeNear;
     float DetailFadeFar;
-    float PackedFadeNear;
-    float PackedFadeFar;
+    float StructureFadeNear;
+    float StructureFadeFar;
 };
 
 /** Sampling controls. Separate from the field because a light march reuses the
@@ -171,8 +187,8 @@ GGFieldParams GG_BuildField(
 	float DetailRelief,
 	float DetailDepth,
 	float DensityCurve,
-	float PackedRelief,
-	float PackedErosion,
+	float StructureRelief,
+	float StructureErosion,
 	float4 FadeRanges)
 {
     GGFieldParams F;
@@ -195,19 +211,19 @@ GGFieldParams GG_BuildField(
     F.DetailRelief = DetailRelief;
     F.DetailDepth = DetailDepth;
     F.DensityCurve = DensityCurve;
-    F.PackedRelief = PackedRelief;
-    F.PackedErosion = PackedErosion;
+    F.StructureRelief = StructureRelief;
+    F.StructureErosion = StructureErosion;
 
     F.DetailFade = 1.0f;
-    F.PackedFade = 1.0f;
+    F.StructureFade = 1.0f;
 
-	// (DetailNear, DetailFar, PackedNear, PackedFar). Each Far is clamped above
+	// (DetailNear, DetailFar, StructureNear, StructureFar). Each Far is clamped above
 	// its own Near: equal endpoints make smoothstep a step, and a step here is
 	// a ring across the disc at a fixed distance.
     F.DetailFadeNear = FadeRanges.x;
     F.DetailFadeFar = max(FadeRanges.y, FadeRanges.x + 1e-4f);
-    F.PackedFadeNear = FadeRanges.z;
-    F.PackedFadeFar = max(FadeRanges.w, FadeRanges.z + 1e-4f);
+    F.StructureFadeNear = FadeRanges.z;
+    F.StructureFadeFar = max(FadeRanges.w, FadeRanges.z + 1e-4f);
 
     return F;
 }
@@ -248,7 +264,7 @@ struct GGFieldSample
     float Pressure;
     float Band;
     float ShapeDetail;
-    float ShapePacked;
+    float ShapeStructure;
 };
 
 /** Rotation about the planet's axis, the only transport primitive here. Exact
@@ -376,7 +392,7 @@ float GG_DensityRamp(float Depth, float Ramp, float Curve, float Core)
 float GG_CloudTop(
 	float Elevation,
 	float ShapeDetail,
-	float ShapePacked,
+	float ShapeStructure,
 	float Pressure,
 	float StormCells,
 	float ReliefScale,
@@ -403,10 +419,10 @@ float GG_CloudTop(
 	// surface. That softens the top instead of defining it -- a look decision,
 	// not an error. At zero the deck is a true heightfield.
 	// Each layer carves by its own amount. Summed rather than mixed, so the
-	// packed layer's mid-level shaping survives at a distance where the detail
+	// structure layer's mid-level shaping survives at a distance where the detail
 	// layer has already faded out from under it.
     Top -= F.DetailRelief * (1.0f - ShapeDetail);
-    Top -= F.PackedRelief * (1.0f - ShapePacked);
+    Top -= F.StructureRelief * (1.0f - ShapeStructure);
 
     Top += F.Relief.z * Pressure;
 
@@ -434,8 +450,10 @@ float GG_CloudTop(
 GGFieldSample GG_Field(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
-	Texture3D PackedDetail,
-	SamplerState PackedSampler,
+	Texture3D DetailVolume,
+	SamplerState DetailSampler,
+	Texture3D StructureVolume,
+	SamplerState StructureSampler,
 	float3 P,
 	float Height,
 	GGFieldParams F)
@@ -527,10 +545,11 @@ GGFieldSample GG_Field(
 	// is multiplied to nothing, so the fetches that produce it buy nothing.
 	// Gated per layer, because the two fade on different schedules.
     const bool bWantDetail = (F.DetailFade > 1e-3f);
-    const bool bWantPacked = (F.PackedFade > 1e-3f);
+    const bool bWantStructure = (F.StructureFade > 1e-3f);
 
 #if GG_DETAIL_OCTAVE
     BRANCH
+
     if (bWantDetail)
     {
 
@@ -556,7 +575,7 @@ GGFieldSample GG_Field(
 	// makes the detail change whether or not anything is happening to it, which
 	// is grain by definition. If it looks pinned, raise Warps.x.
         const float3 DetailUVW = PDetail * (F.Scales.x + Height * F.DetailVertical);
-        const float4 DetailSample = PackedDetail.SampleLevel(PackedSampler, DetailUVW, 0.0f);
+        const float4 DetailSample = DetailVolume.SampleLevel(DetailSampler, DetailUVW, 0.0f);
 
         DetailWarp = GG_FlowVelocity(PDetail, DeepFlow) * (F.Warps.y * Turbulence);
         Pos = normalize(Warped + DetailWarp);
@@ -571,25 +590,26 @@ GGFieldSample GG_Field(
 #endif
 
 	// Alpha is the storm-tower gate, and 1 is its NEUTRAL value: the tower term
-	// reads (1 - StormCells), so 1 means no towers. 0.5 would leave half-height
-	// towers standing everywhere the layer had faded out.
-    float4 Packed = float4(0.5f, 1.0f, 0.5f, 0.5f);
+	// reads (1 - StormCells), so 1 means no towers. The fade lerps toward this
+	// same 1, so the skipped case and the fully faded case agree.
+    float4 Structure = float4(0.5f, 1.0f, 0.5f, 0.5f);
 
-#if GG_PACKED_DETAIL
+#if GG_STRUCTURE_LAYER
     BRANCH
-    if (bWantPacked)
+
+    if (bWantStructure)
     {
 
-	// -- Packed: chemistry riding on top, held nearly rigid -------------------
+	// -- Structure: chemistry riding on top, held nearly rigid -------------------
 	//
 	// Its own inheritance, and 0 is legitimate rather than degenerate: this
 	// layer breaks the flow into rounded shapes, and a shape dragged through
 	// the flow field is no longer round.
 
-        const float3 PPacked = normalize(N + (FlowWarp + DetailWarp) * F.Scales.w);
+        const float3 PStructure = normalize(N + (FlowWarp + DetailWarp) * F.Scales.w);
 
-        const float3 PackedUVW = PPacked * (F.Scales.y + Height * F.DetailVertical);
-        Packed = PackedDetail.SampleLevel(PackedSampler, PackedUVW, 0.0f);
+        const float3 StructureUVW = PStructure * (F.Scales.y + Height * F.DetailVertical);
+        Structure = StructureVolume.SampleLevel(StructureSampler, StructureUVW, 0.0f);
     }
 #endif
 
@@ -622,14 +642,14 @@ GGFieldSample GG_Field(
 
 	// R against G as Perlin-Worley, the fluffy shape term. B stays raw as
 	// streaks, which want to look wispy rather than rounded. Both belong to the
-	// packed layer and are normalized against each other, so shifting the
+	// structure layer and are normalized against each other, so shifting the
 	// balance between them does not change how much shaping there is.
-    const float Fluff = GG_PerlinWorley(Packed.r, Packed.g);
+    const float Fluff = GG_PerlinWorley(Structure.r, Structure.g);
 
-    const float PackedWeights = max(F.Detail.y + F.Detail.z, 1e-4f);
+    const float StructureWeights = max(F.Detail.y + F.Detail.z, 1e-4f);
 
-    const float PackedMix = saturate(
-		(F.Detail.y * Fluff + F.Detail.z * Packed.b) / PackedWeights);
+    const float StructureMix = saturate(
+		(F.Detail.y * Fluff + F.Detail.z * Structure.b) / StructureWeights);
 
 	// TWO SHAPES, NOT ONE. Each is 1 where its layer contributes nothing, so a
 	// faded layer drops out of both the carve and the erosion without
@@ -644,18 +664,29 @@ GGFieldSample GG_Field(
     const float ShapeDetail = lerp(1.0f, Ridge,
 		saturate(Edge * F.Detail.x * F.DetailFade));
 
-    const float ShapePacked = lerp(1.0f, PackedMix, saturate(Edge * F.PackedFade));
+    const float ShapeStructure = lerp(1.0f, StructureMix, saturate(Edge * F.StructureFade));
+
+	// THE TOWER GATE RIDES THE SAME FADE. 1 is its neutral value, so fading
+	// toward 1 lowers the towers continuously. Left raw it holds full height
+	// down to the skip threshold and then vanishes in one step, which is the
+	// tallest feature on the deck popping out at a fixed distance -- and since
+	// towers are the part of the structure layer that reads furthest, it looks
+	// like the fade doing nothing at all.
+	//
+	// Not edge-weighted, unlike the shapes: a tower's placement already comes
+	// from the vortex gate in GG_CloudTop.
+    const float StormGate = lerp(1.0f, Structure.g, saturate(F.StructureFade));
 
 	// Assembled here rather than in the density function, because the storm
-	// cell mask is Packed.g and Packed only exists in this scope.
+	// cell mask only exists in this scope.
     GGFieldSample Out;
 
     Out.Top = GG_CloudTop(
-		Elevation, ShapeDetail, ShapePacked, Pressure, Packed.g, ReliefScale, F);
+		Elevation, ShapeDetail, ShapeStructure, Pressure, StormGate, ReliefScale, F);
     Out.Pressure = Pressure;
     Out.Band = BandSigned;
     Out.ShapeDetail = ShapeDetail;
-    Out.ShapePacked = ShapePacked;
+    Out.ShapeStructure = ShapeStructure;
 
     return Out;
 }
@@ -783,8 +814,10 @@ float GG_Spot(float3 N, float3 Centre, float Radius, float Strength)
 float4 GG_Density(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
-	Texture3D PackedDetail,
-	SamplerState PackedSampler,
+	Texture3D DetailVolume,
+	SamplerState DetailSampler,
+	Texture3D StructureVolume,
+	SamplerState StructureSampler,
 	float3 LocalPos,
 	float StepHalfLength,
 	GGFieldParams F)
@@ -796,7 +829,8 @@ float4 GG_Density(
     const float Height = (Radius - F.PlanetRadius) / F.Thickness;
 
     const GGFieldSample Field = GG_Field(
-		FlowField, FlowSampler, PackedDetail, PackedSampler,
+		FlowField, FlowSampler, DetailVolume, DetailSampler,
+		StructureVolume, StructureSampler,
 		Direction, Height, F);
 
     const float Top = Field.Top;
@@ -845,10 +879,10 @@ float4 GG_Density(
     const float CarveDetail = lerp(1.0f, Field.ShapeDetail,
 		saturate(F.DetailErosion) * CarveWeight);
 
-    const float CarvePacked = lerp(1.0f, Field.ShapePacked,
-		saturate(F.PackedErosion) * CarveWeight);
+    const float CarveStructure = lerp(1.0f, Field.ShapeStructure,
+		saturate(F.StructureErosion) * CarveWeight);
 
-    const float Density = Gradient * CarveDetail * CarvePacked;
+    const float Density = Gradient * CarveDetail * CarveStructure;
 
 	// W IS THE DECK TOP AT THIS COLUMN, which the march cannot compute itself
 	// and needs in order to skip the empty space above the deck.
@@ -1004,7 +1038,7 @@ void GG_TopBounds(GGFieldParams F, out float OutMin, out float OutMax)
 	//
 	// BOTH LAYERS HAVE TO APPEAR. The inner cull is measured down from OutMin,
 	// so a carve left out of this bound cuts low columns off mid-ramp.
-    OutMin = F.Relief.x - Span - abs(F.DetailRelief) - abs(F.PackedRelief);
+    OutMin = F.Relief.x - Span - abs(F.DetailRelief) - abs(F.StructureRelief);
     OutMax = F.Relief.x + Span + max(F.Relief.w, 0.0f);
 }
 
@@ -1032,14 +1066,16 @@ void GG_TopBounds(GGFieldParams F, out float OutMin, out float OutMax)
  *  the expected value over what the ray saw rather than a reading from an
  *  arbitrary step -- a single-step reading flickers at the limb.
  *
- *  Packed into one float4 rather than out parameters: the Custom node's
+ *  Structure into one float4 rather than out parameters: the Custom node's
  *  Additional Outputs are declared by hand in the node's own array, and a
  *  mismatch fails at shader compile with an undeclared identifier. */
 float4 GG_March(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
-	Texture3D PackedDetail,
-	SamplerState PackedSampler,
+	Texture3D DetailVolume,
+	SamplerState DetailSampler,
+	Texture3D StructureVolume,
+	SamplerState StructureSampler,
 	float3 InViewVec,
 	float3 InCamPosLocal,
 	GGFieldParams F,
@@ -1246,7 +1282,8 @@ float4 GG_March(
         const float StepHalfHeight = RadialRate * StepLen * 0.5f / Thickness;
 
         const float4 Field = GG_Density(
-			FlowField, FlowSampler, PackedDetail, PackedSampler,
+			FlowField, FlowSampler, DetailVolume, DetailSampler,
+		StructureVolume, StructureSampler,
 			SamplePos, StepHalfHeight, F);
 
 		// No extinction multiplier. CoreDensity is the density the deck reaches,

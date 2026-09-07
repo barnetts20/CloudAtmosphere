@@ -1,16 +1,31 @@
 // AtmosphereParams.h — the parameter sets the three-stage atmosphere post
 // process is driven by, and the derivations that keep them consistent.
 //
-// SPLIT BY WHO READS THEM, NOT BY WHAT THEY MEAN. Shared holds what both march
-// materials declare AND tune the same way: the air, the geometry, the light,
-// the composite. Anything a terrestrial cloud and a gas giant deck would want
-// at substantially different values is duplicated into the per-model struct so
-// each carries its own defaults.
+// THREE TIERS, SPLIT BY WHAT OWNS THE VALUE.
 //
-// Cloud Beta is the clearest case. Terrestrial wants ~150, absolute extinction
-// against a cloud with holes. The gas giant deck is 100% coverage and the
-// per-band alphas multiply this, so 150 goes opaque in one step and the useful
-// value is near 1. One shared field cannot default to both.
+// ENVIRONMENT is what the planet does not choose: the star's colour, and the
+// composite blur that runs on the finished image in a material both models
+// share. One definition, one instance.
+//
+// COMMON is what both march materials declare and read identically -- the
+// shell, the air, the march budget, the cloud lighting. One definition, ONE
+// INSTANCE PER MODEL. The two models read the same parameters and want
+// substantially different values for them: a gas giant's shell is one to two
+// planet radii where a terrestrial's is a few percent, and the march budget
+// that follows from that is not comparable. Two instances carry two sets of
+// defaults, which a single struct cannot.
+//
+// MODEL params are what only one march material declares -- the cloud band, or
+// the deck's field and per-band scattering.
+//
+// The seam is at Common: a generator can fill Environment and Common without
+// knowing which model it is driving, then hand off to a model-specific pass.
+//
+// Cloud Beta stays in the model structs rather than in Common because the two
+// models AUTHOR it differently, not merely value it differently. The
+// terrestrial band writes an absolute extinction against a cloud with holes;
+// the deck solves one from a total optical depth. Same shader parameter, two
+// different inputs.
 //
 // RATIOS, NOT ABSOLUTES, WHEREVER ONE VALUE IS BOUNDED BY ANOTHER. A parameter
 // expressed against the thing that constrains it stays valid when that thing is
@@ -42,10 +57,58 @@ enum class EPlanetAtmosphereType : uint8
 	GasGiant
 };
 
-/** The air, the geometry, the light and the composite. Both march materials
- *  declare every one of these and read them the same way. */
+/** The star and the composite: what the planet does not choose.
+ *
+ *  ONE INSTANCE FOR BOTH MODELS. The star's colour is a system-level property
+ *  that a cloud model has no say in, and the composite blur runs in a single
+ *  material shared by both march paths -- a per-model copy of it would be a
+ *  second value that can never reach a shader. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FAtmosphereSharedParams
+struct CLOUDATMOSPHERE_API FAtmosphereEnvironmentParams
+{
+	GENERATED_BODY()
+
+	// -- Light --------------------------------------------------------------
+
+	/** RGB direction is the hue, RGB magnitude is the intensity. The march and
+	 *  the directional light both derive from this, so they cannot disagree
+	 *  about the star.
+	 *
+	 *  Light DIRECTION is not here: it comes from the actor's rotation. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Light")
+	FLinearColor LightColor = FLinearColor(1.0f, 0.95f, 0.9f, 10.0f);
+
+	// -- Composite ----------------------------------------------------------
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Composite", meta = (ClampMin = "0.0"))
+	float BlurFalloffFactor = 2.0f;
+
+	/** Blur weight at the planet edge. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Composite", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MaxBlurWeight = 0.5f;
+
+	/** Blur weight everywhere else, as a fraction of MaxBlurWeight. A ratio so
+	 *  the floor cannot exceed the peak. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Composite", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MinBlurFraction = 0.1f;
+
+	/** MinW, derived. */
+	float GetMinBlurWeight() const { return MaxBlurWeight * MinBlurFraction; }
+};
+
+/** The shell, the air, the march budget and the cloud lighting: everything both
+ *  march materials declare and read the same way.
+ *
+ *  ONE INSTANCE PER MODEL, and nothing here is shared between them. This is one
+ *  definition of what each parameter MEANS, with a separate value per model.
+ *
+ *  Defaults come from the two factories at the bottom, not from a details-panel
+ *  edit: the member initialisers below are the terrestrial set, and the gas
+ *  giant factory states its deltas against them. A member added without a
+ *  matching delta therefore takes the terrestrial value on both models, which
+ *  is silent. */
+USTRUCT(BlueprintType)
+struct CLOUDATMOSPHERE_API FAtmosphereCommonParams
 {
 	GENERATED_BODY()
 
@@ -63,14 +126,6 @@ struct CLOUDATMOSPHERE_API FAtmosphereSharedParams
 	/** Vertical offset applied to the atmosphere floor. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Geometry")
 	float AtmosphereFloorOffset = 0.0f;
-
-	// -- Light --------------------------------------------------------------
-
-	/** RGB direction is the hue, RGB magnitude is the intensity. The march and
-	 *  the directional light both derive from this, so they cannot disagree
-	 *  about the star. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Light")
-	FLinearColor LightColor = FLinearColor(1.0f, 0.95f, 0.9f, 10.0f);
 
 	// -- Air scattering -----------------------------------------------------
 	//
@@ -104,12 +159,27 @@ struct CLOUDATMOSPHERE_API FAtmosphereSharedParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air Scattering")
 	FLinearColor AtmosphereAmbient = FLinearColor(0.080328f, 0.080328f, 0.1f, 0.0f);
 
+	// -- Cloud lighting -----------------------------------------------------
+	//
+	// Cloud Beta and Cloud Absorption Beta are NOT here. The terrestrial band
+	// authors an absolute extinction; the deck solves one from a total optical
+	// depth. Each model owns its own input to the same shader parameter.
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Lighting")
+	FLinearColor CloudAmbient = FLinearColor(0.04f, 0.04f, 0.05f, 0.0f);
+
+	/** (forward g, backward g, lobe blend, isotropic multiple-scatter weight).
+	 *  The isotropic term is what keeps the shadow side off black -- single
+	 *  scattering has nothing to deliver there. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Lighting")
+	FLinearColor CloudPhaseParams = FLinearColor(0.9f, 0.1f, 0.5f, 0.5f);
+
 	// -- Raymarching --------------------------------------------------------
 	//
-	// Cloud Steps and Cloud Light Steps are NOT here. Terrestrial spends them
-	// across the cloud band; the gas giant spends them across the deck segment
-	// the cone trace split off, which is a different length and a different
-	// budget.
+	// A BUDGET, NOT A QUALITY SETTING, and the two models spend it over
+	// different geometry. Cloud Steps crosses the terrestrial band, but on the
+	// gas giant it crosses only the deck segment the cone trace split off.
+	// Same name, same meaning, values that do not transfer.
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Raymarching", meta = (ClampMin = "1.0"))
 	float AtmosphereSteps = 32.0f;
@@ -121,35 +191,57 @@ struct CLOUDATMOSPHERE_API FAtmosphereSharedParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Raymarching", meta = (ClampMin = "0.0"))
 	float StepScaleFactor = 2.0f;
 
-	// -- Composite ----------------------------------------------------------
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Raymarching", meta = (ClampMin = "1.0"))
+	float CloudSteps = 32.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Composite", meta = (ClampMin = "0.0"))
-	float BlurFalloffFactor = 2.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Raymarching", meta = (ClampMin = "1.0"))
+	float CloudLightSteps = 32.0f;
 
-	/** Blur weight at the planet edge. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Composite", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float MaxBlurWeight = 0.5f;
-
-	/** Blur weight everywhere else, as a fraction of MaxBlurWeight. A ratio so
-	 *  the floor cannot exceed the peak. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Composite", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float MinBlurFraction = 0.1f;
-
-	/** MinW, derived. */
-	float GetMinBlurWeight() const { return MaxBlurWeight * MinBlurFraction; }
+	// -- Derivations --------------------------------------------------------
 
 	/** Atmosphere outer radius in world units. */
 	float GetAtmosphereRadius(float PlanetRadius) const
 	{
 		return PlanetRadius * (1.0f + AtmosphereHeightScale);
 	}
+
+	// -- Defaults -----------------------------------------------------------
+
+	/** The member initialisers above, unmodified. */
+	static FAtmosphereCommonParams MakeTerrestrialDefaults()
+	{
+		return FAtmosphereCommonParams();
+	}
+
+	/** Deltas against the terrestrial set. Everything not listed is identical
+	 *  today and free to diverge -- carrying two instances is what makes that
+	 *  a value edit rather than a code change. */
+	static FAtmosphereCommonParams MakeGasGiantDefaults()
+	{
+		FAtmosphereCommonParams Params;
+
+		// A shell of one planet radius. The deck's world thickness is solved
+		// from this, so it sets the deck's depth as much as the air's.
+		Params.AtmosphereHeightScale = 1.0f;
+
+		// The deck segment gets a finer march than the terrestrial band.
+		Params.CloudSteps = 64.0f;
+
+		// A gas giant has no holes, so nearly every light sample accumulates
+		// and takes the second fetch, where the terrestrial version leans on
+		// Cloud_Density returning zero over most of the domain.
+		Params.CloudLightSteps = 8.0f;
+
+		return Params;
+	}
 };
 
-/** The terrestrial cloud band: its shell, its noise, and its own lighting.
+/** The terrestrial cloud band: its shell, its noise, and the extinction it is
+ *  authored with.
  *
- *  The lighting fields duplicate names that also exist on the gas giant struct.
- *  That is the point -- these are the values tuned for a cloud with holes, and
- *  they do not transfer to a solid deck. */
+ *  Cloud Beta stays here rather than moving to Common because this model writes
+ *  it directly, where the gas giant solves it. Ambient, phase and the step
+ *  counts are in Common. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FTerrestrialCloudParams
 {
@@ -225,20 +317,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialCloudParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lighting")
 	FLinearColor CloudAbsorptionBeta = FLinearColor(25.0f, 25.0f, 25.0f, 0.0f);
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lighting")
-	FLinearColor CloudAmbient = FLinearColor(0.04f, 0.04f, 0.05f, 0.0f);
-
-	/** (forward g, backward g, lobe blend, isotropic multiple-scatter weight) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lighting")
-	FLinearColor CloudPhaseParams = FLinearColor(0.9f, 0.1f, 0.5f, 0.5f);
-
-	// -- Raymarching --------------------------------------------------------
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Raymarching", meta = (ClampMin = "1.0"))
-	float CloudSteps = 32.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Raymarching", meta = (ClampMin = "1.0"))
-	float CloudLightSteps = 32.0f;
+	// -- Derivations --------------------------------------------------------
 
 	/** Cloud Outer Height Scale, as the material expects it: a fraction of
 	 *  planet radius. */
@@ -322,7 +401,7 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	 *  this is the mid-level shaping that gives the deck its silhouette, and it
 	 *  has to survive to a distance where the detail layer is long gone. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief", meta = (ClampMin = "0.0"))
-	float PackedRelief = 0.12f;
+	float StructureRelief = 0.12f;
 
 	/** Vortex strength above which storm towers are allowed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief", meta = (ClampMin = "0.0", ClampMax = "1.0"))
@@ -334,18 +413,18 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.01"))
 	float DetailScale = 6.0f;
 
-	/** Packed layer scale, as a multiple of DetailScale. Below 1 makes it the
+	/** Structure layer scale, as a multiple of DetailScale. Below 1 makes it the
 	 *  COARSER layer, which is what its job wants: mid-level shaping that stays
 	 *  resolvable from orbit while the detail layer tiles finely up close. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.01"))
-	float PackedScaleRatio = 0.25f;
+	float StructureScaleRatio = 0.25f;
 
 	/** Vertical feature size against the horizontal one. Their ratio IS the
 	 *  aspect of the resulting structure, so the ratio is the real control and
 	 *  the absolute is derived.
 	 *
-	 *  Applies to both layers, so the packed layer's effective aspect is this
-	 *  over PackedScaleRatio -- taller than authored when the packed layer is
+	 *  Applies to both layers, so the structure layer's effective aspect is this
+	 *  over StructureScaleRatio -- taller than authored when the structure layer is
 	 *  the coarser of the two. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.01"))
 	float DetailAspect = 0.5f;
@@ -356,15 +435,24 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float DetailWarpInherit = 0.8f;
 
-	/** How much the packed layer inherits. 0 is legitimate: this layer breaks
+	/** How much the structure layer inherits. 0 is legitimate: this layer breaks
 	 *  the flow into rounded shapes, and a shape dragged through the flow field
 	 *  is no longer round. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float PackedWarpInherit = 0.1f;
+	float StructureWarpInherit = 0.1f;
 
 	// -- Level of detail ----------------------------------------------------
 	//
-	// Distances in ATMOSPHERE THICKNESSES from the camera to the sample.
+	// Distances in PLANET RADII from the camera to the sample. Each layer is
+	// full strength below Near, fades to nothing at Near + Span, and is skipped
+	// entirely beyond that.
+	//
+	// THE UNIT IS THE PLANET, NOT THE ATMOSPHERE. Both volumes are sampled
+	// against a unit direction, so a feature's world size goes with the planet
+	// radius and has nothing to do with how thick the air is. Measured in
+	// atmosphere thicknesses instead, retuning AtmosphereHeightScale moves
+	// every fade with it -- which reads as the LOD breaking rather than as the
+	// shell changing.
 	//
 	// A FADE RANGE BELONGS WITH ITS SCALE. Tiling frequency scales with the
 	// layer's scale, so the distance at which it starts aliasing goes as one
@@ -378,24 +466,24 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 
 	/** Detail layer: where it starts fading. Small, because this layer is the
 	 *  finer of the two and tiles aggressively -- which is affordable exactly
-	 *  because it is gone within a fraction of an atmosphere thickness. */
+	 *  because it is gone within a fraction of a planet radius. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level Of Detail", meta = (ClampMin = "0.0"))
-	float DetailFadeNear = 0.05f;
+	float DetailFadeNear = 0.01f;
 
-	/** Detail layer: fade width, as a multiple of Near. A ratio so the far edge
-	 *  cannot cross the near one, and so the transition stays a gradient across
-	 *  the disc rather than collapsing into a ring. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level Of Detail", meta = (ClampMin = "1.5"))
-	float DetailFadeSpan = 5.0f;
+	/** Detail layer: fade width, added to Near. Additive rather than a
+	 *  multiple, so the transition width is independent of where it starts and
+	 *  a tight fade close in is authorable. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level Of Detail", meta = (ClampMin = "0.0"))
+	float DetailFadeSpan = 0.04f;
 
-	/** Packed layer: where it starts fading. An order of magnitude further out,
+	/** Structure layer: where it starts fading. An order of magnitude further out,
 	 *  because this is the mid-level shaping that has to read from orbit. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level Of Detail", meta = (ClampMin = "0.0"))
-	float PackedFadeNear = 0.5f;
+	float StructureFadeNear = 0.1f;
 
-	/** Packed layer: fade width, as a multiple of Near. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level Of Detail", meta = (ClampMin = "1.5"))
-	float PackedFadeSpan = 4.0f;
+	/** Structure layer: fade width, added to Near. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level Of Detail", meta = (ClampMin = "0.0"))
+	float StructureFadeSpan = 0.3f;
 
 	/** (Ridge, Fluff, Wisp, EdgeBias).
 	 *
@@ -414,11 +502,11 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	float DetailErosion = 0.7f;
 
 	/** How much the PACKED layer erodes the density. Separate because the two
-	 *  layers survive to different distances: the packed one carries shape that
+	 *  layers survive to different distances: the structure one carries shape that
 	 *  has to read from orbit, the detail one is micro variance that is gone
-	 *  within a fraction of an atmosphere thickness. */
+	 *  within a fraction of a planet radius. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.0", ClampMax = "0.99"))
-	float PackedErosion = 0.4f;
+	float StructureErosion = 0.4f;
 
 	/** Depth over which erosion falls off, as a multiple of the ramp depth
 	 *  (1 / DensityRamp). A ratio so that sharpening the density onset pulls
@@ -476,11 +564,21 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 
 	// -- Sources ------------------------------------------------------------
 
-	/** Four independent scalars, BGRA8. SAMPLER: wrap on all three axes, and
-	 *  Linear Color -- these are not colours, and an sRGB decode curves every
-	 *  one of them without erroring. */
+	/** Micro variance. Only the alpha channel is read, as the filament network.
+	 *  SAMPLER: wrap on all three axes, Linear Color -- these are scalar fields
+	 *  and an sRGB decode curves them without erroring. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sources")
-	TObjectPtr<UVolumeTexture> PackedDetail = nullptr;
+	TObjectPtr<UVolumeTexture> DetailVolume = nullptr;
+
+	/** Mid-level shape. RGB are read as Perlin, Worley F1 and Ridged; G also
+	 *  gates the storm towers.
+	 *
+	 *  A SEPARATE TEXTURE BECAUSE IT IS SAMPLED AT A DIFFERENT POSITION. Detail
+	 *  inherits most of the flow warp so its filaments stretch along the
+	 *  streamlines; structure inherits almost none so its shapes stay round.
+	 *  One volume cannot serve both, whatever its channel layout. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sources")
+	TObjectPtr<UVolumeTexture> StructureVolume = nullptr;
 
 	/** Owns the flow render target the material samples and the settings the
 	 *  sim subsystem steps against. */
@@ -491,18 +589,6 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	 *  the subsystem is per-world, so two planets starting it fight. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sources")
 	bool bStartSimulationOnBeginPlay = true;
-
-	// -- Raymarching --------------------------------------------------------
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Raymarching", meta = (ClampMin = "1.0"))
-	float CloudSteps = 64.0f;
-
-	/** Lower than the terrestrial default on purpose. A gas giant has no holes,
-	 *  so nearly every light sample accumulates and takes the second fetch,
-	 *  where the terrestrial version leans on Cloud_Density returning zero over
-	 *  most of the domain. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Raymarching", meta = (ClampMin = "1.0"))
-	float CloudLightSteps = 8.0f;
 
 	// -- Derivations --------------------------------------------------------
 
@@ -547,9 +633,9 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	{
 		return FLinearColor(
 			DetailScale,
-			DetailScale * PackedScaleRatio,
+			DetailScale * StructureScaleRatio,
 			DetailWarpInherit,
-			PackedWarpInherit);
+			StructureWarpInherit);
 	}
 
 	FLinearColor GetWarps() const
@@ -572,14 +658,15 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 
 	float GetDetailVertical() const { return DetailScale * DetailAspect; }
 
-	/** (DetailNear, DetailFar, PackedNear, PackedFar), as the shader wants it. */
+	/** (DetailNear, DetailFar, StructureNear, StructureFar), as the shader wants
+	 *  it. Planet radii. */
 	FLinearColor GetFadeRanges() const
 	{
 		return FLinearColor(
 			DetailFadeNear,
-			DetailFadeNear * DetailFadeSpan,
-			PackedFadeNear,
-			PackedFadeNear * PackedFadeSpan);
+			DetailFadeNear + DetailFadeSpan,
+			StructureFadeNear,
+			StructureFadeNear + StructureFadeSpan);
 	}
 
 	float GetDetailDepth() const
@@ -588,8 +675,7 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	}
 };
 
-/** Per-band scattering for the deck, plus the shared cloud lighting the gas
- *  giant path tunes differently from the terrestrial one.
+/** Per-band scattering and extinction for the deck.
  *
  *  Alpha on each set MULTIPLIES the base extinction rather than replacing it,
  *  so the deck stays on the same footing as the air. RGB is single-scattering
@@ -661,15 +747,6 @@ struct CLOUDATMOSPHERE_API FGasGiantScatterParams
 	 *  shadow side. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Extinction", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float LightExtinctionFraction = 0.35f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lighting")
-	FLinearColor CloudAmbient = FLinearColor(0.04f, 0.04f, 0.05f, 0.0f);
-
-	/** (forward g, backward g, lobe blend, isotropic multiple-scatter weight).
-	 *  The isotropic term is what keeps the shadow side off black -- single
-	 *  scattering has nothing to deliver there. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lighting")
-	FLinearColor CloudPhaseParams = FLinearColor(0.9f, 0.1f, 0.5f, 0.5f);
 
 	// -- Derivations --------------------------------------------------------
 
