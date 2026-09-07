@@ -57,15 +57,31 @@
 // count rather than to go back to footprint.
 // ---------------------------------------------------------------------------
 
+/** How many saturation depths below the deck's lowest possible top the marched
+ *  span extends. 1 is the depth at which a ray is already invisible, so this is
+ *  pure margin against the estimate being optimistic somewhere -- a band with a
+ *  lower ScatterX.a, or a column the detail carve dropped. */
+#ifndef GG_INNER_CULL_SAFETY
+#define GG_INNER_CULL_SAFETY 2.0f
+#endif
+
+/** Floor on the inner cull, as a fraction of planet radius. Only stops the
+ *  radius going negative or degenerate; it is deliberately far below the
+ *  surface, because a deck culled at the surface is the geometry deciding
+ *  where the cloud ends. */
+#ifndef GG_INNER_CULL_FLOOR
+#define GG_INNER_CULL_FLOOR 0.05f
+#endif
+
 /** Distance at which detail starts fading, in atmosphere thicknesses. */
 #ifndef GG_DETAIL_LOD_NEAR
-#define GG_DETAIL_LOD_NEAR 0.25f
+#define GG_DETAIL_LOD_NEAR 0.5f
 #endif
 
 /** Distance at which it is fully gone. Wide against the near threshold so the
  *  transition is a gradient across the disc rather than a ring. */
 #ifndef GG_DETAIL_LOD_FAR
-#define GG_DETAIL_LOD_FAR 1.0f
+#define GG_DETAIL_LOD_FAR 2.0f
 #endif
 
 /** Per-band scattering, blended by the signed band channel.
@@ -296,12 +312,21 @@ GGScatterParams GGAtmo_BuildScatter(
 /** Fills CompositeParams for a gas giant, deriving the cloud shell from the
  *  field rather than taking it as two more pins.
  *
- *  THE CLOUD RADII ARE NOT AUTHORED. cloudInnerRadius is the planet surface,
- *  because the deck is solid all the way down and only transmittance ends a
- *  ray; cloudOuterRadius is the cull radius GG_TopBounds computes, which every
- *  Relief term contributes to. Authored by hand, an outer radius set below that
- *  bound slices the tops off exactly the features it belongs to and reads as a
- *  geometry bug rather than a pin one.
+ *  THE CLOUD RADII ARE NOT AUTHORED. Both are derived, and both from the same
+ *  kind of bound: cloudOuterRadius from the highest the deck can reach, and
+ *  cloudInnerRadius from the depth at which it has certainly gone opaque.
+ *
+ *  THE INNER ONE IS OPTICAL, NOT GEOMETRIC. Using the planet surface makes the
+ *  deck's bottom a property of the sphere rather than of the cloud, and on a
+ *  gas giant the surface is an arbitrary radius that happens to sit just under
+ *  the deck. Derived from optical depth instead, the span ends where the ray
+ *  stopped seeing rather than where the geometry ran out -- and it is free to
+ *  end BELOW the surface, so a thin deck is not clipped by a sphere that has no
+ *  physical meaning here.
+ *
+ *  Nothing marches past the surface regardless: Atmo_Plan bounds the ray at
+ *  the planet hit. An inner radius below it simply means the geometry never
+ *  gets to be the thing that ends the cloud.
  *
  *  Only the terrestrial cloud SHAPE arguments are passed as zero -- the noise
  *  volume, its coverage and its height curve, none of which this path samples.
@@ -343,8 +368,39 @@ CompositeParams GGAtmo_BuildAtmo(
     float TopMin, TopMax;
     GG_TopBounds(F, TopMin, TopMax);
 
-    const float CloudInner = F.PlanetRadius;
     const float CloudOuter = F.PlanetRadius + F.Thickness * TopMax;
+
+	// -- Inner cull, from optical depth -------------------------------------
+	//
+	// cloudScatterBeta is divided by atmosphere thickness downstream, so the
+	// optical depth a ray gathers per shell fraction of deck is
+	//
+	//     CoreDensity * beta * Thickness / atmoThickness
+	//
+	// The MINIMUM channel, because the span has to cover the slowest one: cull
+	// on the average and the red channel is still transmitting where the blue
+	// has stopped, which reads as a coloured rim at the cull radius.
+    const float AtmoThickness = max(atmoRadius - F.PlanetRadius, 1e-4f);
+
+    const float BetaMin = min(cloudScatterBeta.r, min(cloudScatterBeta.g, cloudScatterBeta.b));
+
+    const float DepthPerFraction =
+		max(F.Profile.w, 0.0f) * BetaMin * F.Thickness / AtmoThickness;
+
+	// The ramp reaches core density about one 1/DensityRamp below the top and
+	// contributes almost nothing above that, so the depth to opacity is that
+	// onset plus the 7 optical depths that put transmittance under 0.001.
+    const float SaturationDepth =
+		1.0f / max(F.Profile.y, 1e-4f) + 7.0f / max(DepthPerFraction, 1e-6f);
+
+	// From the LOWEST the deck can sit, not the highest: a column in a band
+	// trough starts its ramp lower, and culling against the high columns would
+	// cut the low ones off mid-ramp.
+    const float InnerFraction = TopMin - SaturationDepth * GG_INNER_CULL_SAFETY;
+
+    const float CloudInner = max(
+		F.PlanetRadius + F.Thickness * InnerFraction,
+		F.PlanetRadius * GG_INNER_CULL_FLOOR);
 
     return Atmo_BuildParams(
 		svPosition, rayDir, cameraPos, atmoPos,
@@ -619,10 +675,24 @@ float4 GGAtmo_MainMarch(
     const float2 AtmoHit = Atmo_RaySphere(
 		RayOrigin, RayDir, P.Atmo.planetParams.planetPos, P.Atmo.planetParams.atmoRadius);
 
-	// Mie is suppressed when something in the scene cut the ray short: the
-	// forward lobe is enormous, and a ray terminating on geometry has not
-	// travelled the distance that lobe assumes.
-    const bool DepthLimited = (MaxDist < AtmoHit.y);
+	// MIE SCALES BY HOW MUCH OF THE ATMOSPHERE THE RAY ACTUALLY CROSSED.
+	//
+	// The forward lobe is enormous, and a ray terminating on geometry has not
+	// travelled the distance that lobe assumes -- but that is a FRACTION of the
+	// path, not a yes or no.
+	//
+	// PITFALL: gating on (MaxDist < AtmoHit.y) switches Mie fully off for rays
+	// that hit the planet and fully on for rays that miss, so the planet's
+	// silhouette becomes a step in the brightest term in the image. It only
+	// shows facing the light, because that is when the forward lobe dominates,
+	// and it does not move when field parameters change -- it is in the
+	// geometry, not the field. A terrestrial cloud band is patchy enough to
+	// hide it; an opaque deck reaching the limb is not.
+    const float AtmoEntry = max(AtmoHit.x, 0.0f);
+    const float ChordFull = max(AtmoHit.y - AtmoEntry, 1e-4f);
+    const float ChordUsed = max(MaxDist - AtmoEntry, 0.0f);
+
+    const float MieFraction = saturate(ChordUsed / ChordFull);
 
     float4 Segments[ATMO_MAX_SEGMENTS];
 
@@ -718,8 +788,8 @@ float4 GGAtmo_MainMarch(
                 const float3 RayleighScatter =
 					P.Atmo.scatteringParams.rayBeta * P.Atmo.scatteringParams.phaseR * AtmoDens.x;
 
-                const float3 MieScatter = DepthLimited ? float3(0.0f, 0.0f, 0.0f)
-					: P.Atmo.scatteringParams.mieBeta * P.Atmo.scatteringParams.phaseM * AtmoDens.y;
+                const float3 MieScatter = P.Atmo.scatteringParams.mieBeta
+					* P.Atmo.scatteringParams.phaseM * AtmoDens.y * MieFraction;
 
                 const float3 DirectScatter =
 					(RayleighScatter + MieScatter) * SunTransmittance * P.Atmo.mainRayParams.lightCol;
