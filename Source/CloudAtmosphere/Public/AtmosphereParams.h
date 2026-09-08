@@ -392,9 +392,12 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	/** Where the mass sits inside the gradient, without moving either boundary.
 	 *  1 is centred, below 1 pulls density toward the top.
 	 *
-	 *  FLOORED AT 0.5: the profile owes zero derivative at both ends, and the
-	 *  exponent preserves it only above a half. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shell", meta = (ClampMin = "0.5", ClampMax = "4.0"))
+	 *  ABOVE 0.5 THE ONSET IS C1. At 0.5 the slope at the deck top goes finite
+	 *  instead of zero, which creases along the whole top; below it the top
+	 *  hardens into an edge. Both are allowed -- a sharp cloud top is a real
+	 *  discontinuity, not a bug -- so this is a look control rather than a
+	 *  bounded one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shell", meta = (ClampMin = "0.0001", ClampMax = "4.0"))
 	float DensityCurve = 1.5f;
 
 	// -- Relief -------------------------------------------------------------
@@ -421,19 +424,30 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief", meta = (ClampMin = "0.0"))
 	float ReliefThinning = 0.0f;
 
-	/** How deep the DETAIL layer carves the deck top.
+	/** How deep the DETAIL layer carves the deck top. ONE-SIDED: it only
+	 *  removes, because its features are fine enough that centring them reads
+	 *  as high-frequency material pushing up out of the surface rather than as
+	 *  the surface being broken up.
+	 *
+	 *  NEGATIVE FLIPS IT into a one-sided build instead.
 	 *
 	 *  NOT A RATIO OF BandRelief, deliberately. Summed before the relief
 	 *  multiply, raising the band relief scales the fine noise by the same
 	 *  factor, and noise stretched vertically but not horizontally becomes
 	 *  spikes. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief")
 	float DetailRelief = 1.0f;
 
-	/** How deep the PACKED layer carves it. Larger than the detail layer's:
-	 *  this is the mid-level shaping that gives the deck its silhouette, and it
-	 *  has to survive to a distance where the detail layer is long gone. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief", meta = (ClampMin = "0.0"))
+	/** How far the PACKED layer moves the deck top, SIGNED about the noise's
+	 *  median -- its features are large enough that a one-sided carve drops
+	 *  whole regions through the floor and pulls the mean deck down with it.
+	 *
+	 *  NEGATIVE MIRRORS THE NOISE, turning its billows into pits.
+	 *
+	 *  Larger than the detail layer's: this is the mid-level shaping that gives
+	 *  the deck its silhouette, and it has to survive to a distance where the
+	 *  detail layer is long gone. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief")
 	float StructureRelief = 0.75f;
 
 	/** Vortex strength above which storm towers are allowed. */
@@ -699,8 +713,8 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	{
 		return 0.5f * FMath::Abs(BandRelief)
 			+ FMath::Abs(PressureLift)
-			+ FMath::Abs(DetailRelief)
-			+ FMath::Abs(StructureRelief);
+			+ FMath::Max(DetailRelief, 0.0f)
+			+ 0.5f * FMath::Abs(StructureRelief);
 	}
 
 	/** The highest the deck can reach, as an atmosphere fraction. Closed form,
@@ -709,8 +723,9 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	 *
 	 *  Elevation is in [0,1] so the band contributes half of BandRelief either
 	 *  side of the base. Pressure is soft-saturated to [-1,1] sim-side so it
-	 *  contributes the whole of PressureLift. The carves are subtractive and
-	 *  belong to the lower bound only.
+	 *  contributes the whole of PressureLift. The structure carve is signed, so
+	 *  half of it lands in each bound; the detail carve is one-sided and lands
+	 *  in whichever bound its sign points at.
 	 *
 	 *  Keep this at or below 1: it is the deck's top against the atmosphere
 	 *  ceiling. */
@@ -719,11 +734,13 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 		return DeckTop + GetGradientDepth() * (
 			0.5f * FMath::Abs(BandRelief)
 			+ FMath::Abs(PressureLift)
+			+ 0.5f * FMath::Abs(StructureRelief)
+			+ FMath::Max(-DetailRelief, 0.0f)
 			+ FMath::Max(StormTowers, 0.0f));
 	}
 
-	/** The lowest the deck top can fall, both carves included. Equals
-	 *  DeckBottom exactly when GetReliefBudget() is 1. */
+	/** The lowest the deck top can fall. Equals DeckBottom exactly when
+	 *  GetReliefBudget() is 1. */
 	float GetTopMin() const
 	{
 		return DeckTop - GetGradientDepth() * GetReliefBudget();

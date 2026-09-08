@@ -404,7 +404,7 @@ float3 GG_RotateZ(float3 P, float Angle)
 #endif
 
 #ifndef GG_STRUCTURE_MIP
-#define GG_STRUCTURE_MIP 1
+#define GG_STRUCTURE_MIP 0
 #endif
 
 /** Mip levels subtracted from the computed footprint.
@@ -558,8 +558,13 @@ float3 GG_FlowVelocity(float3 N, float4 Flow)
  *  march can skip six of its seven fetches there and the inner cull is
  *  arithmetic. The gradient compresses in troughs and stretches over crests.
  *
- *  PITFALL: below 0.5 the exponent's slope at t = 0 outruns smoothstep's zero
- *  and the deck top creases, so Curve is floored here rather than by callers.
+ *  PITFALL: the onset stays C1 only while Curve is above 0.5. At exactly 0.5
+ *  the slope at the deck top becomes finite instead of zero, which is a crease
+ *  along the whole cloud top; below it the slope runs away and the top hardens
+ *  into an edge. That is a legitimate look -- a sharp cloud top IS a
+ *  discontinuity -- so it is allowed. The floor here only keeps the exponent
+ *  positive, since pow(t, 0) returns 1 and would put full density above the
+ *  deck.
  *
  *  PITFALL: a column whose Top is below Bottom has no gradient -- the max only
  *  keeps the divide finite, and the solid-region skip fills such a column in.
@@ -570,7 +575,7 @@ float GG_DeckDensity(float Height, float Top, float Bottom, float Curve)
 
     const float T = saturate((Top - Height) / Span);
 
-    return smoothstep(0.0f, 1.0f, pow(T, max(Curve, 0.5f)));
+    return smoothstep(0.0f, 1.0f, pow(T, max(Curve, 1e-4f)));
 }
 
 /** Cloud top altitude, as a fraction of atmosphere thickness. Flow first --
@@ -591,8 +596,8 @@ float GG_DeckDensity(float Height, float Top, float Bottom, float Curve)
  *  field reads as plausible until you notice every storm is a pit. */
 float GG_CloudTop(
 	float Elevation,
-	float ShapeDetail,
-	float ShapeStructure,
+	float CarveDetail,
+	float ReliefStructure,
 	float Pressure,
 	float StormCells,
 	float ReliefScale,
@@ -625,8 +630,21 @@ float GG_CloudTop(
 	// Each layer carves by its own amount. Summed rather than mixed, so the
 	// structure layer's mid-level shaping survives at a distance where the detail
 	// layer has already faded out from under it.
-    Top -= D * F.DetailRelief * (1.0f - ShapeDetail);
-    Top -= D * F.StructureRelief * (1.0f - ShapeStructure);
+	// THE TWO LAYERS ENTER DIFFERENTLY, BECAUSE THEY DO DIFFERENT WORK.
+	//
+	// STRUCTURE IS CENTRED. Its features are large enough that a purely
+	// subtractive carve drops whole regions of deck through the floor, and it
+	// lowers the mean top as it is turned up -- so texture amount and deck
+	// altitude stop being separate controls.
+	//
+	// DETAIL SUBTRACTS. It is fine enough that it never moves the deck as a
+	// body, and centred it reads as high-frequency material pushing UP out of
+	// the surface, which is not what breaking a surface up looks like.
+	//
+	// EITHER AMOUNT MAY BE NEGATIVE, which mirrors the layer: the structure
+	// noise's billows become pits, and the detail layer builds instead of eats.
+    Top -= D * F.DetailRelief * CarveDetail;
+    Top += D * F.StructureRelief * ReliefStructure;
 
     Top += D * F.Relief.z * Pressure;
 
@@ -661,7 +679,17 @@ struct GGFlowProbe
  *  term is at its most generous: the band contributes max(Relief.y *
  *  (Elevation - 0.5), 0), since ReliefScale is in [0,1] and multiplies a term
  *  that changes sign; the storm tower is at full height wherever its gate is
- *  open; the carves are omitted, safe because they only ever LOWER the deck.
+ *  open; the carves are omitted entirely.
+ *
+ *  NO CARVE MARGIN HERE. This probe has two callers with opposite needs: the
+ *  entry search wants an upper bound and pays only an extra iteration for one
+ *  that is loose, while the shadow ray reads Top as the deck's ACTUAL height
+ *  and pays for looseness in optical depth -- a margin of half the gradient
+ *  darkens the deck to nothing. The margin therefore belongs to the search, in
+ *  GG_CloudTopUpper, not to the probe.
+ *
+ *  What is left is the deck top with the carves at their median, which is
+ *  neither an over nor an under estimate -- correct for a density read.
  *
  *  Band and Pressure MUST MATCH GG_Field's, or the two paths disagree about
  *  which band a column is and the solid region tints differently from the
@@ -695,14 +723,27 @@ GGFlowProbe GG_FlowProbe(
     return Probe;
 }
 
-/** The bound alone, for callers that want nothing else. */
+/** A conservative UPPER BOUND on the deck top, for the entry search.
+ *
+ *  The probe's top plus whatever the carves can RAISE the deck by: the
+ *  structure layer's upward half always, since it is signed, and the detail
+ *  layer's only when its amount is negative and it therefore builds. Anything
+ *  that can only lower the deck stays out.
+ *
+ *  A search that overestimates takes another iteration; one that
+ *  underestimates steps over the surface. Only the first is recoverable, which
+ *  is why the margin lives here and not in the probe -- the probe's other
+ *  caller reads Top as a height rather than as a bound. */
 float GG_CloudTopUpper(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
 	float3 P,
 	GGFieldParams F)
 {
-    return GG_FlowProbe(FlowField, FlowSampler, P, F).Top;
+    const float Top = GG_FlowProbe(FlowField, FlowSampler, P, F).Top;
+
+    return Top + F.GradientDepth * (max(-F.DetailRelief, 0.0f)
+		+ 0.5f * abs(F.StructureRelief));
 }
 
 /** Evaluates the cloud field at a direction on the sphere. Height is the
@@ -959,11 +1000,19 @@ GGFieldSample GG_Field(
 	// wherever it comes from -- it has no relationship to the structure it sits
 	// on. Each layer's amount is the w of its own weight set, so the two are
 	// dialled independently of the rung balance above them.
-    const float ShapeDetail = lerp(1.0f, Ridge,
-		saturate(Edge * F.DetailNoise.w * F.DetailFade));
+    const float DetailWeight = saturate(Edge * F.DetailNoise.w * F.DetailFade);
+    const float StructureWeight = saturate(Edge * F.StructureNoise.w * F.StructureFade);
 
-    const float ShapeStructure = lerp(1.0f, StructureMix,
-		saturate(Edge * F.StructureNoise.w * F.StructureFade));
+	// EROSION KEEPS ITS NEUTRAL AT 1, because it multiplies density and may only
+	// remove material. RELIEF is signed about the median, because it moves a
+	// surface and has no reason to prefer one direction.
+    const float ShapeDetail = lerp(1.0f, Ridge, DetailWeight);
+    const float ShapeStructure = lerp(1.0f, StructureMix, StructureWeight);
+
+	// Detail as a one-sided carve in [0, Weight]; structure signed about the
+	// noise's median in [-Weight/2, +Weight/2].
+    const float CarveDetail = DetailWeight * (1.0f - Ridge);
+    const float ReliefStructure = StructureWeight * (StructureMix - 0.5f);
 
 	// THE TOWER GATE RIDES THE SAME FADE. 1 is its neutral value, so fading
 	// toward 1 lowers the towers continuously. Left raw it holds full height
@@ -981,7 +1030,7 @@ GGFieldSample GG_Field(
     GGFieldSample Out;
 
     Out.Top = GG_CloudTop(
-		Elevation, ShapeDetail, ShapeStructure, Pressure, StormGate, ReliefScale, F);
+		Elevation, CarveDetail, ReliefStructure, Pressure, StormGate, ReliefScale, F);
     Out.Pressure = Pressure;
     Out.Band = BandSigned;
     Out.ShapeDetail = ShapeDetail;
@@ -1317,11 +1366,31 @@ bool GG_RaySphere(float3 Origin, float3 Dir, float Radius, out float T0, out flo
  *  contributes the whole of Relief.z. ReliefScale never exceeds one, so
  *  ignoring it errs in the safe direction.
  *
+ *  The structure carve is signed, so it appears in both bounds at half its
+ *  authored amount. The detail carve is one-sided and appears in one of them,
+ *  chosen by its sign.
+ *
+ *  THE CARVES ARE SCALED BY THE FADES, because a bound taken from the authored
+ *  amount reserves room for a layer that a faded ray will never see -- and the
+ *  outer bound sets the marched band, whose thickness divided by cloudSteps is
+ *  the step size. Left unscaled, turning up a relief amount coarsens the march
+ *  at every distance including those where its layer contributes nothing, which
+ *  reads as the LIGHTING changing in response to a shape control.
+ *
+ *  Pass 1 for both to get the unconditional bound. Any fade passed must be at
+ *  least as large as the fade at every sample the bound will cover, or the
+ *  bound stops being one.
+ *
  *  OutMin is the WORST CASE, every term at its most negative at once, so it
  *  sits well below anything the field produces. It sizes the march reference
  *  rather than bounding the solid region -- the floor does that, and does it
  *  exactly. */
-void GG_TopBounds(GGFieldParams F, out float OutMin, out float OutMax)
+void GG_TopBounds(
+	GGFieldParams F,
+	float DetailFade,
+	float StructureFade,
+	out float OutMin,
+	out float OutMax)
 {
     const float D = F.GradientDepth;
 
@@ -1335,8 +1404,20 @@ void GG_TopBounds(GGFieldParams F, out float OutMin, out float OutMax)
 	//
 	// BOTH LAYERS HAVE TO APPEAR. The inner cull is measured down from OutMin,
 	// so a carve left out of this bound cuts low columns off mid-ramp.
-    OutMin = F.Relief.x - Span - D * (abs(F.DetailRelief) + abs(F.StructureRelief));
-    OutMax = F.Relief.x + Span + D * max(F.Relief.w, 0.0f);
+	// The structure carve is signed, so half of it lands in each bound. The
+	// detail carve is one-sided, and which side depends on the sign of its
+	// amount.
+    const float StructureHalf =
+		D * 0.5f * abs(F.StructureRelief) * saturate(StructureFade);
+
+    const float DetailCarve = D * saturate(DetailFade) * abs(F.DetailRelief);
+
+    OutMin = F.Relief.x - Span - StructureHalf
+		- (F.DetailRelief > 0.0f ? DetailCarve : 0.0f);
+
+    OutMax = F.Relief.x + Span + StructureHalf
+		+ (F.DetailRelief < 0.0f ? DetailCarve : 0.0f)
+		+ D * max(F.Relief.w, 0.0f);
 }
 
 /** Marches the cloud shell and integrates density.
@@ -1390,7 +1471,7 @@ float4 GG_March(
 	// -- Shell bounds -------------------------------------------------------
 
     float TopMin, TopMax;
-    GG_TopBounds(F, TopMin, TopMax);
+    GG_TopBounds(F, 1.0f, 1.0f, TopMin, TopMax);
 
 	// TopMin is unused here: the marched span ends at transmittance, and the
 	// deck's lower extent is the authored floor rather than a bound.
