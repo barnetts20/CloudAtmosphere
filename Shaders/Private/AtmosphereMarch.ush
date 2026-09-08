@@ -122,6 +122,19 @@
 #define ATMO_MAX_ITER 256
 #endif
 
+/** Optical depths at which a SHADOW ray is treated as fully blocked.
+ *
+ *  WHEREVER A MARCH ENDS ON THIS IT MUST ALSO RETURN ZERO. The threshold
+ *  asserts the ray is blocked, so returning the residual that tripped it leaves
+ *  a leak carried only by rays that stopped early -- and since it fires on one
+ *  channel while the others are still short, that leak is coloured.
+ *
+ *  Measured against the FASTEST channel, which is only cheap to be early about
+ *  because the answer is then rounded down to zero. */
+#ifndef ATMO_SHADOW_SATURATION
+#define ATMO_SHADOW_SATURATION 5.0
+#endif
+
 // ---------------------------------------------------------------------------
 // Planning
 // ---------------------------------------------------------------------------
@@ -359,6 +372,12 @@ float3 Atmo_LightMarch(
 	// ray's own plan length.
     float referenceLength = max(input.planetParams.atmoRadius - input.planetParams.planetRadius, 0.0001);
 
+	// The FASTEST channel, so the saturation break fires as soon as any one of
+	// them is opaque. Safe only because that path returns zero: the slower
+	// channels are within a percent, and the rounding discards the difference.
+    float absBetaMax = max(input.cloudParams.cloudAbsBeta.r,
+		max(input.cloudParams.cloudAbsBeta.g, input.cloudParams.cloudAbsBeta.b));
+
     for (int s = 0; s < segmentCount; s++)
     {
         float segStart = segments[s].x;
@@ -395,11 +414,13 @@ float3 Atmo_LightMarch(
             float3 toCenter = p - input.planetParams.planetPos;
             float distSq = dot(toCenter, toCenter);
 
-            if (distSq < input.planetParams.planetRadiusSq)
-            {
-                return float3(0.0, 0.0, 0.0);
-            }
-
+			// NO HARD PLANET TEST HERE. planetShadow above already answers this,
+			// continuously, and a binary return disagrees with it inside the
+			// smoothstep band: a ray grazing the surface earns a small but nonzero
+			// shadow, while one sample dipping under the radius returns exactly
+			// zero and bypasses the multiply entirely. That defeats the softening
+			// in the band it exists for, along a curve that moves with the light --
+			// the seam this function's opening comment was written to avoid.
             float dist = sqrt(distSq);
             float h = dist - input.planetParams.planetRadius;
 
@@ -414,6 +435,14 @@ float3 Atmo_LightMarch(
                 if (cDensity > 0.0)
                 {
                     cloudOptDepth += cDensity * currentStep;
+
+					// Past this the ray is blocked and every remaining segment is
+					// pure cost. Zero rather than the residual, for the reason on
+					// ATMO_SHADOW_SATURATION.
+                    if (cloudOptDepth * absBetaMax > ATMO_SHADOW_SATURATION)
+                    {
+                        return float3(0.0, 0.0, 0.0);
+                    }
                 }
             }
 

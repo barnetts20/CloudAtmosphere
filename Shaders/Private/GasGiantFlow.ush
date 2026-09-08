@@ -401,6 +401,24 @@ float3 GG_RotateZ(float3 P, float Angle)
  *  and gives it Worley's rounded boundary, which reads as fluffiness. Done here
  *  because the baker's channels are independent by construction. Worley arrives
  *  as raw F1, LOW at cell centres, so the remap floor uses it un-inverted. */
+/** How the flow field is reconstructed between texels.
+ *
+ *      0  bilinear      one tap, C0 -- the slope jumps at texel edges, the deck
+ *                       top inherits it, and shading shows it as faceting along
+ *                       the lat/lon grid
+ *      1  quintic fade  one tap, C1 -- fixes the slope break, but its weight is
+ *                       flat at both ends so each texel plateaus and a sharp
+ *                       band edge reads as blocks
+ *      2  cubic spline  four taps, C2 with no plateau -- smooths the field
+ *                       itself rather than only its interpolation
+ *
+ *  NONE OF THESE ADD INFORMATION. If blocks survive at 2, the band edge is a
+ *  genuine step in the sim data, and the answer is sim resolution or a softer
+ *  BandSharpness rather than a filter. */
+#ifndef GG_FLOW_FILTER
+#define GG_FLOW_FILTER 2
+#endif
+
 /** Whether each volume read picks a mip from the march's footprint, or stays
  *  at mip 0. Set per layer because the two want opposite answers.
  *
@@ -540,7 +558,82 @@ float4 GG_SampleFlow(Texture2DArray FlowField, SamplerState FlowSampler, float3 
     const float U = frac(atan2(N.y, N.x) * (0.5f / PI));
     const float V = 0.5f + 0.5f * N.z;
 
+#if GG_FLOW_FILTER == 0
+
     return FlowField.SampleLevel(FlowSampler, float3(U, V, Layer), 0.0f);
+
+#else
+
+	// RECONSTRUCTION MATTERS HERE. Bilinear is continuous in VALUE but not in
+	// gradient: the slope jumps at every texel boundary. The deck top is a
+	// direct function of this field, and shading responds to its slope, so those
+	// jumps surface as faceting on the sampling grid -- which is lat/lon
+	// aligned, so the facets run along meridians and parallels. Meridional flow
+	// shows it worst, since that is where the band varies fastest across U.
+	//
+	// Warping the coordinate by the quintic fade before the hardware filter
+	// makes the reconstruction C1 at texel edges. Same single bilinear tap: the
+	// position is offset from a texel centre by the FADED fraction, so the
+	// hardware blends the same two texels by a weight whose derivative vanishes
+	// where they meet.
+	//
+	// The wrap and clamp still apply -- the offset coordinate is in the same
+	// space -- so U crossing zero and V at the poles behave as before.
+    uint Width, Height, Slices, Levels;
+    FlowField.GetDimensions(0, Width, Height, Slices, Levels);
+
+    const float2 Size = float2(Width, Height);
+    const float2 InvSize = 1.0f / Size;
+
+    const float2 Texel = float2(U, V) * Size - 0.5f;
+    const float2 Corner = floor(Texel);
+    const float2 Frac = Texel - Corner;
+
+#if GG_FLOW_FILTER == 1
+
+	// Quintic fade: C1 at the edges, but FLAT at both ends, so each texel's
+	// value plateaus and all the change is squeezed into the boundaries. That
+	// trades faceting for quilting -- the blocks are the texels.
+    const float2 Fade = Frac * Frac * Frac * (Frac * (Frac * 6.0f - 15.0f) + 10.0f);
+
+    return FlowField.SampleLevel(FlowSampler,
+		float3((Corner + 0.5f + Fade) * InvSize, Layer), 0.0f);
+
+#else
+
+	// Cubic B-spline, as four bilinear taps.
+	//
+	// SMOOTH WITHOUT PLATEAUING, which is what the quintic cannot do: it reads
+	// four texels per axis instead of two, so curvature carries across a
+	// boundary rather than being flattened at the centres. Being APPROXIMATING
+	// rather than interpolating is the point -- it does not pass through the
+	// texel values, so a one-texel step in the field stops being a one-texel
+	// step in the surface.
+	//
+	// Four taps rather than sixteen: each pair of texels is fetched by a single
+	// hardware bilinear placed at the offset that reproduces their weights.
+    const float2 F2 = Frac * Frac;
+    const float2 F3 = F2 * Frac;
+
+    const float2 W0 = (-F3 + 3.0f * F2 - 3.0f * Frac + 1.0f) / 6.0f;
+    const float2 W1 = (3.0f * F3 - 6.0f * F2 + 4.0f) / 6.0f;
+    const float2 W2 = (-3.0f * F3 + 3.0f * F2 + 3.0f * Frac + 1.0f) / 6.0f;
+    const float2 W3 = F3 / 6.0f;
+
+    const float2 S0 = W0 + W1;
+    const float2 S1 = W2 + W3;
+
+    const float2 UV0 = (Corner + 0.5f + (W1 / S0 - 1.0f)) * InvSize;
+    const float2 UV1 = (Corner + 0.5f + (W3 / S1 + 1.0f)) * InvSize;
+
+    return
+		  S0.x * S0.y * FlowField.SampleLevel(FlowSampler, float3(UV0.x, UV0.y, Layer), 0.0f)
+		+ S1.x * S0.y * FlowField.SampleLevel(FlowSampler, float3(UV1.x, UV0.y, Layer), 0.0f)
+		+ S0.x * S1.y * FlowField.SampleLevel(FlowSampler, float3(UV0.x, UV1.y, Layer), 0.0f)
+		+ S1.x * S1.y * FlowField.SampleLevel(FlowSampler, float3(UV1.x, UV1.y, Layer), 0.0f);
+
+#endif
+#endif
 }
 
 /** Rebuilds the 3D tangent velocity from the stored components. NO TRIG: with

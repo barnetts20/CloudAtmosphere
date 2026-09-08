@@ -41,39 +41,44 @@ float Cloud_Density(
 	float3 samplePos,
 	CompositeParams input)
 {
-	float cloudNormH = (distFromCenter - input.planetParams.cloudInnerRadius)
+    float cloudNormH = (distFromCenter - input.planetParams.cloudInnerRadius)
 		/ (input.planetParams.cloudOuterRadius - input.planetParams.cloudInnerRadius);
 
 	// Flat-top height curve: full density through the middle, smooth fades at
 	// the bottom (0 to curve.x) and the top (curve.y to 1).
-	float bottomFade = saturate(smoothstep(0.0, input.cloudParams.cloudHeightCurve.x, cloudNormH));
-	float topFade = saturate(smoothstep(1.0, input.cloudParams.cloudHeightCurve.y, cloudNormH));
-	float heightGradient = bottomFade * topFade;
+    float bottomFade = saturate(smoothstep(0.0, input.cloudParams.cloudHeightCurve.x, cloudNormH));
+    float topFade = saturate(smoothstep(1.0, input.cloudParams.cloudHeightCurve.y, cloudNormH));
+    float heightGradient = bottomFade * topFade;
 
 	// Reconstructed to world space. The march runs camera-relative for
 	// precision, but the noise has to be sampled somewhere fixed or the whole
 	// cloud field slides with the viewer.
-	float3 worldPos = samplePos + input.mainRayParams.originalCameraPos;
+    float3 worldPos = samplePos + input.mainRayParams.originalCameraPos;
 
-	float3 uvw = worldPos / (input.planetParams.cloudOuterRadius * input.cloudParams.cloudScale);
+    float3 uvw = worldPos / (input.planetParams.cloudOuterRadius * input.cloudParams.cloudScale);
 
-	uvw += input.cloudParams.animationWeights.rgb * View.RealTime;
+    uvw += input.cloudParams.animationWeights.rgb * View.RealTime;
 
 	// Per-channel inversion, blended rather than branched, so a channel can be
 	// used either way round without a second bake.
-	float4 cSample = cloudDensityTex.Sample(cloudDensitySampler, uvw);
-	float4 icSample = 1 - cSample;
-	float4 fcSample = lerp(cSample, icSample, input.cloudParams.cloudNoiseInvert);
+	// EXPLICIT LOD. Both call sites sit inside loops with data-dependent breaks,
+	// which is non-uniform flow control -- implicit derivatives are undefined
+	// there. In the light march neighbouring pixels' rays start at different
+	// depths, so the quad derivative is meaningless and the mip it picks is
+	// arbitrary rather than merely coarse.
+    float4 cSample = cloudDensityTex.SampleLevel(cloudDensitySampler, uvw, 0.0);
+    float4 icSample = 1 - cSample;
+    float4 fcSample = lerp(cSample, icSample, input.cloudParams.cloudNoiseInvert);
 
 	// R is the largest octave, so it blocks out the overall shapes.
-	float baseNoise = fcSample.r;
+    float baseNoise = fcSample.r;
 
 	// Modulated by the finer GBA channels.
-	float detail = (fcSample.g * input.cloudParams.cloudNoiseWeights.r
+    float detail = (fcSample.g * input.cloudParams.cloudNoiseWeights.r
 		+ fcSample.b * input.cloudParams.cloudNoiseWeights.g
 		+ fcSample.a * input.cloudParams.cloudNoiseWeights.b);
 
-	float noise = saturate(baseNoise - detail * input.cloudParams.cloudNoiseWeights.a);
+    float noise = saturate(baseNoise - detail * input.cloudParams.cloudNoiseWeights.a);
 
 	// HEIGHT GRADIENT BEFORE THE COVERAGE THRESHOLD, NOT AFTER.
 	//
@@ -81,28 +86,28 @@ float Cloud_Density(
 	// it uniformly toward the band edges. Applied before, it lowers the value
 	// being thresholded, so the cloud SHRINKS toward its edges instead --
 	// rounding off at top and bottom rather than fading out at full size.
-	float remapped = saturate(heightGradient * (noise - (1.0 - input.cloudParams.cloudCoverage))
+    float remapped = saturate(heightGradient * (noise - (1.0 - input.cloudParams.cloudCoverage))
 		/ input.cloudParams.cloudCoverage);
 
 	// Thresholded first, which skips the second fetch entirely for any sample
 	// that is not inside a cloud. At typical coverage that is most of them.
-	if (remapped > 0)
-	{
-		float3 uvwDetail = uvw * input.cloudParams.detailNoiseScale;
+    if (remapped > 0)
+    {
+        float3 uvwDetail = uvw * input.cloudParams.detailNoiseScale;
 
 		// A second animation rate, so the detail scrolls at a different speed
 		// from the base shape. That difference is what reads as churning; equal
 		// rates would just translate the whole field.
-		uvwDetail += input.cloudParams.animationWeights.rgb * View.RealTime * input.cloudParams.animationWeights.a;
+        uvwDetail += input.cloudParams.animationWeights.rgb * View.RealTime * input.cloudParams.animationWeights.a;
 
-		float4 dSample = cloudDensityTex.Sample(cloudDensitySampler, uvwDetail);
-		float4 idSample = 1 - dSample;
-		float4 fdSample = lerp(dSample, idSample, input.cloudParams.detailNoiseInvert);
+        float4 dSample = cloudDensityTex.SampleLevel(cloudDensitySampler, uvwDetail, 0.0);
+        float4 idSample = 1 - dSample;
+        float4 fdSample = lerp(dSample, idSample, input.cloudParams.detailNoiseInvert);
 
-		float fineDetail = dot(fdSample, input.cloudParams.detailNoiseWeights);
+        float fineDetail = dot(fdSample, input.cloudParams.detailNoiseWeights);
 
-		remapped = saturate(remapped - fineDetail * input.cloudParams.detailNoiseErode);
-	}
+        remapped = saturate(remapped - fineDetail * input.cloudParams.detailNoiseErode);
+    }
 
-	return remapped * input.cloudParams.cloudDensityMult;
+    return remapped * input.cloudParams.cloudDensityMult;
 }
