@@ -1051,8 +1051,16 @@ float4 GGAtmo_MainMarch(
 					// planet: a grazing ray's near end stays detailed while its
 					// far end fades, which is what a per-pixel measure would
 					// have done anyway.
+					//
+					// THE JITTERED POSITION, LIKE EVERYTHING ELSE IN THE LOOP. Read
+					// at the step centre the fade takes one value per step, and
+					// since transmittance is spent within a couple of samples the
+					// pixel inherits that value whole. Iso-step-index contours are
+					// rings about the view centre, so the lattice draws itself in
+					// the deck. The jitter is what hides that lattice everywhere
+					// else; the fade owes it too.
                     const float ViewDistances =
-						(Pos + CurrentStep * 0.5f) * InvPlanetRadius;
+						(Pos + CurrentStep * 0.5f + Offset) * InvPlanetRadius;
 
                     GGFieldParams FieldLOD = P.Field;
 
@@ -1061,6 +1069,17 @@ float4 GGAtmo_MainMarch(
 
                     FieldLOD.StructureFade = 1.0f - smoothstep(
 						P.Field.StructureFadeNear, P.Field.StructureFadeFar, ViewDistances);
+
+					// The step's footprint, split the way the volumes are sampled:
+					// sideways moves the sample around the noise sphere, up or
+					// down changes that sphere's radius. Both grow with distance
+					// because CurrentStep does, so the mip follows the march
+					// rather than a hand-tuned range.
+                    FieldLOD.StepAngle =
+						CurrentStep * sqrt(max(1.0f - RadialRate * RadialRate, 0.0f))
+							/ max(DistFromCentre, 1e-4f);
+
+                    FieldLOD.StepHeight = StepHalfHeight * 2.0f;
 
 #if GG_DEBUG_TERM == 8 || GG_DEBUG_TERM == 9
 					if (bDebugFirstDeck)

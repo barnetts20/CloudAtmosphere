@@ -128,6 +128,16 @@ struct GGFieldParams
 	 *  amount at the edges. */
     float EdgeBias;
 
+	/** The march step's angular width, radians, and its radial extent as an
+	 *  atmosphere fraction. Together they are the sample's FOOTPRINT, which is
+	 *  what selects the volume mip.
+	 *
+	 *  SET PER SAMPLE BY THE MARCH, alongside the fades, since the step size
+	 *  changes along the ray. Zero means mip 0 and is the correct default for
+	 *  any caller that does not know its own step. */
+    float StepAngle;
+    float StepHeight;
+
     float4 Relief;
     float4 Profile;
     float3 Layers;
@@ -266,6 +276,11 @@ GGFieldParams GG_BuildField(
     F.DetailNoise = DetailNoise;
     F.StructureNoise = StructureNoise;
     F.EdgeBias = EdgeBias;
+
+	// Overwritten per sample by the march. Zero holds mip 0, which is what a
+	// caller with no step size wants.
+    F.StepAngle = 0.0f;
+    F.StepHeight = 0.0f;
     F.Relief = Relief;
     F.Profile = Profile;
     F.Layers = Layers;
@@ -365,6 +380,83 @@ float3 GG_RotateZ(float3 P, float Angle)
  *  and gives it Worley's rounded boundary, which reads as fluffiness. Done here
  *  because the baker's channels are independent by construction. Worley arrives
  *  as raw F1, LOW at cell centres, so the remap floor uses it un-inverted. */
+/** Whether each volume read picks a mip from the march's footprint, or stays
+ *  at mip 0. Set per layer because the two want opposite answers.
+ *
+ *  STRUCTURE MIPS. It is the layer that survives to distance, so it is still on
+ *  screen where the step is largest and the footprint worst, and its aliasing
+ *  shows up as the silhouette wobbling -- which reads as the shape being wrong
+ *  rather than as noise.
+ *
+ *  DETAIL DOES NOT. Its footprint is eight voxels at the closest step, so an
+ *  honest mip erases it, and erasing it is what leaves the deck blobby. Held at
+ *  mip 0 it is knowingly undersampled: the high frequencies fold down rather
+ *  than resolve, which breaks up the surface but crawls under motion. That is
+ *  affordable only because the layer is near-field and fades out well before
+ *  the step grows.
+ *
+ *  MIPS DO NOT HIDE TILING either way. Each tile blurs identically, so the
+ *  repeat survives every level -- what suppresses it is removing the layer,
+ *  which is what the fade ranges do. Keep the two effects separate when judging
+ *  either. */
+#ifndef GG_DETAIL_MIP
+#define GG_DETAIL_MIP 0
+#endif
+
+#ifndef GG_STRUCTURE_MIP
+#define GG_STRUCTURE_MIP 1
+#endif
+
+/** Mip levels subtracted from the computed footprint.
+ *
+ *  A FOOTPRINT OF ONE STEP IS NYQUIST-CRITICAL, so 0 is the level at which the
+ *  march can just represent what it reads and anything sharper is aliasing.
+ *  Negative values buy apparent detail by letting some through, which is a
+ *  legitimate trade in a jittered march but is not free: what it returns is
+ *  frequency the step spacing cannot carry, and it will crawl. */
+#ifndef GG_MIP_BIAS
+#define GG_MIP_BIAS 0.0f
+#endif
+
+/** Mip level for a volume read, from the march step's footprint.
+ *
+ *  WITHOUT THIS THE FADES ARE THE ONLY ANTI-ALIASING, and a fade removes the
+ *  layer rather than filtering it -- so detail does not soften with distance,
+ *  it stops. Worse, fade ranges are absolute while the distance at which a
+ *  layer starts aliasing goes as 1/scale, so every scale retune silently moves
+ *  where the aliasing begins and the fades do not follow.
+ *
+ *  TWO TERMS, BECAUSE THE VOLUME IS SAMPLED ON A SPHERE THAT GROWS WITH
+ *  ALTITUDE. Stepping sideways moves the sample around that sphere, by the step
+ *  angle times its radius in noise units; stepping up or down changes the radius
+ *  itself, by the vertical rate. A tangent ray is nearly all of the first and a
+ *  nadir ray nearly all of the second.
+ *
+ *  The along-ray spacing only. The pixel cone widens the footprint further at
+ *  grazing angles, so this errs sharp there rather than blurry.
+ *
+ *  UVW of 1 spans the whole volume, so multiplying by the width converts the
+ *  footprint to voxels, and a footprint of one voxel is mip 0. */
+float GG_VolumeLOD(
+	Texture3D Volume,
+	float Scale,
+	float Vertical,
+	float Height,
+	GGFieldParams F)
+{
+    uint Width, VolHeight, Depth;
+    Volume.GetDimensions(Width, VolHeight, Depth);
+
+    const float NoiseRadius = Scale + Height * Vertical;
+
+    const float Tangential = F.StepAngle * NoiseRadius;
+    const float Radial = F.StepHeight * Vertical;
+
+    const float Footprint = sqrt(Tangential * Tangential + Radial * Radial);
+
+    return max(log2(max(Footprint * (float) Width, 1.0f)) + GG_MIP_BIAS, 0.0f);
+}
+
 /** Collapses the Worley rungs to one value, mixing about the median.
  *
  *  NORMALIZED BY THE WEIGHTS' LENGTH, NOT THEIR SUM. The rungs are independent
@@ -719,16 +811,15 @@ GGFieldSample GG_Field(
 	// A FADED LAYER IS SKIPPED, NOT JUST SCALED. Below the threshold its shape
 	// is multiplied to nothing, so the fetches that produce it buy nothing.
 	// Gated per layer, because the two fade on different schedules.
-    const bool bWantDetail = (F.DetailFade > 1e-3f);
-    const bool bWantStructure = (F.StructureFade > 1e-3f);
+	// EXACTLY ZERO, NOT AN EPSILON. A skip at a small positive fade is a
+	// discontinuity at a fixed fade value, which is a fixed distance from the
+	// camera, which is a ring on screen. smoothstep returns exactly 1 past its
+	// far edge, so the fade reaches exactly 0 and the branch still fires over
+	// the whole faded region -- the epsilon bought nothing.
+    const bool bWantDetail = (F.DetailFade > 0.0f);
+    const bool bWantStructure = (F.StructureFade > 0.0f);
 
-#if GG_DETAIL_OCTAVE
-    BRANCH
-
-    if (bWantDetail)
-    {
-
-	// -- Detail: baked, warped by a DEEPER simulated layer -------------------
+	// -- Fine shear, WANTED BY BOTH LAYERS -----------------------------------
 	//
 	// Layers.y selects the slice. Reading a different layer from the coarse warp
 	// is what produces genuine vertical wind shear.
@@ -736,11 +827,32 @@ GGFieldSample GG_Field(
 	// Inherits only a FRACTION of the coarse displacement. A displacement field
 	// with a large gradient IS strain, so inheriting one whole imposes an
 	// order-one strain on the fine layer regardless of its own flow.
+	//
+	// OUTSIDE THE DETAIL BRANCH, BECAUSE THIS IS GEOMETRY RATHER THAN NOISE.
+	// The structure layer positions itself with it, so computing it only where
+	// the detail layer survives makes the structure warp differently either side
+	// of the detail fade -- a discontinuity in MOTION, which no amount of
+	// softening the fade will hide, since the fade scales the detail layer's
+	// appearance and this is not that. One flow fetch, no volume read, and it is
+	// skipped only when neither layer will use it.
+    float3 PDetail = N;
 
-        float3 PDetail = normalize(N + FlowWarp * F.Scales.z);
+    BRANCH
+
+    if (bWantDetail || bWantStructure)
+    {
+        PDetail = normalize(N + FlowWarp * F.Scales.z);
 
         const float4 DeepFlow = GG_SampleFlow(FlowField, FlowSampler, PDetail, F.Layers.y);
 
+        DetailWarp = GG_FlowVelocity(PDetail, DeepFlow) * (F.Warps.y * Turbulence);
+    }
+
+#if GG_DETAIL_OCTAVE
+    BRANCH
+
+    if (bWantDetail)
+    {
 	// SAMPLED IN TRUE 3D. PDetail is a unit direction, so PDetail * Scale traces
 	// a sphere through the volume -- a 2D slice discarding all the vertical
 	// structure the bake put there. DetailVertical is how many noise units the
@@ -750,10 +862,16 @@ GGFieldSample GG_Field(
 	// makes the detail change whether or not anything is happening to it, which
 	// is grain by definition. If it looks pinned, raise Warps.x.
         const float3 DetailUVW = PDetail * (F.Scales.x + Height * F.DetailVertical);
-        const float4 DetailSample = DetailVolume.SampleLevel(DetailSampler, DetailUVW, 0.0f);
 
-        DetailWarp = GG_FlowVelocity(PDetail, DeepFlow) * (F.Warps.y * Turbulence);
-        Pos = normalize(Warped + DetailWarp);
+#if GG_DETAIL_MIP
+        const float DetailLOD =
+			GG_VolumeLOD(DetailVolume, F.Scales.x, F.DetailVertical, Height, F);
+#else
+        const float DetailLOD = 0.0f;
+#endif
+
+        const float4 DetailSample =
+			DetailVolume.SampleLevel(DetailSampler, DetailUVW, DetailLOD);
 
 	// GBA is the F1 stack remapped against the Perlin base in R: the Perlin says
 	// where material is and the cells erode it, the same arrangement the
@@ -784,7 +902,16 @@ GGFieldSample GG_Field(
         const float3 PStructure = normalize(N + (FlowWarp + DetailWarp) * F.Scales.w);
 
         const float3 StructureUVW = PStructure * (F.Scales.y + Height * F.StructureVertical);
-        Structure = StructureVolume.SampleLevel(StructureSampler, StructureUVW, 0.0f);
+
+#if GG_STRUCTURE_MIP
+        const float StructureLOD =
+			GG_VolumeLOD(StructureVolume, F.Scales.y, F.StructureVertical, Height, F);
+#else
+        const float StructureLOD = 0.0f;
+#endif
+
+        Structure =
+			StructureVolume.SampleLevel(StructureSampler, StructureUVW, StructureLOD);
     }
 #endif
 
