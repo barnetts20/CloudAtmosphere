@@ -470,6 +470,9 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	 *  ratio IS the aspect of the resulting structure, so the ratio is the real
 	 *  control and the absolute vertical rate is derived from it.
 	 *
+	 *  1 IS ISOTROPIC at any shell thickness -- above it features are taller
+	 *  than they are wide, below it flatter.
+	 *
 	 *  PITFALL: an exaggerated aspect does not read as tall noise. The UVW scale
 	 *  swings by a large factor across the shell, so the pattern RESCALES with
 	 *  sample altitude -- and since altitude within a step moves with step size,
@@ -542,26 +545,42 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level Of Detail", meta = (ClampMin = "0.0"))
 	float StructureFadeSpan = 0.66f;
 
-	/** Weights over the DETAIL volume's three Worley rungs: GBA, coarse to fine.
-	 *
-	 *  INDEPENDENT FIELDS ON SEPARATE SEEDS, each carrying its own octave stack
-	 *  from its base scale down. Raising a rung adds a distinct pattern rather
-	 *  than more of what the others already say.
-	 *
-	 *  Normalized shader-side by the weights' length, so contrast holds however
-	 *  the balance is set and this is purely a look control. Strength lives in
-	 *  DetailAmount. */
+	// Weights over each volume's three Worley rungs, coarse to fine.
+	//
+	// INDEPENDENT FIELDS ON SEPARATE SEEDS, each carrying its own octave stack
+	// from its base scale down. Raising a rung adds a distinct pattern rather
+	// than more of what the others already say.
+	//
+	// Normalized shader-side by the weights' length, so contrast holds however
+	// the balance is set and these are purely look controls. Strength lives in
+	// the Amount beside them.
+	//
+	// Six scalars rather than two vectors, so each field's name in the details
+	// panel is the name of the material parameter it feeds.
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
-	FVector DetailWorleyWeights = FVector(1.0, 0.5, 0.25);
+	float DetailWorleyCoarse = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
+	float DetailWorleyMid = 0.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
+	float DetailWorleyFine = 0.25f;
 
 	/** How strongly the detail layer carves. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.0"))
 	float DetailAmount = 0.5f;
 
-	/** The same three rungs for the STRUCTURE volume. Weighted toward the coarse
-	 *  one it gives rounded billows; toward the fine one, cellular breakup. */
+	/** Weighted toward the coarse rung the structure layer gives rounded
+	 *  billows; toward the fine one, cellular breakup. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
-	FVector StructureWorleyWeights = FVector(1.0, 0.5, 0.25);
+	float StructureWorleyCoarse = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
+	float StructureWorleyMid = 0.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
+	float StructureWorleyFine = 0.25f;
 
 	/** How strongly the structure layer shapes. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.0"))
@@ -648,19 +667,22 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 
 	// -- Sources ------------------------------------------------------------
 
-	/** Micro variance. Only the alpha channel is read, as the filament network.
+	/** Micro variance. R is a Perlin FBM, GBA a Worley octave ladder on separate
+	 *  seeds, all median-centred and equalized per channel.
+	 *
 	 *  SAMPLER: wrap on all three axes, Linear Color -- these are scalar fields
 	 *  and an sRGB decode curves them without erroring. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sources")
 	TObjectPtr<UVolumeTexture> DetailVolume = nullptr;
 
-	/** Mid-level shape. RGB are read as Perlin, Worley F1 and Ridged; G also
-	 *  gates the storm towers.
+	/** Mid-level shape, same channel layout as the detail volume. G doubles as
+	 *  the storm-tower gate, so it stays the coarsest rung.
 	 *
-	 *  A SEPARATE TEXTURE BECAUSE IT IS SAMPLED AT A DIFFERENT POSITION. Detail
-	 *  inherits most of the flow warp so its filaments stretch along the
-	 *  streamlines; structure inherits almost none so its shapes stay round.
-	 *  One volume cannot serve both, whatever its channel layout. */
+	 *  A SEPARATE ASSET FOR DIFFERENT SEEDS, not because one texture could not
+	 *  serve both positions -- the two layers are sampled at different points
+	 *  and would be two fetches either way. Shared seeds would make the layers
+	 *  rhyme, and coincident features across two scales read as a repeat rather
+	 *  than as depth. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sources")
 	TObjectPtr<UVolumeTexture> StructureVolume = nullptr;
 
@@ -679,14 +701,13 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	/** Ladder weights plus the layer's amount, as the material expects them. */
 	FLinearColor GetDetailNoise() const
 	{
-		return FLinearColor(DetailWorleyWeights.X, DetailWorleyWeights.Y,
-			DetailWorleyWeights.Z, DetailAmount);
+		return FLinearColor(DetailWorleyCoarse, DetailWorleyMid, DetailWorleyFine, DetailAmount);
 	}
 
 	FLinearColor GetStructureNoise() const
 	{
-		return FLinearColor(StructureWorleyWeights.X, StructureWorleyWeights.Y,
-			StructureWorleyWeights.Z, StructureAmount);
+		return FLinearColor(StructureWorleyCoarse, StructureWorleyMid,
+			StructureWorleyFine, StructureAmount);
 	}
 
 	/** Gradient depth at a column with no relief, and the unit every relief
@@ -803,12 +824,23 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 
 	/** Noise units the shell spans, per layer. Each aspect rides on its own
 	 *  layer's horizontal scale, so retuning one scale leaves the other layer's
-	 *  shape alone. */
-	float GetDetailVertical() const { return DetailScale * DetailAspect; }
-
-	float GetStructureVertical() const
+	 *  shape alone.
+	 *
+	 *  SCALED BY ATMOSPHERE HEIGHT, WHICH IS WHAT MAKES THE ASPECT A RATIO.
+	 *  Heights reaching the field are fractions of shell thickness while the
+	 *  horizontal scale is against planet radius, so a vertical rate authored
+	 *  bare means a different world shape at every shell size -- 1 would be
+	 *  isotropic at a shell of one radius, forty times stretched at a
+	 *  hundredth of one. Folding the height scale in here makes 1 isotropic
+	 *  everywhere, and a shell retune stops restretching the noise. */
+	float GetDetailVertical(float AtmosphereHeightScale) const
 	{
-		return DetailScale * StructureScaleRatio * StructureAspect;
+		return DetailScale * DetailAspect * AtmosphereHeightScale;
+	}
+
+	float GetStructureVertical(float AtmosphereHeightScale) const
+	{
+		return DetailScale * StructureScaleRatio * StructureAspect * AtmosphereHeightScale;
 	}
 
 	/** (DetailNear, DetailFar, StructureNear, StructureFar), as the shader wants

@@ -159,6 +159,27 @@
 #define GG_LOBE_SHADOW_POWER 6.0f
 #endif
 
+/** Optical depths at which a SHADOW ray is treated as fully blocked.
+ *
+ *  Lower than the view march's margin because the light march snaps to zero on
+ *  reaching it, so being early costs a fraction of a percent of sun rather than
+ *  a visible leak. Measured against the FASTEST channel for the same reason --
+ *  the slower ones are within a percent, and the snap discards the difference. */
+#ifndef GG_SHADOW_SATURATION
+#define GG_SHADOW_SATURATION 5.0f
+#endif
+
+/** Optical depths below the deck floor at which the VIEW ray is provably
+ *  opaque and the march can be clipped.
+ *
+ *  TWICE WHAT OPACITY NEEDS, because the per-band ScatterX.a multipliers are
+ *  not visible where this is used and a band below 1 saturates slower. Erring
+ *  deep costs a step; erring shallow blacks out cloud that should still be
+ *  visible, at a fixed radius, which is a ring. */
+#ifndef GG_VIEW_OPAQUE_DEPTH
+#define GG_VIEW_OPAQUE_DEPTH 14.0f
+#endif
+
 // The two layers fade on their own schedules because they do different jobs.
 //
 // DETAIL is micro variance -- the texture you see standing next to a cloud. It
@@ -326,7 +347,7 @@ float GGAtmo_DeckEntry(
 
         const float Advance = (ProbeHeight - TopUpper) * F.Thickness / max(ClosingRate, 1e-5f);
 
-        TSearch += max(Advance * 0.9f, 1e-4f);
+        TSearch += max(Advance * GG_CONE_RELAXATION, 1e-4f);
 
         if (TSearch >= T1)
         {
@@ -746,7 +767,7 @@ float3 GGAtmo_LightMarch(
 	// zero that the cutoff itself cannot draw an edge.
     const float3 AbsBeta = P.Atmo.cloudParams.cloudAbsBeta;
     const float AbsMax = max(AbsBeta.x, max(AbsBeta.y, AbsBeta.z));
-    const float SaturationDepth = 5.0f / max(AbsMax, 1e-8f);
+    const float SaturationDepth = GG_SHADOW_SATURATION / max(AbsMax, 1e-8f);
 
     bool bSaturated = false;
 
@@ -897,7 +918,48 @@ float4 GGAtmo_MainMarch(
 	//
 	// The light ray still respects it -- see PlanetShadow. An occluder for light
 	// and a terminus for the view are different jobs.
-    const float MaxDist = P.Atmo.mainRayParams.sceneDepth;
+    float MaxDist = P.Atmo.mainRayParams.sceneDepth;
+
+	// -- Inner terminus, where the deck is PROVABLY opaque -------------------
+	//
+	// Removing the planet clip left this segment ending at the far side of the
+	// atmosphere, so the interior chord is marched until transmittance happens
+	// to die. That is fine at a deep optical depth and a cliff at a shallow one:
+	// nothing structural bounds the loop.
+	//
+	// A RADIUS, NOT A STEP. Collapsing the region to one long step would get
+	// extinction exactly right -- it is homogeneous -- but spawns a single light
+	// march at the midpoint of a saturated slab, which is fully shadowed. The
+	// in-scattering that belongs in the first optical depth below the floor
+	// would vanish, and it would vanish at a fixed radius: a ring.
+	//
+	// Clipping instead changes nothing about how the region above is sampled,
+	// and unlike the planet clip it sits where every ray reaching it is already
+	// opaque -- so the segment structure changing there cannot show.
+    const float BetaMin = min(P.Atmo.cloudParams.cloudScatBeta.r,
+		min(P.Atmo.cloudParams.cloudScatBeta.g, P.Atmo.cloudParams.cloudScatBeta.b));
+
+	// Twice the depth that puts transmittance under 0.001, because the per-band
+	// ScatterX.a multipliers are not visible here and a band below 1 saturates
+	// slower. Erring deep costs a step; erring shallow blacks out cloud that
+	// should still be visible.
+    const float OpaqueFraction =
+		P.Field.Profile.y - GG_VIEW_OPAQUE_DEPTH / max(BetaMin, 1e-6f);
+
+    bool bClippedOpaque = false;
+
+    if (OpaqueFraction > 0.0f)
+    {
+        const float2 OpaqueHit = Atmo_RaySphere(
+			RayOrigin, RayDir, P.Atmo.planetParams.planetPos,
+			P.Field.PlanetRadius + P.Field.Thickness * OpaqueFraction);
+
+        if (OpaqueHit.x > 0.0f && OpaqueHit.x < MaxDist)
+        {
+            MaxDist = OpaqueHit.x;
+            bClippedOpaque = true;
+        }
+    }
 
     const float2 AtmoHit = Atmo_RaySphere(
 		RayOrigin, RayDir, P.Atmo.planetParams.planetPos, P.Atmo.planetParams.atmoRadius);
@@ -1205,7 +1267,8 @@ float4 GGAtmo_MainMarch(
                 }
             }
 
-            if (max(Transmittance.x, max(Transmittance.y, Transmittance.z)) < 0.001f)
+            if (max(Transmittance.x, max(Transmittance.y, Transmittance.z))
+				< GG_OPAQUE_TRANSMITTANCE)
             {
                 Transmittance = float3(0.0f, 0.0f, 0.0f);
                 break;
@@ -1215,7 +1278,8 @@ float4 GGAtmo_MainMarch(
             StepIndex++;
         }
 
-        if (max(Transmittance.x, max(Transmittance.y, Transmittance.z)) < 0.001f)
+        if (max(Transmittance.x, max(Transmittance.y, Transmittance.z))
+			< GG_OPAQUE_TRANSMITTANCE)
         {
             Transmittance = float3(0.0f, 0.0f, 0.0f);
             break;
@@ -1224,6 +1288,15 @@ float4 GGAtmo_MainMarch(
 
 	// The MOST opaque channel, because the alpha is one value composited against
 	// the scene behind.
+	// A ray that reached the terminus crossed the whole deck to get there, so it
+	// is opaque by construction. Saying so is the same push the light march's
+	// saturation break needs -- without it the clip leaks whatever the march had
+	// left, and only clipped rays carry that leak.
+    if (bClippedOpaque)
+    {
+        Transmittance = float3(0.0f, 0.0f, 0.0f);
+    }
+
     const float MinTrans = min(Transmittance.x, min(Transmittance.y, Transmittance.z));
 
 #if GG_DEBUG_TERM

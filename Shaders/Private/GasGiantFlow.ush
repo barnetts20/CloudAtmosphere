@@ -84,6 +84,27 @@
 #define GG_STRUCTURE_LAYER 1
 #endif
 
+/** Transmittance below which a ray is treated as opaque and stops.
+ *
+ *  WHEREVER A MARCH ENDS ON THIS IT MUST ALSO SNAP TO ZERO. The threshold
+ *  asserts opacity, so returning the residual that tripped it leaves a leak
+ *  carried only by rays that stopped early -- and since it fires on one channel
+ *  while the others are still short, that leak is coloured. */
+#ifndef GG_OPAQUE_TRANSMITTANCE
+#define GG_OPAQUE_TRANSMITTANCE 0.001f
+#endif
+
+/** Fraction of the cone trace's conservative advance actually taken.
+ *
+ *  UNDER ONE BECAUSE THE ADVANCE IS A BOUND, NOT A DISTANCE. Taking the whole
+ *  of it repeatedly lands the search exactly on the surface it is converging
+ *  to, where a bound that is right to the last digit still leaves the first
+ *  density sample straddling the deck top. Backing off costs an iteration and
+ *  buys the entry a margin. */
+#ifndef GG_CONE_RELAXATION
+#define GG_CONE_RELAXATION 0.9f
+#endif
+
 
 // ---------------------------------------------------------------------------
 // Parameters
@@ -404,7 +425,7 @@ float3 GG_RotateZ(float3 P, float Angle)
 #endif
 
 #ifndef GG_STRUCTURE_MIP
-#define GG_STRUCTURE_MIP 0
+#define GG_STRUCTURE_MIP 1
 #endif
 
 /** Mip levels subtracted from the computed footprint.
@@ -1616,7 +1637,7 @@ float4 GG_March(
 		// is authored, and an under-declared slope is the one way this can still
 		// step over the surface. Raise Layers.z first if tangent-angle slicing
 		// appears.
-        TSearch += max(Advance * 0.9f, 1e-4f);
+        TSearch += max(Advance * GG_CONE_RELAXATION, 1e-4f);
 
         if (TSearch >= TExit)
         {
@@ -1683,7 +1704,7 @@ float4 GG_March(
 
         Transmittance *= 1.0f - Alpha;
 
-        if (Transmittance < 0.001f)
+        if (Transmittance < GG_OPAQUE_TRANSMITTANCE)
         {
             break;
         }
