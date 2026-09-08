@@ -18,16 +18,36 @@
 //                joins the north pole to the south, and that reads as a
 //                simulation bug rather than a sampler one.
 //
-//   DetailVolume    Micro variance. Only .a is read, as the filament network.
-//                   Carries the flow warp at DetailWarpInherit, so filaments
-//                   stretch along the streamlines.
+//   BOTH VOLUMES SHARE ONE CHANNEL LAYOUT:
 //
-//   StructureVolume Mid-level shape. Three channels:
-//                     R  Perlin        )  combined as Perlin-Worley, the
-//                     G  Worley F1     )  fluffy term. G also gates towers.
-//                     B  Ridged        streaks, read raw so they stay wispy
-//                   Held nearly rigid, so the shapes stay round rather than
-//                   being dragged into filaments by the flow.
+//     R  Perlin FBM  s4
+//     G  Worley F1   s4
+//     B  Worley F1   s8
+//     A  Worley F1   s16
+//
+//   EVERY CHANNEL CARRIES ITS FULL OCTAVE STACK, ON ITS OWN SEED. Base scale
+//   sets where a channel starts and the octaves fill in from there, so a
+//   256-cube holds far more usable structure than one octave per channel would.
+//   Separate seeds are what keep the rungs independent despite the overlap:
+//   raising one adds a distinct field rather than more of what the others
+//   already say.
+//
+//   MEDIAN-CENTRED, EQUALIZED PER CHANNEL. GG_WorleyLadder relies on both --
+//   it mixes around 0.5 and normalizes for independence, neither of which
+//   holds for a raw Worley histogram.
+//
+//   GBA is then remapped against the Perlin base, so the Perlin sets where
+//   material is and the Worley erodes it.
+//
+//   DetailVolume    Micro variance. Reads as filaments rather than blobs
+//                   because it carries the flow warp at DetailWarpInherit and
+//                   the warp stretches its cells along the streamlines -- the
+//                   cells themselves are round.
+//
+//   StructureVolume Mid-level shape, the same recipe on its own seeds so the
+//                   two layers do not rhyme. G doubles as the storm-tower gate,
+//                   so it stays the coarsest rung. Held nearly rigid, so the
+//                   shapes stay round rather than being dragged into filaments.
 //
 //                SAMPLER FOR BOTH: WRAP ON ALL THREE AXES, LINEAR COLOR. These
 //                are scalar fields, and an sRGB decode curves every one of them
@@ -82,7 +102,8 @@
  *  Scales   float4(DetailScale, StructureScale, DetailWarpInherit,
  *                  StructureWarpInherit)
  *  Warps    float4(WarpTime, DetailWarp, BandBias, TurbulenceFloor)
- *  Detail   float4(Ridge, Fluff, Wisp, EdgeBias)
+ *  DetailNoise     float4(WorleyG, WorleyB, WorleyA, Amount)
+ *  StructureNoise  float4(WorleyG, WorleyB, WorleyA, Amount)
  *  Relief   float4(DeckTop, BandRelief, PressureLift, StormTowers)
  *  Profile  float4(AtmosphereThickness, DeckBottom, VortexThreshold, unused)
  *  Layers   float3(FlowLayer, DeepFlowLayer, DeckSlope)
@@ -97,7 +118,16 @@ struct GGFieldParams
 {
     float4 Scales;
     float4 Warps;
-    float4 Detail;
+	/** Worley rung weights in xyz, layer amount in w. The weights are normalized
+	 *  by their own length, so rebalancing the rungs changes the character of the
+	 *  noise without changing its contrast or how much of it there is. */
+    float4 DetailNoise;
+    float4 StructureNoise;
+
+	/** How much detail survives in the flat band interiors, against the full
+	 *  amount at the edges. */
+    float EdgeBias;
+
     float4 Relief;
     float4 Profile;
     float3 Layers;
@@ -211,7 +241,9 @@ GGFieldParams GG_BuildField(
 	float RigidRate,
 	float4 Scales,
 	float4 Warps,
-	float4 Detail,
+	float4 DetailNoise,
+	float4 StructureNoise,
+	float EdgeBias,
 	float3 Layers,
 	float4 Relief,
 	float4 Profile,
@@ -231,7 +263,9 @@ GGFieldParams GG_BuildField(
 
     F.Scales = Scales;
     F.Warps = Warps;
-    F.Detail = Detail;
+    F.DetailNoise = DetailNoise;
+    F.StructureNoise = StructureNoise;
+    F.EdgeBias = EdgeBias;
     F.Relief = Relief;
     F.Profile = Profile;
     F.Layers = Layers;
@@ -331,6 +365,28 @@ float3 GG_RotateZ(float3 P, float Angle)
  *  and gives it Worley's rounded boundary, which reads as fluffiness. Done here
  *  because the baker's channels are independent by construction. Worley arrives
  *  as raw F1, LOW at cell centres, so the remap floor uses it un-inverted. */
+/** Collapses the Worley rungs to one value, mixing about the median.
+ *
+ *  NORMALIZED BY THE WEIGHTS' LENGTH, NOT THEIR SUM. The rungs are independent
+ *  fields, so their variances add rather than their amplitudes: dividing by the
+ *  sum leaves three equally weighted rungs at 0.58 of one rung's contrast, and
+ *  the mix flattens toward grey exactly as more of it is switched on. Dividing
+ *  by the length holds contrast constant however the balance is set, which is
+ *  what makes the weights a look control instead of a fader.
+ *
+ *  ABOUT 0.5 BECAUSE THE CHANNELS ARE MEDIAN-CENTRED. Mixing raw and rescaling
+ *  afterwards would drag the result toward whichever rung's mean sits furthest
+ *  from centre.
+ *
+ *  Saturated because holding contrast can push past the ends, and the
+ *  Perlin-Worley remap below reads this as an offset in [0,1]. */
+float GG_WorleyLadder(float3 Octaves, float3 Weights)
+{
+    const float Norm = max(length(Weights), 1e-4f);
+
+    return saturate(0.5f + dot(Octaves - 0.5f, Weights) / Norm);
+}
+
 float GG_PerlinWorley(float Perlin, float WorleyF1)
 {
     const float Low = -WorleyF1;
@@ -699,19 +755,19 @@ GGFieldSample GG_Field(
         DetailWarp = GG_FlowVelocity(PDetail, DeepFlow) * (F.Warps.y * Turbulence);
         Pos = normalize(Warped + DetailWarp);
 
-	// Alpha carries Worley F2-F1, the filament network -- minimal ON cell walls,
-	// so it arrives dark and reads as bright wisps once weighted.
-	//
-	// SAME VOLUME AS THE PACKED SAMPLE BELOW, read at a DIFFERENT POSITION, so
-	// this is a separate fetch rather than a swizzle.
-        Ridge = DetailSample.a;
+	// GBA is the F1 stack remapped against the Perlin base in R: the Perlin says
+	// where material is and the cells erode it, the same arrangement the
+	// structure layer uses three octave bands down.
+        Ridge = GG_PerlinWorley(
+			DetailSample.r,
+			GG_WorleyLadder(DetailSample.gba, F.DetailNoise.xyz));
     }
 #endif
 
 	// Alpha is the storm-tower gate, and 1 is its NEUTRAL value: the tower term
 	// reads (1 - StormCells), so 1 means no towers. The fade lerps toward this
 	// same 1, so the skipped case and the fully faded case agree.
-    float4 Structure = float4(0.5f, 1.0f, 0.5f, 0.5f);
+    float4 Structure = float4(0.5f, 1.0f, 1.0f, 1.0f);
 
 #if GG_STRUCTURE_LAYER
     BRANCH
@@ -757,18 +813,14 @@ GGFieldSample GG_Field(
 	// relationship to the structure it sits on. Concentrated on the transitions
 	// it ravels the band EDGES, where a real gas giant's billows live. EdgeBias
 	// is how much survives in the flat interiors.
-    const float Edge = lerp(F.Detail.w, 1.0f, Boundary);
+    const float Edge = lerp(F.EdgeBias, 1.0f, Boundary);
 
-	// R against G as Perlin-Worley, the fluffy shape term. B stays raw as
-	// streaks, which want to look wispy rather than rounded. Both belong to the
-	// structure layer and are normalized against each other, so shifting the
-	// balance between them does not change how much shaping there is.
-    const float Fluff = GG_PerlinWorley(Structure.r, Structure.g);
-
-    const float StructureWeights = max(F.Detail.y + F.Detail.z, 1e-4f);
-
-    const float StructureMix = saturate(
-		(F.Detail.y * Fluff + F.Detail.z * Structure.b) / StructureWeights);
+	// The Perlin base in R, eroded by the weighted F1 rungs. Rebalancing them
+	// moves the shapes between rounded billows and fine cellular breakup without
+	// changing how much shaping there is.
+    const float StructureMix = GG_PerlinWorley(
+		Structure.r,
+		GG_WorleyLadder(Structure.gba, F.StructureNoise.xyz));
 
 	// TWO SHAPES, NOT ONE. Each is 1 where its layer contributes nothing, so a
 	// faded layer drops out of both the carve and the erosion without
@@ -778,12 +830,13 @@ GGFieldSample GG_Field(
 	//
 	// Edge weights both, since detail applied uniformly is grain by definition
 	// wherever it comes from -- it has no relationship to the structure it sits
-	// on. Detail.x doubles as the detail layer's own amount, which is what it
-	// was doing inside the old three-way normalization anyway.
+	// on. Each layer's amount is the w of its own weight set, so the two are
+	// dialled independently of the rung balance above them.
     const float ShapeDetail = lerp(1.0f, Ridge,
-		saturate(Edge * F.Detail.x * F.DetailFade));
+		saturate(Edge * F.DetailNoise.w * F.DetailFade));
 
-    const float ShapeStructure = lerp(1.0f, StructureMix, saturate(Edge * F.StructureFade));
+    const float ShapeStructure = lerp(1.0f, StructureMix,
+		saturate(Edge * F.StructureNoise.w * F.StructureFade));
 
 	// THE TOWER GATE RIDES THE SAME FADE. 1 is its neutral value, so fading
 	// toward 1 lowers the towers continuously. Left raw it holds full height

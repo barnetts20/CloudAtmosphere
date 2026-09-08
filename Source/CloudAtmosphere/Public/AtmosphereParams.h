@@ -528,14 +528,35 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level Of Detail", meta = (ClampMin = "0.0"))
 	float StructureFadeSpan = 0.66f;
 
-	/** (Ridge, Fluff, Wisp, EdgeBias).
+	/** Weights over the DETAIL volume's three Worley rungs: GBA, coarse to fine.
 	 *
-	 *  Ridge is the DETAIL layer's own amount. Fluff and Wisp belong to the
-	 *  PACKED layer and are renormalized against each other, so shifting their
-	 *  balance does not change how much shaping there is. EdgeBias is how much
-	 *  of either survives in the flat band interiors. */
+	 *  INDEPENDENT FIELDS ON SEPARATE SEEDS, each carrying its own octave stack
+	 *  from its base scale down. Raising a rung adds a distinct pattern rather
+	 *  than more of what the others already say.
+	 *
+	 *  Normalized shader-side by the weights' length, so contrast holds however
+	 *  the balance is set and this is purely a look control. Strength lives in
+	 *  DetailAmount. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
-	FLinearColor DetailWeights = FLinearColor(0.5f, 0.5f, -0.1f, 1.0f);
+	FVector DetailWorleyWeights = FVector(1.0, 0.5, 0.25);
+
+	/** How strongly the detail layer carves. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.0"))
+	float DetailAmount = 0.5f;
+
+	/** The same three rungs for the STRUCTURE volume. Weighted toward the coarse
+	 *  one it gives rounded billows; toward the fine one, cellular breakup. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
+	FVector StructureWorleyWeights = FVector(1.0, 0.5, 0.25);
+
+	/** How strongly the structure layer shapes. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.0"))
+	float StructureAmount = 1.0f;
+
+	/** How much of either layer survives in the flat band interiors, against
+	 *  full strength at the edges where a real gas giant's billows live. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float EdgeBias = 1.0f;
 
 	/** How much the DETAIL layer erodes the density. Below 1: there is no lower
 	 *  cloud shell, so a fully transparent column would let a ray run to the far
@@ -640,6 +661,19 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	bool bStartSimulationOnBeginPlay = true;
 
 	// -- Derivations --------------------------------------------------------
+
+	/** Ladder weights plus the layer's amount, as the material expects them. */
+	FLinearColor GetDetailNoise() const
+	{
+		return FLinearColor(DetailWorleyWeights.X, DetailWorleyWeights.Y,
+			DetailWorleyWeights.Z, DetailAmount);
+	}
+
+	FLinearColor GetStructureNoise() const
+	{
+		return FLinearColor(StructureWorleyWeights.X, StructureWorleyWeights.Y,
+			StructureWorleyWeights.Z, StructureAmount);
+	}
 
 	/** Gradient depth at a column with no relief, and the unit every relief
 	 *  amount is a fraction of. The grain handle: widen it and the deck top
