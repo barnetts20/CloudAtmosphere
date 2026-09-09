@@ -17,7 +17,7 @@
 // WHAT Atmo_Plan ALREADY DOES CORRECTLY FOR A DECK. Set
 //
 //     cloudOuterRadius = planetRadius + Thickness * TopMax
-//     cloudInnerRadius = planetRadius + Thickness * DeckBottom   (the backstop)
+//     cloudInnerRadius = planetRadius + Thickness * DeckBackstop   (the backstop)
 //
 // and the planner emits the three regions the deck actually has: coarse air
 // above the highest column, FINE across the band the gradients live in, and
@@ -40,7 +40,7 @@
 // by atmosphere thickness, but leaves the RADII in world units. So
 // GGFieldParams.PlanetRadius is the same value as the planetRadius pin, and
 // Profile.x is the atmosphere thickness in world units alongside it -- the
-// deck has no shell of its own, and DeckTop and DeckBottom place it inside the
+// deck has no shell of its own, and DeckTop and DeckBackstop place it inside the
 // air as fractions of that thickness. Relief is a fraction of the distance
 // between the two, not of the thickness.
 //
@@ -55,20 +55,17 @@
 // The detail volumes carve the deck top and erode the density. Both are high
 // frequency, and past some distance one march sample stands for many features
 // at once -- which is undersampling the FIELD rather than the ray, so raising
-// step counts does not quiet it. Fading the detail out is the mip chain the
-// volume does not have, and it drops three of the seven fetches per sample.
+// step counts does not quiet it. The fades are the whole answer: they remove a
+// layer once it stops resolving, and drop three of the seven fetches with it.
 //
-// DISTANCE, NOT FOOTPRINT. Measuring the pixel's angular footprint against the
-// noise scale is the principled form, but Scales.x is noise units per RADIAN
-// and a noise unit holds several features -- so the threshold carries an
-// unknown calibration constant and lands somewhere around 0.02, which is not a
-// number anyone can author against. Distance in planet radii is the same
-// decision expressed in a unit with meaning.
+// DISTANCE, NOT FOOTPRINT. A footprint-derived mip is the principled form and
+// does not work here. It blurs along the shell, which erases the vertical
+// structure a high aspect ratio builds, so a deliberately layered deck flattens
+// back to one shell at exactly the distances the layering was for.
 //
 // The trade is resolution independence: at a higher march resolution the same
 // distance resolves more detail than this admits. If 4K and 1080p visibly
-// disagree, the fix is to scale these two against the march target's pixel
-// count rather than to go back to footprint.
+// disagree, scale the fade ranges against the march target's pixel count.
 // ---------------------------------------------------------------------------
 
 /** Isolates one lighting term so a stray glow can be attributed rather than
@@ -79,22 +76,21 @@
  *    0  off, normal output
  *    1  air Rayleigh only
  *    2  air Mie only          <- the forward lobe, before the blur sees it
- *    3  air ambient only
- *    4  deck direct + multiple scattering only
- *    5  deck ambient only
- *    6  sun transmittance at the first deck sample, as greyscale
- *    7  Mie lobe survival, as greyscale: 1 in clear air, 0 behind deck
- *    8  DetailFade at the first deck sample, as greyscale
- *    9  StructureFade at the first deck sample, as greyscale
+ *    3  deck direct + multiple scattering only
+ *    4  deck ambient only
+ *    5  sun transmittance at the first deck sample, as greyscale
+ *    6  Mie lobe survival, as greyscale: 1 in clear air, 0 behind deck
  *
- *  If the glow is present in 2 and absent in 4 and 5, it is air Mie in front
- *  of the deck. If it is absent from ALL of them but present with the mode
- *  off, it is the stage 3 composite spreading the limb inward rather than
- *  anything this file produced.
+ *  1 to 4 PARTITION THE LIT IMAGE, air against deck and direct against
+ *  ambient, so a glow present in 2 and absent in 3 and 4 is air Mie in front of
+ *  the deck. Absent from all four but present with the mode off puts it in the
+ *  stage 3 composite, spreading the limb inward, rather than in anything this
+ *  file produced.
  *
- *  8 and 9 answer whether a fade range reached the shader at all. White across
- *  the disc from orbit means the range arrived far larger than authored, which
- *  is a material pin rather than anything here. */
+ *  5 and 6 read a scalar rather than a term: how much sun reaches the deck, and
+ *  how much of the forward lobe survives the deck in front of it. Between them
+ *  they cover the two shadow paths, which is where a terminator that looks
+ *  wrong usually comes from. */
 #ifndef GG_DEBUG_TERM
 #define GG_DEBUG_TERM 0
 #endif
@@ -1017,6 +1013,12 @@ float4 GGAtmo_MainMarch(
 
 #if GG_DEBUG_TERM
 	float3 DebugAccum = float3(0.0f, 0.0f, 0.0f);
+#endif
+
+#if GG_DEBUG_TERM == 5
+	// Only the first deck sample is wanted: the rest of the ray is behind it,
+	// and reading a scalar at every step would average a shadow the camera
+	// never sees through.
 	bool bDebugFirstDeck = true;
 #endif
 
@@ -1131,9 +1133,7 @@ float4 GGAtmo_MainMarch(
 #elif GG_DEBUG_TERM == 2
 				DebugAccum += Transmittance * MieScatter
 					* SunTransmittance * P.Atmo.mainRayParams.lightCol * CurrentStep;
-#elif GG_DEBUG_TERM == 3
-				DebugAccum += Transmittance * AmbientScatter * CurrentStep;
-#elif GG_DEBUG_TERM == 7
+#elif GG_DEBUG_TERM == 6
 				DebugAccum = float3(MieLobe, MieLobe, MieLobe);
 #endif
 
@@ -1170,28 +1170,6 @@ float4 GGAtmo_MainMarch(
 
                     FieldLOD.StructureFade = 1.0f - smoothstep(
 						P.Field.StructureFadeNear, P.Field.StructureFadeFar, ViewDistances);
-
-					// The step's footprint, split the way the volumes are sampled:
-					// sideways moves the sample around the noise sphere, up or
-					// down changes that sphere's radius. Both grow with distance
-					// because CurrentStep does, so the mip follows the march
-					// rather than a hand-tuned range.
-                    FieldLOD.StepAngle =
-						CurrentStep * sqrt(max(1.0f - RadialRate * RadialRate, 0.0f))
-							/ max(DistFromCentre, 1e-4f);
-
-                    FieldLOD.StepHeight = StepHalfHeight * 2.0f;
-
-#if GG_DEBUG_TERM == 8 || GG_DEBUG_TERM == 9
-					if (bDebugFirstDeck)
-					{
-						const float DebugFade = (GG_DEBUG_TERM == 8)
-							? FieldLOD.DetailFade : FieldLOD.StructureFade;
-
-						DebugAccum = float3(DebugFade, DebugFade, DebugFade);
-						bDebugFirstDeck = false;
-					}
-#endif
 
                     const float4 Deck = GG_Density(
 						FlowField, FlowSampler, DetailVolume, DetailSampler,
@@ -1235,15 +1213,15 @@ float4 GGAtmo_MainMarch(
                         const float3 DeckStepLight =
 							DeckLight * S.rgb * (1.0f - DeckStepTransmittance);
 
-#if GG_DEBUG_TERM == 4
+#if GG_DEBUG_TERM == 3
 						DebugAccum += Transmittance * (IncomingLight * PhaseDual + MultiScatter)
 							* S.rgb * (1.0f - DeckStepTransmittance);
-#elif GG_DEBUG_TERM == 5
+#elif GG_DEBUG_TERM == 4
 						DebugAccum += Transmittance
 							* (P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb
 								* AmbientFactor)
 							* S.rgb * (1.0f - DeckStepTransmittance);
-#elif GG_DEBUG_TERM == 6
+#elif GG_DEBUG_TERM == 5
 						if (bDebugFirstDeck)
 						{
 							DebugAccum = SunTransmittance;

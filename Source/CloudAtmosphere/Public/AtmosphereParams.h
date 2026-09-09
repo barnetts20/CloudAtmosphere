@@ -354,13 +354,13 @@ struct CLOUDATMOSPHERE_API FTerrestrialCloudParams
 
 /** The gas giant deck's field: shape, transport, and the volumes it reads.
  *
- *  THREE ABSOLUTES, EVERYTHING ELSE DIMENSIONLESS. DeckTop, DeckBottom and
+ *  THREE ABSOLUTES, EVERYTHING ELSE DIMENSIONLESS. DeckTop, DeckBackstop and
  *  GradientThickness are fractions of atmosphere height; every relief amount
  *  and both carves are fractions of GradientThickness.
  *
  *  THE GRADIENT HANGS FROM EACH COLUMN'S OWN TOP rather than stretching between
  *  two anchors, so relief moves the profile instead of deforming it and every
- *  column shades alike. DeckBottom is a backstop under it: the gradient stops
+ *  column shades alike. DeckBackstop is a backstop under it: the gradient stops
  *  there, which keeps the marched band fixed however deep relief cuts.
  *
  *  RELIEF IS THEREFORE UNBOUNDED BELOW. Only the ceiling check remains:
@@ -409,7 +409,7 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	 *  step. Lowering it buys uniformity in the troughs and widens the fine band
 	 *  one for one. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shell", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float DeckBottom = 0.3f;
+	float DeckBackstop = 0.3f;
 
 	/** Where the mass sits inside the gradient, without moving either boundary.
 	 *  1 is centred, below 1 pulls density toward the top.
@@ -765,8 +765,8 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 			+ FMath::Max(StormTowers, 0.0f));
 	}
 
-	/** The lowest a column top can fall. Below DeckBottom its gradient has been
-	 *  clamped to a step; below DeckBottom + GradientThickness it is compressed.
+	/** The lowest a column top can fall. Below DeckBackstop its gradient has been
+	 *  clamped to a step; below DeckBackstop + GradientThickness it is compressed.
 	 *  Also the altitude under which every column is saturated, which the shader
 	 *  counts its opaque terminus down from. */
 	float GetTopMin() const
@@ -778,7 +778,7 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	 *  GG_DeckFloor in GasGiantFlow.ush, which does the same clamp per column. */
 	float GetNominalFloor() const
 	{
-		return FMath::Min(FMath::Max(DeckTop - GradientThickness, DeckBottom), DeckTop);
+		return FMath::Min(FMath::Max(DeckTop - GradientThickness, DeckBackstop), DeckTop);
 	}
 
 	/** Atmosphere thickness in world units: the one absolute length the field
@@ -796,7 +796,7 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	{
 		return FLinearColor(
 			GetAtmosphereThickness(PlanetRadius, AtmosphereHeightScale),
-			DeckBottom,
+			DeckBackstop,
 			VortexThreshold,
 			GradientThickness);
 	}

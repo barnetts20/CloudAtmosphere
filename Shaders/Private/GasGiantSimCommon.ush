@@ -411,7 +411,7 @@ float3 SimTangentVelocity(float3 N, float2 Components)
  *  What it costs is polar detail, and Jupiter's poles genuinely do have detail:
  *  Juno found cyclone clusters there. Those are discrete, long-lived, and would
  *  not emerge from a solve at this resolution regardless, so they belong on the
- *  authored GG_Spot path rather than being something the sim is asked for. */
+ *  authored-vortex path rather than being something the sim is asked for. */
 int SimFilterHalfWidth(float Mu, float FilterLatitude, int MaxHalfWidth)
 {
     const float CosPhi = sqrt(1.0f - Mu * Mu);
