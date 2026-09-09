@@ -499,6 +499,7 @@ CompositeParams GGAtmo_BuildAtmo(
 	int cloudLightSteps,
 	float jitterFactor,
 	float lightJitterFactor,
+	float lightBudgetFloor,
 	float stepScaleFactor,
 	GGFieldParams F)
 {
@@ -554,7 +555,7 @@ CompositeParams GGAtmo_BuildAtmo(
 		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
 		0.0f, 0.0f, float4(0.0f, 0.0f, 0.0f, 0.0f),
 		mainAtmoSteps, mainCloudSteps, atmoLightSteps, cloudLightSteps,
-		jitterFactor, lightJitterFactor, stepScaleFactor);
+		jitterFactor, lightJitterFactor, lightBudgetFloor, stepScaleFactor);
 }
 
 /** Deck density AND band for a SHADOW ray, from ONE flow fetch, against seven
@@ -584,6 +585,7 @@ float2 GGAtmo_DeckSampleForLight(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
 	float3 LocalPos,
+	float StepHalfLength,
 	GGFieldParams F)
 {
     const float Radius = length(LocalPos);
@@ -599,11 +601,33 @@ float2 GGAtmo_DeckSampleForLight(
 	// is the safe direction here.
     const float Floor = GG_DeckFloor(Probe.Top, F);
 
-	// Below its own floor the column is saturated, so the profile is skipped
-	// rather than the fetch -- the band is still wanted there.
-    const float Density = (Height <= Floor)
-		? 1.0f
-		: GG_DeckDensity(Height, Probe.Top, Floor, F.DensityCurve);
+    const float HalfStep = max(StepHalfLength, 0.0f);
+
+	// Below its own floor the column is saturated across the whole step, so the
+	// profile is skipped rather than the fetch -- the band is still wanted.
+    BRANCH
+
+    if (Height + HalfStep <= Floor)
+    {
+        return float2(1.0f, Probe.Band);
+    }
+
+	// THE PROFILE IS INTEGRATED ACROSS THE STEP, exactly as the view path does
+	// it, and for a sharper reason: this ray runs on a handful of steps, so one
+	// of them can be wider than the whole gradient. A point sample of a ramp
+	// narrower than the step is very nearly a coin flip -- it lands inside the
+	// deck or outside it -- and the jitter decides which. Exponentiate a couple
+	// of those into a transmittance and neighbouring pixels differ by factors,
+	// which is the scatter of bright and dark points rather than a field.
+	//
+	// Three closed-form evaluations and no extra fetch. What it buys is
+	// CONTINUITY rather than accuracy: the estimate now moves smoothly as the
+	// sample slides, which is what a blur can actually resolve.
+    const float RampNear = GG_DeckDensity(Height - HalfStep, Probe.Top, Floor, F.DensityCurve);
+    const float RampMid = GG_DeckDensity(Height, Probe.Top, Floor, F.DensityCurve);
+    const float RampFar = GG_DeckDensity(Height + HalfStep, Probe.Top, Floor, F.DensityCurve);
+
+    const float Density = (RampNear + 4.0f * RampMid + RampFar) / 6.0f;
 
     return float2(Density, Probe.Band);
 }
@@ -756,8 +780,6 @@ float3 GGAtmo_LightMarch(
 
     bool bSaturated = false;
 
-    const uint2 PixelCoord = uint2(P.Atmo.mainRayParams.svxy);
-
     const float RayStart = Segments[0].x;
     const float ReferenceLength = max(
 		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f);
@@ -791,15 +813,11 @@ float3 GGAtmo_LightMarch(
 					P.Atmo.mainRayParams.stepScaleFactor) * P.Atmo.lightRayParams.stepSizeMult,
 				SegEnd - Pos);
 
-			// Seeded on the parent step index as well as the pixel, so
-			// successive light rays from one pixel do not sample in phase.
-            uint Seed = PixelCoord.x * 1664525u + PixelCoord.y * 1013904223u
-				+ uint(P.Atmo.lightRayParams.parentStepIndex) * 214013u
-				+ uint(Pos * 100.0f) * 2531011u;
-            Seed = (Seed ^ (Seed >> 16)) * 2654435769u;
-            Seed = (Seed ^ (Seed >> 16));
-
-            const float StepSeed = float(Seed) / 4294967295.0f;
+			// Salted by the parent step and by this step, so successive light
+			// rays from one pixel do not sample in phase and neither does the
+			// view ray that spawned them.
+            const float StepSeed = Atmo_HashJitter(P.Atmo.mainRayParams.svxy,
+				uint(P.Atmo.lightRayParams.parentStepIndex) * 9781u + uint(Iter));
             const float Offset = (StepSeed - 0.5f) * CurrentStep * P.Atmo.lightRayParams.jitterFactor;
 
             const float3 SamplePos = Start + LightDir * (Pos + CurrentStep * 0.5f + Offset);
@@ -822,12 +840,18 @@ float3 GGAtmo_LightMarch(
             {
                 const float3 LocalPos = GGAtmo_ToLocal(SamplePos, P);
 
+				// Half the step along the RADIUS, in atmosphere fractions, which
+				// is the axis the profile varies on.
+                const float StepHalfHeight = 0.5f * CurrentStep
+					* abs(dot(LocalDir, LocalPos / max(length(LocalPos), 1e-4f)))
+					/ max(P.Field.Thickness, 1e-4f);
+
 				// The band still scales extinction, so a belt shadows more than
 				// a zone. That difference is exactly the kind of low-frequency
 				// signal a shadow ray should carry, and it arrives on the same
 				// fetch the density came from.
                 const float2 Deck = GGAtmo_DeckSampleForLight(
-					FlowField, FlowSampler, LocalPos, P.Field);
+					FlowField, FlowSampler, LocalPos, StepHalfHeight, P.Field);
 
                 if (Deck.x > 0.0f)
                 {
@@ -1125,11 +1149,11 @@ float4 GGAtmo_MainMarch(
                 const float LightBudgetWeight =
 					max(Transmittance.x, max(Transmittance.y, Transmittance.z));
 
-                P.Atmo.lightRayParams.atmoLightSteps =
-					Atmo_LightBudget(FullAtmoLightSteps, LightBudgetWeight);
+                P.Atmo.lightRayParams.atmoLightSteps = Atmo_LightBudget(
+					FullAtmoLightSteps, LightBudgetWeight, P.Atmo.lightRayParams.budgetFloor);
 
-                P.Atmo.lightRayParams.cloudLightSteps =
-					Atmo_LightBudget(FullCloudLightSteps, LightBudgetWeight);
+                P.Atmo.lightRayParams.cloudLightSteps = Atmo_LightBudget(
+					FullCloudLightSteps, LightBudgetWeight, P.Atmo.lightRayParams.budgetFloor);
 
                 float LobeShadow;
                 const float3 SunTransmittance = GGAtmo_LightMarch(

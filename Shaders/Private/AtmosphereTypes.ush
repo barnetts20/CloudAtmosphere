@@ -100,6 +100,11 @@ struct LightRayParams
     float jitterFactor;
     float stepSizeMult;
     int parentStepIndex;
+
+	/** Floor on the transmittance-scaled budget, as a fraction of the authored
+	 *  count. Carried here because Atmo_LightBudget rewrites the two counts
+	 *  above every step and needs a rule that survives the rewrite. */
+    float budgetFloor;
 };
 
 struct CompositeParams
@@ -190,11 +195,22 @@ float Atmo_PhaseDualLobe(float cosTheta, float gForward, float gBack, float forw
  *  the reduction step over step and the shadow ray collapses to nothing a short
  *  way into the deck.
  *
- *  Floored at 2: one sample cannot see a gradient, and the floor only costs
- *  anything where T has already made the result nearly invisible. */
-int Atmo_LightBudget(int fullSteps, float transmittance)
+ *  THE FLOOR IS A FRACTION OF THE AUTHORED BUDGET, NOT A CONSTANT. What a
+ *  shadow ray needs is a step short enough to resolve the deck it crosses, and
+ *  that is a property of the deck rather than a number of samples -- so the
+ *  count that satisfies it is already encoded in whatever the budget was tuned
+ *  to. A constant floor holds at one tuning and is wrong at every other.
+ *
+ *  Below the floor the ray stops resolving what it is crossing and starts
+ *  deciding it: each step lands in deck or in clear, the jitter picks which, and
+ *  a couple of those exponentiated into a transmittance put neighbouring pixels
+ *  factors apart. That reads as a scatter of bright points, not as grain, and no
+ *  blur resolves it. */
+int Atmo_LightBudget(int fullSteps, float transmittance, float floorFraction)
 {
-    return max((int) round(float(fullSteps) * saturate(transmittance)), 2);
+    const int minSteps = max((int) round(float(fullSteps) * saturate(floorFraction)), 2);
+
+    return max((int) round(float(fullSteps) * saturate(transmittance)), minSteps);
 }
 
 /** Weight on an ambient term at a given sun elevation.
@@ -255,6 +271,42 @@ float Atmo_AdaptiveStepSize(float baseStep, float pos, float rayStart, float ref
 }
 
 /** Per-pixel seed for the main ray, from the integer pixel coordinate. */
+/** White-noise jitter value in [0,1) for a pixel and a step, from an integer
+ *  hash.
+ *
+ *  WHITE, DELIBERATELY, AND SEPARATE FROM Atmo_RaySeed. A light march runs on a
+ *  handful of steps, so its jitter is nearly the whole of its variance -- and a
+ *  low-sample estimator driven by a REGULAR sequence prints that sequence into
+ *  the image as a grid rather than as grain. The view ray takes sixty-four
+ *  steps and averages its own dither, so a structured low-discrepancy sequence
+ *  suits it; this one does not.
+ *
+ *  EACH AXIS IS MIXED BEFORE THEY MEET. Hashing a LINEAR combination of x and y
+ *  gives every pixel on a lattice line the same seed, and one avalanche round
+ *  does not break that up -- the residual is spatially correlated, which is the
+ *  one kind of noise a blur cannot remove. Two multiplies and the Murmur3
+ *  finalizer decorrelate neighbours properly.
+ *
+ *  The salt is what separates one light ray from the next, and the light ray
+ *  from the view ray that spawned it: sharing a value there makes the two
+ *  jitters move together, which is structure again by another route. */
+float Atmo_HashJitter(float2 svxy, uint salt)
+{
+    uint2 p = uint2(svxy);
+
+    uint h = p.x * 0x9E3779B1u;
+    h ^= p.y * 0x85EBCA77u;
+    h ^= salt * 0xC2B2AE3Du;
+
+    h ^= h >> 16;
+    h *= 0x85EBCA6Bu;
+    h ^= h >> 13;
+    h *= 0xC2B2AE35u;
+    h ^= h >> 16;
+
+    return float(h) * (1.0 / 4294967296.0);
+}
+
 float Atmo_RaySeed(float2 svxy)
 {
 	// INTERLEAVED GRADIENT NOISE. Its whole design goal is dither that a small

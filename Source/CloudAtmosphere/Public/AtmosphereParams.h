@@ -305,6 +305,25 @@ struct CLOUDATMOSPHERE_API FAtmosphereRaymarchParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0"))
 	float CloudLightSteps = 32.0f;
 
+	/** Floor on the transmittance-scaled light budget, as a fraction of the two
+	 *  counts above.
+	 *
+	 *  A shadow ray's budget scales with the view transmittance that reached it,
+	 *  because that is what its result gets multiplied by. This is how far that
+	 *  is allowed to fall.
+	 *
+	 *  WHAT IT PROTECTS IS RESOLUTION, NOT BRIGHTNESS. Past some step length the
+	 *  ray stops resolving the deck it crosses and starts deciding it -- each
+	 *  step lands in cloud or in clear, the jitter picks which, and a couple of
+	 *  those exponentiated put neighbouring pixels factors apart. It reads as a
+	 *  scatter of bright points rather than as grain, and no amount of composite
+	 *  blur resolves it: a blur averages a noisy field, and this is not one.
+	 *
+	 *  A FRACTION RATHER THAN A COUNT, so the floor still means the same thing
+	 *  after the budget above is retuned. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float LightBudgetFloor = 0.375f;
+
 	static FAtmosphereRaymarchParams MakeGasGiantDefaults()
 	{
 		FAtmosphereRaymarchParams Params;

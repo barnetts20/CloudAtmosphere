@@ -364,7 +364,6 @@ float3 Atmo_LightMarch(
     float3 atmoOptDepth = float3(0.0, 0.0, 0.0);
     float cloudOptDepth = 0.0;
 
-    uint2 pixelCoord = uint2(input.mainRayParams.svxy);
 
     float rayStart = segments[0].x;
 
@@ -397,15 +396,11 @@ float3 Atmo_LightMarch(
 					* input.lightRayParams.stepSizeMult,
 				segEnd - pos);
 
-			// Seeded on the parent step index and the position as well as the
-			// pixel, so successive light rays from one pixel do not all sample
-			// in the same phase.
-            uint seed = pixelCoord.x * 1664525u + pixelCoord.y * 1013904223u
-				+ uint(input.lightRayParams.parentStepIndex) * 214013u
-				+ uint(pos * 100.0) * 2531011u;
-            seed = (seed ^ (seed >> 16)) * 2654435769u;
-            seed = (seed ^ (seed >> 16));
-            float stepSeed = float(seed) / 4294967295.0;
+			// Salted by the parent step and by this step, so successive light
+			// rays from one pixel do not sample in phase and neither does the
+			// view ray that spawned them.
+            float stepSeed = Atmo_HashJitter(input.mainRayParams.svxy,
+				uint(input.lightRayParams.parentStepIndex) * 9781u + uint(iter));
 
             float sampleOffset = (stepSeed - 0.5) * currentStep * input.lightRayParams.jitterFactor;
             float3 p = input.lightRayParams.samplePos + input.lightRayParams.lightDir * (pos + currentStep * 0.5 + sampleOffset);
