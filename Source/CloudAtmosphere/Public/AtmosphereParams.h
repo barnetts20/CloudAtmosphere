@@ -69,8 +69,37 @@ struct CLOUDATMOSPHERE_API FAtmosphereCompositeParams
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	/** Kernel size in SOURCE pixels. THE COST IS QUADRATIC IN THIS -- the loop is
+	 *  the disc inscribed in a (2r+1) square, so 6 is about 113 taps and 8 is
+	 *  about 197.
+	 *
+	 *  It is mostly paying to hide the march's sampling noise rather than to
+	 *  upsample, so anything that quiets the march lets this come down, and this
+	 *  is the cheapest place in the chain to get frames back. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0", ClampMax = "16"))
+	int32 BlurRadius = 6;
+
+	/** The Gaussian's width as a DIVISOR of the radius: sigma = radius /
+	 *  falloff. Higher concentrates the weight at the centre; at 1 the edge taps
+	 *  still carry about 0.6 and the kernel is close enough to a box that its
+	 *  response hatches. 2 puts the edge at 0.14. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.25"))
 	float BlurFalloffFactor = 2.0f;
+
+	/** How hard a depth difference cuts a tap off, so the blur cannot drag
+	 *  atmosphere across a silhouette. Measured against the centre depth, so it
+	 *  is a relative tolerance and holds at any distance. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float DepthSharpness = 5000.0f;
+
+	/** Full-resolution pixels per source pixel: 2 for a half-per-axis buffer,
+	 *  1 if the march runs at full resolution.
+	 *
+	 *  A PIPELINE FACT, NOT A LOOK CONTROL. It has to match how the postprocess
+	 *  material is configured, and the only symptom of getting it wrong is that
+	 *  the depth cutoff stops holding the silhouette at the distance it should. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0"))
+	float DepthTapScale = 2.0f;
 
 	/** Blur weight at the planet edge. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))

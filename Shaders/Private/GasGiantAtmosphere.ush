@@ -24,6 +24,13 @@
 // coarse below the backstop where columns are saturated. cloudSteps therefore
 // means steps across the GRADIENT rather than across the whole deck.
 //
+// THE LIGHT BUDGET IS TRANSMITTANCE-WEIGHTED. Every view sample spawns a shadow
+// ray at the same cost, but its result is multiplied by the transmittance that
+// reached it -- so a sample a hundred optical depths inside the deck pays full
+// price for a number that is scaled by nothing. Atmo_LightBudget scales both
+// step counts by accumulated T, which also grows the light march's step size,
+// since the planner sizes its segments from those counts.
+//
 // THE BACKSTOP IS A SAFE PLACE TO CHANGE STEP SIZE, which a fixed radius
 // normally is not. Every column whose top clears it is saturated either side,
 // so the step change lands where the field is constant. The exception is a
@@ -1028,6 +1035,13 @@ float4 GGAtmo_MainMarch(
     const float ReferenceLength = max(
 		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f);
 
+	// THE AUTHORED BUDGETS, HELD ASIDE. P carries the light ray's parameters and
+	// is rewritten in place each step, so the scaled counts have to come from
+	// these rather than from what the previous step left behind -- otherwise the
+	// reduction compounds and the shadow ray dies a short way into the deck.
+    const int FullAtmoLightSteps = P.Atmo.lightRayParams.atmoLightSteps;
+    const int FullCloudLightSteps = P.Atmo.lightRayParams.cloudLightSteps;
+
 	// Constant along the ray: both the view and the light are fixed per pixel.
     const float PhaseDual = Atmo_PhaseDualLobe(P.Atmo.scatteringParams.cosTheta,
 		P.Atmo.cloudParams.cloudPhaseParams.r,
@@ -1099,6 +1113,23 @@ float4 GGAtmo_MainMarch(
                 P.Atmo.lightRayParams.samplePos = SamplePos;
                 P.Atmo.lightRayParams.parentStepIndex = StepIndex;
                 P.Atmo.lightRayParams.stepSizeMult = StepSizeMult;
+
+				// Whatever light this sample finds is multiplied by the
+				// transmittance that reached it, so that is what its shadow ray
+				// is worth. The brightest channel, since a shadow that still
+				// matters to one of them matters.
+				//
+				// TAKEN BEFORE THIS STEP'S EXTINCTION IS APPLIED, which is what
+				// the ordering below already does: the first sample inside the
+				// deck is the one the eye reads, and it gets the full budget.
+                const float LightBudgetWeight =
+					max(Transmittance.x, max(Transmittance.y, Transmittance.z));
+
+                P.Atmo.lightRayParams.atmoLightSteps =
+					Atmo_LightBudget(FullAtmoLightSteps, LightBudgetWeight);
+
+                P.Atmo.lightRayParams.cloudLightSteps =
+					Atmo_LightBudget(FullCloudLightSteps, LightBudgetWeight);
 
                 float LobeShadow;
                 const float3 SunTransmittance = GGAtmo_LightMarch(

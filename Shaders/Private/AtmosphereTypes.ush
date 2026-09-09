@@ -172,6 +172,31 @@ float Atmo_PhaseDualLobe(float cosTheta, float gForward, float gBack, float forw
     return max(lerp(backward, forward, forwardWeight), .05);
 }
 
+/** Light-march step budget for a sample, scaled by the view transmittance that
+ *  has reached it.
+ *
+ *  A SAMPLE'S CONTRIBUTION SCALES WITH T BUT ITS COST DOES NOT. Every sample
+ *  buys the same shadow ray whether it lands on the first lit surface or a
+ *  hundred optical depths inside opaque deck, where it is multiplied by
+ *  nothing. Scaling the budget with T spends the steps where they are visible.
+ *
+ *  LINEAR IN T, WHICH IS THE PRINCIPLED RATE. A light march's error falls as
+ *  1/steps and enters the image multiplied by T, so holding T/steps fixed holds
+ *  each sample's contribution to the total error fixed. Anything steeper starves
+ *  the samples that still matter; anything shallower keeps paying for ones that
+ *  do not.
+ *
+ *  PASS THE FULL BUDGET EVERY TIME. Feeding the previous result back compounds
+ *  the reduction step over step and the shadow ray collapses to nothing a short
+ *  way into the deck.
+ *
+ *  Floored at 2: one sample cannot see a gradient, and the floor only costs
+ *  anything where T has already made the result nearly invisible. */
+int Atmo_LightBudget(int fullSteps, float transmittance)
+{
+    return max((int) round(float(fullSteps) * saturate(transmittance)), 2);
+}
+
 /** Weight on an ambient term at a given sun elevation.
  *
  *  ONE DERIVATION FOR BOTH PATHS AND BOTH TERMS. Air ambient and cloud ambient
@@ -232,22 +257,19 @@ float Atmo_AdaptiveStepSize(float baseStep, float pos, float rayStart, float ref
 /** Per-pixel seed for the main ray, from the integer pixel coordinate. */
 float Atmo_RaySeed(float2 svxy)
 {
-    uint2 pixelCoord = uint2(svxy);
-
-    uint pixSeed = pixelCoord.x * 1664525u + pixelCoord.y * 1013904223u;
-    pixSeed = (pixSeed ^ (pixSeed >> 16)) * 2654435769u;
-    pixSeed = (pixSeed ^ (pixSeed >> 16));
-
-    return float(pixSeed) / 4294967295.0;
+	// INTERLEAVED GRADIENT NOISE. Its whole design goal is dither that a small
+	// blur resolves cleanly, which is exactly the job here: the composite pass
+	// exists to hide this noise, and a blur removes uncorrelated noise well and
+	// correlated noise badly.
+	//
+	// PITFALL: an integer hash over a LINEAR combination of x and y leaves
+	// every pixel on a lattice line sharing a seed, and one avalanche round
+	// does not break that up. What survives reads as a woven or hatched grain
+	// that no blur radius removes -- widening it only produces a blurrier
+	// weave. This form has no such lattice.
+    return frac(52.9829189 * frac(0.06711056 * svxy.x + 0.00583715 * svxy.y));
 }
 
-/** Golden-ratio advance through the sequence, one value per step.
- *
- *  Every step is jittered, not just the first. Offsetting only the first step
- *  translates the lattice per pixel but leaves each ray on a regular grid, and
- *  a regular grid beats against any structure of comparable period. 0.618033 is
- *  the standard advance because its continued fraction converges slowest, which
- *  is the formal statement of having no short period. */
 float Atmo_StepJitter(float seed, int stepIndex)
 {
     return frac(seed + float(stepIndex) * 0.618033);

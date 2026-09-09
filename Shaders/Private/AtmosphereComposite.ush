@@ -3,24 +3,45 @@
 // ---------------------------------------------------------------------------
 // Composite: the third pass.
 //
-// Upscales and blurs the quarter-resolution march back over the scene. It is
+// Upscales and blurs the reduced-resolution march back over the scene. It is
 // doing two jobs, and only one of them is what it looks like.
 //
 // The obvious one is upsampling. The other is hiding the march's sampling
 // noise -- and that is worth being explicit about, because it means the blur
 // radius is currently paying for undersampling in the march rather than for
-// resolution. Fixing the step sizing (see the note in AtmosphereMarch.ush)
-// should let this radius come down, which is a real saving: the cost here is
-// quadratic in the radius.
+// resolution. The cost is quadratic in the radius, so anything that quiets the
+// march buys more here than it does anywhere else.
+//
+// A BLUR CANNOT REMOVE CORRELATED NOISE. If the march's dither carries lattice
+// structure, widening this radius produces a blurrier version of the same
+// pattern. Atmo_RaySeed is where that gets fixed, not here.
 // ---------------------------------------------------------------------------
 
 /** Depth-aware blur of the atmosphere buffer, composited over the scene.
  *
- *  Radius is in SOURCE pixels, so at quarter resolution a radius of 6 reaches
- *  twelve full-resolution pixels. The loop is (2r+1)^2 taps -- 169 at r=6 --
- *  which is why the radius matters more than it looks.
+ *  Radius is in SOURCE pixels, so at half-per-axis a radius of 6 reaches twelve
+ *  full-resolution pixels. The loop is bounded by a (2r+1) square but only taps
+ *  inside the inscribed disc are taken -- about 79% of them.
  *
- *  invW is the spatial falloff: weight = exp(-dist^2 * invW).
+ *  CIRCULAR, NOT SQUARE. A square support reaches r*sqrt(2) into its corners,
+ *  so unless the falloff has already killed those weights the kernel is longer
+ *  on the diagonals than on the axes. That anisotropy prints as a hatch on any
+ *  grain the blur fails to remove, and the corner taps were the least useful
+ *  ones being paid for.
+ *
+ *  Falloff sets the Gaussian's width as a DIVISOR of the radius: sigma =
+ *  radius / falloff. Tying the two fixes the SHAPE of the kernel and leaves
+ *  only its size authored. A sigma set independently can leave the edge weights
+ *  near 1, which is a box blur, and a box response has side lobes on the axes
+ *  -- hatching for the same reason the square support does.
+ *
+ *  DepthTapScale is full-resolution pixels per source pixel. The colour tap
+ *  moves in source texels while the depth tap moves in screen UV, so without it
+ *  a tap's depth weight is read from the right direction at the wrong distance
+ *  and the silhouette protection is quietly weaker than it reads.
+ *
+ *  BlurWeight lerps back toward the untouched centre sample, which is what
+ *  makes the blur an authored amount rather than all or nothing.
  *
  *  PARAMETERS AND THE TEXTURE ID HAVE TO BE PASSED IN.
  *
@@ -39,51 +60,69 @@ float4 Atmo_Composite(
 	float centerDepth,
 	float3 sceneColor,
 	float2 screenUV,
-	float invW,
+	float falloff,
 	int radius,
-	float depthSharpness)
+	float depthSharpness,
+	float depthTapScale,
+	float blurWeight)
 {
-	float4 sum = center;
-	float totalWeight = 1.0;
+    float4 sum = center;
+    float totalWeight = 1.0;
 
-	for (int x = -radius; x <= radius; x++)
-	{
-		for (int y = -radius; y <= radius; y++)
-		{
-			if (x == 0 && y == 0) continue;
+    const float radiusF = float(max(radius, 1));
 
-			float2 offset = float2(x, y);
-			float4 s = SceneTextureFetchFunc(Parameters, SceneTextureId, offset);
+	// exp(-d^2 / 2 sigma^2), folded into one multiply. The divisor is floored so
+	// a falloff of zero widens the kernel rather than dividing by it.
+    const float sigma = radiusF / max(falloff, 0.25);
+    const float invW = 1.0 / (2.0 * sigma * sigma);
 
-			float dist2 = float(x * x + y * y);
-			float spatialW = exp(-dist2 * invW);
+    const float radiusSq = radiusF * radiusF;
+
+    const float2 depthTexel = View.ViewSizeAndInvSize.zw * max(depthTapScale, 1.0);
+
+    for (int x = -radius; x <= radius; x++)
+    {
+        for (int y = -radius; y <= radius; y++)
+        {
+            if (x == 0 && y == 0)
+                continue;
+
+            float dist2 = float(x * x + y * y);
+
+            if (dist2 > radiusSq)
+                continue;
+
+            float2 offset = float2(x, y);
+            float4 s = SceneTextureFetchFunc(Parameters, SceneTextureId, offset);
+
+            float spatialW = exp(-dist2 * invW);
 
 			// DEPTH WEIGHT, and it is what stops the blur bleeding atmosphere
 			// across a silhouette. Normalized by the centre depth so the
 			// tolerance is relative -- an absolute threshold would be far too
 			// tight at planetary distance and far too loose up close.
-			float2 sampleUV = screenUV + offset * View.ViewSizeAndInvSize.zw;
-			float sampleDepth = CalcSceneDepth(sampleUV);
-			float depthDiff = abs(centerDepth - sampleDepth) / max(centerDepth, 1.0);
-			float depthW = exp(-depthDiff * depthDiff * depthSharpness);
+            float2 sampleUV = screenUV + offset * depthTexel;
+            float sampleDepth = CalcSceneDepth(sampleUV);
+            float depthDiff = abs(centerDepth - sampleDepth) / max(centerDepth, 1.0);
+            float depthW = exp(-depthDiff * depthDiff * depthSharpness);
 
-			float w = spatialW * depthW;
+            float w = spatialW * depthW;
 
-			sum += s * w;
-			totalWeight += w;
-		}
-	}
+            sum += s * w;
+            totalWeight += w;
+        }
+    }
 
-	float4 atmo = sum / totalWeight;
+    float4 atmo = lerp(center, sum / totalWeight, saturate(blurWeight));
 
 	// THE ALPHA IS TAKEN UNBLURRED, AND THAT IS DELIBERATE.
 	//
 	// Blurring the transmittance would soften the boundary between "atmosphere
 	// in front of this pixel" and "clear", which is exactly the edge the depth
 	// weight above is working to preserve. Colour can bleed; occlusion cannot.
-	float centerAlpha = center.a;
+    float centerAlpha = center.a;
 
-	float3 finalColor = atmo.rgb + sceneColor * centerAlpha;
+    float3 finalColor = atmo.rgb + sceneColor * centerAlpha;
 
-	return float4(finalColor, 1.0);
+    return float4(finalColor, 1.0);
 }
