@@ -17,18 +17,19 @@
 // WHAT Atmo_Plan ALREADY DOES CORRECTLY FOR A DECK. Set
 //
 //     cloudOuterRadius = planetRadius + Thickness * TopMax
-//     cloudInnerRadius = planetRadius + Thickness * DeckBottom
+//     cloudInnerRadius = planetRadius + Thickness * DeckBottom   (the backstop)
 //
 // and the planner emits the three regions the deck actually has: coarse air
-// above the highest column, FINE across the gradient where all the variance
-// is, and coarse below the floor where every column is saturated and uniform.
-// cloudSteps therefore means steps across the GRADIENT rather than across the
-// whole deck.
+// above the highest column, FINE across the band the gradients live in, and
+// coarse below the backstop where columns are saturated. cloudSteps therefore
+// means steps across the GRADIENT rather than across the whole deck.
 //
-// THE FLOOR IS A SAFE PLACE TO CHANGE STEP SIZE, which a fixed radius normally
-// is not. Density is exactly 1 either side of it, so the step change lands
-// where the field is provably constant. The handoff at cloudOuterRadius has no
-// such guarantee and remains the one acknowledged fault here.
+// THE BACKSTOP IS A SAFE PLACE TO CHANGE STEP SIZE, which a fixed radius
+// normally is not. Every column whose top clears it is saturated either side,
+// so the step change lands where the field is constant. The exception is a
+// trough pushed below the backstop by relief: its gradient is stepped coarsely.
+// The handoff at cloudOuterRadius has no such guarantee and remains the one
+// acknowledged fault here.
 //
 // SEGMENTS[].w IS THE FINE-STEP FLAG, NOT A DECK FLAG. Terrestrially the two
 // coincide because nothing lies below the band; here the solid region does,
@@ -98,67 +99,6 @@
 #define GG_DEBUG_TERM 0
 #endif
 
-/** Width of the ambient terminator, in cosine of sun elevation. 0.15 is about
- *  9 degrees either side of the geometric terminator.
- *
- *  AMBIENT IS STARLIGHT THAT BOUNCED, NOT A FLOOR. Both ambient terms stand in
- *  for light that scattered several times before arriving, and behind an opaque
- *  planet there is none. Added unconditionally they wash the night side at a
- *  fixed brightness, which reads as the star shining through the planet -- and
- *  on a gas giant, where the deck is opaque to the limb, there is nothing to
- *  break it up. */
-#ifndef GG_AMBIENT_TERMINATOR
-#define GG_AMBIENT_TERMINATOR 0.15f
-#endif
-
-/** How fast the Mie forward lobe dies behind deck. Optical depths of deck for
- *  an e-fold, inverted -- 2 means the lobe is at 2% one optical depth in.
- *
- *  THE LOBE BELONGS TO SINGLE SCATTERING. Light that has crossed a dense
- *  medium has bounced several times and lost its direction, so the sharp
- *  forward peak washes out to something near isotropic. Carrying full phaseM
- *  through the deck is what makes the glow appear to sit on top of the planet
- *  rather than in front of it. */
-#ifndef GG_MIE_LOBE_DECAY
-#define GG_MIE_LOBE_DECAY 2.0f
-#endif
-
-/** Width of the planet-shadow falloff, as a fraction of atmosphere thickness.
- *
- *  The geometric shadow of a sphere has a hard boundary; a real terminator does
- *  not, because a grazing sun ray crosses progressively more air before it
- *  arrives. This stands in for that without marching it.
- *
- *  WIDE, because this is what shapes the terminator. Narrowing it to stop the
- *  forward lobe leaking makes the terminator hard AND exposes the smoothstep's
- *  own endpoints as edges along the light's tangent cone. The lobe gets its own
- *  factor below instead. */
-#ifndef GG_TERMINATOR_SOFTNESS
-#define GG_TERMINATOR_SOFTNESS 0.35f
-#endif
-
-/** Exponent applied to the shadow for the ANISOTROPIC terms only.
- *
- *  THE FORWARD LOBE AND THE ISOTROPIC TERM WANT DIFFERENT SHADOWS. The lobe is
- *  single-scattered direct light: it arrives along one path, and behind a
- *  planet that path is blocked, so it really is hard-shadowed. The isotropic
- *  term stands in for light that bounced several times, which genuinely wraps
- *  around the terminator. Sharing one factor forces a choice between a hard
- *  terminator and a glow.
- *
- *  Atmo_PhaseDualLobe at the default (0.9, 0.1, 0.5) returns about 7.6 head-on
- *  against an isotropic 1/4pi -- a 95x multiplier in exactly the backlit
- *  geometry where the falloff is widest. A few percent of residual shadow
- *  becomes a wash across the whole disc, which is why the phase parameters read
- *  as the cause: they are the gain on the leak.
- *
- *  A power on the same smoothstep rather than a narrower one, so no new
- *  endpoint appears anywhere -- the curve stays C1 where it already was and
- *  only its tail is crushed. 6 takes 10% residual to 1e-6. */
-#ifndef GG_LOBE_SHADOW_POWER
-#define GG_LOBE_SHADOW_POWER 6.0f
-#endif
-
 /** Optical depths at which a SHADOW ray is treated as fully blocked.
  *
  *  Lower than the view march's margin because the light march snaps to zero on
@@ -225,6 +165,33 @@ struct GGScatterParams
     float4 ScatterPos;
     float4 ScatterBase;
     float BandScale;
+
+	/** Width of the planet-shadow falloff, as a fraction of atmosphere
+	 *  thickness. What shapes the terminator: the geometric shadow of a sphere
+	 *  has a hard boundary and a real terminator does not. */
+    float TerminatorSoftness;
+
+	/** Width of the ambient terminator, in cosine of sun elevation. Both
+	 *  ambient terms stand in for light that bounced, and behind an opaque
+	 *  planet there is none to bounce. */
+    float AmbientTerminator;
+
+	/** How fast the Mie forward lobe dies behind deck: optical depths for an
+	 *  e-fold, inverted. Light that crossed a dense medium has lost its
+	 *  direction, so the sharp forward peak washes out. */
+    float MieLobeDecay;
+
+	/** Exponent on the shadow for the ANISOTROPIC terms only.
+	 *
+	 *  THE LOBE AND THE ISOTROPIC TERM WANT DIFFERENT SHADOWS. The lobe arrives
+	 *  along one path and is genuinely hard-shadowed; the isotropic term stands
+	 *  in for multiply-scattered light, which wraps around the terminator.
+	 *  Sharing one factor forces a choice between a hard terminator and a glow.
+	 *
+	 *  A power on the same smoothstep rather than a narrower one, so no new
+	 *  endpoint appears -- the curve stays C1 where it already was and only its
+	 *  tail is crushed. */
+    float LobeShadowPower;
 };
 
 /** Everything the gas giant march reads. CompositeParams carries the planet,
@@ -449,12 +416,18 @@ void GGAtmo_SplitDeckSegment(
  *
  *  Set all three sets equal for a single-material deck. BandScale sets where
  *  the ramp saturates; matching it to the debug view's inverse DebugScale makes
- *  the material and the debug view agree about band boundaries. */
+ *  the material and the debug view agree about band boundaries.
+ *
+ *  LobeParams is (TerminatorSoftness, AmbientTerminator, MieLobeDecay,
+ *  LobeShadowPower). Four lighting scalars in one float4 because they are tuned
+ *  together and against each other: the softness sets the terminator's width
+ *  and the power crushes the tail the lobe would otherwise leak through it. */
 GGScatterParams GGAtmo_BuildScatter(
 	float4 ScatterNeg,
 	float4 ScatterPos,
 	float4 ScatterBase,
-	float BandScale)
+	float BandScale,
+	float4 LobeParams)
 {
     GGScatterParams S;
 
@@ -462,6 +435,13 @@ GGScatterParams GGAtmo_BuildScatter(
     S.ScatterPos = ScatterPos;
     S.ScatterBase = ScatterBase;
     S.BandScale = BandScale;
+
+	// Floored where zero is degenerate: the softness divides a smoothstep's
+	// width, and a zero-width one is a step along the light's tangent cone.
+    S.TerminatorSoftness = max(LobeParams.x, 1e-4f);
+    S.AmbientTerminator = max(LobeParams.y, 1e-4f);
+    S.MieLobeDecay = max(LobeParams.z, 0.0f);
+    S.LobeShadowPower = max(LobeParams.w, 0.0f);
 
     return S;
 }
@@ -554,10 +534,11 @@ CompositeParams GGAtmo_BuildAtmo(
 	//
 	// NOT AN OPTICAL CULL. Where the deck goes opaque is a property of the
 	// extinction, and deriving a radius from it makes retuning DeckOpticalDepth
-	// move the step size -- a coupling with no visible cause. The floor is a
-	// geometric anchor and says the same thing better: below it the field is
-	// uniform, so a coarse step integrates it exactly and transmittance ends the
-	// ray within a couple of them.
+	// move the step size -- a coupling with no visible cause. The backstop is a
+	// geometric anchor and says the same thing better: no gradient reaches below
+	// it unless relief pushed the whole column under, so a coarse step
+	// integrates what is left and transmittance ends the ray within a couple of
+	// them.
     const float CloudInner = max(F.PlanetRadius + F.Thickness * F.Profile.y, 1e-4f);
 
     return Atmo_BuildParams(
@@ -614,11 +595,16 @@ float2 GGAtmo_DeckSampleForLight(
 
     const GGFlowProbe Probe = GG_FlowProbe(FlowField, FlowSampler, Direction, F);
 
-	// Below the floor every column is saturated, so the profile is skipped
+	// The floor follows the probe's top, so the same over-estimate that thickens
+	// the deck also deepens the saturated region under it -- both darken, which
+	// is the safe direction here.
+    const float Floor = GG_DeckFloor(Probe.Top, F);
+
+	// Below its own floor the column is saturated, so the profile is skipped
 	// rather than the fetch -- the band is still wanted there.
-    const float Density = (Height <= F.Profile.y)
+    const float Density = (Height <= Floor)
 		? 1.0f
-		: GG_DeckDensity(Height, Probe.Top, F.Profile.y, F.DensityCurve);
+		: GG_DeckDensity(Height, Probe.Top, Floor, F.DensityCurve);
 
     return float2(Density, Probe.Band);
 }
@@ -659,7 +645,7 @@ float3 GGAtmo_LightMarch(
 
     const float Soft = max(
 		(P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius)
-			* GG_TERMINATOR_SOFTNESS,
+			* P.Scatter.TerminatorSoftness,
 		1e-4f);
 
 	// How far ahead the closest approach lies. Negative means the planet is
@@ -703,7 +689,7 @@ float3 GGAtmo_LightMarch(
 	//
 	// The anisotropic terms read this instead of PlanetShadow. Same curve, tail
 	// crushed, so no new endpoint appears at either end.
-    OutLobeShadow = pow(PlanetShadow, GG_LOBE_SHADOW_POWER);
+    OutLobeShadow = pow(PlanetShadow, P.Scatter.LobeShadowPower);
 
     float4 Segments[ATMO_MAX_SEGMENTS];
 
@@ -939,12 +925,20 @@ float4 GGAtmo_MainMarch(
     const float BetaMin = min(P.Atmo.cloudParams.cloudScatBeta.r,
 		min(P.Atmo.cloudParams.cloudScatBeta.g, P.Atmo.cloudParams.cloudScatBeta.b));
 
+	// COUNTED DOWN FROM WHERE EVERY COLUMN IS SATURATED, which is the backstop
+	// or the lowest a column top can fall, whichever is lower. Relief is free to
+	// push a top under the backstop, and above such a top the ray is still
+	// crossing clear air -- counting from the backstop alone would put the
+	// terminus inside cloud that had not gone opaque yet.
+    float BoundMin, BoundMax;
+    GG_TopBounds(P.Field, 1.0f, 1.0f, BoundMin, BoundMax);
+
 	// Twice the depth that puts transmittance under 0.001, because the per-band
 	// ScatterX.a multipliers are not visible here and a band below 1 saturates
 	// slower. Erring deep costs a step; erring shallow blacks out cloud that
 	// should still be visible.
-    const float OpaqueFraction =
-		P.Field.Profile.y - GG_VIEW_OPAQUE_DEPTH / max(BetaMin, 1e-6f);
+    const float OpaqueFraction = min(P.Field.Profile.y, BoundMin)
+		- GG_VIEW_OPAQUE_DEPTH / max(BetaMin, 1e-6f);
 
     bool bClippedOpaque = false;
 
@@ -968,7 +962,7 @@ float4 GGAtmo_MainMarch(
 	//
 	// The forward lobe is the brightest term in the image facing the light, and
 	// it has to be extinguished by the cloud between the sample and the camera
-	// -- see GG_MIE_LOBE_DECAY. Deck depth is accumulated separately from the
+	// -- see MieLobeDecay. Deck depth is accumulated separately from the
 	// base transmittance in the loop below, because the lobe dies faster than
 	// the light does.
 	//
@@ -1090,7 +1084,8 @@ float4 GGAtmo_MainMarch(
                 const float SunElevation = dot(SampleUp, P.Atmo.lightRayParams.lightDir);
 
                 const float AmbientFactor = smoothstep(
-					-GG_AMBIENT_TERMINATOR, GG_AMBIENT_TERMINATOR, SunElevation);
+					-P.Scatter.AmbientTerminator, P.Scatter.AmbientTerminator,
+					SunElevation);
 
                 P.Atmo.lightRayParams.samplePos = SamplePos;
                 P.Atmo.lightRayParams.parentStepIndex = StepIndex;
@@ -1110,7 +1105,7 @@ float4 GGAtmo_MainMarch(
 				// Evaluated against the deck already crossed, before this step
 				// adds its own -- the lobe is attenuated by what is in FRONT of
 				// the sample, not by the sample itself.
-                const float MieLobe = exp(-DeckDepthAhead * GG_MIE_LOBE_DECAY);
+                const float MieLobe = exp(-DeckDepthAhead * P.Scatter.MieLobeDecay);
 
                 const float3 MieScatter = P.Atmo.scatteringParams.mieBeta
 					* P.Atmo.scatteringParams.phaseM * AtmoDens.y * MieLobe * LobeShadow;

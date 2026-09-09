@@ -126,13 +126,18 @@
  *  DetailNoise     float4(WorleyG, WorleyB, WorleyA, Amount)
  *  StructureNoise  float4(WorleyG, WorleyB, WorleyA, Amount)
  *  Relief   float4(DeckTop, BandRelief, PressureLift, StormTowers)
- *  Profile  float4(AtmosphereThickness, DeckBottom, VortexThreshold, unused)
+ *  Profile  float4(AtmosphereThickness, DeckBottom, VortexThreshold,
+ *                  GradientThickness)
  *  Layers   float3(FlowLayer, DeepFlowLayer, DeckSlope)
  *
- *  TWO ABSOLUTES AND THE REST DIMENSIONLESS. DeckTop and DeckBottom are
- *  fractions of atmosphere thickness; the three relief amounts, both carves and
- *  DeckSlope are fractions of GradientDepth, the distance between them. Relief
- *  therefore cannot outgrow the room the deck has, whichever anchor moves.
+ *  THREE ABSOLUTES AND THE REST DIMENSIONLESS. DeckTop, DeckBottom and
+ *  GradientThickness are fractions of atmosphere thickness; the three relief
+ *  amounts, both carves and DeckSlope are fractions of GradientThickness, the
+ *  span the density profile occupies below each column's own top.
+ *
+ *  DeckBottom is a backstop rather than the profile's base: the gradient runs
+ *  down from the column top and stops there, so relief moves the whole profile
+ *  instead of stretching it.
  *
  *  Thickness, GradientDepth and SpinAngle are derived in GG_BuildField. */
 struct GGFieldParams
@@ -166,9 +171,13 @@ struct GGFieldParams
     float PlanetRadius;
     float Thickness;
 
-	/** DeckTop - DeckBottom, and the unit every relief amount is a fraction of.
-	 *  Also the profile's nominal span, so relief and gradient stay tied and the
-	 *  floor cannot be crossed while the relief budget is under 1. */
+	/** Profile.w: how far the density gradient reaches below a column's own top,
+	 *  and the unit every relief amount is a fraction of.
+	 *
+	 *  AUTHORED, NOT THE DISTANCE BETWEEN THE ANCHORS. Every column gets the
+	 *  same span, so crests and troughs shade alike; a span derived from a flat
+	 *  floor stretches over crests and collapses in troughs, and the gradient is
+	 *  what the surface shading reads. */
     float GradientDepth;
 
     float SpinAngle;
@@ -311,9 +320,8 @@ GGFieldParams GG_BuildField(
 	// The atmosphere's own depth, and the unit the two anchors are fractions of.
     F.Thickness = max(Profile.x, 1e-4f);
 
-	// Floored only to keep the relief multiply finite; an inverted pair is an
-	// authoring error, not a case to support.
-    F.GradientDepth = max(Relief.x - Profile.y, 1e-4f);
+	// Floored only to keep the relief multiply finite.
+    F.GradientDepth = max(Profile.w, 1e-4f);
     F.SpinAngle = -RigidRate * Time;
 
     F.BandSharpness = BandSharpness;
@@ -667,10 +675,10 @@ float3 GG_FlowVelocity(float3 N, float4 Flow)
  *  floor to be smooth at, and why its solid depth is implicit rather than
  *  authored.
  *
- *  THE SPAN IS PER COLUMN, DOWN TO A FLAT FLOOR. Every column saturates at
- *  Bottom whatever its top, so the region below is uniform for all of them: the
- *  march can skip six of its seven fetches there and the inner cull is
- *  arithmetic. The gradient compresses in troughs and stretches over crests.
+ *  Bottom comes from GG_DeckFloor, so the span is the authored thickness
+ *  wherever the backstop is clear and compresses only below it. Every column
+ *  saturates at its own Bottom, and below the backstop every column is
+ *  saturated at once.
  *
  *  PITFALL: the onset stays C1 only while Curve is above 0.5. At exactly 0.5
  *  the slope at the deck top becomes finite instead of zero, which is a crease
@@ -678,11 +686,7 @@ float3 GG_FlowVelocity(float3 N, float4 Flow)
  *  into an edge. That is a legitimate look -- a sharp cloud top IS a
  *  discontinuity -- so it is allowed. The floor here only keeps the exponent
  *  positive, since pow(t, 0) returns 1 and would put full density above the
- *  deck.
- *
- *  PITFALL: a column whose Top is below Bottom has no gradient -- the max only
- *  keeps the divide finite, and the solid-region skip fills such a column in.
- *  Keep DeckBottom under the lowest top the field produces. */
+ *  deck. */
 float GG_DeckDensity(float Height, float Top, float Bottom, float Curve)
 {
     const float Span = max(Top - Bottom, 1e-4f);
@@ -690,6 +694,26 @@ float GG_DeckDensity(float Height, float Top, float Bottom, float Curve)
     const float T = saturate((Top - Height) / Span);
 
     return smoothstep(0.0f, 1.0f, pow(T, max(Curve, 1e-4f)));
+}
+
+/** Where a column's gradient bottoms out: the authored thickness below its own
+ *  top, backstopped by DeckBottom.
+ *
+ *  THE ONE PLACE THE FLOOR IS DERIVED. The profile, the erosion normalization
+ *  and the solid-region skip all have to agree about it, or the skip fills in
+ *  cloud the profile left transparent.
+ *
+ *  THE BACKSTOP IS WHAT KEEPS THE MARCHED BAND THIN. A freely following floor
+ *  drags the fine segment's lower edge down to the deepest column top minus the
+ *  thickness, spending the same step budget over nearly twice the span.
+ *
+ *  NEVER ABOVE THE TOP. A column pushed below the backstop would otherwise get
+ *  a floor above its own top, which inverts the profile and makes empty air
+ *  read as solid. Clamped, such a column is a step at its top -- and the result
+ *  is monotone in Top, which is what lets the skip test a lower bound. */
+float GG_DeckFloor(float Top, GGFieldParams F)
+{
+    return min(max(Top - F.GradientDepth, F.Profile.y), Top);
 }
 
 /** Cloud top altitude, as a fraction of atmosphere thickness. Flow first --
@@ -774,50 +798,49 @@ float GG_CloudTop(
 }
 
 
-/** What one flow fetch yields: the band, the pressure, and a conservative
- *  upper bound on the cloud top. */
+/** What one flow fetch yields: the band, the pressure, and the cloud top
+ *  bracketed from above and below. */
 struct GGFlowProbe
 {
     float Band;
     float Pressure;
+
+	/** The deck top with the carves at their median and the flow terms at their
+	 *  most generous. Read as a HEIGHT by the shadow ray and as an upper bound
+	 *  by the entry search. */
     float Top;
+
+	/** Every term at its most negative, including both carves. A true lower
+	 *  bound on what GG_Field would return for this column, so a floor derived
+	 *  from it is at or below the column's real floor. */
+    float TopLower;
 };
 
-/** The cheap read of the field, for the two jobs that do not need the volumes:
- *  finding where a ray enters the deck, and shading the solid region below
- *  DeckBottom where the volumes cannot change the density.
+/** The cloud top from a flow sample, without the volumes.
  *
- *  WHY AN UPPER BOUND AND NOT THE VALUE. A search that overestimates the deck
- *  stops short and takes another iteration; one that underestimates steps over
- *  the surface and misses cloud entirely. Only one is recoverable, so every
- *  term is at its most generous: the band contributes max(Relief.y *
- *  (Elevation - 0.5), 0), since ReliefScale is in [0,1] and multiplies a term
- *  that changes sign; the storm tower is at full height wherever its gate is
- *  open; the carves are omitted entirely.
+ *  WHY Top IS AN UPPER BOUND. A search that overestimates the deck stops short
+ *  and takes another iteration; one that underestimates steps over the surface
+ *  and misses cloud entirely. Only one is recoverable, so every flow term is at
+ *  its most generous: the band contributes max(Relief.y * (Elevation - 0.5), 0),
+ *  since ReliefScale is in [0,1] and multiplies a term that changes sign, and
+ *  the storm tower is at full height wherever its gate is open.
  *
- *  NO CARVE MARGIN HERE. This probe has two callers with opposite needs: the
- *  entry search wants an upper bound and pays only an extra iteration for one
- *  that is loose, while the shadow ray reads Top as the deck's ACTUAL height
- *  and pays for looseness in optical depth -- a margin of half the gradient
- *  darkens the deck to nothing. The margin therefore belongs to the search, in
- *  GG_CloudTopUpper, not to the probe.
+ *  NO CARVE MARGIN IN Top. Its two readers have opposite needs: the entry
+ *  search pays only an extra iteration for a loose bound, while the shadow ray
+ *  reads it as the deck's ACTUAL height and pays for looseness in optical depth
+ *  -- a margin of half the gradient darkens the deck to nothing. The search's
+ *  margin lives in GG_CloudTopUpper. What is left is the top with the carves at
+ *  their median, which is neither an over nor an under estimate.
  *
- *  What is left is the deck top with the carves at their median, which is
- *  neither an over nor an under estimate -- correct for a density read.
+ *  THE CARVE TERMS IN TopLower MATCH GG_TopBounds, which bounds the same
+ *  quantity across the whole deck. Two expressions for how far a layer can cut
+ *  would drift, and the skip would then disagree with the marched band.
  *
  *  Band and Pressure MUST MATCH GG_Field's, or the two paths disagree about
  *  which band a column is and the solid region tints differently from the
  *  gradient above it. */
-GGFlowProbe GG_FlowProbe(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	float3 P,
-	GGFieldParams F)
+GGFlowProbe GG_ProbeFromFlow(float4 Flow, GGFieldParams F)
 {
-    const float3 N = normalize(GG_RotateZ(P, F.SpinAngle));
-
-    const float4 Flow = GG_SampleFlow(FlowField, FlowSampler, N, F.Layers.x);
-
     GGFlowProbe Probe;
 
     Probe.Band = (Flow.w + F.Warps.z) * F.BandSharpness;
@@ -827,14 +850,38 @@ GGFlowProbe GG_FlowProbe(
 
     const float D = F.GradientDepth;
 
-    Probe.Top = F.Relief.x + D * max(F.Relief.y * (Elevation - 0.5f), 0.0f);
+	// Pressure is known exactly from this fetch, so it sits in both bounds.
+    const float Base = F.Relief.x + D * F.Relief.z * Probe.Pressure;
 
-    Probe.Top += D * F.Relief.z * Probe.Pressure;
+    const float BandTerm = F.Relief.y * (Elevation - 0.5f);
 
-    Probe.Top += D * max(F.Relief.w, 0.0f)
-		* smoothstep(F.Profile.z, 1.0f, abs(Probe.Pressure));
+    const float Vortex = smoothstep(F.Profile.z, 1.0f, abs(Probe.Pressure));
+
+    Probe.Top = Base + D * (max(BandTerm, 0.0f) + max(F.Relief.w, 0.0f) * Vortex);
+
+	// The tower term carries (1 - StormCells), which the volumes decide, so
+	// only its sign is known here.
+    const float CarveDown = max(F.DetailRelief, 0.0f) * saturate(F.DetailFade)
+		+ 0.5f * abs(F.StructureRelief) * saturate(F.StructureFade);
+
+    Probe.TopLower = Base
+		+ D * (min(BandTerm, 0.0f) + min(F.Relief.w, 0.0f) * Vortex - CarveDown);
 
     return Probe;
+}
+
+/** The cheap read of the field, for the jobs that do not need the volumes:
+ *  finding where a ray enters the deck, and shading the region below a column's
+ *  floor where the volumes cannot change the density. */
+GGFlowProbe GG_FlowProbe(
+	Texture2DArray FlowField,
+	SamplerState FlowSampler,
+	float3 P,
+	GGFieldParams F)
+{
+    const float3 N = normalize(GG_RotateZ(P, F.SpinAngle));
+
+    return GG_ProbeFromFlow(GG_SampleFlow(FlowField, FlowSampler, N, F.Layers.x), F);
 }
 
 /** A conservative UPPER BOUND on the deck top, for the entry search.
@@ -863,12 +910,21 @@ float GG_CloudTopUpper(
 /** Evaluates the cloud field at a direction on the sphere. Height is the
  *  shading point's atmosphere fraction and only affects the 3D detail lookups.
  *
+ *  N IS ALREADY SPUN, AND Flow0 IS ITS UNWARPED FLOW SAMPLE. Both come from the
+ *  caller because the saturation test needs the same fetch before it can decide
+ *  whether to call this at all; taking them as arguments is what keeps that test
+ *  free. Flow0 is also the warp loop's first iteration, so nothing is fetched
+ *  twice either way.
+ *
+ *  UNWARPED, deliberately. The sim transports vorticity, so the band pattern
+ *  arrives already advected; warping the lookup would double-count.
+ *
  *  Returns Top, Pressure, Band and the two layer shapes. Both shapes are in
  *  [0,1] where 1 is solid and 0 is clear, already scaled by their layer's fade
  *  and edge weight, so a fully faded layer returns exactly 1 and contributes
  *  nothing to either the carve or the erosion.
  *
- *  One to seven fetches, depending on which layers survive their fade. */
+ *  Up to six further fetches, depending on which layers survive their fade. */
 GGFieldSample GG_Field(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
@@ -876,23 +932,11 @@ GGFieldSample GG_Field(
 	SamplerState DetailSampler,
 	Texture3D StructureVolume,
 	SamplerState StructureSampler,
-	float3 P,
+	float3 N,
+	float4 Flow0,
 	float Height,
 	GGFieldParams F)
 {
-    const float3 N = normalize(GG_RotateZ(P, F.SpinAngle));
-
-	// -- The band, straight from the flow ------------------------------------
-	//
-	// One sample before the warp, for the band, the pressure and the turbulence
-	// weight that scales the warp. Free -- the loop's first iteration samples
-	// this same position -- and it breaks what would otherwise be circular,
-	// since warp length depends on the band.
-	//
-	// UNWARPED, deliberately. The sim transports vorticity, so the band pattern
-	// arrives already advected; warping the lookup would double-count.
-    const float4 Flow0 = GG_SampleFlow(FlowField, FlowSampler, N, F.Layers.x);
-
     const float Pressure = Flow0.z;
 
 	// SIGN AND MAGNITUDE ARE TWO QUANTITIES DRIVING TWO OUTPUTS, and collapsing
@@ -934,8 +978,8 @@ GGFieldSample GG_Field(
 	[unroll]
     for (int It = 0; It < GG_WARP_ITERATIONS; It++)
     {
-		// Reuses the pre-loop sample on the first iteration, so the fetch above
-		// is genuinely free.
+		// Reuses the caller's sample on the first iteration, so the probe that
+		// produced it is genuinely free.
         const float4 Flow = (It == 0) ? Flow0
 			: GG_SampleFlow(FlowField, FlowSampler, Pos, F.Layers.x);
 
@@ -1263,11 +1307,16 @@ float GG_Spot(float3 N, float3 Centre, float Radius, float Strength)
  *  radius. The profile is integrated across it so a step straddling the cloud
  *  top is weighted by how much of it lies inside.
  *
- *  ONE FETCH BELOW DeckBottom RATHER THAN SEVEN. Density there is exactly 1
- *  for every column and the volumes cannot change it, so only the band and the
- *  pressure are still wanted and one flow read supplies both. The test uses the
- *  step's far edge, so the boundary sits a half step clear of the sampling
- *  lattice and the two paths never disagree inside one step.
+ *  ONE FETCH BELOW THE COLUMN'S FLOOR RATHER THAN SEVEN. Density there is
+ *  exactly 1 and the volumes cannot change it, so only the band and the pressure
+ *  are still wanted and the flow read the probe already took supplies both. The
+ *  test uses the step's far edge, so the boundary sits a half step clear of the
+ *  sampling lattice and the two paths never disagree inside one step.
+ *
+ *  THE TEST IS AGAINST A LOWER BOUND ON THE FLOOR, NOT AGAINST THE FLOOR. The
+ *  floor follows the column top, which costs the volumes to know; the probe
+ *  brackets it from below for free. Claiming saturation on the probe's upper
+ *  bound instead would fill carved troughs back in with solid deck.
  *
  *  Returns:
  *    x  Density in [0,1]. Multiply by an extinction coefficient in the march.
@@ -1299,29 +1348,38 @@ float4 GG_Density(
 
     const float HalfStep = max(StepHalfLength, 0.0f);
 
-    const float Bottom = F.Profile.y;
+	// The one flow fetch both paths start from.
+    const float3 N = normalize(GG_RotateZ(Direction, F.SpinAngle));
+
+    const float4 Flow0 = GG_SampleFlow(FlowField, FlowSampler, N, F.Layers.x);
+
+    const GGFlowProbe Probe = GG_ProbeFromFlow(Flow0, F);
 
 	// -- Solid region -------------------------------------------------------
 	//
-	// The whole step lies below the floor, so every column is saturated across
-	// it and erosion has run out with the gradient it is normalized against.
-	// Nothing the volumes could say changes the density, so their six fetches
-	// are pure cost.
+	// The whole step lies below where this column can bottom out, so it is
+	// saturated across the step and erosion has run out with the gradient it is
+	// normalized against. Nothing the volumes could say changes the density, so
+	// their six fetches are pure cost.
+	//
+	// GG_DeckFloor is monotone in Top, so feeding it the probe's lower bound
+	// yields a floor at or below the real one and the test can only be
+	// conservative.
     BRANCH
 
-    if (Height + HalfStep <= Bottom)
+    if (Height + HalfStep <= GG_DeckFloor(Probe.TopLower, F))
     {
-        const GGFlowProbe Probe = GG_FlowProbe(FlowField, FlowSampler, Direction, F);
-
         return float4(1.0f, Probe.Band, Probe.Pressure, Probe.Top);
     }
 
     const GGFieldSample Field = GG_Field(
 		FlowField, FlowSampler, DetailVolume, DetailSampler,
 		StructureVolume, StructureSampler,
-		Direction, Height, F);
+		N, Flow0, Height, F);
 
     const float Top = Field.Top;
+
+    const float Bottom = GG_DeckFloor(Top, F);
 
 	// THE PROFILE IS INTEGRATED ACROSS THE STEP, NOT SAMPLED AT ITS MIDPOINT.
 	// One midpoint sample makes the deck a near-binary decision per step, and as
@@ -1496,9 +1554,11 @@ bool GG_RaySphere(float3 Origin, float3 Dir, float Radius, out float T0, out flo
  *  bound stops being one.
  *
  *  OutMin is the WORST CASE, every term at its most negative at once, so it
- *  sits well below anything the field produces. It sizes the march reference
- *  rather than bounding the solid region -- the floor does that, and does it
- *  exactly. */
+ *  sits at or below anything the field produces. It is the lowest a column top
+ *  can be, which is the altitude below which EVERY column is saturated -- the
+ *  anchor the opaque clip counts down from. It does not bound the marched band:
+ *  that ends at DeckBottom, so a trough reaching below the backstop is stepped
+ *  coarsely rather than finely. */
 void GG_TopBounds(
 	GGFieldParams F,
 	float DetailFade,
@@ -1516,11 +1576,11 @@ void GG_TopBounds(
 	// up, and TopMax sets the cull radius, lengthening the chord every grazing
 	// ray crosses for lumps that only ever cut downward.
 	//
-	// BOTH LAYERS HAVE TO APPEAR. The inner cull is measured down from OutMin,
-	// so a carve left out of this bound cuts low columns off mid-ramp.
-	// The structure carve is signed, so half of it lands in each bound. The
-	// detail carve is one-sided, and which side depends on the sign of its
-	// amount.
+	// BOTH LAYERS HAVE TO APPEAR. The opaque clip counts down from OutMin, so a
+	// carve left out of this bound puts the terminus above cloud that is still
+	// transparent. The structure carve is signed, so half of it lands in each
+	// bound. The detail carve is one-sided, and which side depends on the sign
+	// of its amount.
     const float StructureHalf =
 		D * 0.5f * abs(F.StructureRelief) * saturate(StructureFade);
 
@@ -1600,8 +1660,9 @@ float4 GG_March(
     const float OuterRadius = F.PlanetRadius + Thickness * TopMax;
 
 	// The deck's own vertical extent: from the highest a column can reach down
-	// to the floor, below which every column is uniform. That is the region the
-	// step budget has to resolve.
+	// to the backstop, which is as low as a gradient runs unless relief pushed
+	// the column top under it. That is the region the step budget has to
+	// resolve.
     const float DeckExtent = max(TopMax - F.Profile.y, 1e-4f);
 
     float TEnter, TExit;
