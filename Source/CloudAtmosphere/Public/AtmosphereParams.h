@@ -337,6 +337,27 @@ struct CLOUDATMOSPHERE_API FAtmosphereRaymarchParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.25", ClampMax = "8.0"))
 	float LightStepTexels = 1.0f;
 
+	/** March pixels a VIEW step is allowed to span.
+	 *
+	 *  THE COUNTS ABOVE SIZE THE MARCH AGAINST THE DECK, THIS SIZES IT AGAINST
+	 *  THE SCREEN. A step budget divided into a span knows nothing about where
+	 *  the camera is, so the same detail is resolved at fifty planet radii as at
+	 *  two -- and at fifty, a dozen samples land inside a single pixel. Nothing
+	 *  finer than a pixel can be seen, so nothing finer needs marching.
+	 *
+	 *  IT ONLY EVER LENGTHENS THE STEP. Close in the footprint is smaller than
+	 *  the planned step and this does nothing; far out it is many times larger
+	 *  and the step follows it, which is where the saving is. The march is
+	 *  capped by the thinnest feature on the ray either way, so a step can never
+	 *  swallow the gradient it is integrating however far the camera gets.
+	 *
+	 *  1 is a step per pixel. Above about 2 the deck starts to band along the
+	 *  step lattice at distance, since the jitter has less room to hide the
+	 *  integration error; below 1 the extra samples land inside a pixel that has
+	 *  already been decided. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.25", ClampMax = "4.0"))
+	float ViewStepPixels = 1.0f;
+
 	static FAtmosphereRaymarchParams MakeGasGiantDefaults()
 	{
 		FAtmosphereRaymarchParams Params;

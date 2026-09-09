@@ -205,7 +205,30 @@ struct GGAtmoParams
     GGFieldParams Field;
     GGScatterParams Scatter;
     float3x3 WorldToLocal;
+
+	/** Angular width of one march pixel, radians. Times the distance to a
+	 *  sample, it is how much of the deck that sample stands for. */
+    float PixelAngle;
+
+	/** March pixels a view step is allowed to span. The step budget sizes the
+	 *  march against the DECK; this sizes it against the SCREEN, and the screen
+	 *  is what decides whether the extra samples are visible. */
+    float StepPixels;
 };
+
+/** Angular width of one march pixel, from the ray directions either side of it.
+ *
+ *  MEASURED RATHER THAN DERIVED FROM THE PROJECTION. Both directions are unit
+ *  vectors, so the chord between them is the angle to well within what this is
+ *  used for, and it stays correct under any projection the ray builder already
+ *  handles instead of duplicating its assumptions. */
+float GGAtmo_PixelAngle(float2 svxy, float2 rtSize)
+{
+    const float3 D0 = Atmo_RayDirection(svxy, rtSize);
+    const float3 D1 = Atmo_RayDirection(svxy + float2(1.0f, 0.0f), rtSize);
+
+    return length(D1 - D0);
+}
 
 /** Blends the three scattering sets by the signed band.
  *
@@ -1176,10 +1199,34 @@ float4 GGAtmo_MainMarch(
         {
             Iter++;
 
-            const float CurrentStep = min(
-				Atmo_AdaptiveStepSize(BaseStepSize, Pos, RayStart, ReferenceLength,
-					P.Atmo.mainRayParams.stepScaleFactor),
-				SegEnd - Pos);
+			// -- Screen-footprint bound -------------------------------------
+			//
+			// The plan sizes steps against the DECK and knows nothing about the
+			// camera, so the march resolves the same detail at fifty radii as at
+			// two -- and at fifty, a dozen samples land inside one pixel. The
+			// footprint is what decides whether a sample can be seen at all.
+			//
+			// IT RAISES THE FLOOR, IT DOES NOT SET THE STEP. Close in the
+			// footprint is smaller than the planned step and this does nothing;
+			// far out it is many times larger and the step follows it.
+			//
+			// CAPPED BY THE THINNEST THING ON THE RAY, whichever of the deck's
+			// gradient or the air's scale height is smaller. Past that a step
+			// swallows the feature it is meant to be integrating, and no
+			// footprint argument makes that acceptable -- an unresolved gradient
+			// is wrong everywhere, not just where it is too small to see.
+            const float FootprintStep = Pos * P.PixelAngle * P.StepPixels;
+
+            const float FeatureCap = min(
+				P.Field.GradientDepth * P.Field.Thickness,
+				P.Atmo.scatteringParams.rayScaleH);
+
+            float CurrentStep = Atmo_AdaptiveStepSize(BaseStepSize, Pos, RayStart,
+				ReferenceLength, P.Atmo.mainRayParams.stepScaleFactor);
+
+            CurrentStep = max(CurrentStep, min(FootprintStep, FeatureCap));
+
+            CurrentStep = min(CurrentStep, SegEnd - Pos);
 
             const float StepSizeMult = CurrentStep / max(BaseStepSize, 1e-6f);
 
