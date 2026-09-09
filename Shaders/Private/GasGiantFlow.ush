@@ -41,6 +41,22 @@
 #endif
 
 
+/** Which sim slice the deck reads. The coarse warp and the band signal come
+ *  from GG_FLOW_LAYER; the fine shear comes from GG_DEEP_FLOW_LAYER, and the two
+ *  being DIFFERENT is what produces vertical wind shear rather than a single
+ *  sheet dragged around.
+ *
+ *  Both must be under GasGiantSimConfig::LayerCount, which is authored. A slice
+ *  index past the end reads clamped rather than failing, so the shear quietly
+ *  vanishes instead of erroring. */
+#ifndef GG_FLOW_LAYER
+#define GG_FLOW_LAYER 0
+#endif
+
+#ifndef GG_DEEP_FLOW_LAYER
+#define GG_DEEP_FLOW_LAYER 1
+#endif
+
 /** Fraction of the cone-trace advance actually taken. Under 1 because the deck
  *  slope bound is authored, and an under-declared slope is the one way the
  *  entry search steps over the surface. */
@@ -55,9 +71,8 @@
  *  Scales   (DetailScale, StructureScale, DetailWarpInherit, StructureWarpInherit)
  *  Warps    (WarpTime, DetailWarp, BandBias, TurbulenceFloor)
  *  DetailNoise / StructureNoise  (WorleyG, WorleyB, WorleyA, Amount)
- *  Relief   (DeckTop, BandRelief, PressureLift, StormTowers)
+ *  Relief   (DeckTop, BandRelief, PressureRelief, StormTowerRelief)
  *  Profile  (AtmosphereThickness, DeckBackstop, VortexThreshold, GradientThickness)
- *  Layers   (FlowLayer, DeepFlowLayer, DeckSlope)
  *
  *  Thickness, GradientDepth and SpinAngle are derived in GG_BuildField; the two
  *  fades are set per sample by the march. */
@@ -73,7 +88,11 @@ struct GGFieldParams
 
     float4 Relief;
     float4 Profile;
-    float3 Layers;
+	/** Bound on the deck's slope, GRADIENT DEPTHS per radian -- the same unit as
+	 *  the relief producing that slope, so it stays in step through an anchor
+	 *  retune. Read only by the entry search's cone angle: under-declaring it is
+	 *  the one way that search steps over the surface. */
+    float DeckSlope;
 
     float PlanetRadius;
     float Thickness;
@@ -142,7 +161,7 @@ GGFieldParams GG_BuildField(
 	float4 DetailNoise,
 	float4 StructureNoise,
 	float EdgeBias,
-	float3 Layers,
+	float DeckSlope,
 	float4 Relief,
 	float4 Profile,
 	float BandSharpness,
@@ -167,7 +186,7 @@ GGFieldParams GG_BuildField(
 
     F.Relief = Relief;
     F.Profile = Profile;
-    F.Layers = Layers;
+    F.DeckSlope = DeckSlope;
 
     F.PlanetRadius = PlanetRadius;
 
@@ -507,7 +526,7 @@ GGFlowProbe GG_FlowProbe(
 {
     const float3 N = normalize(GG_RotateZ(P, F.SpinAngle));
 
-    return GG_ProbeFromFlow(GG_SampleFlow(FlowField, FlowSampler, N, F.Layers.x), F);
+    return GG_ProbeFromFlow(GG_SampleFlow(FlowField, FlowSampler, N, GG_FLOW_LAYER), F);
 }
 
 
@@ -587,7 +606,7 @@ GGFieldSample GG_Field(
     for (int It = 0; It < GG_WARP_ITERATIONS; It++)
     {
         const float4 Flow = (It == 0) ? Flow0
-			: GG_SampleFlow(FlowField, FlowSampler, Pos, F.Layers.x);
+			: GG_SampleFlow(FlowField, FlowSampler, Pos, GG_FLOW_LAYER);
 
         const float3 Velocity = GG_FlowVelocity(Pos, Flow);
 
@@ -629,7 +648,7 @@ GGFieldSample GG_Field(
     BRANCH
 
 
-	// Fine shear, WANTED BY BOTH LAYERS. Layers.y selects a different sim slice
+	// Fine shear, WANTED BY BOTH LAYERS. A different sim slice
 	// from the coarse warp, which is what produces genuine vertical wind shear.
 	// Inherits only a FRACTION of the coarse displacement, since a displacement
 	// field with a large gradient IS strain. OUTSIDE THE DETAIL BRANCH, BECAUSE
@@ -641,7 +660,7 @@ GGFieldSample GG_Field(
     {
         PDetail = normalize(N + FlowWarp * F.Scales.z);
 
-        const float4 DeepFlow = GG_SampleFlow(FlowField, FlowSampler, PDetail, F.Layers.y);
+        const float4 DeepFlow = GG_SampleFlow(FlowField, FlowSampler, PDetail, GG_DEEP_FLOW_LAYER);
 
         DetailWarp = GG_FlowVelocity(PDetail, DeepFlow) * (F.Warps.y * Turbulence);
     }
@@ -805,7 +824,7 @@ float4 GG_Density(
 
     const float3 N = normalize(GG_RotateZ(Direction, F.SpinAngle));
 
-    const float4 Flow0 = GG_SampleFlow(FlowField, FlowSampler, N, F.Layers.x);
+    const float4 Flow0 = GG_SampleFlow(FlowField, FlowSampler, N, GG_FLOW_LAYER);
 
     const GGFlowProbe Probe = GG_ProbeFromFlow(Flow0, F);
 

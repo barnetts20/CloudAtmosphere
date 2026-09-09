@@ -63,181 +63,207 @@ enum class EPlanetAtmosphereType : uint8
  *  that a cloud model has no say in, and the composite blur runs in a single
  *  material shared by both march paths -- a per-model copy of it would be a
  *  second value that can never reach a shader. */
+ /** Stage 3 blur, which softens the limb against the scene behind it. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FAtmosphereEnvironmentParams
+struct CLOUDATMOSPHERE_API FAtmosphereCompositeParams
 {
 	GENERATED_BODY()
 
-	// -- Light --------------------------------------------------------------
-
-	/** RGB direction is the hue, RGB magnitude is the intensity. The march and
-	 *  the directional light both derive from this, so they cannot disagree
-	 *  about the star.
-	 *
-	 *  Light DIRECTION is not here: it comes from the actor's rotation. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Light")
-	FLinearColor LightColor = FLinearColor(30.0f, 28.5f, 27.0f, 10.0f);
-
-	// -- Composite ----------------------------------------------------------
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Composite", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float BlurFalloffFactor = 2.0f;
 
 	/** Blur weight at the planet edge. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Composite", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float MaxBlurWeight = 0.5f;
 
 	/** Blur weight everywhere else, as a fraction of MaxBlurWeight. A ratio so
 	 *  the floor cannot exceed the peak. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Composite", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float MinBlurFraction = 0.0f;
 
 	/** MinW, derived. */
 	float GetMinBlurWeight() const { return MaxBlurWeight * MinBlurFraction; }
 };
 
-/** The shell, the air, the march budget and the cloud lighting: everything both
- *  march materials declare and read the same way.
+/** The flow simulation both models read.
  *
- *  ONE INSTANCE PER MODEL, and nothing here is shared between them. This is one
- *  definition of what each parameter MEANS, with a separate value per model.
- *
- *  Defaults come from the two factories at the bottom, not from a details-panel
- *  edit: the member initialisers below are the terrestrial set, and the gas
- *  giant factory states its deltas against them. A member added without a
- *  matching delta therefore takes the terrestrial value on both models, which
- *  is silent. */
+ *  ONE SIM PER WORLD. The gas giant deck reads it for flow and the terrestrial
+ *  band will read it for weather, so it sits on the environment rather than on
+ *  either model: a per-model copy would be a second config the one subsystem
+ *  cannot honour. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FAtmosphereCommonParams
+struct CLOUDATMOSPHERE_API FAtmosphereSimulationParams
 {
 	GENERATED_BODY()
 
-	// -- Geometry -----------------------------------------------------------
-	//
-	// Planet Center and Planet Radius come from the actor's transform, not from
-	// here. Everything below is a fraction of the radius, so resizing the
-	// planet moves the whole system together.
+	/** Owns the flow render target the materials sample and the settings the
+	 *  sim subsystem steps against. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	TObjectPtr<UGasGiantSimConfig> Config = nullptr;
+
+	/** Start the sim on BeginPlay. Off when another actor already drives it:
+	 *  the subsystem is per-world, so two planets starting it fight. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	bool bStartOnBeginPlay = true;
+};
+
+/** Where the shell sits.
+ *
+ *  Planet Center and Planet Radius come from the actor's transform, not from
+ *  here. Everything below is a fraction of the radius, so resizing the planet
+ *  moves the whole system together. */
+USTRUCT(BlueprintType)
+struct CLOUDATMOSPHERE_API FAtmosphereGeometryParams
+{
+	GENERATED_BODY()
 
 	/** Atmosphere top, as a fraction of planet radius above the surface. The
 	 *  ceiling every other shell in the system is expressed against. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Geometry", meta = (ClampMin = "0.001"))
-	float AtmosphereHeightScale = 0.2f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001"))
+	float HeightScale = 0.2f;
 
 	/** Vertical offset applied to the atmosphere floor. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Geometry")
-	float AtmosphereFloorOffset = 0.0f;
-
-	// -- Air scattering -----------------------------------------------------
-	//
-	// Coefficients and scale heights are divided by atmosphere thickness in
-	// Atmo_BuildParams, so they are thickness-relative and survive a resize.
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air Scattering")
-	FLinearColor RayleighBeta = FLinearColor(0.896360f, 2.913294f, 4.0f, 1.0f);
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air Scattering")
-	float RayleighHeight = 0.1f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air Scattering")
-	FLinearColor MieBeta = FLinearColor(1.0f, 0.83163f, 0.71612f, 1.0f);
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air Scattering")
-	float MieHeight = 0.05f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air Scattering", meta = (ClampMin = "-0.99", ClampMax = "0.99"))
-	float MieG = 0.9f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air Scattering")
-	FLinearColor AtmosphereAbsorptionBeta = FLinearColor(0.05f, 0.05f, 0.05f, 0.0f);
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air Scattering")
-	float AtmosphereAbsorptionHeight = 0.15f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air Scattering")
-	float AtmosphereAbsorptionFalloff = 0.1f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Air Scattering")
-	FLinearColor AtmosphereAmbient = FLinearColor(0.080328f, 0.080328f, 0.1f, 0.0f);
-
-	// -- Cloud lighting -----------------------------------------------------
-	//
-	// Cloud Beta and Cloud Absorption Beta are NOT here. The terrestrial band
-	// authors an absolute extinction; the deck solves one from a total optical
-	// depth. Each model owns its own input to the same shader parameter.
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Lighting")
-	FLinearColor CloudAmbient = FLinearColor(0.04f, 0.04f, 0.05f, 0.0f);
-
-	/** (forward g, backward g, lobe blend, isotropic multiple-scatter weight).
-	 *  The isotropic term is what keeps the shadow side off black -- single
-	 *  scattering has nothing to deliver there. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud Lighting")
-	FLinearColor CloudPhaseParams = FLinearColor(0.9f, 0.1f, 0.5f, 0.5f);
-
-	// -- Raymarching --------------------------------------------------------
-	//
-	// A BUDGET, NOT A QUALITY SETTING, and the two models spend it over
-	// different geometry. Cloud Steps crosses the terrestrial band, but on the
-	// gas giant it crosses only the deck segment the cone trace split off.
-	// Same name, same meaning, values that do not transfer.
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Raymarching", meta = (ClampMin = "1.0"))
-	float AtmosphereSteps = 32.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Raymarching", meta = (ClampMin = "1.0"))
-	float AtmosphereLightSteps = 16.0f;
-
-	/** Step growth with distance from the ray start. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Raymarching", meta = (ClampMin = "0.0"))
-	float StepScaleFactor = 2.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Raymarching", meta = (ClampMin = "1.0"))
-	float CloudSteps = 32.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Raymarching", meta = (ClampMin = "1.0"))
-	float CloudLightSteps = 32.0f;
-
-	// -- Derivations --------------------------------------------------------
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float FloorOffset = 0.0f;
 
 	/** Atmosphere outer radius in world units. */
 	float GetAtmosphereRadius(float PlanetRadius) const
 	{
-		return PlanetRadius * (1.0f + AtmosphereHeightScale);
+		return PlanetRadius * (1.0f + HeightScale);
 	}
 
-	// -- Defaults -----------------------------------------------------------
-
-	/** The member initialisers above, unmodified. */
-	static FAtmosphereCommonParams MakeTerrestrialDefaults()
+	/** A shell of a third of a planet radius. The deck's world thickness is
+	 *  solved from this, so it sets the deck's depth as much as the air's. */
+	static FAtmosphereGeometryParams MakeGasGiantDefaults()
 	{
-		return FAtmosphereCommonParams();
+		FAtmosphereGeometryParams Params;
+		Params.HeightScale = 0.3f;
+		return Params;
 	}
+};
 
-	/** Deltas against the terrestrial set. Everything not listed is identical
-	 *  today and free to diverge -- carrying two instances is what makes that
-	 *  a value edit rather than a code change. */
-	static FAtmosphereCommonParams MakeGasGiantDefaults()
+/** The air itself: scattering, absorption and what bounced light survives.
+ *
+ *  Coefficients and scale heights are divided by atmosphere thickness in
+ *  Atmo_BuildParams, so they are thickness-relative and survive a resize. */
+USTRUCT(BlueprintType)
+struct CLOUDATMOSPHERE_API FAtmosphereAirParams
+{
+	GENERATED_BODY()
+
+	/** RGB is the Rayleigh coefficient, A IS ITS SCALE HEIGHT as a fraction of
+	 *  atmosphere thickness. Packed together because a coefficient without the
+	 *  profile it applies to is not a quantity -- they are only ever authored as
+	 *  a pair, and the shader reads them from one pin.
+	 *
+	 *  A scale height under about half the deck's top leaves no air above the
+	 *  cloud, and the limb loses its halo. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FLinearColor RayleighBeta = FLinearColor(0.896360f, 2.913294f, 4.0f, 0.1f);
+
+	/** RGB the Mie coefficient, A ITS SCALE HEIGHT. Lower than Rayleigh's:
+	 *  aerosol sits nearer the surface than the gas does. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FLinearColor MieBeta = FLinearColor(1.0f, 0.83163f, 0.71612f, 0.05f);
+
+	/** Mie asymmetry. Belongs to MieBeta and sits apart only because that
+	 *  float4 has no channel left. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-0.99", ClampMax = "0.99"))
+	float MieG = 0.9f;
+
+	/** RGB the absorber coefficient, A THE ALTITUDE ITS LAYER IS CENTRED ON.
+	 *  Not a scale height like the two above: the absorber is a Lorentzian
+	 *  layer, ozone-like, rather than a profile falling off from the ground. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FLinearColor AbsorptionBeta = FLinearColor(0.05f, 0.05f, 0.05f, 0.15f);
+
+	/** Half-width of that layer. Separate because the layer has two parameters
+	 *  and only one alpha channel. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float AbsorptionFalloff = 0.1f;
+
+	/** RGB the ambient colour, A THE FLOOR its terminator falloff lerps from.
+	 *
+	 *  AT ZERO FLOOR THE TERM HAS ALMOST NO RANGE. Ambient stands in for light
+	 *  that bounced several times, and behind an opaque planet there is none --
+	 *  but gated to exactly zero it is swamped by direct light everywhere it is
+	 *  not zero, so the whole control lives inside the terminator's width. The
+	 *  floor is what buys it a night side, at the cost of the planet glowing
+	 *  where nothing should reach it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FLinearColor Ambient = FLinearColor(0.080328f, 0.080328f, 0.1f, 0.0f);
+
+	/** Stronger and bluer than the terrestrial air, and a scale height that
+	 *  keeps the air extending past the deck's crests rather than dying under
+	 *  them -- below about half the deck's top there is no Rayleigh left above
+	 *  the cloud and the limb reads as a hard edge. */
+	static FAtmosphereAirParams MakeGasGiantDefaults()
 	{
-		FAtmosphereCommonParams Params;
+		FAtmosphereAirParams Params;
+		Params.RayleighBeta = FLinearColor(5.291138f, 23.918282f, 32.0f, 0.2f);
+		return Params;
+	}
+};
 
-		// A shell of a third of a planet radius. The deck's world thickness is
-		// solved from this, so it sets the deck's depth as much as the air's.
-		Params.AtmosphereHeightScale = 0.3f;
+/** How cloud is lit, for whichever model is marching.
+ *
+ *  Cloud Beta and Cloud Absorption Beta are NOT here. The terrestrial band
+ *  authors an absolute extinction; the deck solves one from a total optical
+ *  depth. Each model owns its own input to the same shader parameter. */
+USTRUCT(BlueprintType)
+struct CLOUDATMOSPHERE_API FAtmosphereCloudLightParams
+{
+	GENERATED_BODY()
 
-		// Stronger and bluer than the terrestrial air, and a scale height that
-		// keeps the air extending past the deck's crests rather than dying
-		// under them -- below about half the deck's top there is no Rayleigh
-		// left above the cloud and the limb reads as a hard edge.
-		Params.RayleighBeta = FLinearColor(5.291138f, 23.918282f, 32.0f, 1.0f);
-		Params.RayleighHeight = 0.2f;
+	/** RGB the cloud ambient colour, A THE FLOOR, exactly as the air's. Its own
+	 *  floor because the deck and the air go dark at different rates. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FLinearColor Ambient = FLinearColor(0.04f, 0.04f, 0.05f, 0.0f);
+
+	/** (forward g, backward g, lobe blend, isotropic multiple-scatter weight).
+	 *  The isotropic term is what keeps the shadow side off black -- single
+	 *  scattering has nothing to deliver there. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FLinearColor PhaseParams = FLinearColor(0.9f, 0.1f, 0.5f, 0.5f);
+};
+
+/** The march's step budget.
+ *
+ *  A BUDGET, NOT A QUALITY SETTING, and the two models spend it over different
+ *  geometry. Cloud Steps crosses the terrestrial band, but on the gas giant it
+ *  crosses only the deck segment the cone trace split off. Same name, same
+ *  meaning, values that do not transfer. */
+USTRUCT(BlueprintType)
+struct CLOUDATMOSPHERE_API FAtmosphereRaymarchParams
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0"))
+	float AtmosphereSteps = 32.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0"))
+	float AtmosphereLightSteps = 16.0f;
+
+	/** Step growth with distance from the ray start. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float StepScaleFactor = 2.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0"))
+	float CloudSteps = 32.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0"))
+	float CloudLightSteps = 32.0f;
+
+	static FAtmosphereRaymarchParams MakeGasGiantDefaults()
+	{
+		FAtmosphereRaymarchParams Params;
 
 		// The deck fills the disc, so the air segment above it is crossed by
-		// every ray rather than only the ones that miss the planet.
+		// every ray rather than only the ones that miss the planet, and the
+		// deck segment gets a much finer march than the terrestrial band --
+		// the whole image is deck, and the gradient holds every feature.
 		Params.AtmosphereSteps = 128.0f;
 		Params.StepScaleFactor = 3.0f;
-
-		// The deck segment gets a much finer march than the terrestrial band:
-		// the whole image is deck, and the gradient is where every feature is.
 		Params.CloudSteps = 128.0f;
 
 		// A gas giant has no holes, so nearly every light sample accumulates
@@ -249,6 +275,20 @@ struct CLOUDATMOSPHERE_API FAtmosphereCommonParams
 
 		return Params;
 	}
+};
+
+/** The four common groups gathered by reference, so the apply path can take
+ *  one argument and still read them by group.
+ *
+ *  NOT A UPROPERTY. The groups are declared separately on the actor -- one per
+ *  panel group, twice over for the two models -- and this is only how they
+ *  travel together. */
+struct FAtmosphereCommonView
+{
+	const FAtmosphereGeometryParams& Geometry;
+	const FAtmosphereAirParams& Air;
+	const FAtmosphereCloudLightParams& CloudLight;
+	const FAtmosphereRaymarchParams& Raymarch;
 };
 
 /** The terrestrial cloud band: its shell, its noise, and the extinction it is
@@ -363,10 +403,11 @@ struct CLOUDATMOSPHERE_API FTerrestrialCloudParams
  *  column shades alike. DeckBackstop is a backstop under it: the gradient stops
  *  there, which keeps the marched band fixed however deep relief cuts.
  *
- *  RELIEF IS THEREFORE UNBOUNDED BELOW. Only the ceiling check remains:
- *  GetTopMax() returns an atmosphere fraction and has to stay at or below 1.
- *  GetTopMin() says how far the deepest troughs fall, which is a tuning readout
- *  rather than a limit. */
+ *  RELIEF IS BOUNDED IN NEITHER DIRECTION. Downward it meets the backstop;
+ *  upward the deck hangs from DeckTop, so the peaks land on it whatever the
+ *  relief amounts are. GetTopMin() says how far the deepest troughs fall, and
+ *  GetDeckBase() where an unrelieved column sits -- both tuning readouts rather
+ *  than limits. The only constraint left is DeckTop itself, at or below 1. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 {
@@ -374,12 +415,16 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 
 	// -- Shell --------------------------------------------------------------
 	//
-	// Measured from the planet surface. GetTopMax() must stay at or below 1:
+	// Measured from the planet surface. DeckTop must stay at or below 1:
 	// above it Atmo_Plan clips the tallest columns, slicing the tops off
 	// exactly where features are tallest, which reads as a field bug.
 
-	/** Base of the deck top, before relief moves it. Relief adds and subtracts
-	 *  around this, so the highest point is GetTopMax() rather than this. */
+	/** THE CEILING: the highest any column reaches, as a fraction of atmosphere
+	 *  thickness. Relief hangs the deck DOWNWARD from here, so the cloud tops
+	 *  stay put and GradientThickness spends itself on depth.
+	 *
+	 *  The shader is given GetDeckBase() rather than this. Keeping it at or
+	 *  below 1 is the whole ceiling constraint. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shell", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float DeckTop = 0.8f;
 
@@ -425,8 +470,10 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	// -- Relief -------------------------------------------------------------
 	//
 	// Fractions of GradientThickness, all of them, moving the deck top around
-	// DeckTop. 1 is one whole gradient. Nothing bounds the downward terms --
-	// they meet the backstop -- so only GetTopMax() has to be watched.
+	// GetDeckBase(). 1 is one whole gradient. NOTHING HERE NEEDS WATCHING: the
+	// base is solved so the upward terms land on DeckTop, and the downward ones
+	// meet the backstop. Raising an amount deepens the deck rather than
+	// pushing it through the shell.
 
 	/** Height between a jet and a zone. Wants to be large: the point of driving
 	 *  height from the flow is that bands are geometry rather than a pattern
@@ -436,11 +483,12 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 
 	/** How far pressure lifts the deck. Anticyclones rise, cyclones sink. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief")
-	float PressureLift = 0.1f;
+	float PressureRelief = 0.1f;
 
-	/** Added height of a convective tower, where the vortex gate is open. */
+	/** Added height of a convective tower, where VortexThreshold's gate is
+	 *  open. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief")
-	float StormTowers = 0.1f;
+	float StormTowerRelief = 0.1f;
 
 	/** How far the flow's strain collapses band relief toward flat. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Relief", meta = (ClampMin = "0.0"))
@@ -479,15 +527,22 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 
 	// -- Detail -------------------------------------------------------------
 
-	/** Horizontal feature size of the detail volume. */
+	/** Horizontal feature size of the DETAIL volume, in noise units per radian.
+	 *  Higher tiles finer. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.01"))
 	float DetailScale = 24.0f;
 
-	/** Structure layer scale, as a multiple of DetailScale. Below 1 makes it the
-	 *  COARSER layer, which is what its job wants: mid-level shaping that stays
-	 *  resolvable from orbit while the detail layer tiles finely up close. */
+	/** Horizontal feature size of the STRUCTURE volume, same unit, authored
+	 *  independently. Below DetailScale makes it the coarser layer, which is
+	 *  what its job wants: mid-level shaping that stays resolvable from orbit
+	 *  while the detail layer tiles finely up close.
+	 *
+	 *  INDEPENDENT RATHER THAN A RATIO, so the two layers can take different
+	 *  noise assets and be retuned separately. Tied to DetailScale, retuning the
+	 *  fine layer silently moves the deck's silhouette -- the shape that has to
+	 *  survive to orbit follows a control that only matters up close. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.01"))
-	float StructureScaleRatio = 0.05f;
+	float StructureScale = 1.2f;
 
 	/** DETAIL layer: vertical feature size against its horizontal one. Their
 	 *  ratio IS the aspect of the resulting structure, so the ratio is the real
@@ -568,46 +623,23 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level Of Detail", meta = (ClampMin = "0.0"))
 	float StructureFadeSpan = 0.4f;
 
-	// Weights over each volume's three Worley rungs, coarse to fine.
-	//
-	// INDEPENDENT FIELDS ON SEPARATE SEEDS, each carrying its own octave stack
-	// from its base scale down. Raising a rung adds a distinct pattern rather
-	// than more of what the others already say.
-	//
-	// Normalized shader-side by the weights' length, so contrast holds however
-	// the balance is set and these are purely look controls. Strength lives in
-	// the Amount beside them.
-	//
-	// Six scalars rather than two vectors, so each field's name in the details
-	// panel is the name of the material parameter it feeds.
-
+	/** Worley rung weights coarse to fine in RGB, layer amount in A.
+	 *
+	 *  RGB IS A DIRECTION, NOT THREE LEVELS. The rungs are renormalized by their
+	 *  LENGTH shader-side rather than their sum, so only the balance between
+	 *  them carries meaning -- which is exactly what a colour picker navigates.
+	 *  Dragging the wheel sweeps the whole spectrum continuously; three sliders
+	 *  can only walk one axis at a time.
+	 *
+	 *  A stays independent of that normalization and is the layer's overall
+	 *  amount. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
-	float DetailWorleyCoarse = 1.0f;
+	FLinearColor DetailNoiseWeights = FLinearColor(1.0f, 0.5f, 0.25f, 1.0f);
 
+	/** Same layout for the structure layer. Its own set, because the two layers
+	 *  are different sizes doing different jobs. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
-	float DetailWorleyMid = 0.5f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
-	float DetailWorleyFine = 0.25f;
-
-	/** How strongly the detail layer carves. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.0"))
-	float DetailAmount = 1.0f;
-
-	/** Weighted toward the coarse rung the structure layer gives rounded
-	 *  billows; toward the fine one, cellular breakup. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
-	float StructureWorleyCoarse = 1.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
-	float StructureWorleyMid = 0.5f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
-	float StructureWorleyFine = 0.25f;
-
-	/** How strongly the structure layer shapes. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail", meta = (ClampMin = "0.0"))
-	float StructureAmount = 1.0f;
+	FLinearColor StructureNoiseWeights = FLinearColor(1.0f, 0.5f, 0.25f, 1.0f);
 
 	/** How much of either layer survives in the flat band interiors, against
 	 *  full strength at the edges where a real gas giant's billows live. */
@@ -669,16 +701,10 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	 *  runs in the rotating frame, so this rotates the sampling position rather
 	 *  than the flow. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flow")
-	float RigidRate = 0.0f;
+	float RotationWeight = 0.0f;
 
-	/** Which sim layer drives the coarse warp and the band signal. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flow", meta = (ClampMin = "0"))
-	int32 FlowLayer = 0;
-
-	/** Which sim layer advects the detail. A different layer from FlowLayer is
-	 *  what produces genuine vertical wind shear. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flow", meta = (ClampMin = "0"))
-	int32 DeepFlowLayer = 1;
+	// The sim slices the deck reads are GG_FLOW_LAYER and GG_DEEP_FLOW_LAYER
+	// in GasGiantFlow.ush. Both must stay under GasGiantSimConfig::LayerCount.
 
 	/** Bound on the deck's slope, GRADIENT DEPTHS per radian -- the same unit as
 	 *  the relief that produces the slope, so it stays in step through an anchor
@@ -709,60 +735,67 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sources")
 	TObjectPtr<UVolumeTexture> StructureVolume = nullptr;
 
-	/** Owns the flow render target the material samples and the settings the
-	 *  sim subsystem steps against. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sources")
-	TObjectPtr<UGasGiantSimConfig> SimConfig = nullptr;
-
-	/** Start the sim on BeginPlay. Off when another actor already drives it:
-	 *  the subsystem is per-world, so two planets starting it fight. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sources")
-	bool bStartSimulationOnBeginPlay = true;
+	// The sim that drives the flow lives on the Environment set, since the
+	// subsystem is per-world and the terrestrial band will read the same one.
 
 	// -- Derivations --------------------------------------------------------
 
 	/** Ladder weights plus the layer's amount, as the material expects them. */
 	FLinearColor GetDetailNoise() const
 	{
-		return FLinearColor(DetailWorleyCoarse, DetailWorleyMid, DetailWorleyFine, DetailAmount);
+		return DetailNoiseWeights;
 	}
 
 	FLinearColor GetStructureNoise() const
 	{
-		return FLinearColor(StructureWorleyCoarse, StructureWorleyMid,
-			StructureWorleyFine, StructureAmount);
+		return StructureNoiseWeights;
 	}
 
-	/** How far the downward relief terms take a column top below DeckTop,
-	 *  in gradients. Feeds GetTopMin; nothing bounds it. */
+	/** How far the UPWARD relief terms can carry a column above the base, in
+	 *  gradients. Every term in GG_CloudTop at its most generous: Elevation is
+	 *  in [0,1] so the band contributes half of BandRelief either side of the
+	 *  base; pressure is soft-saturated to [-1,1] sim-side so it contributes
+	 *  the whole of PressureRelief; the structure carve is signed, so half of it
+	 *  lands in each bound; the detail carve is one-sided and lands in whichever
+	 *  bound its sign points at. */
+	float GetUpBudget() const
+	{
+		return 0.5f * FMath::Abs(BandRelief)
+			+ FMath::Abs(PressureRelief)
+			+ 0.5f * FMath::Abs(StructureRelief)
+			+ FMath::Max(-DetailRelief, 0.0f)
+			+ FMath::Max(StormTowerRelief, 0.0f);
+	}
+
+	/** The matching downward reach. Feeds GetTopMin; nothing bounds it. */
 	float GetReliefBudget() const
 	{
 		return 0.5f * FMath::Abs(BandRelief)
-			+ FMath::Abs(PressureLift)
+			+ FMath::Abs(PressureRelief)
 			+ FMath::Max(DetailRelief, 0.0f)
 			+ 0.5f * FMath::Abs(StructureRelief);
 	}
 
-	/** The highest the deck can reach, as an atmosphere fraction. Closed form,
-	 *  and it must match GG_TopBounds in GasGiantFlow.ush -- every term in
-	 *  GG_CloudTop appears, each at its most generous.
+	/** The unrelieved deck altitude the shader builds every column from: far
+	 *  enough below DeckTop that the tallest column lands exactly on it.
 	 *
-	 *  Elevation is in [0,1] so the band contributes half of BandRelief either
-	 *  side of the base. Pressure is soft-saturated to [-1,1] sim-side so it
-	 *  contributes the whole of PressureLift. The structure carve is signed, so
-	 *  half of it lands in each bound; the detail carve is one-sided and lands
-	 *  in whichever bound its sign points at.
-	 *
-	 *  Keep this at or below 1: it is the deck's top against the atmosphere
-	 *  ceiling. */
+	 *  DERIVED, SO THE CEILING IS WHAT IS AUTHORED. Anchoring the base instead
+	 *  puts DeckTop at neither the peaks nor the mean: relief is a fraction of
+	 *  GradientThickness, so the peaks climb as the deck deepens and every
+	 *  thickness needs the shell realigned by hand. Hung from the ceiling, the
+	 *  cloud tops stay where they were put and thickness spends itself
+	 *  downward, which is the direction that has room. */
+	float GetDeckBase() const
+	{
+		return DeckTop - GradientThickness * GetUpBudget();
+	}
+
+	/** The highest the deck reaches. DeckTop by construction -- kept as a
+	 *  function because GG_TopBounds still derives it the long way, from the
+	 *  base plus the same budget, and the two must agree. */
 	float GetTopMax() const
 	{
-		return DeckTop + GradientThickness * (
-			0.5f * FMath::Abs(BandRelief)
-			+ FMath::Abs(PressureLift)
-			+ 0.5f * FMath::Abs(StructureRelief)
-			+ FMath::Max(-DetailRelief, 0.0f)
-			+ FMath::Max(StormTowers, 0.0f));
+		return GetDeckBase() + GradientThickness * GetUpBudget();
 	}
 
 	/** The lowest a column top can fall. Below DeckBackstop its gradient has been
@@ -771,14 +804,16 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	 *  counts its opaque terminus down from. */
 	float GetTopMin() const
 	{
-		return DeckTop - GradientThickness * GetReliefBudget();
+		return GetDeckBase() - GradientThickness * GetReliefBudget();
 	}
 
 	/** Where the gradient bottoms out at a column with no relief. Matches
 	 *  GG_DeckFloor in GasGiantFlow.ush, which does the same clamp per column. */
 	float GetNominalFloor() const
 	{
-		return FMath::Min(FMath::Max(DeckTop - GradientThickness, DeckBackstop), DeckTop);
+		const float Base = GetDeckBase();
+
+		return FMath::Min(FMath::Max(Base - GradientThickness, DeckBackstop), Base);
 	}
 
 	/** Atmosphere thickness in world units: the one absolute length the field
@@ -805,14 +840,14 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	 *  around, so it belongs in the same float4 as they do. */
 	FLinearColor GetRelief() const
 	{
-		return FLinearColor(DeckTop, BandRelief, PressureLift, StormTowers);
+		return FLinearColor(GetDeckBase(), BandRelief, PressureRelief, StormTowerRelief);
 	}
 
 	FLinearColor GetScales() const
 	{
 		return FLinearColor(
 			DetailScale,
-			DetailScale * StructureScaleRatio,
+			StructureScale,
 			DetailWarpInherit,
 			StructureWarpInherit);
 	}
@@ -824,15 +859,6 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 			WarpTime * DetailWarpRatio,
 			BandBias,
 			TurbulenceFloor);
-	}
-
-	FLinearColor GetLayers() const
-	{
-		return FLinearColor(
-			static_cast<float>(FlowLayer),
-			static_cast<float>(DeepFlowLayer),
-			DeckSlope,
-			0.0f);
 	}
 
 	/** Noise units the shell spans, per layer. Each aspect rides on its own
@@ -853,7 +879,7 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 
 	float GetStructureVertical(float AtmosphereHeightScale) const
 	{
-		return DetailScale * StructureScaleRatio * StructureAspect * AtmosphereHeightScale;
+		return StructureScale * StructureAspect * AtmosphereHeightScale;
 	}
 
 	/** (DetailNear, DetailFar, StructureNear, StructureFar), as the shader wants

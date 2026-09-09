@@ -573,8 +573,11 @@ float4 Atmo_MainMarch(
                 float3 sampleUp = (samplePos - input.planetParams.planetPos)
 					/ max(distFromCenter, 0.0001);
                 float sunElevation = dot(sampleUp, input.lightRayParams.lightDir);
-                float ambientFactor = smoothstep(
-					-ATMO_AMBIENT_TERMINATOR, ATMO_AMBIENT_TERMINATOR, sunElevation);
+                float airAmbientFactor = Atmo_AmbientFactor(sunElevation,
+					ATMO_AMBIENT_TERMINATOR, input.scatteringParams.atmoAmbient.a);
+
+                float cloudAmbientFactor = Atmo_AmbientFactor(sunElevation,
+					ATMO_AMBIENT_TERMINATOR, input.cloudParams.cloudAmb.a);
 
                 input.lightRayParams.samplePos = samplePos;
                 input.lightRayParams.parentStepIndex = stepIndex;
@@ -594,7 +597,7 @@ float4 Atmo_MainMarch(
 
                 float3 directScatter = (rayleighScatter + mieScatter) * sunTransmittance * input.mainRayParams.lightCol;
                 float3 ambientScatter = input.scatteringParams.rayBeta * atmoDens.x
-					* input.scatteringParams.atmoAmbient * ambientFactor;
+					* input.scatteringParams.atmoAmbient.rgb * airAmbientFactor;
 
                 float3 inscattered = (directScatter + ambientScatter) * currentStep;
 
@@ -628,8 +631,8 @@ float4 Atmo_MainMarch(
 
                         float3 cloudLight = incomingLight * phaseDual * lobeShadow
 							+ multiScatter
-							+ input.mainRayParams.lightCol * input.cloudParams.cloudAmb
-								* ambientFactor;
+							+ input.mainRayParams.lightCol * input.cloudParams.cloudAmb.rgb
+								* cloudAmbientFactor;
 
                         float3 cloudExtinction = cloudDensity * input.cloudParams.cloudScatBeta * currentStep;
                         float3 cloudStepTransmittance = exp(-cloudExtinction);

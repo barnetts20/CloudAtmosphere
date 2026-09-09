@@ -26,82 +26,89 @@
 
 struct CloudParams
 {
-	float cloudScale;
-	float2 cloudHeightCurve;
-	float cloudCoverage;
-	float cloudDensityMult;
-	float4 cloudNoiseWeights;
-	float4 cloudNoiseInvert;
-	float4 detailNoiseWeights;
-	float4 detailNoiseInvert;
-	float detailNoiseScale;
-	float detailNoiseErode;
-	float4 animationWeights;
-	float4 cloudPhaseParams;
-	float3 cloudScatBeta;
-	float3 cloudAbsBeta;
-	float3 cloudAmb;
+    float cloudScale;
+    float2 cloudHeightCurve;
+    float cloudCoverage;
+    float cloudDensityMult;
+    float4 cloudNoiseWeights;
+    float4 cloudNoiseInvert;
+    float4 detailNoiseWeights;
+    float4 detailNoiseInvert;
+    float detailNoiseScale;
+    float detailNoiseErode;
+    float4 animationWeights;
+    float4 cloudPhaseParams;
+    float3 cloudScatBeta;
+    float3 cloudAbsBeta;
+	/** rgb ambient colour, a the FLOOR its terminator falloff lerps from.
+	 *
+	 *  A ZERO FLOOR LEAVES THE TERM ALMOST NO RANGE. Ambient stands in for light
+	 *  that bounced several times, and behind an opaque planet there is none --
+	 *  but gated to exactly zero it is also swamped by direct light everywhere
+	 *  it is not zero, so the whole control lives inside the terminator's width.
+	 *  The floor is what buys it a night side. */
+    float4 cloudAmb;
 };
 
 struct PlanetParams
 {
-	float3 planetPos;
-	float planetRadius;
-	float planetRadiusSq;
-	float atmoRadius;
-	float cloudOuterRadius;
-	float cloudInnerRadius;
-	float cloudOuterRadiusSq;
-	float cloudInnerRadiusSq;
+    float3 planetPos;
+    float planetRadius;
+    float planetRadiusSq;
+    float atmoRadius;
+    float cloudOuterRadius;
+    float cloudInnerRadius;
+    float cloudOuterRadiusSq;
+    float cloudInnerRadiusSq;
 };
 
 struct ScatterParams
 {
-	float cosTheta;
-	float3 rayBeta;
-	float3 mieBeta;
-	float3 absBeta;
-	float atmoAmbient;
-	float rayScaleH;
-	float mieScaleH;
-	float absHeight;
-	float absFalloff;
-	float phaseR;
-	float phaseM;
+    float cosTheta;
+    float3 rayBeta;
+    float3 mieBeta;
+    float3 absBeta;
+    float4 atmoAmbient;
+    float rayScaleH;
+    float mieScaleH;
+    float absHeight;
+    float absFalloff;
+    float phaseR;
+    float phaseM;
 };
 
 struct MainRayParams
 {
-	float2 svxy;
-	float3 originalCameraPos;
-	float3 cameraPos;
-	float3 cameraDir;
-	float3 lightCol;
-	float sceneDepth;
-	int atmoSteps;
-	int cloudSteps;
-	float jitterFactor;
-	float stepScaleFactor;
+    float2 svxy;
+    float3 originalCameraPos;
+    float3 cameraPos;
+    float3 cameraDir;
+    float3 lightCol;
+    float sceneDepth;
+    int atmoSteps;
+    int cloudSteps;
+    float jitterFactor;
+    float stepScaleFactor;
 };
 
 struct LightRayParams
 {
-	float3 samplePos;
-	float3 lightDir;
-	int atmoLightSteps;
-	int cloudLightSteps;
-	float jitterFactor;
-	float stepSizeMult;
-	int parentStepIndex;
+    float3 samplePos;
+    float3 lightDir;
+    int atmoLightSteps;
+    int cloudLightSteps;
+    float jitterFactor;
+    float stepSizeMult;
+    int parentStepIndex;
 };
 
 struct CompositeParams
 {
-	PlanetParams planetParams;
-	ScatterParams scatteringParams;
-	CloudParams cloudParams;
-	MainRayParams mainRayParams;
-	LightRayParams lightRayParams;
+    PlanetParams planetParams;
+    ScatterParams scatteringParams;
+    CloudParams cloudParams;
+    MainRayParams mainRayParams;
+    LightRayParams lightRayParams;
 };
 
 // ---------------------------------------------------------------------------
@@ -120,34 +127,34 @@ struct CompositeParams
  *  that assumption, so an unnormalized direction silently scales both roots. */
 float2 Atmo_RaySphere(float3 origin, float3 dir, float3 center, float radius)
 {
-	float3 oc = origin - center;
-	float b = dot(oc, dir);
-	float c = dot(oc, oc) - radius * radius;
-	float disc = b * b - c;
+    float3 oc = origin - center;
+    float b = dot(oc, dir);
+    float c = dot(oc, oc) - radius * radius;
+    float disc = b * b - c;
 
-	if (disc < 0.0)
-	{
-		return float2(-1.0, -1.0);
-	}
+    if (disc < 0.0)
+    {
+        return float2(-1.0, -1.0);
+    }
 
-	float sq = sqrt(disc);
+    float sq = sqrt(disc);
 
-	return float2(-b - sq, -b + sq);
+    return float2(-b - sq, -b + sq);
 }
 
 /** Rayleigh phase. Symmetric forward and back, which is why the sky is bright
  *  in both directions and Mie is not. */
 float Atmo_PhaseRayleigh(float cosTheta)
 {
-	return 3.0 / (16.0 * 3.14159265) * (1.0 + cosTheta * cosTheta);
+    return 3.0 / (16.0 * 3.14159265) * (1.0 + cosTheta * cosTheta);
 }
 
 /** Henyey-Greenstein. Used for Mie directly, and twice inside the dual lobe. */
 float Atmo_PhaseHG(float cosTheta, float g)
 {
-	float g2 = g * g;
+    float g2 = g * g;
 
-	return (1.0 - g2) / (4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5));
+    return (1.0 - g2) / (4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5));
 }
 
 /** Two HG lobes, forward and back, mixed.
@@ -159,10 +166,25 @@ float Atmo_PhaseHG(float cosTheta, float g)
  *  going black. */
 float Atmo_PhaseDualLobe(float cosTheta, float gForward, float gBack, float forwardWeight)
 {
-	float forward = Atmo_PhaseHG(cosTheta, gForward);
-	float backward = Atmo_PhaseHG(cosTheta, -gBack);
+    float forward = Atmo_PhaseHG(cosTheta, gForward);
+    float backward = Atmo_PhaseHG(cosTheta, -gBack);
 
-	return max(lerp(backward, forward, forwardWeight), .05);
+    return max(lerp(backward, forward, forwardWeight), .05);
+}
+
+/** Weight on an ambient term at a given sun elevation.
+ *
+ *  ONE DERIVATION FOR BOTH PATHS AND BOTH TERMS. Air ambient and cloud ambient
+ *  answer the same question -- how much bounced light reaches here -- and a
+ *  second copy of this curve would let them disagree about where night starts.
+ *
+ *  Terminator is the half-width in cosine of sun elevation: 0.15 is about nine
+ *  degrees either side of the geometric terminator. Floor is what survives on
+ *  the far side. */
+float Atmo_AmbientFactor(float sunElevation, float terminator, float ambientFloor)
+{
+    return lerp(saturate(ambientFloor), 1.0,
+		smoothstep(-terminator, terminator, sunElevation));
 }
 
 /** Rayleigh, Mie and absorber density at an altitude, as (ray, mie, abs).
@@ -172,14 +194,14 @@ float Atmo_PhaseDualLobe(float cosTheta, float gForward, float gBack, float forw
  *  ozone, which sits in a layer rather than falling off from the ground. */
 float3 Atmo_Density(float height, float rayScaleH, float mieScaleH, float absHeight, float absFalloff)
 {
-	float rayDensity = exp(-height / rayScaleH);
-	float mieDensity = exp(-height / mieScaleH);
+    float rayDensity = exp(-height / rayScaleH);
+    float mieDensity = exp(-height / mieScaleH);
 
-	float safeFalloff = max(absFalloff, 0.0001);
-	float denom = (absHeight - height) / safeFalloff;
-	float absDensity = (1.0 / (denom * denom + 1.0)) * rayDensity;
+    float safeFalloff = max(absFalloff, 0.0001);
+    float denom = (absHeight - height) / safeFalloff;
+    float absDensity = (1.0 / (denom * denom + 1.0)) * rayDensity;
 
-	return float3(rayDensity, mieDensity, absDensity);
+    return float3(rayDensity, mieDensity, absDensity);
 }
 
 /** Step size growing with progress along the ray.
@@ -202,21 +224,21 @@ float3 Atmo_Density(float height, float rayScaleH, float mieScaleH, float absHei
  *  atmosphere depth" rather than "after crossing however much this ray had". */
 float Atmo_AdaptiveStepSize(float baseStep, float pos, float rayStart, float referenceLength, float growthRate)
 {
-	float t = saturate((pos - rayStart) / referenceLength);
+    float t = saturate((pos - rayStart) / referenceLength);
 
-	return baseStep * (1.0 + t * growthRate);
+    return baseStep * (1.0 + t * growthRate);
 }
 
 /** Per-pixel seed for the main ray, from the integer pixel coordinate. */
 float Atmo_RaySeed(float2 svxy)
 {
-	uint2 pixelCoord = uint2(svxy);
+    uint2 pixelCoord = uint2(svxy);
 
-	uint pixSeed = pixelCoord.x * 1664525u + pixelCoord.y * 1013904223u;
-	pixSeed = (pixSeed ^ (pixSeed >> 16)) * 2654435769u;
-	pixSeed = (pixSeed ^ (pixSeed >> 16));
+    uint pixSeed = pixelCoord.x * 1664525u + pixelCoord.y * 1013904223u;
+    pixSeed = (pixSeed ^ (pixSeed >> 16)) * 2654435769u;
+    pixSeed = (pixSeed ^ (pixSeed >> 16));
 
-	return float(pixSeed) / 4294967295.0;
+    return float(pixSeed) / 4294967295.0;
 }
 
 /** Golden-ratio advance through the sequence, one value per step.
@@ -228,5 +250,5 @@ float Atmo_RaySeed(float2 svxy)
  *  is the formal statement of having no short period. */
 float Atmo_StepJitter(float seed, int stepIndex)
 {
-	return frac(seed + float(stepIndex) * 0.618033);
+    return frac(seed + float(stepIndex) * 0.618033);
 }

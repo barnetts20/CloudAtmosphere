@@ -300,12 +300,12 @@ float GGAtmo_DeckEntry(
 		// The deck rises to meet the ray, so the closing rate is the sum of the
 		// ray's descent and the deck's rise across the ground it covers.
 		// Dividing by the descent alone overshoots without bound at tangent.
-		// Layers.z is in gradient depths per radian, matching the relief that
+		// DeckSlope is in gradient depths per radian, matching the relief that
 		// produces the slope.
         const float Horizontal = sqrt(max(1.0f - ProbeRate * ProbeRate, 0.0f));
 
         const float ClosingRate = -ProbeRate
-			+ Horizontal * max(F.Layers.z, 0.1f) * F.GradientDepth * F.Thickness
+			+ Horizontal * max(F.DeckSlope, 0.1f) * F.GradientDepth * F.Thickness
 				/ max(ProbeRadius, 1e-4f);
 
         const float Advance = (ProbeHeight - TopUpper) * F.Thickness / max(ClosingRate, 1e-5f);
@@ -476,18 +476,15 @@ CompositeParams GGAtmo_BuildAtmo(
 	float sceneDepth,
 	float3 lightDirection,
 	float3 lightColor,
-	float3 rayleighBeta,
-	float3 mieBeta,
-	float3 absorptionBeta,
-	float rayleighHeight,
-	float mieHeight,
-	float absorptionHeight,
+	float4 rayleighBeta,
+	float4 mieBeta,
+	float4 absorptionBeta,
 	float absorptionFalloff,
-	float atmoAmbient,
+	float4 atmoAmbient,
 	float mieG,
 	float3 cloudScatterBeta,
 	float3 cloudAbsorptionBeta,
-	float3 cloudAmbient,
+	float4 cloudAmbient,
 	float4 cloudPhaseParams,
 	int mainAtmoSteps,
 	int mainCloudSteps,
@@ -541,8 +538,7 @@ CompositeParams GGAtmo_BuildAtmo(
 		svPosition, rayDir, cameraPos, atmoPos,
 		F.PlanetRadius, atmoRadius, CloudOuter, CloudInner,
 		sceneDepth, lightDirection, lightColor,
-		rayleighBeta, mieBeta, absorptionBeta,
-		rayleighHeight, mieHeight, absorptionHeight, absorptionFalloff,
+		rayleighBeta, mieBeta, absorptionBeta, absorptionFalloff,
 		atmoAmbient, mieG,
 		cloudScatterBeta, cloudAbsorptionBeta, cloudAmbient,
 		cloudPhaseParams,
@@ -1074,7 +1070,16 @@ float4 GGAtmo_MainMarch(
             const float DistFromCentre = length(SamplePos - P.Atmo.planetParams.planetPos);
             const float Height = DistFromCentre - P.Atmo.planetParams.planetRadius;
 
-            if (Height > 0.0f)
+			// THE SURFACE BOUNDS THE AIR, NOT THE DECK. A gas giant has no
+			// surface: planetRadius is the coordinate origin and the field
+			// saturates below it, so a sample under it is inside opaque deck
+			// rather than inside a body the ray cannot enter. Gating the whole
+			// step on it leaves the interior transparent, and a camera that
+			// descends through the deck comes out into vacuum.
+			//
+			// The air is bounded by it, though. Atmo_Density is exp(-h/H), so a
+			// negative height grows without bound instead of falling off.
+            if (Height > 0.0f || IsDeck)
             {
 				// Local sun elevation, for the ambient terms. Sampled from the
 				// sample's own up vector rather than the planet's, so the
@@ -1085,9 +1090,11 @@ float4 GGAtmo_MainMarch(
 
                 const float SunElevation = dot(SampleUp, P.Atmo.lightRayParams.lightDir);
 
-                const float AmbientFactor = smoothstep(
-					-P.Scatter.AmbientTerminator, P.Scatter.AmbientTerminator,
-					SunElevation);
+                const float AirAmbientFactor = Atmo_AmbientFactor(SunElevation,
+					P.Scatter.AmbientTerminator, P.Atmo.scatteringParams.atmoAmbient.a);
+
+                const float DeckAmbientFactor = Atmo_AmbientFactor(SunElevation,
+					P.Scatter.AmbientTerminator, P.Atmo.cloudParams.cloudAmb.a);
 
                 P.Atmo.lightRayParams.samplePos = SamplePos;
                 P.Atmo.lightRayParams.parentStepIndex = StepIndex;
@@ -1097,9 +1104,11 @@ float4 GGAtmo_MainMarch(
                 const float3 SunTransmittance = GGAtmo_LightMarch(
 					FlowField, FlowSampler, P, LobeShadow);
 
-                const float3 AtmoDens = Atmo_Density(Height,
-					P.Atmo.scatteringParams.rayScaleH, P.Atmo.scatteringParams.mieScaleH,
-					P.Atmo.scatteringParams.absHeight, P.Atmo.scatteringParams.absFalloff);
+                const float3 AtmoDens = (Height > 0.0f)
+					? Atmo_Density(Height,
+						P.Atmo.scatteringParams.rayScaleH, P.Atmo.scatteringParams.mieScaleH,
+						P.Atmo.scatteringParams.absHeight, P.Atmo.scatteringParams.absFalloff)
+					: float3(0.0f, 0.0f, 0.0f);
 
                 const float3 RayleighScatter =
 					P.Atmo.scatteringParams.rayBeta * P.Atmo.scatteringParams.phaseR * AtmoDens.x;
@@ -1116,7 +1125,7 @@ float4 GGAtmo_MainMarch(
 					(RayleighScatter + MieScatter) * SunTransmittance * P.Atmo.mainRayParams.lightCol;
 
                 const float3 AmbientScatter = P.Atmo.scatteringParams.rayBeta * AtmoDens.x
-					* P.Atmo.scatteringParams.atmoAmbient * AmbientFactor;
+					* P.Atmo.scatteringParams.atmoAmbient.rgb * AirAmbientFactor;
 
                 const float3 Inscattered = (DirectScatter + AmbientScatter) * CurrentStep;
 
@@ -1196,8 +1205,8 @@ float4 GGAtmo_MainMarch(
 
                         const float3 DeckLight = IncomingLight * PhaseDual * LobeShadow
 							+ MultiScatter
-							+ P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb
-								* AmbientFactor;
+							+ P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb.rgb
+								* DeckAmbientFactor;
 
 						// Band scales the shared base rather than replacing it,
 						// so the deck stays on the same thickness-relative
@@ -1218,8 +1227,8 @@ float4 GGAtmo_MainMarch(
 							* S.rgb * (1.0f - DeckStepTransmittance);
 #elif GG_DEBUG_TERM == 4
 						DebugAccum += Transmittance
-							* (P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb
-								* AmbientFactor)
+							* (P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb.rgb
+								* DeckAmbientFactor)
 							* S.rgb * (1.0f - DeckStepTransmittance);
 #elif GG_DEBUG_TERM == 5
 						if (bDebugFirstDeck)

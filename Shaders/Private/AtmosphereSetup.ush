@@ -26,13 +26,13 @@
  *  the result is normalized. */
 float3 Atmo_RayDirection(float2 svPosition, float2 rtSize)
 {
-	float2 screenUV = svPosition / rtSize;
+    float2 screenUV = svPosition / rtSize;
 
-	float2 ClipXY = screenUV * float2(2, -2) + float2(-1, 1);
+    float2 ClipXY = screenUV * float2(2, -2) + float2(-1, 1);
 
-	float4 WorldDir = mul(float4(ClipXY, 0.5, 1.0), View.ClipToTranslatedWorld);
+    float4 WorldDir = mul(float4(ClipXY, 0.5, 1.0), View.ClipToTranslatedWorld);
 
-	return normalize(WorldDir.xyz / WorldDir.w);
+    return normalize(WorldDir.xyz / WorldDir.w);
 }
 
 /** Blends between ignoring scene depth and using it.
@@ -47,9 +47,9 @@ float3 Atmo_RayDirection(float2 svPosition, float2 rtSize)
  *  the moment the blend starts. */
 float Atmo_CorrectedDepth(float camDist, float sceneDepth, float atmoRadius, float cloudOuterRadius)
 {
-	float outerBlend = saturate((atmoRadius - camDist) / (atmoRadius - cloudOuterRadius));
+    float outerBlend = saturate((atmoRadius - camDist) / (atmoRadius - cloudOuterRadius));
 
-	return lerp(camDist * 2, sceneDepth, outerBlend);
+    return lerp(camDist * 2, sceneDepth, outerBlend);
 }
 
 /** Fills CompositeParams from the material's pin values.
@@ -77,18 +77,15 @@ CompositeParams Atmo_BuildParams(
 	float sceneDepth,
 	float3 lightDirection,
 	float3 lightColor,
-	float3 rayleighBeta,
-	float3 mieBeta,
-	float3 absorptionBeta,
-	float rayleighHeight,
-	float mieHeight,
-	float absorptionHeight,
+	float4 rayleighBeta,
+	float4 mieBeta,
+	float4 absorptionBeta,
 	float absorptionFalloff,
-	float atmoAmbient,
+	float4 atmoAmbient,
 	float mieG,
 	float3 cloudScatterBeta,
 	float3 cloudAbsorptionBeta,
-	float3 cloudAmbient,
+	float4 cloudAmbient,
 	float4 cloudPhaseParams,
 	float cloudScale,
 	float2 cloudHeightCurve,
@@ -109,74 +106,77 @@ CompositeParams Atmo_BuildParams(
 	float lightJitterFactor,
 	float stepScaleFactor)
 {
-	const float atmoThickness = atmoRadius - planetRadius;
+    const float atmoThickness = atmoRadius - planetRadius;
 
-	const float3 crPlanetPos = atmoPos - cameraPos;
-	const float camDist = length(crPlanetPos);
+    const float3 crPlanetPos = atmoPos - cameraPos;
+    const float camDist = length(crPlanetPos);
 
-	const float cosTheta = dot(rayDir, lightDirection);
+    const float cosTheta = dot(rayDir, lightDirection);
 
-	CompositeParams params;
+    CompositeParams params;
 
-	params.planetParams.planetPos = crPlanetPos;
-	params.planetParams.planetRadius = planetRadius;
-	params.planetParams.atmoRadius = atmoRadius;
-	params.planetParams.cloudOuterRadius = cloudOuterRadius;
-	params.planetParams.cloudInnerRadius = cloudInnerRadius;
-	params.planetParams.planetRadiusSq = planetRadius * planetRadius;
-	params.planetParams.cloudOuterRadiusSq = cloudOuterRadius * cloudOuterRadius;
-	params.planetParams.cloudInnerRadiusSq = cloudInnerRadius * cloudInnerRadius;
+    params.planetParams.planetPos = crPlanetPos;
+    params.planetParams.planetRadius = planetRadius;
+    params.planetParams.atmoRadius = atmoRadius;
+    params.planetParams.cloudOuterRadius = cloudOuterRadius;
+    params.planetParams.cloudInnerRadius = cloudInnerRadius;
+    params.planetParams.planetRadiusSq = planetRadius * planetRadius;
+    params.planetParams.cloudOuterRadiusSq = cloudOuterRadius * cloudOuterRadius;
+    params.planetParams.cloudInnerRadiusSq = cloudInnerRadius * cloudInnerRadius;
 
-	params.scatteringParams.cosTheta = cosTheta;
-	params.scatteringParams.rayBeta = rayleighBeta / atmoThickness;
-	params.scatteringParams.mieBeta = mieBeta / atmoThickness;
-	params.scatteringParams.absBeta = absorptionBeta / atmoThickness;
-	params.scatteringParams.atmoAmbient = atmoAmbient;
-	params.scatteringParams.rayScaleH = atmoThickness * rayleighHeight;
-	params.scatteringParams.mieScaleH = atmoThickness * mieHeight;
-	params.scatteringParams.absHeight = atmoThickness * absorptionHeight;
-	params.scatteringParams.absFalloff = atmoThickness * absorptionFalloff;
-	params.scatteringParams.phaseR = Atmo_PhaseRayleigh(cosTheta);
-	params.scatteringParams.phaseM = Atmo_PhaseHG(cosTheta, mieG);
+    params.scatteringParams.cosTheta = cosTheta;
+	// EACH BETA CARRIES ITS OWN SCALE HEIGHT IN a. The two are only authored
+	// together and mean nothing apart -- a coefficient without the profile it
+	// applies to is not a quantity. The two that divide are floored.
+    params.scatteringParams.rayBeta = rayleighBeta.rgb / atmoThickness;
+    params.scatteringParams.mieBeta = mieBeta.rgb / atmoThickness;
+    params.scatteringParams.absBeta = absorptionBeta.rgb / atmoThickness;
+    params.scatteringParams.atmoAmbient = atmoAmbient;
+    params.scatteringParams.rayScaleH = atmoThickness * max(rayleighBeta.a, 1e-4);
+    params.scatteringParams.mieScaleH = atmoThickness * max(mieBeta.a, 1e-4);
+    params.scatteringParams.absHeight = atmoThickness * absorptionBeta.a;
+    params.scatteringParams.absFalloff = atmoThickness * absorptionFalloff;
+    params.scatteringParams.phaseR = Atmo_PhaseRayleigh(cosTheta);
+    params.scatteringParams.phaseM = Atmo_PhaseHG(cosTheta, mieG);
 
-	params.cloudParams.cloudScatBeta = cloudScatterBeta / atmoThickness;
-	params.cloudParams.cloudAbsBeta = cloudAbsorptionBeta / atmoThickness;
-	params.cloudParams.cloudAmb = cloudAmbient;
-	params.cloudParams.cloudPhaseParams = cloudPhaseParams;
-	params.cloudParams.cloudScale = cloudScale;
-	params.cloudParams.cloudHeightCurve = cloudHeightCurve;
-	params.cloudParams.cloudCoverage = cloudCoverage;
-	params.cloudParams.cloudDensityMult = cloudDensityMult;
-	params.cloudParams.cloudNoiseWeights = cloudNoiseWeights;
-	params.cloudParams.cloudNoiseInvert = cloudNoiseInvert;
-	params.cloudParams.detailNoiseWeights = detailNoiseWeights;
-	params.cloudParams.detailNoiseInvert = detailNoiseInvert;
-	params.cloudParams.detailNoiseScale = detailNoiseScale;
-	params.cloudParams.detailNoiseErode = detailNoiseErode;
-	params.cloudParams.animationWeights = animationWeights;
+    params.cloudParams.cloudScatBeta = cloudScatterBeta / atmoThickness;
+    params.cloudParams.cloudAbsBeta = cloudAbsorptionBeta / atmoThickness;
+    params.cloudParams.cloudAmb = cloudAmbient;
+    params.cloudParams.cloudPhaseParams = cloudPhaseParams;
+    params.cloudParams.cloudScale = cloudScale;
+    params.cloudParams.cloudHeightCurve = cloudHeightCurve;
+    params.cloudParams.cloudCoverage = cloudCoverage;
+    params.cloudParams.cloudDensityMult = cloudDensityMult;
+    params.cloudParams.cloudNoiseWeights = cloudNoiseWeights;
+    params.cloudParams.cloudNoiseInvert = cloudNoiseInvert;
+    params.cloudParams.detailNoiseWeights = detailNoiseWeights;
+    params.cloudParams.detailNoiseInvert = detailNoiseInvert;
+    params.cloudParams.detailNoiseScale = detailNoiseScale;
+    params.cloudParams.detailNoiseErode = detailNoiseErode;
+    params.cloudParams.animationWeights = animationWeights;
 
-	params.mainRayParams.svxy = svPosition;
-	params.mainRayParams.cameraPos = float3(0, 0, 0);
-	params.mainRayParams.originalCameraPos = cameraPos;
-	params.mainRayParams.cameraDir = rayDir;
-	params.mainRayParams.lightCol = lightColor;
-	params.mainRayParams.sceneDepth = Atmo_CorrectedDepth(camDist, sceneDepth, atmoRadius, cloudOuterRadius);
-	params.mainRayParams.atmoSteps = mainAtmoSteps;
-	params.mainRayParams.cloudSteps = mainCloudSteps;
-	params.mainRayParams.jitterFactor = jitterFactor;
-	params.mainRayParams.stepScaleFactor = stepScaleFactor;
+    params.mainRayParams.svxy = svPosition;
+    params.mainRayParams.cameraPos = float3(0, 0, 0);
+    params.mainRayParams.originalCameraPos = cameraPos;
+    params.mainRayParams.cameraDir = rayDir;
+    params.mainRayParams.lightCol = lightColor;
+    params.mainRayParams.sceneDepth = Atmo_CorrectedDepth(camDist, sceneDepth, atmoRadius, cloudOuterRadius);
+    params.mainRayParams.atmoSteps = mainAtmoSteps;
+    params.mainRayParams.cloudSteps = mainCloudSteps;
+    params.mainRayParams.jitterFactor = jitterFactor;
+    params.mainRayParams.stepScaleFactor = stepScaleFactor;
 
-	params.lightRayParams.lightDir = lightDirection;
-	params.lightRayParams.atmoLightSteps = atmoLightSteps;
-	params.lightRayParams.cloudLightSteps = cloudLightSteps;
-	params.lightRayParams.jitterFactor = lightJitterFactor;
+    params.lightRayParams.lightDir = lightDirection;
+    params.lightRayParams.atmoLightSteps = atmoLightSteps;
+    params.lightRayParams.cloudLightSteps = cloudLightSteps;
+    params.lightRayParams.jitterFactor = lightJitterFactor;
 
 	// Filled per step by the main march. Initialised so the struct is complete
 	// before it is passed, since HLSL will not warn about a member that is only
 	// written on some paths.
-	params.lightRayParams.samplePos = float3(0, 0, 0);
-	params.lightRayParams.stepSizeMult = 1.0;
-	params.lightRayParams.parentStepIndex = 0;
+    params.lightRayParams.samplePos = float3(0, 0, 0);
+    params.lightRayParams.stepSizeMult = 1.0;
+    params.lightRayParams.parentStepIndex = 0;
 
-	return params;
+    return params;
 }
