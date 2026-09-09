@@ -402,7 +402,7 @@ float3 Atmo_LightMarch(
             float stepSeed = Atmo_HashJitter(input.mainRayParams.svxy,
 				uint(input.lightRayParams.parentStepIndex) * 9781u + uint(iter));
 
-            float sampleOffset = (stepSeed - 0.5) * currentStep * input.lightRayParams.jitterFactor;
+            float sampleOffset = (stepSeed - 0.5) * currentStep * ATMO_STEP_JITTER;
             float3 p = input.lightRayParams.samplePos + input.lightRayParams.lightDir * (pos + currentStep * 0.5 + sampleOffset);
 
 			// Squared comparison, so the common case costs no sqrt.
@@ -551,7 +551,7 @@ float4 Atmo_MainMarch(
             float stepSizeMult = currentStep / baseStepSize;
 
             float stepSeed = Atmo_StepJitter(worldSeed, stepIndex);
-            float sampleOffset = (stepSeed - 0.5) * currentStep * input.mainRayParams.jitterFactor;
+            float sampleOffset = (stepSeed - 0.5) * currentStep * ATMO_STEP_JITTER;
 
             float3 samplePos = rayOrigin + rayDir * (pos + currentStep * 0.5 + sampleOffset);
 

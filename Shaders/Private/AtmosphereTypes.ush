@@ -24,6 +24,26 @@
 // the same reason.
 // ---------------------------------------------------------------------------
 
+/** Fraction of a step a sample is jittered across.
+ *
+ *  1 IS THE ONLY CORRECT VALUE, WHICH IS WHY IT IS NOT A HANDLE. The sample sits
+ *  at the step centre plus (seed - 0.5) * step * this, so at 1 it is uniform
+ *  across its own step and the march is a stratified estimator: one sample per
+ *  stratum, no gaps and no overlap.
+ *
+ *  Below 1 the samples cluster at step centres and the strata have gaps between
+ *  them, which puts the step lattice back into the image as banding. Above 1 a
+ *  sample crosses into its neighbour's stratum, so some of the ray is covered
+ *  twice and some not at all.
+ *
+ *  0 IS A DIAGNOSTIC, NOT A SETTING. It converts sampling noise back into the
+ *  banding it was hiding, which is the fastest way to tell whether an artefact
+ *  is an integration error or something else. A step bound is what fixes the
+ *  banding it reveals -- turning jitter down only hides the symptom again. */
+#ifndef ATMO_STEP_JITTER
+#define ATMO_STEP_JITTER 1.0
+#endif
+
 struct CloudParams
 {
     float cloudScale;
@@ -87,7 +107,6 @@ struct MainRayParams
     float sceneDepth;
     int atmoSteps;
     int cloudSteps;
-    float jitterFactor;
     float stepScaleFactor;
 };
 
@@ -97,7 +116,6 @@ struct LightRayParams
     float3 lightDir;
     int atmoLightSteps;
     int cloudLightSteps;
-    float jitterFactor;
     float stepSizeMult;
     int parentStepIndex;
 

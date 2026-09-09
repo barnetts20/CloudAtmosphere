@@ -102,8 +102,6 @@ CompositeParams Atmo_BuildParams(
 	int mainCloudSteps,
 	int atmoLightSteps,
 	int cloudLightSteps,
-	float jitterFactor,
-	float lightJitterFactor,
 	float lightStepScale,
 	float stepScaleFactor)
 {
@@ -164,13 +162,11 @@ CompositeParams Atmo_BuildParams(
     params.mainRayParams.sceneDepth = Atmo_CorrectedDepth(camDist, sceneDepth, atmoRadius, cloudOuterRadius);
     params.mainRayParams.atmoSteps = mainAtmoSteps;
     params.mainRayParams.cloudSteps = mainCloudSteps;
-    params.mainRayParams.jitterFactor = jitterFactor;
     params.mainRayParams.stepScaleFactor = stepScaleFactor;
 
     params.lightRayParams.lightDir = lightDirection;
     params.lightRayParams.atmoLightSteps = atmoLightSteps;
     params.lightRayParams.cloudLightSteps = cloudLightSteps;
-    params.lightRayParams.jitterFactor = lightJitterFactor;
     params.lightRayParams.stepScale = lightStepScale;
 
 	// Filled per step by the main march. Initialised so the struct is complete

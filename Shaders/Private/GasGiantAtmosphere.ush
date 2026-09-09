@@ -520,8 +520,6 @@ CompositeParams GGAtmo_BuildAtmo(
 	int mainCloudSteps,
 	int atmoLightSteps,
 	int cloudLightSteps,
-	float jitterFactor,
-	float lightJitterFactor,
 	float lightStepScale,
 	float stepScaleFactor,
 	GGFieldParams F)
@@ -578,7 +576,7 @@ CompositeParams GGAtmo_BuildAtmo(
 		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
 		0.0f, 0.0f, float4(0.0f, 0.0f, 0.0f, 0.0f),
 		mainAtmoSteps, mainCloudSteps, atmoLightSteps, cloudLightSteps,
-		jitterFactor, lightJitterFactor, lightStepScale, stepScaleFactor);
+		lightStepScale, stepScaleFactor);
 }
 
 /** Deck density AND band for a SHADOW ray, from ONE flow fetch, against seven
@@ -924,7 +922,7 @@ float3 GGAtmo_LightMarch(
 			// view ray that spawned them.
             const float StepSeed = Atmo_HashJitter(P.Atmo.mainRayParams.svxy,
 				uint(P.Atmo.lightRayParams.parentStepIndex) * 9781u + uint(Iter));
-            const float Offset = (StepSeed - 0.5f) * CurrentStep * P.Atmo.lightRayParams.jitterFactor;
+            const float Offset = (StepSeed - 0.5f) * CurrentStep * ATMO_STEP_JITTER;
 
             const float3 SamplePos = Start + LightDir * (Pos + CurrentStep * 0.5f + Offset);
 
@@ -1231,7 +1229,7 @@ float4 GGAtmo_MainMarch(
             const float StepSizeMult = CurrentStep / max(BaseStepSize, 1e-6f);
 
             const float StepSeed = Atmo_StepJitter(WorldSeed, StepIndex);
-            const float Offset = (StepSeed - 0.5f) * CurrentStep * P.Atmo.mainRayParams.jitterFactor;
+            const float Offset = (StepSeed - 0.5f) * CurrentStep * ATMO_STEP_JITTER;
 
             const float3 SamplePos = RayOrigin + RayDir * (Pos + CurrentStep * 0.5f + Offset);
 
