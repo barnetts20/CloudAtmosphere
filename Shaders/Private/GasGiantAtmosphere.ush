@@ -499,7 +499,7 @@ CompositeParams GGAtmo_BuildAtmo(
 	int cloudLightSteps,
 	float jitterFactor,
 	float lightJitterFactor,
-	float lightBudgetFloor,
+	float lightStepScale,
 	float stepScaleFactor,
 	GGFieldParams F)
 {
@@ -555,7 +555,7 @@ CompositeParams GGAtmo_BuildAtmo(
 		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
 		0.0f, 0.0f, float4(0.0f, 0.0f, 0.0f, 0.0f),
 		mainAtmoSteps, mainCloudSteps, atmoLightSteps, cloudLightSteps,
-		jitterFactor, lightJitterFactor, lightBudgetFloor, stepScaleFactor);
+		jitterFactor, lightJitterFactor, lightStepScale, stepScaleFactor);
 }
 
 /** Deck density AND band for a SHADOW ray, from ONE flow fetch, against seven
@@ -792,6 +792,21 @@ float3 GGAtmo_LightMarch(
     const float SaturatedRadius = P.Field.PlanetRadius
 		+ P.Field.Thickness * min(P.Field.Profile.y, BoundMin);
 
+	// THE STEP BOUND, AS A LENGTH. The two things a shadow ray has to resolve
+	// are how far it moves ACROSS the deck top and how far it moves THROUGH the
+	// gradient, so the shorter of the two governs. Steps longer than this stop
+	// estimating the column they cross and start choosing one.
+	//
+	// Independent of the budget on purpose: a count divided into the span gives
+	// an overhead ray far more resolution than it needs and a grazing ray far
+	// less, because the span is the thing that changes.
+    const float DeckFeature = min(
+		GG_FlowTexelArc(FlowField, P.Atmo.planetParams.cloudOuterRadius),
+		P.Field.GradientDepth * P.Field.Thickness);
+
+    const float MaxDeckStep = max(
+		DeckFeature * max(P.Atmo.lightRayParams.stepScale, 0.01f), 1e-3f);
+
     const float RayStart = Segments[0].x;
     const float ReferenceLength = max(
 		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f);
@@ -867,10 +882,19 @@ float3 GGAtmo_LightMarch(
 
 			// stepSizeMult carries the parent step's growth down, so a coarsely
 			// sampled main ray does not spawn finely sampled light rays.
-            const float CurrentStep = min(
-				Atmo_AdaptiveStepSize(StepSize, Pos, RayStart, ReferenceLength,
-					P.Atmo.mainRayParams.stepScaleFactor) * P.Atmo.lightRayParams.stepSizeMult,
-				SegEnd - Pos);
+            float CurrentStep = Atmo_AdaptiveStepSize(StepSize, Pos, RayStart,
+				ReferenceLength, P.Atmo.mainRayParams.stepScaleFactor)
+				* P.Atmo.lightRayParams.stepSizeMult;
+
+			// The budget sets the step; this stops the budget from setting it
+			// longer than the deck can be resolved at. Air segments are exempt:
+			// their field is a smooth exponential with nothing to alias.
+            if (IsDeck)
+            {
+                CurrentStep = min(CurrentStep, MaxDeckStep);
+            }
+
+            CurrentStep = min(CurrentStep, SegEnd - Pos);
 
 			// Salted by the parent step and by this step, so successive light
 			// rays from one pixel do not sample in phase and neither does the
@@ -1208,11 +1232,11 @@ float4 GGAtmo_MainMarch(
                 const float LightBudgetWeight =
 					max(Transmittance.x, max(Transmittance.y, Transmittance.z));
 
-                P.Atmo.lightRayParams.atmoLightSteps = Atmo_LightBudget(
-					FullAtmoLightSteps, LightBudgetWeight, P.Atmo.lightRayParams.budgetFloor);
+                P.Atmo.lightRayParams.atmoLightSteps =
+					Atmo_LightBudget(FullAtmoLightSteps, LightBudgetWeight);
 
-                P.Atmo.lightRayParams.cloudLightSteps = Atmo_LightBudget(
-					FullCloudLightSteps, LightBudgetWeight, P.Atmo.lightRayParams.budgetFloor);
+                P.Atmo.lightRayParams.cloudLightSteps =
+					Atmo_LightBudget(FullCloudLightSteps, LightBudgetWeight);
 
                 float LobeShadow;
                 const float3 SunTransmittance = GGAtmo_LightMarch(

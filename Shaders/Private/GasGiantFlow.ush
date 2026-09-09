@@ -57,6 +57,17 @@
 #define GG_DEEP_FLOW_LAYER 1
 #endif
 
+/** How far a crossfade phase runs its advection ramp, as a multiple of the
+ *  authored warp displacement.
+ *
+ *  2 SO THE MEAN IS THE AUTHORED AMOUNT. Each phase ramps from nothing to this
+ *  and resets, so the average over a cycle is half of it. At 1 the deck would
+ *  read as half as advected with the crossfade on as with it off, and enabling
+ *  the feature would change the look rather than only the motion. */
+#ifndef GG_CROSSFADE_SPAN
+#define GG_CROSSFADE_SPAN 2.0f
+#endif
+
 /** Fraction of the cone-trace advance actually taken. Under 1 because the deck
  *  slope bound is authored, and an under-declared slope is the one way the
  *  entry search steps over the surface. */
@@ -73,6 +84,7 @@
  *  DetailNoise / StructureNoise  (WorleyG, WorleyB, WorleyA, Amount)
  *  Relief   (DeckTop, BandRelief, PressureRelief, StormTowerRelief)
  *  Profile  (AtmosphereThickness, DeckBackstop, VortexThreshold, GradientThickness)
+ *  Crossfade (Period, DetailEnable, StructureEnable, unused)
  *
  *  Thickness, GradientDepth and SpinAngle are derived in GG_BuildField; the two
  *  fades are set per sample by the march. */
@@ -88,6 +100,15 @@ struct GGFieldParams
 
     float4 Relief;
     float4 Profile;
+	/** Elapsed time in crossfade PERIODS. Only its fraction is read, so the two
+	 *  phases sit half a period apart whatever the whole part is.
+	 *
+	 *  Zero on either enable leaves that layer sampled once, at the full warp,
+	 *  exactly as it is with the feature off. */
+    float CrossfadeTime;
+    float CrossfadeDetail;
+    float CrossfadeStructure;
+
 	/** Bound on the deck's slope, GRADIENT DEPTHS per radian -- the same unit as
 	 *  the relief producing that slope, so it stays in step through an anchor
 	 *  retune. Read only by the entry search's cone angle: under-declaring it is
@@ -148,20 +169,21 @@ struct GGFieldParams
 };
 
 
-/** Fills GGFieldParams from the material's pin values. RigidRate is the
+/** Fills GGFieldParams from the material's pin values. RotationWeight is the
  *  planet's own rotation; the sim runs in the rotating frame, so it applies to
  *  the SAMPLING POSITION rather than to the flow, negated because rotating the
  *  sample point backwards carries the field forwards. */
 GGFieldParams GG_BuildField(
 	float PlanetRadius,
 	float Time,
-	float RigidRate,
+	float RotationWeight,
 	float4 Scales,
 	float4 Warps,
 	float4 DetailNoise,
 	float4 StructureNoise,
 	float EdgeBias,
 	float DeckSlope,
+	float4 Crossfade,
 	float4 Relief,
 	float4 Profile,
 	float BandSharpness,
@@ -188,12 +210,17 @@ GGFieldParams GG_BuildField(
     F.Profile = Profile;
     F.DeckSlope = DeckSlope;
 
+	// Floored so a zero period is a stopped clock rather than a divide.
+    F.CrossfadeTime = Time / max(Crossfade.x, 1e-3f);
+    F.CrossfadeDetail = Crossfade.y;
+    F.CrossfadeStructure = Crossfade.z;
+
     F.PlanetRadius = PlanetRadius;
 
     F.Thickness = max(Profile.x, 1e-4f);
 
     F.GradientDepth = max(Profile.w, 1e-4f);
-    F.SpinAngle = -RigidRate * Time;
+    F.SpinAngle = -RotationWeight * Time;
 
     F.BandSharpness = BandSharpness;
     F.ReliefThinning = ReliefThinning;
@@ -352,6 +379,29 @@ float4 GG_SampleFlow(Texture2DArray FlowField, SamplerState FlowSampler, float3 
 #endif
 }
 
+
+/** Arc length of one flow texel at a given radius, in world units.
+ *
+ *  THE FINEST THING THE DECK TOP CAN VARY OVER. GG_FlowProbe reads nothing but
+ *  the flow field, so the smallest lateral feature in a column top is one texel
+ *  of it -- the volumes carve finer than that, but no shadow ray ever sees them.
+ *
+ *  A ray that steps further than this in one go samples one column out of the
+ *  several it crossed, and the jitter picks which. That is not an estimate with
+ *  noise on it, it is a choice, and it is why a shadow ray needs a step bounded
+ *  by a LENGTH rather than a budget divided into a span: how much deck a light
+ *  ray crosses depends on where the sun is, so a fixed count resolves an
+ *  overhead ray far past the point of usefulness and a grazing one not at all.
+ *
+ *  Longitude is the tighter axis -- the grid is wider than it is tall -- so the
+ *  width alone bounds it. */
+float GG_FlowTexelArc(Texture2DArray FlowField, float Radius)
+{
+    uint Width, Height, Slices, Levels;
+    FlowField.GetDimensions(0, Width, Height, Slices, Levels);
+
+    return (2.0f * PI * Radius) / float(max(Width, 1u));
+}
 
 /** Rebuilds the 3D tangent velocity from the stored components. NO TRIG: with
  *  c = length(N.xy) the basis is east = (-N.y, N.x, 0)/c and north =
@@ -634,6 +684,30 @@ GGFieldSample GG_Field(
     float Ridge = 0.5f;
     float3 DetailWarp = 0.0f;
 
+	// -- Crossfade ----------------------------------------------------------
+	//
+	// ADVECTION HAS NOWHERE TO ACCUMULATE. The sim carries its own history, but
+	// the volumes are resampled from scratch every frame, so a warp anchored to
+	// a fixed direction can only wobble -- it cannot travel. Two phases half a
+	// period apart, each ramping its displacement from nothing to
+	// GG_CROSSFADE_SPAN and resetting, give features somewhere to travel to.
+	//
+	// THE WEIGHT IS ZERO WHERE THE PHASE RESETS, which is the whole trick: the
+	// discontinuity happens while the layer contributes nothing.
+	//
+	// IT IS A DISSOLVE BETWEEN TWO DIFFERENTLY SHEARED COPIES, not a crossfade
+	// between two positions. Uniform flow would blend invisibly; this flow is
+	// shear-dominated, so the two phases are stretched by different amounts and
+	// the blend ghosts. A shorter period narrows the gap and shows the dissolve
+	// more often. That trade is what the period is for.
+    const float PhaseA = frac(F.CrossfadeTime);
+    const float PhaseB = frac(F.CrossfadeTime + 0.5f);
+
+    const float WeightA = 1.0f - abs(2.0f * PhaseA - 1.0f);
+
+    const float WarpMulA = GG_CROSSFADE_SPAN * PhaseA;
+    const float WarpMulB = GG_CROSSFADE_SPAN * PhaseB;
+
 
 	// A FADED LAYER IS SKIPPED, NOT JUST SCALED. EXACTLY ZERO, NOT AN EPSILON: a
 	// skip at a small positive fade is a discontinuity at a fixed fade value,
@@ -675,16 +749,37 @@ GGFieldSample GG_Field(
 		// scrolling the volume through its own domain makes the detail change
 		// whether or not anything is happening to it, which is grain by
 		// definition. If it looks pinned, raise Warps.x.
-        const float3 DetailUVW = PDetail * (F.Scales.x + Height * F.DetailVertical);
-
+        const float UVWScale = F.Scales.x + Height * F.DetailVertical;
 
 		// MIP 0, ALWAYS. A footprint-derived mip blurs along the shell and
 		// erases the vertical structure a high aspect ratio builds, flattening a
 		// layered deck back to one shell. Undersampled instead: the high
 		// frequencies fold down rather than resolve, and the fades remove a
 		// layer once that stops being affordable.
-        const float4 DetailSample =
-			DetailVolume.SampleLevel(DetailSampler, DetailUVW, 0.0f);
+        float4 DetailSample;
+
+        BRANCH
+
+        if (F.CrossfadeDetail > 0.0f)
+        {
+			// The two phases differ only in how far along the SAME warp they
+			// sit, so one flow loop serves both. The deep-flow fetch stays on
+			// the unphased position: it decides how the layer is sheared, not
+			// where it is, and a second fetch of it would double the loop's cost
+			// to move a displacement the crossfade is already blending across.
+            const float3 PA = normalize(N + FlowWarp * (F.Scales.z * WarpMulA));
+            const float3 PB = normalize(N + FlowWarp * (F.Scales.z * WarpMulB));
+
+            DetailSample = lerp(
+				DetailVolume.SampleLevel(DetailSampler, PB * UVWScale, 0.0f),
+				DetailVolume.SampleLevel(DetailSampler, PA * UVWScale, 0.0f),
+				WeightA);
+        }
+        else
+        {
+            DetailSample = DetailVolume.SampleLevel(
+				DetailSampler, PDetail * UVWScale, 0.0f);
+        }
 
         Ridge = GG_PerlinWorley(
 			DetailSample.r,
@@ -701,17 +796,32 @@ GGFieldSample GG_Field(
 
     if (bWantStructure)
     {
+        const float3 StructureWarp = FlowWarp + DetailWarp;
 
+        const float UVWScale = F.Scales.y + Height * F.StructureVertical;
 
-		// Its own inheritance, and 0 is legitimate rather than degenerate: this
-		// layer breaks the flow into rounded shapes, and a shape dragged through
-		// the flow field is no longer round.
-        const float3 PStructure = normalize(N + (FlowWarp + DetailWarp) * F.Scales.w);
+        BRANCH
 
-        const float3 StructureUVW = PStructure * (F.Scales.y + Height * F.StructureVertical);
+        if (F.CrossfadeStructure > 0.0f)
+        {
+            const float3 PA = normalize(N + StructureWarp * (F.Scales.w * WarpMulA));
+            const float3 PB = normalize(N + StructureWarp * (F.Scales.w * WarpMulB));
 
-        Structure =
-			StructureVolume.SampleLevel(StructureSampler, StructureUVW, 0.0f);
+            Structure = lerp(
+				StructureVolume.SampleLevel(StructureSampler, PB * UVWScale, 0.0f),
+				StructureVolume.SampleLevel(StructureSampler, PA * UVWScale, 0.0f),
+				WeightA);
+        }
+        else
+        {
+			// Its own inheritance, and 0 is legitimate rather than degenerate:
+			// this layer breaks the flow into rounded shapes, and a shape
+			// dragged through the flow field is no longer round.
+            const float3 PStructure = normalize(N + StructureWarp * F.Scales.w);
+
+            Structure = StructureVolume.SampleLevel(
+				StructureSampler, PStructure * UVWScale, 0.0f);
+        }
     }
 
 

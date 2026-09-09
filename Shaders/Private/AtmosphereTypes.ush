@@ -101,10 +101,10 @@ struct LightRayParams
     float stepSizeMult;
     int parentStepIndex;
 
-	/** Floor on the transmittance-scaled budget, as a fraction of the authored
-	 *  count. Carried here because Atmo_LightBudget rewrites the two counts
-	 *  above every step and needs a rule that survives the rewrite. */
-    float budgetFloor;
+	/** How many of the finest features the deck can have a shadow ray may cross
+	 *  in one step. The counts above are a budget; this is the LENGTH bound that
+	 *  keeps the budget from being spread past what it can resolve. */
+    float stepScale;
 };
 
 struct CompositeParams
@@ -195,22 +195,14 @@ float Atmo_PhaseDualLobe(float cosTheta, float gForward, float gBack, float forw
  *  the reduction step over step and the shadow ray collapses to nothing a short
  *  way into the deck.
  *
- *  THE FLOOR IS A FRACTION OF THE AUTHORED BUDGET, NOT A CONSTANT. What a
- *  shadow ray needs is a step short enough to resolve the deck it crosses, and
- *  that is a property of the deck rather than a number of samples -- so the
- *  count that satisfies it is already encoded in whatever the budget was tuned
- *  to. A constant floor holds at one tuning and is wrong at every other.
- *
- *  Below the floor the ray stops resolving what it is crossing and starts
- *  deciding it: each step lands in deck or in clear, the jitter picks which, and
- *  a couple of those exponentiated into a transmittance put neighbouring pixels
- *  factors apart. That reads as a scatter of bright points, not as grain, and no
- *  blur resolves it. */
-int Atmo_LightBudget(int fullSteps, float transmittance, float floorFraction)
+ *  THE FLOOR HERE IS ONLY A SAFETY. What a shadow ray actually needs is a step
+ *  short enough to resolve the deck it crosses, and that is a LENGTH rather than
+ *  a count -- a grazing ray crosses many times the deck an overhead one does, so
+ *  no single count serves both. The length bound lives in the march, and this
+ *  reduction is free to be aggressive because that bound catches it. */
+int Atmo_LightBudget(int fullSteps, float transmittance)
 {
-    const int minSteps = max((int) round(float(fullSteps) * saturate(floorFraction)), 2);
-
-    return max((int) round(float(fullSteps) * saturate(transmittance)), minSteps);
+    return max((int) round(float(fullSteps) * saturate(transmittance)), 2);
 }
 
 /** Weight on an ambient term at a given sun elevation.

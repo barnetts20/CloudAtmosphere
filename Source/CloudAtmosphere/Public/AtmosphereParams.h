@@ -305,24 +305,37 @@ struct CLOUDATMOSPHERE_API FAtmosphereRaymarchParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0"))
 	float CloudLightSteps = 32.0f;
 
-	/** Floor on the transmittance-scaled light budget, as a fraction of the two
-	 *  counts above.
+	/** How many flow-field texels a shadow ray may cross in one step.
 	 *
-	 *  A shadow ray's budget scales with the view transmittance that reached it,
-	 *  because that is what its result gets multiplied by. This is how far that
-	 *  is allowed to fall.
+	 *  A LENGTH BOUND, NOT A BUDGET. The counts above divide a span, but how much
+	 *  deck a shadow ray crosses depends on where the sun is -- an overhead ray
+	 *  crosses a fraction of what a grazing one does. One count cannot serve
+	 *  both, so it over-resolves the first and under-resolves the second.
 	 *
-	 *  WHAT IT PROTECTS IS RESOLUTION, NOT BRIGHTNESS. Past some step length the
-	 *  ray stops resolving the deck it crosses and starts deciding it -- each
-	 *  step lands in cloud or in clear, the jitter picks which, and a couple of
-	 *  those exponentiated put neighbouring pixels factors apart. It reads as a
-	 *  scatter of bright points rather than as grain, and no amount of composite
-	 *  blur resolves it: a blur averages a noisy field, and this is not one.
+	 *  The finest thing a shadow ray can see is one texel of the flow field,
+	 *  since it reads nothing else. Step further and it samples one column out of
+	 *  the several it crossed, with the jitter picking which -- which is not an
+	 *  estimate with noise on it but a coin flip, and it prints as a scatter of
+	 *  bright points that no composite blur resolves.
 	 *
-	 *  A FRACTION RATHER THAN A COUNT, so the floor still means the same thing
-	 *  after the budget above is retuned. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float LightBudgetFloor = 0.375f;
+	 *  1 IS NYQUIST AGAINST THE FIELD AS RECONSTRUCTED, not against the grid. The
+	 *  cubic B-spline is approximating rather than interpolating, so it band
+	 *  limits the flow to something nearer two texels wide -- a step per texel is
+	 *  already sampling the smoothed field twice per feature. That is why 2 shows
+	 *  the flip and 0.5 buys almost nothing: below 1 the extra steps resolve
+	 *  structure the reconstruction has already removed.
+	 *
+	 *  BandSharpness steepens the vorticity-to-altitude map and pushes the
+	 *  effective feature back toward the raw texel, so a sharpened deck wants a
+	 *  lower value. GG_FLOW_FILTER 0 does the same, harder.
+	 *
+	 *  IT SETS THE FLOOR THE BUDGET CAN FALL TO. At 1 with a 512 grid the bound
+	 *  is about 19 steps, so CloudLightSteps above that is free and the scaling
+	 *  saves down to it; at 2 the floor is 9.5 and the saving doubles. Raising
+	 *  GridLongitude tightens the bound in proportion -- a finer sim has finer
+	 *  structure, and resolving it costs. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.25", ClampMax = "8.0"))
+	float LightStepTexels = 1.0f;
 
 	static FAtmosphereRaymarchParams MakeGasGiantDefaults()
 	{
@@ -800,6 +813,48 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Deck|Surface|Warp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TurbulenceFloor = 0.5f;
 
+	// -- Crossfade ----------------------------------------------------------
+	//
+	// The warp anchors to a fixed direction and integrates for a fixed time, so
+	// the noise WOBBLES where the flow changes but never travels: it cannot,
+	// because the volumes are resampled every frame and have nowhere to keep a
+	// position. Two phases half a period apart, each ramping its displacement
+	// and resetting under zero weight, give it somewhere to go.
+	//
+	// A SECOND VOLUME FETCH PER LAYER IT IS ENABLED ON. The flow loop is shared,
+	// so what it costs is the texture read rather than the advection.
+
+	/** How long a phase takes to run its ramp, in SIMULATED seconds. The actor
+	 *  divides by the sim's TimeScale before pushing, so the noise keeps pace
+	 *  with the flow it is meant to be carried by however the sim speed moves.
+	 *
+	 *  IT IS A SPEED CONTROL, NOT A DURATION. How far a phase travels is fixed
+	 *  by the warp -- GG_CROSSFADE_SPAN times WarpTime times the layer's
+	 *  inheritance -- so the period only sets how long that takes. Travelling at
+	 *  the flow's own rate would want a period of GG_CROSSFADE_SPAN * WarpTime,
+	 *  which at any sane warp is a fraction of a second and dissolves far too
+	 *  often to hide. Everything usable is far slower than the flow, so this is
+	 *  an art control rather than a physical one.
+	 *
+	 *  THE GHOSTING TRADE LIVES HERE. Each phase is sheared by a different
+	 *  amount and the blend superimposes them, so long periods separate the two
+	 *  further and ghost harder while short ones dissolve more often. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Deck|Surface|Warp", meta = (ClampMin = "0.1"))
+	float CrossfadePeriod = 20.0f;
+
+	/** ON BY DEFAULT: the detail layer is where pinned noise reads as pinned.
+	 *  Its features are small enough that a few seconds of not travelling shows,
+	 *  and it is the layer the fades remove at distance anyway. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Deck|Surface|Warp")
+	bool bCrossfadeDetail = true;
+
+	/** OFF BY DEFAULT: structure features are large, and their apparent motion
+	 *  already comes from the flow the sim advects. Turning it on doubles this
+	 *  layer's fetches -- including at distance, where it is the only layer left
+	 *  and the detail fade has already stopped paying for one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Deck|Surface|Warp")
+	bool bCrossfadeStructure = false;
+
 	/** Multiplies already-normalized vorticity, so 1 is neutral and the useful
 	 *  range is roughly 0.5 to 3. Too high flattens the elevation to its
 	 *  asymptote everywhere but the boundaries, turning the height field into
@@ -852,6 +907,17 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	// subsystem is per-world and the terrestrial band will read the same one.
 
 	// -- Derivations --------------------------------------------------------
+
+	/** Crossfade, as the material expects it. The enables are pushed as 0 or 1
+	 *  and read as a branch, so a disabled layer costs its single fetch. */
+	FLinearColor GetCrossfade() const
+	{
+		return FLinearColor(
+			CrossfadePeriod,
+			bCrossfadeDetail ? 1.0f : 0.0f,
+			bCrossfadeStructure ? 1.0f : 0.0f,
+			0.0f);
+	}
 
 	/** Ladder weights plus the layer's amount, as the material expects them. */
 	FLinearColor GetDetailNoise() const
