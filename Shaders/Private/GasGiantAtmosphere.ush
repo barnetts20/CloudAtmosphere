@@ -780,6 +780,18 @@ float3 GGAtmo_LightMarch(
 
     bool bSaturated = false;
 
+	// THE RADIUS UNDER WHICH EVERY COLUMN IS SATURATED, which is the backstop or
+	// the lowest a column top can fall, whichever is lower -- relief is free to
+	// push a top under the backstop, and above such a top the ray is crossing
+	// clear air rather than deck. Same quantity the view march's opaque clip
+	// counts down from, and it has to stay the same or the two disagree about
+	// where the field stops varying.
+    float BoundMin, BoundMax;
+    GG_TopBounds(P.Field, 1.0f, 1.0f, BoundMin, BoundMax);
+
+    const float SaturatedRadius = P.Field.PlanetRadius
+		+ P.Field.Thickness * min(P.Field.Profile.y, BoundMin);
+
     const float RayStart = Segments[0].x;
     const float ReferenceLength = max(
 		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f);
@@ -798,6 +810,53 @@ float3 GGAtmo_LightMarch(
 		// which side of the shells a segment falls on. Per sample it would be a
 		// threshold against a jittered position, which dithers an edge.
         const bool IsDeck = GGAtmo_SegmentIsDeck(Start, LightDir, SegStart, SegEnd, P);
+
+		// -- Closed form, where the field is provably constant ----------------
+		//
+		// Density is exactly 1 below SaturatedRadius, for every column, so the
+		// optical depth across a span that stays inside is beta times its
+		// length. Marching it samples a constant and returns the same answer for
+		// more work.
+		//
+		// AND IT IS THE SPAN THAT WAS POISONING THE ESTIMATE. Stepping it spends
+		// most of the budget where there is nothing to resolve, leaving the
+		// gradient -- the only part that varies -- to a couple of steps whose
+		// jitter then decides the result rather than refining it.
+		//
+		// BOTH ENDPOINTS INSIDE IS SUFFICIENT, since the region is a ball and
+		// the segment is a chord: convexity puts everything between them inside
+		// too. The planner already breaks a segment at that radius, so a span
+		// straddling it is the exception rather than the rule.
+        const float3 SegStartPos = LocalOrigin + LocalDir * SegStart;
+        const float3 SegEndPos = LocalOrigin + LocalDir * SegEnd;
+
+        BRANCH
+
+        if (IsDeck
+			&& length(SegStartPos) <= SaturatedRadius
+			&& length(SegEndPos) <= SaturatedRadius)
+        {
+			// One fetch for the band, at the midpoint. The band scales
+			// extinction, and its variation across a saturated span is the only
+			// thing left that is not constant -- a single read of it is the same
+			// approximation the saturation cutoff already makes.
+            const float3 SegMidPos = LocalOrigin + LocalDir * (0.5f * (SegStart + SegEnd));
+
+            const GGFlowProbe MidProbe =
+				GG_FlowProbe(FlowField, FlowSampler, SegMidPos, P.Field);
+
+            const float4 MidScatter = GGAtmo_BandScatter(MidProbe.Band, P.Scatter);
+
+            DeckOptDepth += MidScatter.a * (SegEnd - SegStart);
+
+            if (DeckOptDepth > SaturationDepth)
+            {
+                bSaturated = true;
+                break;
+            }
+
+            continue;
+        }
 
         float Pos = SegStart;
 
