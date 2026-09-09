@@ -419,14 +419,36 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	// above it Atmo_Plan clips the tallest columns, slicing the tops off
 	// exactly where features are tallest, which reads as a field bug.
 
-	/** THE CEILING: the highest any column reaches, as a fraction of atmosphere
-	 *  thickness. Relief hangs the deck DOWNWARD from here, so the cloud tops
-	 *  stay put and GradientThickness spends itself on depth.
+	/** THE CEILING the deck hangs from, as a fraction of atmosphere thickness.
+	 *  Relief works DOWNWARD from here, so the cloud tops stay put and
+	 *  GradientThickness spends itself on depth.
 	 *
-	 *  The shader is given GetDeckBase() rather than this. Keeping it at or
-	 *  below 1 is the whole ceiling constraint. */
+	 *  How much of the relief hangs below it is CeilingReserve. The shader is
+	 *  given GetDeckBase(), never this. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shell", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float DeckTop = 0.8f;
+
+	/** How much of the relief's upward reach is reserved BELOW DeckTop.
+	 *
+	 *  1 hangs the whole theoretical maximum below it, so no column can ever
+	 *  exceed DeckTop. That bound is the JOINT worst case -- every up term at
+	 *  its extreme on the same column at the same moment -- which essentially
+	 *  never happens, so the visible tops sit well under DeckTop and sink
+	 *  further as GradientThickness grows.
+	 *
+	 *  0 puts DeckTop at the unrelieved base, so the tops climb with thickness
+	 *  instead.
+	 *
+	 *  BETWEEN THEM IS WHERE THE TOPS HOLD STILL. Reserve roughly what the up
+	 *  terms actually attain together and the general cloud tops land near
+	 *  DeckTop at any thickness, while the rare joint maxima -- storm towers
+	 *  over a pressure high -- poke above it, which is what those features are
+	 *  for.
+	 *
+	 *  GetTopMax() is then above DeckTop and IS the cull radius, so it is the
+	 *  number that has to stay at or below 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shell", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CeilingReserve = 0.6f;
 
 	/** How far the density gradient reaches below a column's own top, and the
 	 *  unit every relief amount is a fraction of.
@@ -787,12 +809,16 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	 *  downward, which is the direction that has room. */
 	float GetDeckBase() const
 	{
-		return DeckTop - GradientThickness * GetUpBudget();
+		return DeckTop - GradientThickness * GetUpBudget() * CeilingReserve;
 	}
 
-	/** The highest the deck reaches. DeckTop by construction -- kept as a
-	 *  function because GG_TopBounds still derives it the long way, from the
-	 *  base plus the same budget, and the two must agree. */
+	/** The highest the deck can reach, and the cull radius the march plans
+	 *  against. Equals DeckTop only at CeilingReserve 1; below that it sits
+	 *  above by the unreserved remainder. MUST MATCH GG_TopBounds, which
+	 *  derives it the same way from the base the shader was given.
+	 *
+	 *  KEEP THIS AT OR BELOW 1. Past it the cull radius leaves the atmosphere,
+	 *  the plan clamps to the shell, and the tallest columns are sliced flat. */
 	float GetTopMax() const
 	{
 		return GetDeckBase() + GradientThickness * GetUpBudget();
