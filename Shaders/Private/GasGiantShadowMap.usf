@@ -1,0 +1,198 @@
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/CloudAtmosphere/Private/GasGiantFlow.ush"
+
+// ---------------------------------------------------------------------------
+// Gas giant deck shadow map: a light-space bake of the deck's optical depth
+// toward the star, read per view sample by the march instead of a secondary ray.
+//
+// A BAKE, NOT A SIMULATION. Nothing here survives the frame. It reads the flow
+// field the sim wrote, marches, and writes one texture. There is no ping-pong,
+// no substep budget and no state to keep consistent, which is why it is a
+// separate dispatch from GasGiantSim.usf rather than another kernel in it.
+//
+// SPACE. Planet-local, spin axis on Z, exactly as the material path. Spin is
+// applied inside GG_FlowProbe and GG_Density, so positions here are unspun. The
+// light direction arrives already transformed into this frame.
+//
+// THE DEPTH COORDINATE. Positions on a texel's ray are Offset + Dir * d, where
+// Offset is the ray's closest approach to the planet centre and lies in the map
+// plane, and Dir is the direction light travels. So d = dot(X, Dir) for any
+// point, the plane through the centre is d = 0, and no reference plane has to be
+// stored. Depths are written in ATMOSPHERE THICKNESSES: fp16 tops out at 65504
+// and a planet radius in world units is far past it.
+//
+// WHAT THIS PASS CURRENTLY WRITES is the shell entry and one flow probe, not an
+// encoding. It exists to prove the geometry, the basis and the flow read before
+// the optical-depth thresholds land on top of them.
+// ---------------------------------------------------------------------------
+
+#ifndef GG_SHADOW_THREADS
+#define GG_SHADOW_THREADS 8
+#endif
+
+Texture2DArray ShadowFlowField;
+SamplerState ShadowFlowSampler;
+
+RWTexture2D<float4> ShadowMapUAV;
+
+int2 ShadowMapSize;
+float2 ShadowInvMapSize;
+
+/** Planet-local, pointing TOWARD the light -- the same convention as
+ *  lightRayParams.lightDir, so sun elevation stays dot(up, lightDir). */
+float3 ShadowLightDir;
+
+/** The map plane's axes, orthonormal and perpendicular to the light. Built on
+ *  the CPU from the spin axis so successive frames agree about which way the
+ *  grid runs; an arbitrary perpendicular flips as the light moves, and the map
+ *  would then resample against a rotating lattice every frame. */
+float3 ShadowBasisU;
+float3 ShadowBasisV;
+
+/** Half-width of the map in world units. Above the cull radius by a margin, so
+ *  the outermost texels sit outside the shell and the limb has something to
+ *  interpolate toward instead of clamping against the edge. */
+float ShadowExtent;
+
+/** Camera position, planet-local. The layer fades are a function of camera and
+ *  sample position, both of which this pass has -- so they are evaluated here
+ *  per march sample rather than being pinned to full strength.
+ *
+ *  ONE CAMERA PER PLANET. The map reaches the march as a material parameter,
+ *  which has no view dimension, so a second viewport shares this one's fade
+ *  distances. That is an LOD mismatch in the secondary view, not a wrong shadow.
+ *  It is a property of the delivery, not of the pass. */
+float3 ShadowCameraLocal;
+
+// -- GG_BuildField pins, in its argument order ------------------------------
+//
+// The same values the material composes from its own pins, so there is one
+// derivation of the deck rather than two. Any addition to GG_BuildField's
+// signature has to appear here and in FGasGiantShadowParams.
+
+float ShadowPlanetRadius;
+float ShadowTime;
+float ShadowRotationWeight;
+float4 ShadowScales;
+float4 ShadowWarps;
+float4 ShadowDetailNoise;
+float4 ShadowStructureNoise;
+float ShadowEdgeBias;
+float ShadowDeckSlope;
+float4 ShadowCrossfade;
+float4 ShadowRelief;
+float4 ShadowProfile;
+float ShadowBandSharpness;
+float ShadowReliefThinning;
+float ShadowDetailVertical;
+float ShadowStructureVertical;
+float ShadowDetailErosion;
+float ShadowDetailRelief;
+float ShadowErosionDepth;
+float ShadowDensityCurve;
+float ShadowStructureRelief;
+float ShadowStructureErosion;
+float4 ShadowFadeRanges;
+
+GGFieldParams GGShadow_Field()
+{
+    return GG_BuildField(
+		ShadowPlanetRadius,
+		ShadowTime,
+		ShadowRotationWeight,
+		ShadowScales,
+		ShadowWarps,
+		ShadowDetailNoise,
+		ShadowStructureNoise,
+		ShadowEdgeBias,
+		ShadowDeckSlope,
+		ShadowCrossfade,
+		ShadowRelief,
+		ShadowProfile,
+		ShadowBandSharpness,
+		ShadowReliefThinning,
+		ShadowDetailVertical,
+		ShadowStructureVertical,
+		ShadowDetailErosion,
+		ShadowDetailRelief,
+		ShadowErosionDepth,
+		ShadowDensityCurve,
+		ShadowStructureRelief,
+		ShadowStructureErosion,
+		ShadowFadeRanges);
+}
+
+/** Per-layer level of detail at a point, from its distance to the camera.
+ *
+ *  MUST MATCH the view march's expression, or the deck the light sees carries
+ *  layers the eye has dropped -- lumpy shadows on a smooth surface, which reads
+ *  as dirt rather than as under-resolved noise. Planet radii, like there. */
+void GGShadow_Fades(float3 LocalPos, GGFieldParams F, out float OutDetail, out float OutStructure)
+{
+    const float Distance =
+		length(LocalPos - ShadowCameraLocal) / max(F.PlanetRadius, 1e-4f);
+
+    OutDetail = 1.0f - smoothstep(F.DetailFadeNear, F.DetailFadeFar, Distance);
+    OutStructure = 1.0f - smoothstep(F.StructureFadeNear, F.StructureFadeFar, Distance);
+}
+
+[numthreads(GG_SHADOW_THREADS, GG_SHADOW_THREADS, 1)]
+void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (any(DispatchThreadId.xy >= uint2(ShadowMapSize)))
+    {
+        return;
+    }
+
+    const uint2 Texel = DispatchThreadId.xy;
+
+    GGFieldParams F = GGShadow_Field();
+
+	// The unconditional bound: the map is shared by every pixel, so the shell it
+	// covers cannot be narrowed by any one camera's fades.
+    float TopMin, TopMax;
+    GG_TopBounds(F, 1.0f, 1.0f, TopMin, TopMax);
+
+    const float CloudOuter = F.PlanetRadius + F.Thickness * TopMax;
+
+    const float2 UV = (float2(Texel) + 0.5f) * ShadowInvMapSize;
+    const float2 Plane = (UV * 2.0f - 1.0f) * ShadowExtent;
+
+    const float3 Offset = ShadowBasisU * Plane.x + ShadowBasisV * Plane.y;
+
+    const float3 Dir = -ShadowLightDir;
+
+	// Offset is perpendicular to Dir by construction, so |Offset + Dir*d| is
+	// PerpSq + d*d and the shell crossing is a square root rather than a
+	// quadratic. Entry is the negative root: the first crossing along Dir.
+    const float PerpSq = dot(Offset, Offset);
+    const float HalfChordSq = CloudOuter * CloudOuter - PerpSq;
+
+    BRANCH
+
+    if (HalfChordSq <= 0.0f)
+    {
+		// Outside the disc. w is the only channel the reader may test: the
+		// others are meaningless here, not merely zero.
+        ShadowMapUAV[Texel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+
+    const float EntryDepth = -sqrt(HalfChordSq);
+
+    const float3 EntryPos = Offset + Dir * EntryDepth;
+
+    float DetailFade, StructureFade;
+    GGShadow_Fades(EntryPos, F, DetailFade, StructureFade);
+
+    F.DetailFade = DetailFade;
+    F.StructureFade = StructureFade;
+
+    const GGFlowProbe Probe = GG_FlowProbe(ShadowFlowField, ShadowFlowSampler, EntryPos, F);
+
+    ShadowMapUAV[Texel] = float4(
+		EntryDepth / F.Thickness,
+		Probe.Top,
+		StructureFade,
+		1.0f);
+}

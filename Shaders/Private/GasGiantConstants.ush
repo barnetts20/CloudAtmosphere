@@ -30,3 +30,28 @@
 #ifndef PI
 #define PI 3.1415926535897932f
 #endif
+
+// The flow-control attribute macros have the same split as PI, and the same
+// fix. GasGiantFlow.ush uses BRANCH; a material Custom node inherits it from
+// MaterialTemplate.ush, a Platform.ush-only compute shader may not. Guarded, so
+// whichever side already has them keeps its own definition.
+//
+// The failure without this is an undeclared-identifier error inside an unchanged
+// file, reported against the include rather than against the caller that pulled
+// it onto a new path.
+
+#ifndef BRANCH
+#define BRANCH [branch]
+#endif
+
+#ifndef FLATTEN
+#define FLATTEN [flatten]
+#endif
+
+#ifndef LOOP
+#define LOOP [loop]
+#endif
+
+#ifndef UNROLL
+#define UNROLL [unroll]
+#endif
