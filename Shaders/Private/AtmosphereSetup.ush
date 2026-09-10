@@ -101,8 +101,6 @@ CompositeParams Atmo_BuildParams(
 	int mainAtmoSteps,
 	int mainCloudSteps,
 	int atmoLightSteps,
-	int cloudLightSteps,
-	float lightStepScale,
 	float stepScaleFactor)
 {
     const float atmoThickness = atmoRadius - planetRadius;
@@ -166,11 +164,6 @@ CompositeParams Atmo_BuildParams(
 
     params.lightRayParams.lightDir = lightDirection;
     params.lightRayParams.atmoLightSteps = atmoLightSteps;
-    params.lightRayParams.cloudLightSteps = cloudLightSteps;
-    params.lightRayParams.stepScale = lightStepScale;
-
-	// Overwritten per sample by the main march, alongside the two step counts.
-    params.lightRayParams.budgetWeight = 1.0;
 
 	// Filled per step by the main march. Initialised so the struct is complete
 	// before it is passed, since HLSL will not warn about a member that is only

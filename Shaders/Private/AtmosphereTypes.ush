@@ -115,21 +115,8 @@ struct LightRayParams
     float3 samplePos;
     float3 lightDir;
     int atmoLightSteps;
-    int cloudLightSteps;
     float stepSizeMult;
     int parentStepIndex;
-
-	/** How many of the finest features the deck can have a shadow ray may cross
-	 *  in one step. The counts above are a budget; this is the LENGTH bound that
-	 *  keeps the budget from being spread past what it can resolve. */
-    float stepScale;
-
-	/** View transmittance that reached this sample, the same weight the budget
-	 *  above was scaled by. The length bound relaxes with it, or the bound
-	 *  overrides the budget entirely and the transmittance weighting does
-	 *  nothing -- a step LIMIT and a step COUNT cannot both govern. */
-    float budgetWeight;
-
 };
 
 struct CompositeParams
@@ -217,14 +204,14 @@ float Atmo_PhaseDualLobe(float cosTheta, float gForward, float gBack, float forw
  *  do not.
  *
  *  PASS THE FULL BUDGET EVERY TIME. Feeding the previous result back compounds
- *  the reduction step over step and the shadow ray collapses to nothing a short
- *  way into the deck.
+ *  the reduction step over step and the light march collapses to the floor
+ *  within a few samples.
  *
- *  THE FLOOR HERE IS ONLY A SAFETY. What a shadow ray actually needs is a step
- *  short enough to resolve the deck it crosses, and that is a LENGTH rather than
- *  a count -- a grazing ray crosses many times the deck an overhead one does, so
- *  no single count serves both. The length bound lives in the march, and this
- *  reduction is free to be aggressive because that bound catches it. */
+ *  THE FLOOR IS ONLY A SAFETY. The gas giant's light march samples only air, a
+ *  smooth exponential with nothing to alias, so the reduction can be aggressive.
+ *  PITFALL: a light march that samples cloud through this budget also needs a
+ *  LENGTH bound -- a grazing ray crosses many times the deck an overhead one
+ *  does, and no single count serves both. */
 int Atmo_LightBudget(int fullSteps, float transmittance)
 {
     return max((int) round(float(fullSteps) * saturate(transmittance)), 2);

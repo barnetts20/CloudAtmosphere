@@ -348,11 +348,12 @@ float3 Atmo_LightMarch(
 
     float4 segments[ATMO_MAX_SEGMENTS];
 
-	// The light ray is unbounded by scene depth: it leaves the atmosphere.
+	// The light ray is unbounded by scene depth: it leaves the atmosphere. One
+	// count for both segments -- the light ray has no cloud budget of its own.
     const int segmentCount = Atmo_Plan(
 		input.lightRayParams.samplePos, input.lightRayParams.lightDir,
 		1e30f, input.planetParams,
-		input.lightRayParams.atmoLightSteps, input.lightRayParams.cloudLightSteps,
+		input.lightRayParams.atmoLightSteps, input.lightRayParams.atmoLightSteps,
 		segments);
 
 	// Outside the atmosphere entirely: nothing between here and the sun.

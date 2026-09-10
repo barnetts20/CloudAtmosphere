@@ -313,41 +313,6 @@ struct CLOUDATMOSPHERE_API FAtmosphereRaymarchParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0"))
 	float CloudSteps = 32.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0"))
-	float CloudLightSteps = 32.0f;
-
-	/** How many flow-field texels a shadow ray may cross in one step.
-	 *
-	 *  A LENGTH BOUND, NOT A BUDGET. The counts above divide a span, but how much
-	 *  deck a shadow ray crosses depends on where the sun is -- an overhead ray
-	 *  crosses a fraction of what a grazing one does. One count cannot serve
-	 *  both, so it over-resolves the first and under-resolves the second.
-	 *
-	 *  The finest thing a shadow ray can see is one texel of the flow field,
-	 *  since it reads nothing else. Step further and it samples one column out of
-	 *  the several it crossed, with the jitter picking which -- which is not an
-	 *  estimate with noise on it but a coin flip, and it prints as a scatter of
-	 *  bright points that no composite blur resolves.
-	 *
-	 *  1 IS NYQUIST AGAINST THE FIELD AS RECONSTRUCTED, not against the grid. The
-	 *  cubic B-spline is approximating rather than interpolating, so it band
-	 *  limits the flow to something nearer two texels wide -- a step per texel is
-	 *  already sampling the smoothed field twice per feature. That is why 2 shows
-	 *  the flip and 0.5 buys almost nothing: below 1 the extra steps resolve
-	 *  structure the reconstruction has already removed.
-	 *
-	 *  BandSharpness steepens the vorticity-to-altitude map and pushes the
-	 *  effective feature back toward the raw texel, so a sharpened deck wants a
-	 *  lower value. GG_FLOW_FILTER 0 does the same, harder.
-	 *
-	 *  IT SETS THE FLOOR THE BUDGET CAN FALL TO. At 1 with a 512 grid the bound
-	 *  is about 19 steps, so CloudLightSteps above that is free and the scaling
-	 *  saves down to it; at 2 the floor is 9.5 and the saving doubles. Raising
-	 *  GridLongitude tightens the bound in proportion -- a finer sim has finer
-	 *  structure, and resolving it costs. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.25", ClampMax = "8.0"))
-	float LightStepTexels = 1.0f;
-
 	/** March pixels a VIEW step is allowed to span.
 	 *
 	 *  THE COUNTS ABOVE SIZE THE MARCH AGAINST THE DECK, THIS SIZES IT AGAINST
@@ -381,13 +346,9 @@ struct CLOUDATMOSPHERE_API FAtmosphereRaymarchParams
 		Params.StepScaleFactor = 3.0f;
 		Params.CloudSteps = 64.0f;
 
-		// A gas giant has no holes, so nearly every light sample accumulates
-		// and takes the second fetch, where the terrestrial version leans on
-		// Cloud_Density returning zero over most of the domain. The deck's
-		// light budget stays high anyway: it is what shapes the gradient, and
-		// the view steps above were halved to pay for it.
+		// The light ray marches air only; the deck's share of it is one
+		// shadow-map read.
 		Params.AtmosphereLightSteps = 8.0f;
-		Params.CloudLightSteps = 32.0f;
 
 		return Params;
 	}
@@ -887,23 +848,6 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Deck|Surface|Warp")
 	bool bCrossfadeStructure = false;
 
-	/** Let the structure layer cast shadows and transmit where it is eroded.
-	 *
-	 *  WITHOUT IT A SHADOW RAY SHADES AGAINST A FLOW-ONLY DECK. Mid-scale lumps
-	 *  cast nothing and eroded structure blocks light as completely as solid
-	 *  deck, so relief reads only through the density gradient and the phase
-	 *  function -- plausible, but flat where it should be self-shadowing.
-	 *
-	 *  ONE VOLUME FETCH PER LIGHT STEP, plus two per light ray for the warp,
-	 *  and only inside StructureFadeNear + StructureFadeSpan. Beyond that the
-	 *  layer is faded out and this costs nothing, so the bill lands on the near
-	 *  and inside views rather than on orbit.
-	 *
-	 *  THE DETAIL LAYER IS NOT OFFERED. Its features are finer than a light step
-	 *  at any budget, so it would be sampled as noise rather than as shape. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Deck|Surface|Carve")
-	bool bStructureShadows = true;
-
 	/** Multiplies already-normalized vorticity, so 1 is neutral and the useful
 	 *  range is roughly 0.5 to 3. Too high flattens the elevation to its
 	 *  asymptote everywhere but the boundaries, turning the height field into
@@ -958,14 +902,15 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	// -- Derivations --------------------------------------------------------
 
 	/** Crossfade, as the material expects it. The enables are pushed as 0 or 1
-	 *  and read as a branch, so a disabled layer costs its single fetch. */
+	 *  and read as a branch, so a disabled layer costs its single fetch. A is
+	 *  unused and zero. */
 	FLinearColor GetCrossfade() const
 	{
 		return FLinearColor(
 			CrossfadePeriod,
 			bCrossfadeDetail ? 1.0f : 0.0f,
 			bCrossfadeStructure ? 1.0f : 0.0f,
-			bStructureShadows ? 1.0f : 0.0f);
+			0.0f);
 	}
 
 	/** Ladder weights plus the layer's amount, as the material expects them. */
