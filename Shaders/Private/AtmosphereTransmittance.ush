@@ -1,0 +1,131 @@
+#pragma once
+
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
+
+// ---------------------------------------------------------------------------
+// Air transmittance table: density integrals from a point to the top of the
+// atmosphere, as a function of altitude and the cosine toward the light.
+//
+// INTEGRALS, NOT TRANSMITTANCE. R, G and B hold the Rayleigh, Mie and absorber
+// density integrated along the ray, in atmosphere thicknesses. The betas stay
+// per-pixel multipliers, so the table depends on geometry alone and any
+// spectrum reads it without a rebake.
+//
+// THICKNESS UNITS THROUGHOUT. Every radius here is divided by the atmosphere's
+// thickness, so the table is a function of dimensionless inputs and no world
+// scale enters the float arithmetic.
+//
+// SHARED BY THE BAKE AND THE MARCH. The mapping in both directions and the
+// profile derivation live here and nowhere else. A second copy of either
+// fails silently: the air keeps its colour and gets the wrong depth.
+//
+// BELOW THE HORIZON THE TABLE HOLDS THE HORIZON. Occlusion by the planet is
+// the analytic planet shadow's job; the table representing it as well would
+// darken the same samples twice.
+// ---------------------------------------------------------------------------
+
+/** Table size. MUST MATCH AtmosphereTransmittance::Width and Height: the
+ *  texel-centre remap needs the size, and the dispatch writes to it. */
+#ifndef ATMO_TRANSMITTANCE_WIDTH
+#define ATMO_TRANSMITTANCE_WIDTH 256
+#endif
+
+#ifndef ATMO_TRANSMITTANCE_HEIGHT
+#define ATMO_TRANSMITTANCE_HEIGHT 64
+#endif
+
+/** Air profile in thickness units from the authored pins, as (Rayleigh scale
+ *  height, Mie scale height, absorber altitude, absorber half-width). The one
+ *  derivation of these; Atmo_BuildParams scales it by thickness. */
+float4 AtmoT_Profile(float RayleighA, float MieA, float AbsorptionA, float AbsorptionFalloff)
+{
+    return float4(max(RayleighA, 1e-4f), max(MieA, 1e-4f), AbsorptionA, AbsorptionFalloff);
+}
+
+/** Atmosphere thickness in world units: the unit the table is written in. */
+float AtmoT_Thickness(float PlanetRadius, float AtmoRadius)
+{
+    return max(AtmoRadius - PlanetRadius, 1e-4f);
+}
+
+/** Planet and atmosphere-top radii in thickness units. */
+float2 AtmoT_Radii(float PlanetRadius, float AtmoRadius)
+{
+    const float Thickness = AtmoT_Thickness(PlanetRadius, AtmoRadius);
+
+    return float2(PlanetRadius / Thickness, AtmoRadius / Thickness);
+}
+
+/** sqrt(r^2 - R^2) without the cancellation: at low altitude r and R agree in
+ *  most of their digits. */
+float AtmoT_Rho(float R, float Bottom)
+{
+    const float H = max(R - Bottom, 0.0f);
+
+    return sqrt(H * (2.0f * Bottom + H));
+}
+
+/** Distance from radius R along cosine Mu to the atmosphere top. Rays below the
+ *  horizon pass through the planet and still reach the top; the mapping clamps
+ *  them to the horizon. */
+float AtmoT_DistanceToTop(float R, float Mu, float Top)
+{
+    const float Disc = (Top - R) * (Top + R) + (R * Mu) * (R * Mu);
+
+    return max(-R * Mu + sqrt(max(Disc, 0.0f)), 0.0f);
+}
+
+/** [0,1] to a texture coordinate that lands on texel centres at both ends. A
+ *  plain [0,1] extrapolates half a texel past each edge row. */
+float AtmoT_UnitToUV(float X, float Size)
+{
+    return 0.5f / Size + X * (1.0f - 1.0f / Size);
+}
+
+/** Texture coordinate for a point at radius R looking along cosine Mu.
+ *
+ *  Bruneton's mapping: altitude through rho, the cosine through distance to the
+ *  top between its extremes. Both concentrate texels where the integrals change
+ *  fastest, near the ground and near the horizon. */
+float2 AtmoT_UV(float R, float Mu, float Bottom, float Top)
+{
+    R = clamp(R, Bottom, Top);
+
+    const float H = sqrt(max(Top * Top - Bottom * Bottom, 1e-8f));
+    const float Rho = AtmoT_Rho(R, Bottom);
+
+    const float D = AtmoT_DistanceToTop(R, Mu, Top);
+    const float DMin = Top - R;
+    const float DMax = Rho + H;
+
+    const float XMu = saturate((D - DMin) / max(DMax - DMin, 1e-6f));
+    const float XR = Rho / H;
+
+    return float2(
+		AtmoT_UnitToUV(XMu, ATMO_TRANSMITTANCE_WIDTH),
+		AtmoT_UnitToUV(XR, ATMO_TRANSMITTANCE_HEIGHT));
+}
+
+/** Inverse of AtmoT_UV, from unit coordinates. XMu 0 looks straight up; 1 is
+ *  the horizon. */
+void AtmoT_RMu(float XMu, float XR, float Bottom, float Top, out float R, out float Mu)
+{
+    const float H = sqrt(max(Top * Top - Bottom * Bottom, 1e-8f));
+    const float Rho = H * XR;
+
+    R = sqrt(Rho * Rho + Bottom * Bottom);
+
+    const float DMin = Top - R;
+    const float DMax = Rho + H;
+    const float D = DMin + XMu * (DMax - DMin);
+
+    Mu = (D <= 1e-6f) ? 1.0f : (H * H - Rho * Rho - D * D) / (2.0f * R * D);
+    Mu = clamp(Mu, -1.0f, 1.0f);
+}
+
+/** Density integrals from radius R along cosine Mu to the atmosphere top, in
+ *  thickness units. Multiply by each beta and by thickness for optical depth. */
+float3 AtmoT_Lookup(Texture2D Table, SamplerState TableSampler, float R, float Mu, float Bottom, float Top)
+{
+    return Table.SampleLevel(TableSampler, AtmoT_UV(R, Mu, Bottom, Top), 0.0f).rgb;
+}

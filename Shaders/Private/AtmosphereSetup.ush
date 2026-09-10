@@ -2,6 +2,7 @@
 
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereMarch.ush"
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereTransmittance.ush"
 
 // ---------------------------------------------------------------------------
 // Setup: everything between the material's pin values and a filled
@@ -124,15 +125,20 @@ CompositeParams Atmo_BuildParams(
     params.scatteringParams.cosTheta = cosTheta;
 	// EACH BETA CARRIES ITS OWN SCALE HEIGHT IN a. The two are only authored
 	// together and mean nothing apart -- a coefficient without the profile it
-	// applies to is not a quantity. The two that divide are floored.
+	// applies to is not a quantity. The profile comes from AtmoT_Profile, the
+	// derivation the transmittance bake also uses.
     params.scatteringParams.rayBeta = rayleighBeta.rgb / atmoThickness;
     params.scatteringParams.mieBeta = mieBeta.rgb / atmoThickness;
     params.scatteringParams.absBeta = absorptionBeta.rgb / atmoThickness;
     params.scatteringParams.atmoAmbient = atmoAmbient;
-    params.scatteringParams.rayScaleH = atmoThickness * max(rayleighBeta.a, 1e-4);
-    params.scatteringParams.mieScaleH = atmoThickness * max(mieBeta.a, 1e-4);
-    params.scatteringParams.absHeight = atmoThickness * absorptionBeta.a;
-    params.scatteringParams.absFalloff = atmoThickness * absorptionFalloff;
+
+    const float4 airProfile = AtmoT_Profile(
+		rayleighBeta.a, mieBeta.a, absorptionBeta.a, absorptionFalloff) * atmoThickness;
+
+    params.scatteringParams.rayScaleH = airProfile.x;
+    params.scatteringParams.mieScaleH = airProfile.y;
+    params.scatteringParams.absHeight = airProfile.z;
+    params.scatteringParams.absFalloff = airProfile.w;
     params.scatteringParams.phaseR = Atmo_PhaseRayleigh(cosTheta);
     params.scatteringParams.phaseM = Atmo_PhaseHG(cosTheta, mieG);
 

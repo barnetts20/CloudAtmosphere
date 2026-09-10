@@ -3,7 +3,14 @@
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereMarch.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereSetup.ush"
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereTransmittance.ush"
 #include "/Plugin/CloudAtmosphere/Private/GasGiantShadow.ush"
+
+/** Air transmittance toward the light: 1 reads the table, 0 marches. An A/B
+ *  switch for verifying the table against the march it replaces. */
+#ifndef GG_AIR_TRANSMITTANCE_TABLE
+#define GG_AIR_TRANSMITTANCE_TABLE 1
+#endif
 
 // ---------------------------------------------------------------------------
 // Gas giant cloud deck marched through the atmosphere's scattering model.
@@ -504,6 +511,8 @@ float3 GGAtmo_LightMarch(
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
 	float3 ShadowCameraLocal,
+	Texture2D TransmittanceTable,
+	SamplerState TransmittanceSampler,
 	GGAtmoParams P,
 	out float OutLobeShadow)
 {
@@ -574,20 +583,6 @@ float3 GGAtmo_LightMarch(
 	// crushed, so no new endpoint appears at either end.
     OutLobeShadow = pow(PlanetShadow, P.Scatter.LobeShadowPower);
 
-    float4 Segments[ATMO_MAX_SEGMENTS];
-
-	// Unbounded by scene depth: the light ray leaves the atmosphere. One count
-	// for both segments -- everything this loop samples is air.
-    int SegmentCount = Atmo_Plan(
-		Start, LightDir, 1e30f, P.Atmo.planetParams,
-		P.Atmo.lightRayParams.atmoLightSteps, P.Atmo.lightRayParams.atmoLightSteps,
-		Segments);
-
-    if (SegmentCount == 0)
-    {
-        return float3(1.0f, 1.0f, 1.0f);
-    }
-
     const float3 LocalOrigin = GGAtmo_ToLocal(Start, P);
     const float3 LocalDir = mul(P.WorldToLocal, LightDir);
 
@@ -633,6 +628,39 @@ float3 GGAtmo_LightMarch(
 	// The exponent below handles the deep end on its own. GG_ShadowTau already
 	// clamps its tail, so nothing here can run away.
     const float DeckOptDepth = ShadowTau / max(AbsMax, 1e-8f);
+
+	// -- The air --------------------------------------------------------------
+	//
+	// Density integrals from the table, in thickness units, scaled back to world
+	// units so the betas apply exactly as they do to a marched depth. Below the
+	// horizon the table holds the horizon value: PlanetShadow above owns the
+	// occlusion, and is already fading to zero across the band the clamp covers.
+#if GG_AIR_TRANSMITTANCE_TABLE
+    const float Thickness = AtmoT_Thickness(
+		P.Atmo.planetParams.planetRadius, P.Atmo.planetParams.atmoRadius);
+    const float2 Radii = AtmoT_Radii(
+		P.Atmo.planetParams.planetRadius, P.Atmo.planetParams.atmoRadius);
+
+    const float3 FromCentre = Start - P.Atmo.planetParams.planetPos;
+    const float Dist = length(FromCentre);
+    const float Mu = dot(FromCentre, LightDir) / max(Dist, 1e-4f);
+
+    const float3 AtmoOptDepth = AtmoT_Lookup(TransmittanceTable, TransmittanceSampler,
+		Dist / Thickness, Mu, Radii.x, Radii.y) * Thickness;
+#else
+    float4 Segments[ATMO_MAX_SEGMENTS];
+
+	// Unbounded by scene depth: the light ray leaves the atmosphere. One count
+	// for both segments -- everything this loop samples is air.
+    int SegmentCount = Atmo_Plan(
+		Start, LightDir, 1e30f, P.Atmo.planetParams,
+		P.Atmo.lightRayParams.atmoLightSteps, P.Atmo.lightRayParams.atmoLightSteps,
+		Segments);
+
+    if (SegmentCount == 0)
+    {
+        return float3(1.0f, 1.0f, 1.0f);
+    }
 
 	// -- The air, still marched ---------------------------------------------
 	//
@@ -692,6 +720,7 @@ float3 GGAtmo_LightMarch(
             Pos += CurrentStep;
         }
     }
+#endif
 
     return PlanetShadow * exp(-(P.Atmo.scatteringParams.rayBeta * AtmoOptDepth.x
 		+ P.Atmo.scatteringParams.mieBeta * AtmoOptDepth.y
@@ -713,6 +742,8 @@ float4 GGAtmo_MainMarch(
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
 	float3 ShadowCameraLocal,
+	Texture2D TransmittanceTable,
+	SamplerState TransmittanceSampler,
 	GGAtmoParams P)
 {
     const float3 RayOrigin = P.Atmo.mainRayParams.cameraPos;
@@ -1068,7 +1099,8 @@ float4 GGAtmo_MainMarch(
 
                 float LobeShadow;
                 const float3 SunTransmittance = GGAtmo_LightMarch(
-					ShadowMap, ShadowSampler, ShadowCameraLocal, P, LobeShadow);
+					ShadowMap, ShadowSampler, ShadowCameraLocal,
+					TransmittanceTable, TransmittanceSampler, P, LobeShadow);
 
                 const float3 AtmoDens = (Height > 0.0f)
 					? Atmo_Density(Height,
