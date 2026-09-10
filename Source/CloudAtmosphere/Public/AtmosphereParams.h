@@ -786,6 +786,25 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Deck|Surface|Carve", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float ErosionDepth = 1.0f;
 
+	/** How far the STRUCTURE layer's shapes carry material across a band
+	 *  boundary. At 1 a full-strength shape moves the boundary by about its own
+	 *  width. The noise that moves the surface also picks the material, so
+	 *  billows intrude as parcels of the neighbouring band rather than the two
+	 *  meeting on a smooth contour.
+	 *
+	 *  SIGNED: positive gives rising shapes the Positive family, negative the
+	 *  Negative. Scales with the layer's edge weight and fade, and fades out
+	 *  with depth into the gradient, so the saturated interior keeps its
+	 *  unmixed band. Band alpha differences follow into the shadow map. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Deck|Surface|Mix")
+	float StructureBandMix = 0.0f;
+
+	/** The same for the DETAIL layer: fine interleaving along the edges. Finer
+	 *  than the shadow map resolves, so it shows in albedo but averages out of
+	 *  the shadows. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Deck|Surface|Mix")
+	float DetailBandMix = 0.0f;
+
 	// -- Flow ---------------------------------------------------------------
 
 	/** Warp duration. A short advection whose only job is to carry the baked

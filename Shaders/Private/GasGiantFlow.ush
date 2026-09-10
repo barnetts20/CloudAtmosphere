@@ -105,6 +105,8 @@
  *  Profile  (AtmosphereThickness, DeckBackstop, VortexThreshold, GradientThickness)
  *  Crossfade (Period, DetailEnable, StructureEnable, unused)
  *
+ *  BandMix  (Structure, Detail)
+ *
  *  Thickness, GradientDepth and SpinAngle are derived in GG_BuildField; the two
  *  fades are set per sample by the march. */
 struct GGFieldParams
@@ -168,6 +170,12 @@ struct GGFieldParams
     float StructureRelief;
     float StructureErosion;
 
+	/** How far each layer's signed shape moves the MATERIAL boundary, as
+	 *  (Structure, Detail). At 1 a full-strength shape moves Band by one unit,
+	 *  the width of the Boundary term. The sign picks which family rising shapes
+	 *  carry. */
+    float2 BandMix;
+
 
 	/** Per-layer level of detail, 1 at full strength and 0 faded out. Each scales
 	 *  its layer's carve and erosion and gates the fetches feeding it, so a
@@ -215,7 +223,8 @@ GGFieldParams GG_BuildField(
 	float DensityCurve,
 	float StructureRelief,
 	float StructureErosion,
-	float4 FadeRanges)
+	float4 FadeRanges,
+	float2 BandMix)
 {
     GGFieldParams F;
 
@@ -263,18 +272,24 @@ GGFieldParams GG_BuildField(
     F.StructureFadeNear = FadeRanges.z;
     F.StructureFadeFar = max(FadeRanges.w, FadeRanges.z + 1e-4f);
 
+    F.BandMix = BandMix;
+
     return F;
 }
 
 
 /** What GG_Field returns. Two shapes rather than one, because the layers carve
  *  and erode by different amounts and fade on different schedules. Each is 1
- *  where its layer contributes nothing. */
+ *  where its layer contributes nothing.
+ *
+ *  BandShift is the shapes' signed offset to Band, 0 where neither layer
+ *  contributes. GG_Density applies it, weighted by depth into the gradient. */
 struct GGFieldSample
 {
     float Top;
     float Pressure;
     float Band;
+    float BandShift;
     float ShapeDetail;
     float ShapeStructure;
 };
@@ -553,8 +568,9 @@ struct GGFlowProbe
  *  MATCH GG_TopBounds, which bounds the same quantity deck-wide; two
  *  expressions for how far a layer can cut would drift, and the skip would then
  *  disagree with the marched band. Band and Pressure likewise MUST MATCH
- *  GG_Field's, or the saturated region tints differently from the gradient
- *  above it. */
+ *  GG_Field's unshifted values, or the saturated region tints differently from
+ *  the gradient above it. GG_Density takes BandShift to zero at the floor so
+ *  the two meet there. */
 GGFlowProbe GG_ProbeFromFlow(float4 Flow, GGFieldParams F)
 {
     GGFlowProbe Probe;
@@ -969,6 +985,19 @@ GGFieldSample GG_Field(
     const float ReliefStructure = StructureWeight * (StructureMix - 0.5f);
 
 
+	// MATERIAL FOLLOWS SHAPE. The band boundary becomes the zero contour of Band
+	// plus the signed shapes that move the surface, so a billow near a boundary
+	// is made of whichever family its sign points at. Doubled so each term spans
+	// +-1 at full weight.
+	//
+	// PITFALL: keep it additive. Any form that depends on sign(Band) flips on the
+	// zero contour and redraws the clean line as a discontinuity. The detail
+	// term is median-centred regardless of GG_DETAIL_RELIEF_CENTRED; the
+	// one-sided carve would push every boundary toward one family.
+    const float BandShift = 2.0f * (F.BandMix.x * ReliefStructure
+		+ F.BandMix.y * DetailWeight * (0.5f - Ridge));
+
+
 	// THE TOWER GATE RIDES THE SAME FADE. Left raw it holds full height to the
 	// skip threshold then vanishes in one step -- the tallest feature on the deck
 	// popping out at a fixed distance. Not edge-weighted, unlike the shapes: a
@@ -981,6 +1010,7 @@ GGFieldSample GG_Field(
 		Elevation, CarveDetail, ReliefStructure, Pressure, StormGate, ReliefScale, F);
     Out.Pressure = Pressure;
     Out.Band = BandSigned;
+    Out.BandShift = BandShift;
     Out.ShapeDetail = ShapeDetail;
     Out.ShapeStructure = ShapeStructure;
 
@@ -1012,7 +1042,8 @@ float3 GG_BandColour(float Band, float3 ColourA, float3 ColourB, float3 EdgeColo
  *
  *  Returns:
  *    x  Density in [0,1]. Multiply by an extinction coefficient in the march.
- *    y  BAND, signed and unclamped. What the material IS, not a density term.
+ *    y  BAND, signed and unclamped. What the material IS, not a density term;
+ *       shifted by the shapes near the surface.
  *    z  Pressure, for tinting vortices. Negative is cyclonic.
  *    w  The deck top at this column, which the march cannot compute itself. */
 float4 GG_Density(
@@ -1106,7 +1137,13 @@ float4 GG_Density(
 
     const float Density = Gradient * CarveDetail * CarveStructure;
 
-    return float4(Density, Field.Band, Field.Pressure, Top);
+
+	// Mixing lives in the worked surface and is gone by the floor, where the
+	// saturated early-out reports the probe's unshifted band. Smoothstep so the
+	// weight is C1 at both ends and the handoff draws no contour in colour.
+    const float MixWeight = 1.0f - smoothstep(0.0f, 1.0f, DepthFraction);
+
+    return float4(Density, Field.Band + Field.BandShift * MixWeight, Field.Pressure, Top);
 }
 
 // ---------------------------------------------------------------------------

@@ -69,6 +69,7 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 	float StructureErosion = 0.0f;
 
 	FVector4f FadeRanges = FVector4f::Zero();
+	FVector2f BandMix = FVector2f::ZeroVector;
 
 	/** (ScatterNeg.a, ScatterPos.a, ScatterBase.a, BandScale). The per-band
 	 *  extinction multiplier only. The albedo is a property of the scattering
@@ -142,6 +143,7 @@ SHADER_PARAMETER(float, ShadowDensityCurve)
 SHADER_PARAMETER(float, ShadowStructureRelief)
 SHADER_PARAMETER(float, ShadowStructureErosion)
 SHADER_PARAMETER(FVector4f, ShadowFadeRanges)
+SHADER_PARAMETER(FVector2f, ShadowBandMix)
 SHADER_PARAMETER(FVector4f, ShadowScatterAlphas)
 SHADER_PARAMETER(FVector3f, ShadowAbsBeta)
 

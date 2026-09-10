@@ -77,6 +77,7 @@ namespace GasGiantShadow
 		P->ShadowStructureRelief = Params.StructureRelief;
 		P->ShadowStructureErosion = Params.StructureErosion;
 		P->ShadowFadeRanges = Params.FadeRanges;
+		P->ShadowBandMix = Params.BandMix;
 		P->ShadowScatterAlphas = Params.ScatterAlphas;
 		P->ShadowAbsBeta = Params.AbsBeta;
 

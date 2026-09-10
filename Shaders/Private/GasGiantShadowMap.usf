@@ -195,6 +195,7 @@ float ShadowDensityCurve;
 float ShadowStructureRelief;
 float ShadowStructureErosion;
 float4 ShadowFadeRanges;
+float2 ShadowBandMix;
 
 GGFieldParams GGShadow_Field()
 {
@@ -221,7 +222,8 @@ GGFieldParams GGShadow_Field()
 		ShadowDensityCurve,
 		ShadowStructureRelief,
 		ShadowStructureErosion,
-		ShadowFadeRanges);
+		ShadowFadeRanges,
+		ShadowBandMix);
 }
 
 /** Per-layer level of detail at a point, from its distance to the camera.
