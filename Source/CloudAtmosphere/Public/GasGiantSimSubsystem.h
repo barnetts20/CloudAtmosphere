@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
+#include "GasGiantShadowMap.h"
 #include "GasGiantSimTypes.h"
 #include "GasGiantSimSubsystem.generated.h"
 
@@ -55,6 +56,24 @@ public:
 	virtual bool IsTickableInEditor() const override { return true; }
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
 
+	// -- Shadow bake --------------------------------------------------------
+
+	/** Queue one deck shadow map for this frame. Called by each gas giant every
+	 *  tick; the request is consumed by the next Tick and not retained.
+	 *
+	 *  HOSTED HERE FOR ORDERING, NOT BECAUSE IT IS SIM STATE. The bake reads the
+	 *  flow texture this subsystem writes, and being on the same tick is what
+	 *  puts the write before the read. Nothing else about it is shared: it holds
+	 *  no state across frames, has no substeps, and runs whether or not the sim
+	 *  is running.
+	 *
+	 *  ONE MAP PER PLANET, NOT PER VIEW. The map reaches the march as a material
+	 *  parameter, which has no view dimension. A second viewport therefore
+	 *  shares the first's camera-derived layer fades. That is an LOD mismatch in
+	 *  the secondary view, not a wrong shadow, and it is a property of the
+	 *  delivery rather than of this pass. */
+	void RequestShadowBake(const FGasGiantShadowParams& InParams);
+
 	// -- Control ------------------------------------------------------------
 
 	/** Begin stepping against this config. Safe to call again with a different
@@ -102,6 +121,18 @@ public:
 	float GetCourant() const;
 
 private:
+	/** The sim's half of Tick. Every early-out in here is a reason the field
+	 *  should not advance, which is why the bake is not inside it. */
+	void StepSimulation(float DeltaTime);
+
+	/** Drains ShadowRequests into one render command each. */
+	void BakeShadowMap();
+
+	/** This frame's bakes, one per planet. Cleared on consumption rather than
+	 *  keyed by requester: each request already names its own destination, so
+	 *  there is nothing to match up and nothing to leave stale. */
+	TArray<FGasGiantShadowParams> ShadowRequests;
+
 	/** Builds the flat render-thread snapshot. Returns false if the config is
 	 *  unusable, having already logged why. */
 	bool BuildParams(FGasGiantSimParams& OutParams) const;

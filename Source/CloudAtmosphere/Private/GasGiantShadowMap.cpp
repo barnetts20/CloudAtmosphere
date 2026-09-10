@@ -5,7 +5,7 @@
 #include "RenderGraphUtils.h"
 #include "ShaderCompilerCore.h"
 
-// IsFeatureLevelSupported.
+// IsFeatureLevelSupported, GBlackVolumeTexture.
 #include "RenderUtils.h"
 
 bool FGasGiantShadowBakeCS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -34,20 +34,25 @@ namespace GasGiantShadow
 	{
 		const FVector3f L = LightDir.GetSafeNormal();
 
-		// The spin axis, projected off the light. Degenerate only when the light
-		// is along the pole, where any perpendicular is as stable as any other.
+		// The spin axis, projected off the light, on the VERTICAL axis -- so the
+		// pole runs up the map and the bands lie across it, which is how the
+		// planet reads in a viewport. Degenerate only when the light is along
+		// the pole, where any perpendicular is as stable as any other.
 		const FVector3f Axis = FVector3f(0.0f, 0.0f, 1.0f);
 
-		FVector3f U = Axis - L * FVector3f::DotProduct(Axis, L);
+		FVector3f V = Axis - L * FVector3f::DotProduct(Axis, L);
 
-		if (U.SizeSquared() < UE_KINDA_SMALL_NUMBER)
+		if (V.SizeSquared() < UE_KINDA_SMALL_NUMBER)
 		{
 			const FVector3f Fallback(1.0f, 0.0f, 0.0f);
-			U = Fallback - L * FVector3f::DotProduct(Fallback, L);
+			V = Fallback - L * FVector3f::DotProduct(Fallback, L);
 		}
 
-		OutU = U.GetSafeNormal();
-		OutV = FVector3f::CrossProduct(L, OutU);
+		OutV = V.GetSafeNormal();
+
+		// Keeps (U, V, L) right-handed, so cross(U, V) is the light direction
+		// and the map is not mirrored.
+		OutU = FVector3f::CrossProduct(OutV, L);
 	}
 
 	void AddBakePass_RenderThread(FRDGBuilder& GraphBuilder, const FGasGiantShadowParams& Params)
@@ -100,6 +105,8 @@ namespace GasGiantShadow
 		P->ShadowStructureRelief = Params.StructureRelief;
 		P->ShadowStructureErosion = Params.StructureErosion;
 		P->ShadowFadeRanges = Params.FadeRanges;
+		P->ShadowScatterAlphas = Params.ScatterAlphas;
+		P->ShadowAbsBeta = Params.AbsBeta;
 
 		P->ShadowMapUAV = GraphBuilder.CreateUAV(Map);
 
@@ -110,6 +117,26 @@ namespace GasGiantShadow
 		// pole to the south, which reads as a simulation bug rather than a
 		// sampler one.
 		P->ShadowFlowSampler = TStaticSamplerState<SF_Bilinear, AM_Wrap, AM_Clamp, AM_Clamp>::GetRHI();
+
+		// A missing volume binds black rather than refusing the bake. Black is a
+		// defined value through GG_PerlinWorley, so the deck comes out uncarved
+		// and the shadow is still broadly right -- diagnosable at a glance,
+		// where a planet with no shadows at all looks like a broken pass.
+		P->ShadowDetailVolume = Params.DetailTexture.IsValid()
+			? Params.DetailTexture
+			: GBlackVolumeTexture->TextureRHI;
+
+		P->ShadowStructureVolume = Params.StructureTexture.IsValid()
+			? Params.StructureTexture
+			: GBlackVolumeTexture->TextureRHI;
+
+		// Wrap on all three axes, matching the material. Clamped, a tiling bake
+		// reads a stretched band of constant value along each face.
+		P->ShadowDetailSampler =
+			TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
+
+		P->ShadowStructureSampler =
+			TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
 
 		const FIntVector Groups(
 			FMath::DivideAndRoundUp(Params.MapSize.X, ThreadGroupSize),

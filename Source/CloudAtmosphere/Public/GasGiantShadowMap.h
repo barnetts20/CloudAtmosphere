@@ -71,10 +71,26 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 
 	FVector4f FadeRanges = FVector4f::Zero();
 
+	/** (ScatterNeg.a, ScatterPos.a, ScatterBase.a, BandScale). The per-band
+	 *  extinction multiplier only. The albedo is a property of the scattering
+	 *  site, not of the medium the light crossed, and stays per-pixel. */
+	FVector4f ScatterAlphas = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
+
+	/** cloudAbsorptionBeta. Its fastest channel scales the accumulation so the
+	 *  stored thresholds mean transmittance. */
+	FVector3f AbsBeta = FVector3f::OneVector;
+
 	// -- Resources ----------------------------------------------------------
 
 	/** The sim's flow output. Read, never written. */
 	FTextureRHIRef FlowTexture;
+
+	/** The deck's noise volumes, from the actor's own properties -- these are
+	 *  RHI handles rather than a second asset reference, since a compute pass
+	 *  cannot reach a UObject. Either may be null; the pass binds black, which
+	 *  is a defined value through the noise and gives an uncarved deck. */
+	FTextureRHIRef DetailTexture;
+	FTextureRHIRef StructureTexture;
 
 	/** The bake's destination, pushed to the march as a material parameter. */
 	FTextureRHIRef MapTexture;
@@ -130,11 +146,19 @@ SHADER_PARAMETER(float, ShadowDensityCurve)
 SHADER_PARAMETER(float, ShadowStructureRelief)
 SHADER_PARAMETER(float, ShadowStructureErosion)
 SHADER_PARAMETER(FVector4f, ShadowFadeRanges)
+SHADER_PARAMETER(FVector4f, ShadowScatterAlphas)
+SHADER_PARAMETER(FVector3f, ShadowAbsBeta)
 
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, ShadowMapUAV)
 
 SHADER_PARAMETER_TEXTURE(Texture2DArray, ShadowFlowField)
 SHADER_PARAMETER_SAMPLER(SamplerState, ShadowFlowSampler)
+
+SHADER_PARAMETER_TEXTURE(Texture3D, ShadowDetailVolume)
+SHADER_PARAMETER_SAMPLER(SamplerState, ShadowDetailSampler)
+
+SHADER_PARAMETER_TEXTURE(Texture3D, ShadowStructureVolume)
+SHADER_PARAMETER_SAMPLER(SamplerState, ShadowStructureSampler)
 
 END_SHADER_PARAMETER_STRUCT()
 

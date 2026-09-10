@@ -623,6 +623,81 @@ float GG_CloudTopUpper(
 }
 
 
+/** Distance along a ray at which it first reaches the deck. Returns T1 when the
+ *  ray never reaches it between T0 and T1.
+ *
+ *  A CONE TRACE, AND NOT AN OPTIMIZATION -- it is what keeps the limb from
+ *  breaking. A grazing chord from the cull radius to the surface is enormous,
+ *  and stepped at the deck's own step size it exhausts the iteration cap in
+ *  empty space, leaving the ray transparent at exactly the angles where its
+ *  neighbours a fraction of a degree steeper reach density and go opaque. That
+ *  threshold is geometric and sharp, and it draws a hard silhouette where the
+ *  limb should be softest.
+ *
+ *  LocalOrigin and LocalDir are in the field's frame, LocalDir normalized --
+ *  which an orthonormal WorldToLocal preserves. */
+float GG_DeckEntry(
+	Texture2DArray FlowField,
+	SamplerState FlowSampler,
+	float3 LocalOrigin,
+	float3 LocalDir,
+	float T0,
+	float T1,
+	float TopMax,
+	GGFieldParams F)
+{
+    float TSearch = T0;
+
+	[loop]
+    for (int Probe = 0; Probe < 24; Probe++)
+    {
+        const float3 ProbePos = LocalOrigin + LocalDir * TSearch;
+        const float ProbeRadius = length(ProbePos);
+        const float ProbeHeight = (ProbeRadius - F.PlanetRadius) / F.Thickness;
+
+        const float3 ProbeDir = ProbePos / max(ProbeRadius, 1e-4f);
+        const float ProbeRate = dot(LocalDir, ProbeDir);
+
+        const float TopUpper = GG_CloudTopUpper(FlowField, FlowSampler, ProbeDir, F);
+
+        if (ProbeHeight <= TopUpper)
+        {
+            return TSearch;
+        }
+
+		// Climbing and clear of the highest the deck can reach. Both conditions
+		// matter: a climbing ray still inside the deck's range can meet a
+		// taller column ahead.
+        if (ProbeRate >= 0.0f && ProbeHeight > TopMax)
+        {
+            return T1;
+        }
+
+		// The deck rises to meet the ray, so the closing rate is the sum of the
+		// ray's descent and the deck's rise across the ground it covers.
+		// Dividing by the descent alone overshoots without bound at tangent.
+		// DeckSlope is in gradient depths per radian, matching the relief that
+		// produces the slope.
+        const float Horizontal = sqrt(max(1.0f - ProbeRate * ProbeRate, 0.0f));
+
+        const float ClosingRate = -ProbeRate
+			+ Horizontal * max(F.DeckSlope, 0.1f) * F.GradientDepth * F.Thickness
+				/ max(ProbeRadius, 1e-4f);
+
+        const float Advance = (ProbeHeight - TopUpper) * F.Thickness / max(ClosingRate, 1e-5f);
+
+        TSearch += max(Advance * GG_CONE_RELAXATION, 1e-4f);
+
+        if (TSearch >= T1)
+        {
+            return T1;
+        }
+    }
+
+    return TSearch;
+}
+
+
 /** The structure layer's warp at a point, from two flow reads.
  *
  *  FOR THE SHADOW RAY, WHICH CANNOT AFFORD GG_Field. The full warp is four Euler

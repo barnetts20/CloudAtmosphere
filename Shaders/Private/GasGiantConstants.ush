@@ -55,3 +55,40 @@
 #ifndef UNROLL
 #define UNROLL [unroll]
 #endif
+
+// ---------------------------------------------------------------------------
+// Deck shadow map encoding
+//
+// The map stores the DEPTHS AT WHICH FIXED OPTICAL DEPTHS ARE CROSSED, not the
+// optical depth at fixed depths. Inverting it this way places the nodes by
+// transmittance rather than by geometry, so they concentrate wherever the deck
+// is dense -- which is the top of the density ramp, where view transmittance is
+// spent and where a fit anchored at the shell entry is worst.
+//
+// Depths are offsets from the analytic cull-sphere entry, in atmosphere
+// thicknesses. Small, positive, and reconstructible in full precision on the
+// reading side, which is what keeps fp16 resolving a fraction of a gradient.
+//
+// The thresholds are on the FASTEST absorption channel, matching
+// GG_SHADOW_SATURATION. Both the bake and the reconstruction read them from
+// here; two copies would drift and the shadow would land at the wrong depth.
+// ---------------------------------------------------------------------------
+
+#ifndef GG_SHADOW_TAU0
+#define GG_SHADOW_TAU0 0.25f
+#endif
+
+#ifndef GG_SHADOW_TAU1
+#define GG_SHADOW_TAU1 1.0f
+#endif
+
+#ifndef GG_SHADOW_TAU2
+#define GG_SHADOW_TAU2 3.0f
+#endif
+
+/** Written where a threshold is never reached, and where the ray misses the
+ *  shell. Far past any real chord, so reconstruction reads zero optical depth
+ *  rather than needing a validity test. */
+#ifndef GG_SHADOW_NO_DECK
+#define GG_SHADOW_NO_DECK 1000.0f
+#endif

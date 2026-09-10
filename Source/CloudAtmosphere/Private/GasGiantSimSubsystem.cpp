@@ -1,5 +1,6 @@
 #include "GasGiantSimSubsystem.h"
 
+#include "GasGiantShadowMap.h"
 #include "GasGiantSimulation.h"
 #include "GasGiantSimSettings.h"
 #include "GasGiantSnapshot.h"
@@ -940,6 +941,22 @@ void UGasGiantSimSubsystem::Tick(float DeltaTime)
 		TryAutoStart();
 	}
 
+	StepSimulation(DeltaTime);
+
+	// AFTER, AND NOT INSIDE. The bake reads the flow texture the step above
+	// writes, and render commands run in enqueue order, so this ordering is what
+	// keeps the shadow from being cast by a one-frame-stale field -- shadows
+	// beside the lumps that cast them.
+	//
+	// Outside StepSimulation because every early-out in there is a reason the
+	// SIM should not advance, not a reason the deck stops casting. A stopped,
+	// paused or fully spun-up sim still has a deck, and the camera is still
+	// moving, so the fades baked into the map are still changing.
+	BakeShadowMap();
+}
+
+void UGasGiantSimSubsystem::StepSimulation(float DeltaTime)
+{
 	if (!bRunning || !Config || !Simulation)
 	{
 		return;
@@ -1023,4 +1040,39 @@ void UGasGiantSimSubsystem::Tick(float DeltaTime)
 
 			GraphBuilder.Execute();
 		});
+}
+
+void UGasGiantSimSubsystem::RequestShadowBake(const FGasGiantShadowParams& InParams)
+{
+	ShadowRequests.Add(InParams);
+}
+
+void UGasGiantSimSubsystem::BakeShadowMap()
+{
+	// CONSUMED, NOT HELD. A planet that stops asking stops baking on the next
+	// tick, rather than leaving a map frozen at whatever light direction it last
+	// pushed -- which would look like a shadow that works and is wrong.
+	TArray<FGasGiantShadowParams> Requests = MoveTemp(ShadowRequests);
+	ShadowRequests.Reset();
+
+	for (const FGasGiantShadowParams& Params : Requests)
+	{
+		// Rejected here rather than on the render thread: a params struct is
+		// cheap to refuse on the game thread and expensive to unwind once a
+		// graph is building.
+		if (!Params.IsUsable())
+		{
+			continue;
+		}
+
+		ENQUEUE_RENDER_COMMAND(GasGiantShadowBake)(
+			[Params](FRHICommandListImmediate& RHICmdList)
+			{
+				FRDGBuilder GraphBuilder(RHICmdList);
+
+				GasGiantShadow::AddBakePass_RenderThread(GraphBuilder, Params);
+
+				GraphBuilder.Execute();
+			});
+	}
 }

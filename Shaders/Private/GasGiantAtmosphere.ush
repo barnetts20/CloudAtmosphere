@@ -332,82 +332,6 @@ bool GGAtmo_SegmentIsDeck(
 		<= P.Atmo.planetParams.cloudOuterRadius;
 }
 
-/** Distance along the ray at which it first reaches the deck.
- *
- *  The cone trace from GG_March, operating on a segment rather than on a whole
- *  ray. Returns T1 when the ray never reaches the deck within the segment.
- *
- *  This is not an optimization here, it is what keeps the limb from breaking.
- *  A grazing chord from the cull radius to the surface is enormous, and marched
- *  at the deck's own step size it exhausts ATMO_MAX_ITER in empty space --
- *  leaving the ray transparent at exactly the angles where its neighbours a
- *  fraction of a degree steeper reach density and go opaque. That threshold is
- *  geometric and sharp, and it draws a hard silhouette where the limb should be
- *  softest.
- *
- *  LocalOrigin and LocalDir are already in the field's frame; LocalDir must be
- *  normalized, which an orthonormal WorldToLocal preserves. */
-float GGAtmo_DeckEntry(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	float3 LocalOrigin,
-	float3 LocalDir,
-	float T0,
-	float T1,
-	float TopMax,
-	GGFieldParams F)
-{
-    float TSearch = T0;
-
-	[loop]
-    for (int Probe = 0; Probe < 24; Probe++)
-    {
-        const float3 ProbePos = LocalOrigin + LocalDir * TSearch;
-        const float ProbeRadius = length(ProbePos);
-        const float ProbeHeight = (ProbeRadius - F.PlanetRadius) / F.Thickness;
-
-        const float3 ProbeDir = ProbePos / max(ProbeRadius, 1e-4f);
-        const float ProbeRate = dot(LocalDir, ProbeDir);
-
-        const float TopUpper = GG_CloudTopUpper(FlowField, FlowSampler, ProbeDir, F);
-
-        if (ProbeHeight <= TopUpper)
-        {
-            return TSearch;
-        }
-
-		// Climbing and clear of the highest the deck can reach. Both conditions
-		// matter: a climbing ray still inside the deck's range can meet a
-		// taller column ahead.
-        if (ProbeRate >= 0.0f && ProbeHeight > TopMax)
-        {
-            return T1;
-        }
-
-		// The deck rises to meet the ray, so the closing rate is the sum of the
-		// ray's descent and the deck's rise across the ground it covers.
-		// Dividing by the descent alone overshoots without bound at tangent.
-		// DeckSlope is in gradient depths per radian, matching the relief that
-		// produces the slope.
-        const float Horizontal = sqrt(max(1.0f - ProbeRate * ProbeRate, 0.0f));
-
-        const float ClosingRate = -ProbeRate
-			+ Horizontal * max(F.DeckSlope, 0.1f) * F.GradientDepth * F.Thickness
-				/ max(ProbeRadius, 1e-4f);
-
-        const float Advance = (ProbeHeight - TopUpper) * F.Thickness / max(ClosingRate, 1e-5f);
-
-        TSearch += max(Advance * GG_CONE_RELAXATION, 1e-4f);
-
-        if (TSearch >= T1)
-        {
-            return T1;
-        }
-    }
-
-    return TSearch;
-}
-
 /** Splits the fine segment at the cone-traced entry.
  *
  *  IN THE PLAN, NOT IN THE LOOP. The region between the cull radius and the
@@ -462,7 +386,7 @@ void GGAtmo_SplitDeckSegment(
     const float SegEnd = Segments[Band].y;
     const float FineStep = Segments[Band].z;
 
-    const float Entry = GGAtmo_DeckEntry(
+    const float Entry = GG_DeckEntry(
 		FlowField, FlowSampler, LocalOrigin, LocalDir, SegStart, SegEnd, TopMax, F);
 
 	// Nothing worth splitting off: the ray was already at the deck.
