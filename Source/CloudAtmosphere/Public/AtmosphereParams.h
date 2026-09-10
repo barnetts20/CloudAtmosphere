@@ -303,9 +303,6 @@ struct CLOUDATMOSPHERE_API FAtmosphereRaymarchParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0"))
 	float AtmosphereSteps = 32.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0"))
-	float AtmosphereLightSteps = 16.0f;
-
 	/** Step growth with distance from the ray start. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float StepScaleFactor = 2.0f;
@@ -345,10 +342,6 @@ struct CLOUDATMOSPHERE_API FAtmosphereRaymarchParams
 		Params.AtmosphereSteps = 64.0f;
 		Params.StepScaleFactor = 3.0f;
 		Params.CloudSteps = 64.0f;
-
-		// The light ray marches air only; the deck's share of it is one
-		// shadow-map read.
-		Params.AtmosphereLightSteps = 8.0f;
 
 		return Params;
 	}

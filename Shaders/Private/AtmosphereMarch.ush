@@ -3,6 +3,11 @@
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
 #include "/Plugin/CloudAtmosphere/Private/CloudDensity.ush"
 
+/** Light-ray step count for the terrestrial march. */
+#ifndef ATMO_TERRESTRIAL_LIGHT_STEPS
+#define ATMO_TERRESTRIAL_LIGHT_STEPS 16
+#endif
+
 // ---------------------------------------------------------------------------
 // Shadow shaping
 //
@@ -349,11 +354,11 @@ float3 Atmo_LightMarch(
     float4 segments[ATMO_MAX_SEGMENTS];
 
 	// The light ray is unbounded by scene depth: it leaves the atmosphere. One
-	// count for both segments -- the light ray has no cloud budget of its own.
+	// fixed count for both segments; this path has no transmittance table.
     const int segmentCount = Atmo_Plan(
 		input.lightRayParams.samplePos, input.lightRayParams.lightDir,
 		1e30f, input.planetParams,
-		input.lightRayParams.atmoLightSteps, input.lightRayParams.atmoLightSteps,
+		ATMO_TERRESTRIAL_LIGHT_STEPS, ATMO_TERRESTRIAL_LIGHT_STEPS,
 		segments);
 
 	// Outside the atmosphere entirely: nothing between here and the sun.

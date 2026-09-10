@@ -114,7 +114,6 @@ struct LightRayParams
 {
     float3 samplePos;
     float3 lightDir;
-    int atmoLightSteps;
     float stepSizeMult;
     int parentStepIndex;
 };
@@ -187,34 +186,6 @@ float Atmo_PhaseDualLobe(float cosTheta, float gForward, float gBack, float forw
     float backward = Atmo_PhaseHG(cosTheta, -gBack);
 
     return max(lerp(backward, forward, forwardWeight), .05);
-}
-
-/** Light-march step budget for a sample, scaled by the view transmittance that
- *  has reached it.
- *
- *  A SAMPLE'S CONTRIBUTION SCALES WITH T BUT ITS COST DOES NOT. Every sample
- *  buys the same shadow ray whether it lands on the first lit surface or a
- *  hundred optical depths inside opaque deck, where it is multiplied by
- *  nothing. Scaling the budget with T spends the steps where they are visible.
- *
- *  LINEAR IN T, WHICH IS THE PRINCIPLED RATE. A light march's error falls as
- *  1/steps and enters the image multiplied by T, so holding T/steps fixed holds
- *  each sample's contribution to the total error fixed. Anything steeper starves
- *  the samples that still matter; anything shallower keeps paying for ones that
- *  do not.
- *
- *  PASS THE FULL BUDGET EVERY TIME. Feeding the previous result back compounds
- *  the reduction step over step and the light march collapses to the floor
- *  within a few samples.
- *
- *  THE FLOOR IS ONLY A SAFETY. The gas giant's light march samples only air, a
- *  smooth exponential with nothing to alias, so the reduction can be aggressive.
- *  PITFALL: a light march that samples cloud through this budget also needs a
- *  LENGTH bound -- a grazing ray crosses many times the deck an overhead one
- *  does, and no single count serves both. */
-int Atmo_LightBudget(int fullSteps, float transmittance)
-{
-    return max((int) round(float(fullSteps) * saturate(transmittance)), 2);
 }
 
 /** Weight on an ambient term at a given sun elevation.

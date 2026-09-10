@@ -6,12 +6,6 @@
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTransmittance.ush"
 #include "/Plugin/CloudAtmosphere/Private/GasGiantShadow.ush"
 
-/** Air transmittance toward the light: 1 reads the table, 0 marches. An A/B
- *  switch for verifying the table against the march it replaces. */
-#ifndef GG_AIR_TRANSMITTANCE_TABLE
-#define GG_AIR_TRANSMITTANCE_TABLE 1
-#endif
-
 // ---------------------------------------------------------------------------
 // Gas giant cloud deck marched through the atmosphere's scattering model.
 //
@@ -31,12 +25,9 @@
 // coarse below the backstop where columns are saturated. cloudSteps therefore
 // means steps across the GRADIENT rather than across the whole deck.
 //
-// THE LIGHT BUDGET IS TRANSMITTANCE-WEIGHTED. Every view sample spawns a shadow
-// ray at the same cost, but its result is multiplied by the transmittance that
-// reached it -- so a sample a hundred optical depths inside the deck pays full
-// price for a number that is scaled by nothing. Atmo_LightBudget scales the
-// light step count by accumulated T, which also grows the light march's step
-// size, since the planner sizes its segments from that count.
+// LIGHT TOWARD THE STAR IS READ, NOT MARCHED. The air's share comes from the
+// transmittance table and the deck's from the shadow map, so a view sample's
+// light costs the same at any depth and there is no light step budget.
 //
 // THE BACKSTOP IS A SAFE PLACE TO CHANGE STEP SIZE, which a fixed radius
 // normally is not. Every column whose top clears it is saturated either side,
@@ -439,7 +430,6 @@ CompositeParams GGAtmo_BuildAtmo(
 	float4 cloudPhaseParams,
 	int mainAtmoSteps,
 	int mainCloudSteps,
-	int atmoLightSteps,
 	float stepScaleFactor,
 	GGFieldParams F)
 {
@@ -494,13 +484,14 @@ CompositeParams GGAtmo_BuildAtmo(
 		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
 		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
 		0.0f, 0.0f, float4(0.0f, 0.0f, 0.0f, 0.0f),
-		mainAtmoSteps, mainCloudSteps, atmoLightSteps,
+		mainAtmoSteps, mainCloudSteps,
 		stepScaleFactor);
 }
 
 /** Transmittance from a sample toward the light, through air and deck.
  *
- *  Optical depth accumulated and exponentiated once, as in Atmo_LightMarch.
+ *  Both optical depths are read -- the air's from the transmittance table, the
+ *  deck's from the shadow map -- and exponentiated once.
  *
  *  The deck's optical depth is band-scaled, so a belt absorbs more than a zone.
  *  It resolves through cloudAbsorptionBeta rather than cloudScatterBeta: light
@@ -574,11 +565,6 @@ float3 GGAtmo_LightMarch(
         return float3(0.0f, 0.0f, 0.0f);
     }
 
-	// Set here rather than further down: every return below this point is a
-	// LIT path, and one of them reports full transmittance for a light ray that
-	// never enters the atmosphere. Assigned late, that sample keeps a zero lobe
-	// while being fully lit -- black where it should be brightest.
-	//
 	// The anisotropic terms read this instead of PlanetShadow. Same curve, tail
 	// crushed, so no new endpoint appears at either end.
     OutLobeShadow = pow(PlanetShadow, P.Scatter.LobeShadowPower);
@@ -635,7 +621,6 @@ float3 GGAtmo_LightMarch(
 	// units so the betas apply exactly as they do to a marched depth. Below the
 	// horizon the table holds the horizon value: PlanetShadow above owns the
 	// occlusion, and is already fading to zero across the band the clamp covers.
-#if GG_AIR_TRANSMITTANCE_TABLE
     const float Thickness = AtmoT_Thickness(
 		P.Atmo.planetParams.planetRadius, P.Atmo.planetParams.atmoRadius);
     const float2 Radii = AtmoT_Radii(
@@ -647,80 +632,6 @@ float3 GGAtmo_LightMarch(
 
     const float3 AtmoOptDepth = AtmoT_Lookup(TransmittanceTable, TransmittanceSampler,
 		Dist / Thickness, Mu, Radii.x, Radii.y) * Thickness;
-#else
-    float4 Segments[ATMO_MAX_SEGMENTS];
-
-	// Unbounded by scene depth: the light ray leaves the atmosphere. One count
-	// for both segments -- everything this loop samples is air.
-    int SegmentCount = Atmo_Plan(
-		Start, LightDir, 1e30f, P.Atmo.planetParams,
-		P.Atmo.lightRayParams.atmoLightSteps, P.Atmo.lightRayParams.atmoLightSteps,
-		Segments);
-
-    if (SegmentCount == 0)
-    {
-        return float3(1.0f, 1.0f, 1.0f);
-    }
-
-	// -- The air, still marched ---------------------------------------------
-	//
-	// A smooth exponential over a short path with nothing to alias, which is why
-	// it keeps its own steps. It is now the entire per-pixel light cost, so it is
-	// the next thing worth measuring rather than the next thing worth tuning.
-    float3 AtmoOptDepth = float3(0.0f, 0.0f, 0.0f);
-
-    const float RayStart = Segments[0].x;
-    const float ReferenceLength = max(
-		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f);
-
-    for (int s = 0; s < SegmentCount; s++)
-    {
-        const float SegStart = Segments[s].x;
-        const float SegEnd = Segments[s].y;
-        const float StepSize = Segments[s].z;
-
-        float Pos = SegStart;
-
-        int Iter = 0;
-        while (Pos < SegEnd && Iter < ATMO_MAX_ITER)
-        {
-            Iter++;
-
-			// stepSizeMult carries the parent step's growth down, so a coarsely
-			// sampled main ray does not spawn finely sampled light rays.
-            float CurrentStep = Atmo_AdaptiveStepSize(StepSize, Pos, RayStart,
-				ReferenceLength, P.Atmo.mainRayParams.stepScaleFactor)
-				* P.Atmo.lightRayParams.stepSizeMult;
-
-            CurrentStep = min(CurrentStep, SegEnd - Pos);
-
-			// Salted by the parent step and by this step, so successive light
-			// rays from one pixel do not sample in phase and neither does the
-			// view ray that spawned them.
-            const float StepSeed = Atmo_HashJitter(P.Atmo.mainRayParams.svxy,
-				uint(P.Atmo.lightRayParams.parentStepIndex) * 9781u + uint(Iter));
-            const float Offset = (StepSeed - 0.5f) * CurrentStep * ATMO_STEP_JITTER;
-
-            const float3 SamplePos = Start + LightDir * (Pos + CurrentStep * 0.5f + Offset);
-
-            const float3 ToCentreStep = SamplePos - P.Atmo.planetParams.planetPos;
-            const float DistSq = dot(ToCentreStep, ToCentreStep);
-
-            if (DistSq < P.Atmo.planetParams.planetRadiusSq)
-            {
-                return float3(0.0f, 0.0f, 0.0f);
-            }
-
-            const float Dist = sqrt(DistSq);
-
-            AtmoOptDepth += Atmo_Density(Dist - P.Atmo.planetParams.planetRadius,
-				P.Atmo.scatteringParams.rayScaleH, P.Atmo.scatteringParams.mieScaleH,
-				P.Atmo.scatteringParams.absHeight, P.Atmo.scatteringParams.absFalloff) * CurrentStep;
-
-            Pos += CurrentStep;
-        }
-    }
-#endif
 
     return PlanetShadow * exp(-(P.Atmo.scatteringParams.rayBeta * AtmoOptDepth.x
 		+ P.Atmo.scatteringParams.mieBeta * AtmoOptDepth.y
@@ -900,12 +811,6 @@ float4 GGAtmo_MainMarch(
     const float ReferenceLength = max(
 		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f);
 
-	// THE AUTHORED BUDGET, HELD ASIDE. P carries the light ray's parameters and
-	// is rewritten in place each step, so the scaled count has to come from this
-	// rather than from what the previous step left behind -- otherwise the
-	// reduction compounds and the light march collapses to its floor.
-    const int FullAtmoLightSteps = P.Atmo.lightRayParams.atmoLightSteps;
-
 	// Constant along the ray: both the view and the light are fixed per pixel.
     const float PhaseDual = Atmo_PhaseDualLobe(P.Atmo.scatteringParams.cosTheta,
 		P.Atmo.cloudParams.cloudPhaseParams.r,
@@ -1018,8 +923,6 @@ float4 GGAtmo_MainMarch(
 
             CurrentStep = min(CurrentStep, SegEnd - Pos);
 
-            const float StepSizeMult = CurrentStep / max(BaseStepSize, 1e-6f);
-
             const float StepSeed = Atmo_StepJitter(P.Atmo.mainRayParams.svxy, StepIndex);
             const float Offset = (StepSeed - 0.5f) * CurrentStep * ATMO_STEP_JITTER;
 
@@ -1056,21 +959,6 @@ float4 GGAtmo_MainMarch(
 
                 P.Atmo.lightRayParams.samplePos = SamplePos;
                 P.Atmo.lightRayParams.parentStepIndex = StepIndex;
-                P.Atmo.lightRayParams.stepSizeMult = StepSizeMult;
-
-				// Whatever light this sample finds is multiplied by the
-				// transmittance that reached it, so that is what its shadow ray
-				// is worth. The brightest channel, since a shadow that still
-				// matters to one of them matters.
-				//
-				// TAKEN BEFORE THIS STEP'S EXTINCTION IS APPLIED, which is what
-				// the ordering below already does: the first sample inside the
-				// deck is the one the eye reads, and it gets the full budget.
-                const float LightBudgetWeight =
-					max(Transmittance.x, max(Transmittance.y, Transmittance.z));
-
-                P.Atmo.lightRayParams.atmoLightSteps =
-					Atmo_LightBudget(FullAtmoLightSteps, LightBudgetWeight);
 
 				// THE FADES BELONG TO THE SAMPLE, NOT TO THE PATH. GG_BuildField
 				// leaves both at 1 and the march sets them per sample for the
