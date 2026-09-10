@@ -94,7 +94,29 @@
  *
  *  0 restores the previous behaviour, for A/B against the noise. */
 #ifndef GG_LIGHT_STRUCTURE_MIP
-#define GG_LIGHT_STRUCTURE_MIP 2
+#define GG_LIGHT_STRUCTURE_MIP 3.0f
+#endif
+
+/** How far transmittance may stretch the shadow ray's step, as a multiple of
+ *  the resolution bound.
+ *
+ *  A CAP ON UNDER-SAMPLING, WHICH IS WHAT THE EYE ACTUALLY READS. The relaxation
+ *  spends resolution where a sample's contribution has fallen, on the argument
+ *  that absolute error is what matters. Deep inside the deck that argument
+ *  fails: EVERY sample there is low contribution, the whole image is made of
+ *  them, and what shows is relative error.
+ *
+ *  IT REPLACES THE GRADIENT AS THE FLOOR. The gradient was a safe backstop while
+ *  the light path read nothing but the flow field, whose features are far
+ *  coarser than the ramp. Structure features are finer, so the old floor let the
+ *  step run several features long and the jitter chose between them.
+ *
+ *  TIGHTENING LightStepTexels INSTEAD IS THE WRONG LEVER. That is the bound at
+ *  FULL contribution, where the sampling was already adequate, so it buys the
+ *  same quiet at several times the cost. This costs only where the relaxation
+ *  had already gone too far. */
+#ifndef GG_LIGHT_RELAX_MAX
+#define GG_LIGHT_RELAX_MAX 4.0f
 #endif
 
 /** Isolates one lighting term so a stray glow can be attributed rather than
@@ -941,11 +963,16 @@ float3 GGAtmo_LightMarch(
 	// transmittance weighting do nothing at all, and every sample deep inside
 	// the deck pays the same as the first one on the surface.
 	//
-	// THE GRADIENT IS WHERE THE RELAXATION STOPS. A step wider than the density
-	// ramp stops integrating the profile and starts choosing a side of it, which
-	// is the coin flip that no filter recovers from. Between the flow texel and
-	// the gradient there is room to trade, and transmittance is what spends it.
-    const float LooseBound = P.Field.GradientDepth * P.Field.Thickness * StepGrowth;
+	// THE RELAXATION IS CAPPED AS A MULTIPLE OF THE BOUND, not at an absolute
+	// length. What the eye reads is how far past resolvable a sample has been
+	// stretched, and that ratio is the same quantity whatever the deck is tuned
+	// to -- an absolute floor holds at one tuning and is wrong at the next.
+	//
+	// Still never past the density ramp: a step wider than that stops
+	// integrating the profile and starts choosing a side of it.
+    const float LooseBound = min(
+		TightBound * GG_LIGHT_RELAX_MAX,
+		P.Field.GradientDepth * P.Field.Thickness * StepGrowth);
 
     const float MaxDeckStep = max(
 		min(TightBound / max(P.Atmo.lightRayParams.budgetWeight, 1e-3f), LooseBound),
@@ -1302,7 +1329,6 @@ float4 GGAtmo_MainMarch(
 
     const float PhaseIsotropic = 1.0f / (4.0f * PI);
 
-    const float WorldSeed = Atmo_RaySeed(P.Atmo.mainRayParams.svxy);
 
     int StepIndex = 0;
 
@@ -1352,7 +1378,7 @@ float4 GGAtmo_MainMarch(
 
             const float StepSizeMult = CurrentStep / max(BaseStepSize, 1e-6f);
 
-            const float StepSeed = Atmo_StepJitter(WorldSeed, StepIndex);
+            const float StepSeed = Atmo_StepJitter(P.Atmo.mainRayParams.svxy, StepIndex);
             const float Offset = (StepSeed - 0.5f) * CurrentStep * ATMO_STEP_JITTER;
 
             const float3 SamplePos = RayOrigin + RayDir * (Pos + CurrentStep * 0.5f + Offset);

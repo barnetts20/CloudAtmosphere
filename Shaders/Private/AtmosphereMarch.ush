@@ -526,7 +526,6 @@ float4 Atmo_MainMarch(
 
     float phaseIsotropic = 1.0 / (4.0 * 3.14159265);
 
-    float worldSeed = Atmo_RaySeed(input.mainRayParams.svxy);
 
     int stepIndex = 0;
 
@@ -550,7 +549,7 @@ float4 Atmo_MainMarch(
 
             float stepSizeMult = currentStep / baseStepSize;
 
-            float stepSeed = Atmo_StepJitter(worldSeed, stepIndex);
+            float stepSeed = Atmo_StepJitter(input.mainRayParams.svxy, stepIndex);
             float sampleOffset = (stepSeed - 0.5) * currentStep * ATMO_STEP_JITTER;
 
             float3 samplePos = rayOrigin + rayDir * (pos + currentStep * 0.5 + sampleOffset);

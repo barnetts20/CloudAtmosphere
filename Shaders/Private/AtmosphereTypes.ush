@@ -339,7 +339,22 @@ float Atmo_RaySeed(float2 svxy)
     return frac(52.9829189 * frac(0.06711056 * svxy.x + 0.00583715 * svxy.y));
 }
 
-float Atmo_StepJitter(float seed, int stepIndex)
+/** Jitter for one step of a view ray, from the pixel and the step index.
+ *
+ *  A GOLDEN-RATIO ADVANCE OFF ONE SEED CORRELATES EVERY STEP ACROSS THE SCREEN.
+ *  Each pixel walks a well-distributed sequence, which is why banding goes away
+ *  -- but at a given step index the offsets differ between pixels by a constant,
+ *  so all sixty-four steps carry the SAME spatial pattern, merely shifted. The
+ *  per-pixel errors then add rather than cancel, and since iso-step-index
+ *  contours are rings about the view centre, the residual is a set of rings that
+ *  the deck slides through as the camera moves.
+ *
+ *  Offsetting the noise's INPUT by the step index keeps the spatial
+ *  distribution well behaved at every step while decorrelating one step from the
+ *  next, so the sixty-four errors average instead of accumulating. The constant
+ *  is the one interleaved gradient noise is normally advanced by per frame; the
+ *  step index serves the same purpose here. */
+float Atmo_StepJitter(float2 svxy, int stepIndex)
 {
-    return frac(seed + float(stepIndex) * 0.618033);
+    return Atmo_RaySeed(svxy + 5.588238 * float(stepIndex));
 }
