@@ -44,6 +44,17 @@
 #include "AtmosphereParams.generated.h"
 
 class UGasGiantSimConfig;
+
+/** MIRRORS GG_DETAIL_RELIEF_CENTRED in GasGiantFlow.ush, and the two must be
+ *  changed together. The shader plans the marched band from GG_TopBounds while
+ *  the actor culls from GetTopMax, so a disagreement about which side the detail
+ *  carve reserves slices the deck against a shell sized for the other setting.
+ *
+ *  A pair of defines is the wrong shape for this and it should collapse to one
+ *  once the look question is settled -- whichever wins becomes the code. */
+#ifndef GG_DETAIL_RELIEF_CENTRED
+#define GG_DETAIL_RELIEF_CENTRED 1
+#endif
 class UVolumeTexture;
 
 /** Which cloud model the march stage uses.
@@ -980,8 +991,35 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 		return 0.5f * FMath::Abs(BandRelief)
 			+ FMath::Abs(PressureRelief)
 			+ 0.5f * FMath::Abs(StructureRelief)
-			+ FMath::Max(-DetailRelief, 0.0f)
+			+ GetDetailUpReach()
 			+ FMath::Max(StormTowerRelief, 0.0f);
+	}
+
+	/** How far the detail carve reaches in each direction, in gradients.
+	 *
+	 *  MUST MATCH GG_DETAIL_RELIEF_CENTRED in GasGiantFlow.ush. The cull radius
+	 *  comes from GetTopMax and the shader plans against GG_TopBounds, so the
+	 *  two have to bound the same deck -- disagree and the tops get sliced
+	 *  against a shell that reserved room for the other setting.
+	 *
+	 *  Centred, half lands on each side. One-sided, all of it lands on whichever
+	 *  side the amount's sign points at. */
+	float GetDetailUpReach() const
+	{
+#if GG_DETAIL_RELIEF_CENTRED
+		return 0.5f * FMath::Abs(DetailRelief);
+#else
+		return FMath::Max(-DetailRelief, 0.0f);
+#endif
+	}
+
+	float GetDetailDownReach() const
+	{
+#if GG_DETAIL_RELIEF_CENTRED
+		return 0.5f * FMath::Abs(DetailRelief);
+#else
+		return FMath::Max(DetailRelief, 0.0f);
+#endif
 	}
 
 	/** The matching downward reach. Feeds GetTopMin; nothing bounds it. */
@@ -989,7 +1027,7 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	{
 		return 0.5f * FMath::Abs(BandRelief)
 			+ FMath::Abs(PressureRelief)
-			+ FMath::Max(DetailRelief, 0.0f)
+			+ GetDetailDownReach()
 			+ 0.5f * FMath::Abs(StructureRelief);
 	}
 

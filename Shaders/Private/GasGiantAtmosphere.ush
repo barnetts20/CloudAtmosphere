@@ -92,9 +92,22 @@
  *  Halving the frequency the layer HAS is more robust than trying to bound the
  *  step against a feature size the bake decides and the shader cannot read.
  *
+ *  3 AT THE CURRENT DECK, and the number follows from the sampling rather than
+ *  from taste. A structure feature is about 0.045 planet radii at mip 0, against
+ *  a relaxed light step of 0.1, so mip 2 lands at 1.8 samples per feature -- at
+ *  the edge, which reads as marginal-but-present grain. Mip 3 doubles the
+ *  feature to 0.36 and clears it at the CHEAPEST step settings rather than the
+ *  most expensive.
+ *
+ *  RAISING QUALITY DOES NOT CLOSE THIS GRAIN, WHICH IS WHY THE MIP IS THE LEVER.
+ *  Below Nyquist each step lands inside one feature or another and the jitter
+ *  decides which, so more samples change which lump was picked rather than
+ *  averaging an error down. Variance collapses only on crossing into resolving
+ *  the feature, and it is far cheaper to move the feature than the step.
+ *
  *  0 restores the previous behaviour, for A/B against the noise. */
 #ifndef GG_LIGHT_STRUCTURE_MIP
-#define GG_LIGHT_STRUCTURE_MIP 3.0f
+#define GG_LIGHT_STRUCTURE_MIP 3
 #endif
 
 /** How far transmittance may stretch the shadow ray's step, as a multiple of
@@ -872,15 +885,34 @@ float3 GGAtmo_LightMarch(
 		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f)
 		/ float(max(P.Atmo.lightRayParams.atmoLightSteps, 1));
 
-	// A SAMPLE ABOVE THE DECK WITH A CLIMBING LIGHT RAY NEVER RE-ENTERS IT, so
-	// the search has nothing to find and the segment is pure air. Both
-	// conditions are needed: a climbing ray still inside the deck's range can
-	// meet a taller column ahead.
+	// A RAY WHOSE CLOSEST APPROACH CLEARS THE DECK NEVER TOUCHES IT, so the
+	// search has nothing to find and the segment is pure air.
+	//
+	// EXACT, NOT A CLIMB TEST. Asking only whether the ray is climbing sends
+	// every slightly descending ray into a 24-probe cone trace, including the
+	// ones that level off well above the deck and never arrive. Those are the
+	// NEAR-TANGENT rays, which is exactly what a light ray is at the terminator
+	// -- the band where a shadow ray is already crossing ten times the deck a
+	// radial one does, and can least afford two dozen fetches for an answer that
+	// was available in closed form.
+	//
+	// Closest approach sits at t = -dot(O, D) for a unit D. Behind the origin,
+	// the ray is climbing away and the start radius is the minimum; ahead, the
+	// perpendicular distance is. The identity needs no square root until the
+	// comparison, and the comparison is against the CULL radius, which already
+	// carries the fades and the carve margin.
     const float StartRadius = length(LocalOrigin);
     const float StartHeight = (StartRadius - P.Field.PlanetRadius) / P.Field.Thickness;
-    const float ClimbRate = dot(LocalDir, LocalOrigin / max(StartRadius, 1e-4f));
 
-    if (StartHeight > TopMax && ClimbRate >= 0.0f)
+    const float ApproachT = -dot(LocalOrigin, LocalDir);
+
+    const float MinRadiusSq = (ApproachT > 0.0f)
+		? max(dot(LocalOrigin, LocalOrigin) - ApproachT * ApproachT, 0.0f)
+		: dot(LocalOrigin, LocalOrigin);
+
+    const float CullRadius = P.Atmo.planetParams.cloudOuterRadius;
+
+    if (StartHeight > TopMax && MinRadiusSq > CullRadius * CullRadius)
     {
         const int LastSeg = SegmentCount - 1;
         if (LastSeg >= 0 && Segments[LastSeg].w > 0.5f)
@@ -1371,6 +1403,63 @@ float4 GGAtmo_MainMarch(
 
             float CurrentStep = Atmo_AdaptiveStepSize(BaseStepSize, Pos, RayStart,
 				ReferenceLength, P.Atmo.mainRayParams.stepScaleFactor);
+
+			// -- Obliquity ---------------------------------------------------
+			//
+			// THE PLANNED STEP IS A HEIGHT BUDGET WEARING A LENGTH'S CLOTHES.
+			// Atmo_Plan divides the band's RADIAL thickness by cloudSteps, so
+			// the step it hands down is how far a straight-down ray should climb
+			// per sample -- and it is then spent as a distance along whatever
+			// direction the ray happens to have.
+			//
+			// A radial ray converts one for one. A grazing one climbs a fraction
+			// of its path length, so it takes many more steps to cross the same
+			// gradient and resolves a density that is barely changing between
+			// them. That is the tangent case: the longest chords in the scene
+			// marched at the finest rate in the scene, each step spawning a
+			// shadow ray, for a field the ray is running parallel to.
+			//
+			// Dividing by the radial rate spends the budget on HEIGHT, which is
+			// the axis the profile varies on, and leaves the radial case
+			// untouched.
+			//
+			// THE LATERAL BOUND IS WHAT STOPS IT AT TANGENCY, where the radial
+			// rate goes to zero and the height argument says the step may be
+			// infinite. Sideways the ray still crosses columns, and the deck top
+			// varies at the flow grid's own scale -- so one texel of arc is the
+			// step's other limit, the same bound the shadow ray uses.
+			//
+			// COMBINED IN QUADRATURE, NOT BY min. The two are not alternatives,
+			// they are the components of one motion: a step advances in height
+			// and sideways at the same time, and each carries the ray a fraction
+			// of the way to its own limit. Adding those fractions in quadrature
+			// is the same footprint sum a mip level is chosen by.
+			//
+			// AND min WOULD DRAW A RING. It is continuous but its derivative is
+			// not, and the kink sits at a fixed obliquity -- which on a sphere is
+			// a circle about the limb. Step size changes character across it, so
+			// sampling quality does too, and the seam prints. This form is smooth
+			// everywhere and is tightest at the crossover, which is where the
+			// sampling was worst anyway.
+            BRANCH
+
+            if (IsDeck)
+            {
+                const float3 ToCentre = RayOrigin + RayDir * Pos - P.Atmo.planetParams.planetPos;
+                const float StepRadius = max(length(ToCentre), 1e-4f);
+
+                const float RadialRate = abs(dot(RayDir, ToCentre / StepRadius));
+                const float LateralRate = sqrt(max(1.0f - RadialRate * RadialRate, 0.0f));
+
+				// Progress toward each limit, per unit of path travelled.
+                const float HeightCost = RadialRate / max(CurrentStep, 1e-6f);
+
+                const float LateralCost =
+					LateralRate / max(GG_FlowTexelArc(FlowField, StepRadius) * .5, 1e-6f);
+
+                CurrentStep = rsqrt(max(
+					HeightCost * HeightCost + LateralCost * LateralCost, 1e-12f));
+            }
 
             CurrentStep = max(CurrentStep, min(FootprintStep, FeatureCap));
 

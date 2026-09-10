@@ -68,6 +68,25 @@
 #define GG_CROSSFADE_SPAN 2.0f
 #endif
 
+/** Whether the detail layer moves the deck top SYMMETRICALLY about the noise
+ *  median, the way the structure layer does, or only downward.
+ *
+ *  ONE-SIDED MOVES THE MEAN DECK WITH THE FADE. The carve is scaled by
+ *  DetailFade, so a layer that only subtracts lowers the deck as it fades IN --
+ *  the surface sinks on approach and thin features dissolve into it. That is the
+ *  same coupling the structure layer is signed to avoid, arriving through the
+ *  fade rather than through the amount.
+ *
+ *  ONE-SIDED IS ALSO WHAT BREAKING A SURFACE UP LOOKS LIKE. Centred, fine noise
+ *  reads as material pushing out of the deck rather than being cut from it, so
+ *  this is a look decision and not only a correctness one.
+ *
+ *  Either amount may still be negative, which mirrors the layer. The bounds in
+ *  GG_TopBounds follow this switch, so both sides stay reserved when it is on. */
+#ifndef GG_DETAIL_RELIEF_CENTRED
+#define GG_DETAIL_RELIEF_CENTRED 1
+#endif
+
 /** Fraction of the cone-trace advance actually taken. Under 1 because the deck
  *  slope bound is authored, and an under-declared slope is the one way the
  *  entry search steps over the surface. */
@@ -907,7 +926,14 @@ GGFieldSample GG_Field(
     const float ShapeDetail = lerp(1.0f, Ridge, DetailWeight);
     const float ShapeStructure = lerp(1.0f, StructureMix, StructureWeight);
 
+#if GG_DETAIL_RELIEF_CENTRED
+	// About the median, so turning the layer up or fading it in changes the
+	// deck's texture without changing its altitude.
+    const float CarveDetail = DetailWeight * (0.5f - Ridge);
+#else
     const float CarveDetail = DetailWeight * (1.0f - Ridge);
+#endif
+
     const float ReliefStructure = StructureWeight * (StructureMix - 0.5f);
 
 
@@ -1088,20 +1114,30 @@ void GG_TopBounds(
     const float Span = D * (0.5f * abs(F.Relief.y) + abs(F.Relief.z));
 
 
-	// Both carves are subtractive, so together they lower the deck by at most
-	// their sum and belong in the LOWER bound. A symmetric term would push
-	// OutMax up, lengthening the chord every grazing ray crosses for lumps that
-	// only cut downward. Structure is signed, so half lands in each bound;
-	// detail is one-sided, and which side depends on the sign of its amount.
+	// Structure is signed about the median, so half of its reach lands in each
+	// bound. Detail follows GG_DETAIL_RELIEF_CENTRED: centred it is the same
+	// half-and-half, one-sided it lands entirely in whichever bound the sign of
+	// its amount points at.
+	//
+	// A SYMMETRIC TERM COSTS SOMETHING. It pushes OutMax up, which lengthens the
+	// chord every grazing ray crosses and coarsens the step -- so a one-sided
+	// carve reserving only the side it uses is cheaper, and that is worth
+	// knowing when reading the two settings against each other.
     const float StructureHalf =
 		D * 0.5f * abs(F.StructureRelief) * saturate(StructureFade);
 
     const float DetailCarve = D * saturate(DetailFade) * abs(F.DetailRelief);
 
-    OutMin = F.Relief.x - Span - StructureHalf
-		- (F.DetailRelief > 0.0f ? DetailCarve : 0.0f);
+#if GG_DETAIL_RELIEF_CENTRED
+    const float DetailDown = 0.5f * DetailCarve;
+    const float DetailUp = 0.5f * DetailCarve;
+#else
+    const float DetailDown = (F.DetailRelief > 0.0f) ? DetailCarve : 0.0f;
+    const float DetailUp = (F.DetailRelief < 0.0f) ? DetailCarve : 0.0f;
+#endif
 
-    OutMax = F.Relief.x + Span + StructureHalf
-		+ (F.DetailRelief < 0.0f ? DetailCarve : 0.0f)
+    OutMin = F.Relief.x - Span - StructureHalf - DetailDown;
+
+    OutMax = F.Relief.x + Span + StructureHalf + DetailUp
 		+ D * max(F.Relief.w, 0.0f);
 }
