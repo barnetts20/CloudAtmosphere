@@ -35,7 +35,7 @@
  *  to its own limit. min would be continuous but not smooth, and its kink sits
  *  at a fixed obliquity, which on a sphere is a ring. */
 #ifndef GG_SHADOW_STEPS_PER_GRADIENT
-#define GG_SHADOW_STEPS_PER_GRADIENT 64.0f
+#define GG_SHADOW_STEPS_PER_GRADIENT 8.0f
 #endif
 
 /** Most optical depth a single step may accumulate.
@@ -63,6 +63,44 @@
 #ifndef GG_SHADOW_MAX_STEPS
 #define GG_SHADOW_MAX_STEPS 256
 #endif
+
+/** Lateral samples per march step, 1 or 4.
+ *
+ *  BAND-LIMITING, NOT SMOOTHING. One ray per texel makes the map a point sample
+ *  of a field that varies within a texel, so it carries texel-scale variance
+ *  that no interpolation afterwards can remove -- and blurring the stored nodes
+ *  cannot fix it either, because reconstruction is nonlinear in them and
+ *  GG_SHADOW_NO_DECK sits in the same channels, so any kernel crossing the
+ *  silhouette drags its neighbourhood toward no-deck.
+ *
+ *  Averaging extinction across the texel's footprint makes each texel represent
+ *  its AREA rather than its centre, which is the actual defect. Four subsamples
+ *  at half the resolution is the same number of density fetches as one at full,
+ *  and yields a filtered map rather than an aliased one. */
+#ifndef GG_SHADOW_SUBSAMPLES
+#define GG_SHADOW_SUBSAMPLES 4
+#endif
+
+/** How far the entry is backed off, in texel footprints.
+ *
+ *  The cone trace runs on the centre ray only, so it finds the centre column's
+ *  deck top. Neighbouring columns inside the same texel can be higher, and their
+ *  density would be missed entirely by a march that started at the centre's
+ *  entry. Starting early costs steps through empty air, where density is zero
+ *  and the accumulation is unaffected. */
+#ifndef GG_SHADOW_ENTRY_BACKOFF
+#define GG_SHADOW_ENTRY_BACKOFF 1.5f
+#endif
+
+/** Rotated grid: one subsample per row and per column of the texel, which
+ *  resolves an edge at any orientation better than an axis-aligned quad. */
+static const float2 GGShadow_SubOffsets[4] =
+{
+    float2(-0.375f, -0.125f),
+    float2(-0.125f, 0.375f),
+    float2(0.125f, -0.375f),
+    float2(0.375f, 0.125f),
+};
 
 Texture2DArray ShadowFlowField;
 SamplerState ShadowFlowSampler;
@@ -242,8 +280,22 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     const float3 Origin = Offset - Dir * HalfChord;
     const float RayLength = 2.0f * HalfChord;
 
-    const float TEntry =
+    const float TexelWorld = 2.0f * ShadowExtent / float(max(ShadowMapSize.x, 1));
+
+    float TEntry =
 		GG_DeckEntry(ShadowFlowField, ShadowFlowSampler, Origin, Dir, 0.0f, RayLength, TopMax, F);
+
+	// Converted from a lateral distance to a distance ALONG THE RAY by the rate
+	// the ray descends. A grazing ray covers a texel's width over a long span,
+	// so the back-off grows with obliquity, which is where columns inside one
+	// texel differ most.
+    {
+        const float3 EntryPos = Origin + Dir * TEntry;
+        const float EntryRadius = max(length(EntryPos), 1e-4f);
+        const float EntryRate = abs(dot(Dir, EntryPos / EntryRadius));
+
+        TEntry = max(0.0f, TEntry - TexelWorld * GG_SHADOW_ENTRY_BACKOFF / max(EntryRate, 0.1f));
+    }
 
 	// MATCHES THE MATERIAL'S CONVERSION. AtmosphereSetup divides the pushed
 	// absorption beta by the atmosphere thickness before the march ever sees it,
@@ -313,27 +365,49 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         float MidDetail, MidStructure;
         GGShadow_Fades(Mid, F, MidDetail, MidStructure);
 
-    	// BOTH LAYERS, BOTH FADES. The map cannot resolve detail spatially at this
-	// resolution, but detail is EROSION -- GG_Density applies it as a carve, so
-	// it lowers mean density rather than only adding variation. Omitting it
-	// leaves the shadow deck uniformly denser than the visible one, and the lit
-	// face pays for material the eye never sees.
-	//
-	// A layer may only be dropped from the map if it moves the variance and not
-	// the mean. Neither of these qualifies.
+		// BOTH LAYERS, BOTH FADES. The map cannot resolve detail spatially at
+		// this resolution, but detail is EROSION -- GG_Density applies it as a
+		// carve, so it lowers mean density rather than only adding variation.
+		// Omitting it leaves the shadow deck uniformly denser than the visible
+		// one, and the lit face pays for material the eye never sees.
+		//
+		// A layer may only be dropped from the map if it moves the variance and
+		// not the mean. Neither of these qualifies.
+		//
+		// Evaluated once per step rather than per subsample: the fades vary over
+		// planet radii, and a texel is not one.
         F.DetailFade = MidDetail;
         F.StructureFade = MidStructure;
 
-        const float4 Deck = GG_Density(
-			ShadowFlowField, ShadowFlowSampler,
-			ShadowDetailVolume, ShadowDetailSampler,
-			ShadowStructureVolume, ShadowStructureSampler,
-			Mid, StepHalfHeight, F);
+		// Extinction averaged across the texel's footprint, so the texel stands
+		// for its AREA rather than its centre. Averaged as SIGMA, inside the
+		// step -- averaging optical depths or whole sub-rays would push the
+		// nonlinear part of the reconstruction through the mean and reintroduce
+		// the bias the map exists to remove.
+        float Density = 0.0f;
 
-		// Band scales extinction, so a belt shadows more than a zone. AbsMax
-		// folds in here so the thresholds below are transmittance and not an
-		// arbitrary scalar.
-        const float Sigma = Deck.x * GGShadow_BandAlpha(Deck.y) * AbsMax;
+        UNROLL
+
+        for (int Sub = 0; Sub < GG_SHADOW_SUBSAMPLES; Sub++)
+        {
+            const float2 Offset = (GG_SHADOW_SUBSAMPLES > 1)
+				? GGShadow_SubOffsets[Sub] * TexelWorld
+				: float2(0.0f, 0.0f);
+
+            const float3 SubPos = Mid + ShadowBasisU * Offset.x + ShadowBasisV * Offset.y;
+
+            const float4 Deck = GG_Density(
+				ShadowFlowField, ShadowFlowSampler,
+				ShadowDetailVolume, ShadowDetailSampler,
+				ShadowStructureVolume, ShadowStructureSampler,
+				SubPos, StepHalfHeight, F);
+
+			// Band scales extinction, so a belt shadows more than a zone, and it
+			// arrives on the same fetch the density came from.
+            Density += Deck.x * GGShadow_BandAlpha(Deck.y);
+        }
+
+        const float Sigma = Density * AbsMax / float(GG_SHADOW_SUBSAMPLES);
 
         const float TauNext = Tau + Sigma * Step;
 
