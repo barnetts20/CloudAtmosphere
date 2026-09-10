@@ -106,6 +106,25 @@
 #define GG_SHADOW_LOOKUP_JITTER 1.0f
 #endif
 
+/** Cascade count. Level 0 covers the whole disc; each inner level matches the
+ *  radius a layer is drawn to, so shadow resolution steps up exactly where the
+ *  field it is sampling gains a layer.
+ *
+ *  Adding a level costs a slice and a case in GG_ShadowCascadeExtent. */
+#ifndef GG_SHADOW_CASCADES
+#define GG_SHADOW_CASCADES 3
+#endif
+
+/** Where a cascade starts handing over to the one outside it, as a fraction of
+ *  its half-width. The outer band reconstructs both and blends.
+ *
+ *  THE SEAM IS NOT THE RESOLUTION CHANGE. Subsample offsets scale with texel
+ *  size, so the near map band-limits at a finer scale and reads slightly denser
+ *  over the same ground. A narrow band turns that into a ring. */
+#ifndef GG_SHADOW_NEAR_BLEND
+#define GG_SHADOW_NEAR_BLEND 0.75f
+#endif
+
 /** The map plane's axes for a planet-local light direction, orthonormal and
  *  perpendicular to it.
  *
@@ -149,6 +168,60 @@ float GG_ShadowCullRadius(GGFieldParams F)
     return F.PlanetRadius + F.Thickness * TopMax;
 }
 
+/** Half-width of a cascade.
+ *
+ *  DERIVED FROM THE FADES, NOT AUTHORED SEPARATELY. Level 1 reaches as far as
+ *  structure is drawn, level 2 as far as detail. Inside a level both the map and
+ *  the eye carry that layer; outside, neither does. Sizing them any other way
+ *  makes the two LODs disagree somewhere and leaves a band to tune.
+ *
+ *  STRICTLY ORDERED, because nothing makes the authored fades so. A detail range
+ *  wider than the structure range would invert the cascade and put the coarse
+ *  slice inside the fine one, which reads as the fine slice simply not working.
+ *  A zero extent collapses that level and the walk skips it. */
+float GG_ShadowCascadeExtent(GGFieldParams F, int Level)
+{
+    const float Disc = GG_ShadowCullRadius(F) * GG_SHADOW_EXTENT_MARGIN;
+
+    if (Level <= 0)
+    {
+        return Disc;
+    }
+
+    const float Structure = min(F.PlanetRadius * max(F.StructureFadeFar, 0.0f), Disc);
+
+    if (Level == 1)
+    {
+        return Structure;
+    }
+
+    return min(F.PlanetRadius * max(F.DetailFadeFar, 0.0f), Structure);
+}
+
+/** Centre of a cascade in the map plane, snapped to its own texel grid.
+ *
+ *  Level 0 is centred on the planet and never moves.
+ *
+ *  SNAPPING IS LOAD-BEARING. The centre follows the camera, so an unsnapped map
+ *  slides its lattice continuously under the deck and every crossing depth moves
+ *  with it -- the same crawl an anchored march lattice exists to prevent, coming
+ *  back by another route. Whole-texel jumps land on boundaries that already
+ *  exist, so the sampled values do not shift at all. */
+float2 GG_ShadowCascadeCentre(
+	int Level, float3 CameraLocal, float3 U, float3 V, float Extent, float2 MapSize)
+{
+    if (Level <= 0)
+    {
+        return float2(0.0f, 0.0f);
+    }
+
+    const float2 Plane = float2(dot(CameraLocal, U), dot(CameraLocal, V));
+
+    const float2 TexelSize = 2.0f * Extent / max(MapSize, 1.0f);
+
+    return floor(Plane / TexelSize) * TexelSize;
+}
+
 /** Optical depth from one texel's nodes at a given depth.
  *
  *  Piecewise linear through the four stored nodes, monotone by construction
@@ -185,8 +258,8 @@ float GG_ShadowTauFromNodes(float4 Node, float Depth)
     return min(GG_SHADOW_TAU2 + (Depth - Node.w) * TailRate, GG_SHADOW_SATURATION);
 }
 
-/** Optical depth between a planet-local position and the light, on the fastest
- *  absorption channel.
+/** Optical depth from one cascade slice, at a point already projected into the
+ *  map plane.
  *
  *  FOUR TEXELS RECONSTRUCTED, THEN BLENDED -- not one reconstruction from
  *  blended nodes. The node depths select which segment a sample falls in, so
@@ -194,12 +267,72 @@ float GG_ShadowTauFromNodes(float4 Node, float Depth)
  *  wherever a segment boundary crosses a texel. Those creases sit on the map
  *  lattice, which makes them look like resolution, but their width is set by the
  *  optical depth step across the boundary and does not shrink when texels do.
- *  Blending the reconstructed value is smooth by construction. */
+ *
+ *  QUINTIC WEIGHTS, NOT LINEAR ONES. Straight bilinear is continuous in value
+ *  but not in slope, and across a steep optical depth gradient those slope jumps
+ *  read as facets locked to the lattice. This has zero derivative at both ends,
+ *  so the boundaries stop being visible. Texel centres are unaffected. */
+float GG_ShadowTauSlice(
+	Texture2DArray ShadowMap,
+	SamplerState ShadowSampler,
+	int Level,
+	float2 Plane,
+	float2 Centre,
+	float Extent,
+	float Depth,
+	float2 JitterTexels)
+{
+    const float2 UV = (Plane - Centre) / Extent * 0.5f + 0.5f;
+
+    uint MapWidth, MapHeight, MapSlices;
+    ShadowMap.GetDimensions(MapWidth, MapHeight, MapSlices);
+
+    const float2 Size = float2(MapWidth, MapHeight);
+    const float2 InvSize = 1.0f / Size;
+
+    const float2 Sample = UV * Size - 0.5f + JitterTexels * GG_SHADOW_LOOKUP_JITTER;
+    const float2 Base = floor(Sample);
+
+    float2 Frac = Sample - Base;
+    Frac = Frac * Frac * Frac * (Frac * (Frac * 6.0f - 15.0f) + 10.0f);
+
+    const float3 UV00 = float3((Base + 0.5f) * InvSize, float(Level));
+
+    const float4 N00 = ShadowMap.SampleLevel(ShadowSampler, UV00, 0.0f);
+    const float4 N10 = ShadowMap.SampleLevel(ShadowSampler, UV00 + float3(InvSize.x, 0.0f, 0.0f), 0.0f);
+    const float4 N01 = ShadowMap.SampleLevel(ShadowSampler, UV00 + float3(0.0f, InvSize.y, 0.0f), 0.0f);
+    const float4 N11 = ShadowMap.SampleLevel(ShadowSampler, UV00 + float3(InvSize, 0.0f), 0.0f);
+
+    const float T00 = GG_ShadowTauFromNodes(N00, Depth);
+    const float T10 = GG_ShadowTauFromNodes(N10, Depth);
+    const float T01 = GG_ShadowTauFromNodes(N01, Depth);
+    const float T11 = GG_ShadowTauFromNodes(N11, Depth);
+
+    return lerp(lerp(T00, T10, Frac.x), lerp(T01, T11, Frac.x), Frac.y);
+}
+
+/** Optical depth between a planet-local position and the light, on the fastest
+ *  absorption channel.
+ *
+ *  ONE PARAMETERISATION, SEVERAL SCALES. Every cascade is the whole field at a
+ *  different extent, anchored to the same shell entry, so their depths are
+ *  directly comparable and only the sampling scale differs.
+ *
+ *  THE LEVELS DO NOT DECOMPOSE THE FIELD. GG_Density composes its layers as a
+ *  PRODUCT, so optical depths do not add across layers and no recombination of
+ *  per-layer bakes would be correct -- and the encoding is depth-of-crossing,
+ *  which is nonlinear in density, so even a sound linear split would not survive
+ *  it. Each slice carries the complete field.
+ *
+ *  Walked outermost inward: the disc always contains the sample, and each finer
+ *  level that also contains it replaces the result, blended across its own edge.
+ *  Nested extents make that composition exact rather than an approximation. */
 float GG_ShadowTau(
-	Texture2D ShadowMap,
+	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
 	float3 LocalPos,
 	float3 LightLocal,
+	float3 CameraLocal,
 	float2 JitterTexels,
 	GGFieldParams F)
 {
@@ -219,46 +352,48 @@ float GG_ShadowTau(
         return 0.0f;
     }
 
-	// Depth from the shell entry, matching what the bake marched from.
+	// Depth from the shell entry, matching what the bake marched from. Shared by
+	// every cascade: it is a property of the geometry, not of any lattice.
     const float Depth =
 		(dot(LocalPos, -normalize(LightLocal)) + sqrt(HalfChordSq)) / F.Thickness;
 
-    const float2 UV = Plane / (CullRadius * GG_SHADOW_EXTENT_MARGIN) * 0.5f + 0.5f;
+    uint MapWidth, MapHeight, MapSlices;
+    ShadowMap.GetDimensions(MapWidth, MapHeight, MapSlices);
 
-    uint MapWidth, MapHeight;
-    ShadowMap.GetDimensions(MapWidth, MapHeight);
+    const float2 MapSize = float2(MapWidth, MapHeight);
 
-    const float2 Size = float2(MapWidth, MapHeight);
-    const float2 InvSize = 1.0f / Size;
+    float Tau = GG_ShadowTauSlice(
+		ShadowMap, ShadowSampler, 0, Plane, float2(0.0f, 0.0f),
+		GG_ShadowCascadeExtent(F, 0), Depth, JitterTexels);
 
-	// Texel centres, so the bilinear sampler returns each texel's own value.
-    const float2 Centre = UV * Size - 0.5f + JitterTexels * GG_SHADOW_LOOKUP_JITTER;
-    const float2 Base = floor(Centre);
+    UNROLL
 
-    float2 Frac = Centre - Base;
+    for (int Level = 1; Level < GG_SHADOW_CASCADES; Level++)
+    {
+        const float Extent = GG_ShadowCascadeExtent(F, Level);
 
-	// QUINTIC WEIGHTS, NOT LINEAR ONES. Straight bilinear is continuous in value
-	// but not in slope: its gradient jumps at every texel boundary, and across a
-	// steep optical depth gradient those jumps read as facet creases locked to
-	// the lattice -- which is why they halve exactly when the map doubles while
-	// blending the value alone does not touch them. This has zero derivative at
-	// both ends, so the boundaries stop being visible at all.
-	//
-	// Texel centres are unaffected, so nothing is blurred that was not already
-	// being interpolated.
-    Frac = Frac * Frac * Frac * (Frac * (Frac * 6.0f - 15.0f) + 10.0f);
+        if (Extent <= 0.0f)
+        {
+            continue;
+        }
 
-    const float2 UV00 = (Base + 0.5f) * InvSize;
+        const float2 Centre = GG_ShadowCascadeCentre(
+			Level, CameraLocal, U, V, Extent, MapSize);
 
-    const float4 N00 = ShadowMap.SampleLevel(ShadowSampler, UV00, 0.0f);
-    const float4 N10 = ShadowMap.SampleLevel(ShadowSampler, UV00 + float2(InvSize.x, 0.0f), 0.0f);
-    const float4 N01 = ShadowMap.SampleLevel(ShadowSampler, UV00 + float2(0.0f, InvSize.y), 0.0f);
-    const float4 N11 = ShadowMap.SampleLevel(ShadowSampler, UV00 + InvSize, 0.0f);
+		// Square support, so the edge measure is the larger axis.
+        const float2 Relative = (Plane - Centre) / Extent;
+        const float Edge = max(abs(Relative.x), abs(Relative.y));
 
-    const float T00 = GG_ShadowTauFromNodes(N00, Depth);
-    const float T10 = GG_ShadowTauFromNodes(N10, Depth);
-    const float T01 = GG_ShadowTauFromNodes(N01, Depth);
-    const float T11 = GG_ShadowTauFromNodes(N11, Depth);
+        if (Edge >= 1.0f)
+        {
+            continue;
+        }
 
-    return lerp(lerp(T00, T10, Frac.x), lerp(T01, T11, Frac.x), Frac.y);
+        const float Finer = GG_ShadowTauSlice(
+			ShadowMap, ShadowSampler, Level, Plane, Centre, Extent, Depth, JitterTexels);
+
+        Tau = lerp(Finer, Tau, smoothstep(GG_SHADOW_NEAR_BLEND, 1.0f, Edge));
+    }
+
+    return Tau;
 }

@@ -91,7 +91,8 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 	FTextureRHIRef DetailTexture;
 	FTextureRHIRef StructureTexture;
 
-	/** The bake's destination, pushed to the march as a material parameter. */
+	/** The bake's destination: one slice per cascade, pushed to the march as a
+	 *  single array parameter. */
 	FTextureRHIRef MapTexture;
 
 	/** Whether the bake has everything it needs. Checked before the render
@@ -144,7 +145,7 @@ SHADER_PARAMETER(FVector4f, ShadowFadeRanges)
 SHADER_PARAMETER(FVector4f, ShadowScatterAlphas)
 SHADER_PARAMETER(FVector3f, ShadowAbsBeta)
 
-SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, ShadowMapUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, ShadowMapUAV)
 
 SHADER_PARAMETER_TEXTURE(Texture2DArray, ShadowFlowField)
 SHADER_PARAMETER_SAMPLER(SamplerState, ShadowFlowSampler)
@@ -174,6 +175,11 @@ namespace GasGiantShadow
 {
 	/** Thread group edge. 8x8 = 64, matching the sim's 2D kernels. */
 	static constexpr int32 ThreadGroupSize = 8;
+
+	/** Cascade count. MUST MATCH GG_SHADOW_CASCADES in GasGiantShadow.ush: it
+	 *  sizes both the dispatch and the render target's slice count, while the
+	 *  shader decides what each level covers. */
+	static constexpr int32 CascadeCount = 3;
 
 	/** Adds the bake to the graph. The caller has already validated Params. */
 	CLOUDATMOSPHERE_API void AddBakePass_RenderThread(

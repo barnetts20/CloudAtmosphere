@@ -503,8 +503,9 @@ CompositeParams GGAtmo_BuildAtmo(
  *  INTO it is what the multiple-scattering term in the main loop stands in for,
  *  and using the scattering coefficient here would count that loss twice. */
 float3 GGAtmo_LightMarch(
-	Texture2D ShadowMap,
+	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
+	float3 ShadowCameraLocal,
 	GGAtmoParams P,
 	out float OutLobeShadow)
 {
@@ -619,7 +620,8 @@ float3 GGAtmo_LightMarch(
 			uint(P.Atmo.lightRayParams.parentStepIndex) * 2749u + 23u) - 0.5f);
 
     const float ShadowTau =
-		GG_ShadowTau(ShadowMap, ShadowSampler, LocalOrigin, LocalDir, ShadowJitter, P.Field);
+		GG_ShadowTau(ShadowMap, ShadowSampler, LocalOrigin, LocalDir,
+			ShadowCameraLocal, ShadowJitter, P.Field);
 
 	// NO SATURATION SNAP. A marched estimate needed one: it broke out of its
 	// loop on reaching the threshold, and returning the residual it happened to
@@ -709,8 +711,9 @@ float4 GGAtmo_MainMarch(
 	SamplerState DetailSampler,
 	Texture3D StructureVolume,
 	SamplerState StructureSampler,
-	Texture2D ShadowMap,
+	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
+	float3 ShadowCameraLocal,
 	GGAtmoParams P)
 {
     const float3 RayOrigin = P.Atmo.mainRayParams.cameraPos;
@@ -1077,7 +1080,7 @@ float4 GGAtmo_MainMarch(
 
                 float LobeShadow;
                 const float3 SunTransmittance = GGAtmo_LightMarch(
-					ShadowMap, ShadowSampler, P, LobeShadow);
+					ShadowMap, ShadowSampler, ShadowCameraLocal, P, LobeShadow);
 
                 const float3 AtmoDens = (Height > 0.0f)
 					? Atmo_Density(Height,

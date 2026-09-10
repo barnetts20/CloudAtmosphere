@@ -35,7 +35,7 @@
  *  to its own limit. min would be continuous but not smooth, and its kink sits
  *  at a fixed obliquity, which on a sphere is a ring. */
 #ifndef GG_SHADOW_STEPS_PER_GRADIENT
-#define GG_SHADOW_STEPS_PER_GRADIENT 8.0f
+#define GG_SHADOW_STEPS_PER_GRADIENT 16.0f
 #endif
 
 /** Most optical depth a single step may accumulate, at zero accumulated depth.
@@ -121,9 +121,9 @@
 static const float2 GGShadow_SubOffsets[4] =
 {
     float2(-0.375f, -0.125f),
-    float2(-0.125f,  0.375f),
-    float2( 0.125f, -0.375f),
-    float2( 0.375f,  0.125f),
+    float2(-0.125f, 0.375f),
+    float2(0.125f, -0.375f),
+    float2(0.375f, 0.125f),
 };
 
 Texture2DArray ShadowFlowField;
@@ -135,7 +135,7 @@ SamplerState ShadowDetailSampler;
 Texture3D ShadowStructureVolume;
 SamplerState ShadowStructureSampler;
 
-RWTexture2D<float4> ShadowMapUAV;
+RWTexture2DArray<float4> ShadowMapUAV;
 
 /** (ScatterNeg.a, ScatterPos.a, ScatterBase.a, BandScale). The per-band
  *  extinction MULTIPLIER only -- the albedo belongs to the scattering site and
@@ -281,7 +281,7 @@ float GGShadow_Sigma(
 
     float Density = 0.0f;
 
-	UNROLL
+    UNROLL
 
     for (int Sub = 0; Sub < GG_SHADOW_SUBSAMPLES; Sub++)
     {
@@ -336,12 +336,18 @@ float GGShadow_Crossing(float Target, float Tau, float SigmaA, float SigmaB, flo
 [numthreads(GG_SHADOW_THREADS, GG_SHADOW_THREADS, 1)]
 void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
-    if (any(DispatchThreadId.xy >= uint2(ShadowMapSize)))
+    if (any(DispatchThreadId.xy >= uint2(ShadowMapSize))
+		|| DispatchThreadId.z >= uint(GG_SHADOW_CASCADES))
     {
         return;
     }
 
-    const uint2 Texel = DispatchThreadId.xy;
+	// One dispatch, one slice per cascade. Nothing about the level crosses from
+	// the CPU: extent and centre are derived here by the same functions the
+	// reconstruction calls, so the two cannot disagree about where a slice is.
+    const uint3 Texel = DispatchThreadId;
+
+    const int Level = int(DispatchThreadId.z);
 
     GGFieldParams F = GGShadow_Field();
 
@@ -351,14 +357,29 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     GG_TopBounds(F, 1.0f, 1.0f, TopMin, TopMax);
 
     const float CloudOuter = GG_ShadowCullRadius(F);
-    const float ShadowExtent = CloudOuter * GG_SHADOW_EXTENT_MARGIN;
 
     float3 ShadowBasisU, ShadowBasisV;
     GG_ShadowBasis(ShadowLightDir, ShadowBasisU, ShadowBasisV);
 
-    const float2 UV = (float2(Texel) + 0.5f) * ShadowInvMapSize;
-    const float2 Plane = (UV * 2.0f - 1.0f) * ShadowExtent;
+    const float ShadowExtent = GG_ShadowCascadeExtent(F, Level);
 
+	// A collapsed level -- a layer faded to nothing -- writes the sentinel and
+	// is skipped by the walk that reads it.
+    if (ShadowExtent <= 0.0f)
+    {
+        ShadowMapUAV[Texel] = GG_SHADOW_NO_DECK;
+        return;
+    }
+
+    const float2 ShadowCentre = GG_ShadowCascadeCentre(
+		Level, ShadowCameraLocal, ShadowBasisU, ShadowBasisV,
+		ShadowExtent, float2(ShadowMapSize));
+
+    const float2 UV = (float2(Texel.xy) + 0.5f) * ShadowInvMapSize;
+    const float2 Plane = ShadowCentre + (UV * 2.0f - 1.0f) * ShadowExtent;
+
+	// Still the ray's closest approach to the planet centre: the map plane moved
+	// but the shell did not, so the intersection below is unchanged.
     const float3 Offset = ShadowBasisU * Plane.x + ShadowBasisV * Plane.y;
 
     const float3 Dir = -ShadowLightDir;
@@ -493,7 +514,7 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		// moves the silhouette even when the deck has barely moved.
         float Step = CellSize;
 
-		UNROLL
+        UNROLL
 
         for (int Halve = 0; Halve < GG_SHADOW_MAX_HALVINGS; Halve++)
         {
@@ -578,10 +599,22 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	// run the deck path at all. A zero LastSigma sends it to the sentinel.
     const float TailRate = 1.0f / max(LastSigma, 1e-6f);
 
-    if (NodeEntry < 0.0f) { NodeEntry = T + (GG_SHADOW_TAU_ENTRY - Tau) * TailRate; }
-    if (Node0 < 0.0f) { Node0 = T + (GG_SHADOW_TAU0 - Tau) * TailRate; }
-    if (Node1 < 0.0f) { Node1 = T + (GG_SHADOW_TAU1 - Tau) * TailRate; }
-    if (Node2 < 0.0f) { Node2 = T + (GG_SHADOW_TAU2 - Tau) * TailRate; }
+    if (NodeEntry < 0.0f)
+    {
+        NodeEntry = T + (GG_SHADOW_TAU_ENTRY - Tau) * TailRate;
+    }
+    if (Node0 < 0.0f)
+    {
+        Node0 = T + (GG_SHADOW_TAU0 - Tau) * TailRate;
+    }
+    if (Node1 < 0.0f)
+    {
+        Node1 = T + (GG_SHADOW_TAU1 - Tau) * TailRate;
+    }
+    if (Node2 < 0.0f)
+    {
+        Node2 = T + (GG_SHADOW_TAU2 - Tau) * TailRate;
+    }
 
     float4 Out = float4(NodeEntry, Node0, Node1, Node2) / F.Thickness;
 

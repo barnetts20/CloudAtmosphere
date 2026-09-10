@@ -113,11 +113,12 @@ namespace GasGiantShadow
 		const FIntVector Groups(
 			FMath::DivideAndRoundUp(Params.MapSize.X, ThreadGroupSize),
 			FMath::DivideAndRoundUp(Params.MapSize.Y, ThreadGroupSize),
-			1);
+			CascadeCount);
 
 		TShaderMapRef<FGasGiantShadowBakeCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		FComputeShaderUtils::AddPass(
-			GraphBuilder, RDG_EVENT_NAME("GasGiant.ShadowBake"), Shader, P, Groups);
+			GraphBuilder,
+			RDG_EVENT_NAME("GasGiant.ShadowBake"), Shader, P, Groups);
 	}
 }
