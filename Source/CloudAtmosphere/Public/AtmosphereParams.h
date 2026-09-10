@@ -101,17 +101,17 @@ struct CLOUDATMOSPHERE_API FAtmosphereCompositeParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0"))
 	float DepthTapScale = 2.0f;
 
-	/** Blur weight at the planet edge. */
+	/** How far toward the blurred result the composite goes. 0 leaves the
+	 *  atmosphere buffer untouched, 1 is the full kernel.
+	 *
+	 *  UNIFORM ACROSS THE SCREEN. It was once two values lerped by distance from
+	 *  the planet's centre, on the theory that grazing rays are the worst
+	 *  sampled and want the most blur. That was a screen-space stand-in for an
+	 *  error the march now bounds directly -- the step-length bounds are what
+	 *  hold sampling error even, and a radial weight on top of them blurs by
+	 *  where a pixel IS rather than by what it needs. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float MaxBlurWeight = 0.5f;
-
-	/** Blur weight everywhere else, as a fraction of MaxBlurWeight. A ratio so
-	 *  the floor cannot exceed the peak. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float MinBlurFraction = 0.0f;
-
-	/** MinW, derived. */
-	float GetMinBlurWeight() const { return MaxBlurWeight * MinBlurFraction; }
+	float BlurWeight = 1.0f;
 };
 
 /** The flow simulation both models read.

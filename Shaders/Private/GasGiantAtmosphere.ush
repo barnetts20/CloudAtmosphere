@@ -825,8 +825,34 @@ float3 GGAtmo_LightMarch(
 		GG_FlowTexelArc(FlowField, P.Atmo.planetParams.cloudOuterRadius),
 		P.Field.GradientDepth * P.Field.Thickness);
 
+	// SCALED BY THE PARENT'S STEP GROWTH, like everything else on this ray.
+	// stepSizeMult exists so a coarsely sampled view ray does not spawn finely
+	// sampled light rays -- a shadow ray shades ONE view sample, and resolving
+	// the deck finer than that sample resolves the screen is work nobody sees.
+	//
+	// Left unscaled this bound overrides that coupling: the view march coarsens
+	// with distance and the light march does not, so light cost stays flat while
+	// view cost falls and comes to dominate.
+    const float StepGrowth = max(P.Atmo.lightRayParams.stepSizeMult, 1.0f);
+
+    const float TightBound =
+		DeckFeature * max(P.Atmo.lightRayParams.stepScale, 0.01f) * StepGrowth;
+
+	// AND RELAXED BY TRANSMITTANCE, or this bound quietly repeals the budget
+	// above it. A limit on step LENGTH sets the iteration count on its own --
+	// span divided by the limit -- so a fixed one makes cloudLightSteps and its
+	// transmittance weighting do nothing at all, and every sample deep inside
+	// the deck pays the same as the first one on the surface.
+	//
+	// THE GRADIENT IS WHERE THE RELAXATION STOPS. A step wider than the density
+	// ramp stops integrating the profile and starts choosing a side of it, which
+	// is the coin flip that no filter recovers from. Between the flow texel and
+	// the gradient there is room to trade, and transmittance is what spends it.
+    const float LooseBound = P.Field.GradientDepth * P.Field.Thickness * StepGrowth;
+
     const float MaxDeckStep = max(
-		DeckFeature * max(P.Atmo.lightRayParams.stepScale, 0.01f), 1e-3f);
+		min(TightBound / max(P.Atmo.lightRayParams.budgetWeight, 1e-3f), LooseBound),
+		1e-3f);
 
     const float RayStart = Segments[0].x;
     const float ReferenceLength = max(
@@ -1282,6 +1308,8 @@ float4 GGAtmo_MainMarch(
 
                 P.Atmo.lightRayParams.cloudLightSteps =
 					Atmo_LightBudget(FullCloudLightSteps, LightBudgetWeight);
+
+                P.Atmo.lightRayParams.budgetWeight = LightBudgetWeight;
 
                 float LobeShadow;
                 const float3 SunTransmittance = GGAtmo_LightMarch(

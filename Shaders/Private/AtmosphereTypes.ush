@@ -123,6 +123,12 @@ struct LightRayParams
 	 *  in one step. The counts above are a budget; this is the LENGTH bound that
 	 *  keeps the budget from being spread past what it can resolve. */
     float stepScale;
+
+	/** View transmittance that reached this sample, the same weight the budget
+	 *  above was scaled by. The length bound relaxes with it, or the bound
+	 *  overrides the budget entirely and the transmittance weighting does
+	 *  nothing -- a step LIMIT and a step COUNT cannot both govern. */
+    float budgetWeight;
 };
 
 struct CompositeParams
