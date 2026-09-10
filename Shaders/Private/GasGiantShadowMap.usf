@@ -1,5 +1,5 @@
 #include "/Engine/Public/Platform.ush"
-#include "/Plugin/CloudAtmosphere/Private/GasGiantFlow.ush"
+#include "/Plugin/CloudAtmosphere/Private/GasGiantShadow.ush"
 
 // ---------------------------------------------------------------------------
 // Gas giant deck shadow map: a light-space bake of the deck's optical depth
@@ -29,23 +29,37 @@
 #define GG_SHADOW_THREADS 8
 #endif
 
-/** Remaps the written channels into [0,1] for the render target viewer. 0
- *  writes the raw values, which are atmosphere thicknesses and run past 1. */
-#ifndef GG_SHADOW_DEBUG_VIEW
-#define GG_SHADOW_DEBUG_VIEW 1
-#endif
-
 /** Radial advances per gradient depth. The step is sized against this and
  *  against one flow texel of arc, combined in quadrature -- a step moves in
  *  height and sideways at once, and each carries the ray a fraction of the way
  *  to its own limit. min would be continuous but not smooth, and its kink sits
  *  at a fixed obliquity, which on a sphere is a ring. */
 #ifndef GG_SHADOW_STEPS_PER_GRADIENT
-#define GG_SHADOW_STEPS_PER_GRADIENT 8.0f
+#define GG_SHADOW_STEPS_PER_GRADIENT 64.0f
+#endif
+
+/** Most optical depth a single step may accumulate.
+ *
+ *  GEOMETRY ALONE DOES NOT BOUND THIS. A step sized to the gradient carries
+ *  whatever extinction the deck happens to have, so at a high authored optical
+ *  depth all three thresholds fall inside one step, their crossings collapse to
+ *  one linear interpolation across it, and the reconstruction inherits a lattice
+ *  at the step spacing. The symptom is blockiness that appears with density
+ *  rather than with distance, which reads as a resolution problem and is not.
+ *
+ *  0.15 puts at least two steps below the first threshold at any density. */
+#ifndef GG_SHADOW_MAX_DTAU
+#define GG_SHADOW_MAX_DTAU 0.15f
 #endif
 
 /** Iteration cap. A grazing chord is long and the cone trace only skips the
- *  air above the deck, not the deck itself. */
+ *  air above the deck, not the deck itself.
+ *
+ *  A COUNT AGAINST TWO LENGTHS. GG_SHADOW_MAX_DTAU shortens steps exactly where
+ *  the deck is densest, so this is what stops a very dense column from running
+ *  out of iterations before the last threshold -- at which point the unreached
+ *  nodes extrapolate and the column reads darker than it is. The budget below
+ *  clears 3.0 in twenty steps, leaving the rest for the approach. */
 #ifndef GG_SHADOW_MAX_STEPS
 #define GG_SHADOW_MAX_STEPS 256
 #endif
@@ -66,29 +80,19 @@ RWTexture2D<float4> ShadowMapUAV;
  *  stays per-pixel. */
 float4 ShadowScatterAlphas;
 
-/** cloudAbsorptionBeta. Its fastest channel scales the accumulation, so the
- *  stored thresholds are transmittance-meaningful without the reader having to
- *  re-derive anything. */
+/** cloudAbsorptionBeta AS PUSHED, before the material's divide by atmosphere
+ *  thickness. The march applies that divide in AtmosphereSetup; the bake applies
+ *  it where AbsMax is taken. Whichever side converts, both must. */
 float3 ShadowAbsBeta;
 
 int2 ShadowMapSize;
 float2 ShadowInvMapSize;
 
 /** Planet-local, pointing TOWARD the light -- the same convention as
- *  lightRayParams.lightDir, so sun elevation stays dot(up, lightDir). */
+ *  lightRayParams.lightDir, so sun elevation stays dot(up, lightDir). The basis
+ *  and the extent are derived from it and from the field, not passed: see
+ *  GasGiantShadow.ush. */
 float3 ShadowLightDir;
-
-/** The map plane's axes, orthonormal and perpendicular to the light. Built on
- *  the CPU from the spin axis so successive frames agree about which way the
- *  grid runs; an arbitrary perpendicular flips as the light moves, and the map
- *  would then resample against a rotating lattice every frame. */
-float3 ShadowBasisU;
-float3 ShadowBasisV;
-
-/** Half-width of the map in world units. Above the cull radius by a margin, so
- *  the outermost texels sit outside the shell and the limb has something to
- *  interpolate toward instead of clamping against the edge. */
-float ShadowExtent;
 
 /** Camera position, planet-local. The layer fades are a function of camera and
  *  sample position, both of which this pass has -- so they are evaluated here
@@ -203,7 +207,11 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     float TopMin, TopMax;
     GG_TopBounds(F, 1.0f, 1.0f, TopMin, TopMax);
 
-    const float CloudOuter = F.PlanetRadius + F.Thickness * TopMax;
+    const float CloudOuter = GG_ShadowCullRadius(F);
+    const float ShadowExtent = CloudOuter * GG_SHADOW_EXTENT_MARGIN;
+
+    float3 ShadowBasisU, ShadowBasisV;
+    GG_ShadowBasis(ShadowLightDir, ShadowBasisU, ShadowBasisV);
 
     const float2 UV = (float2(Texel) + 0.5f) * ShadowInvMapSize;
     const float2 Plane = (UV * 2.0f - 1.0f) * ShadowExtent;
@@ -237,13 +245,16 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     const float TEntry =
 		GG_DeckEntry(ShadowFlowField, ShadowFlowSampler, Origin, Dir, 0.0f, RayLength, TopMax, F);
 
-	// THE DETAIL LAYER IS OUT OF THE MAP, and the reason is resolution rather
-	// than distance: a detail feature is finer than one map texel, so it cannot
-	// be carried whatever fade it is given. Pinned to zero, GG_Field skips both
-	// its fetches and leaves the layer at its neutral value.
-    F.DetailFade = 0.0f;
+	// MATCHES THE MATERIAL'S CONVERSION. AtmosphereSetup divides the pushed
+	// absorption beta by the atmosphere thickness before the march ever sees it,
+	// and F.Thickness IS that thickness -- both are Profile.x. Folding the raw
+	// value in here instead leaves every reconstructed optical depth too large
+	// by a whole atmosphere thickness in WORLD UNITS, which is tens of thousands
+	// of them: the deck reads as opaque everywhere and the only way to see lit
+	// cloud is to wind the authored optical depth up by the same factor.
+    const float3 AbsBeta = ShadowAbsBeta / max(F.Thickness, 1e-4f);
 
-    const float AbsMax = max(ShadowAbsBeta.x, max(ShadowAbsBeta.y, ShadowAbsBeta.z));
+    const float AbsMax = max(AbsBeta.x, max(AbsBeta.y, AbsBeta.z));
 
 	// The radial advance a step is allowed. The gradient is the only part of the
 	// profile that varies, so it is what the budget is spent on.
@@ -278,6 +289,15 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
         float Step = rsqrt(max(HeightCost * HeightCost + LateralCost * LateralCost, 1e-12f));
 
+		// The extinction the last step actually found, which is the only
+		// estimate available before this step is taken. Self-correcting: a step
+		// that overshoots into dense deck shortens the next one, so the error is
+		// bounded by one step rather than carried.
+        if (LastSigma > 0.0f)
+        {
+            Step = min(Step, GG_SHADOW_MAX_DTAU / LastSigma);
+        }
+
         Step = min(Step, RayLength - T);
 
 		// NO JITTER. A stochastic offset is what a per-pixel march needs to hide
@@ -293,6 +313,15 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         float MidDetail, MidStructure;
         GGShadow_Fades(Mid, F, MidDetail, MidStructure);
 
+    	// BOTH LAYERS, BOTH FADES. The map cannot resolve detail spatially at this
+	// resolution, but detail is EROSION -- GG_Density applies it as a carve, so
+	// it lowers mean density rather than only adding variation. Omitting it
+	// leaves the shadow deck uniformly denser than the visible one, and the lit
+	// face pays for material the eye never sees.
+	//
+	// A layer may only be dropped from the map if it moves the variance and not
+	// the mean. Neither of these qualifies.
+        F.DetailFade = MidDetail;
         F.StructureFade = MidStructure;
 
         const float4 Deck = GG_Density(
@@ -366,13 +395,10 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
     float4 Out = float4(TEntry, Node0, Node1, Node2) / F.Thickness;
 
-    Out = min(Out, GG_SHADOW_NO_DECK);
-
-#if GG_SHADOW_DEBUG_VIEW
-	// As a fraction of the chord, so every channel reads on the same scale and a
-	// node past the exit clamps to white.
-    Out = saturate(Out * (F.Thickness / max(RayLength, 1e-4f)));
-#endif
-
-    ShadowMapUAV[Texel] = Out;
+	// NO DEBUG REMAP HERE. The map is read by the march, so a define that
+	// rescales what is written silently rescales the lighting with it -- and the
+	// symptom is a fully shadowed planet with a lit sliver at the terminator,
+	// which reads as a reconstruction bug rather than as a units mismatch.
+	// Scale for viewing in the visualisation material instead.
+    ShadowMapUAV[Texel] = min(Out, GG_SHADOW_NO_DECK);
 }

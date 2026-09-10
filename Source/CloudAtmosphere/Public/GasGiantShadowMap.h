@@ -23,17 +23,16 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 
 	FIntPoint MapSize = FIntPoint(512, 512);
 
-	/** Half-width in world units. Set above the cull radius by
-	 *  GasGiantShadow::ExtentMargin so the limb has texels outside the shell. */
-	float Extent = 0.0f;
-
 	// -- Frame --------------------------------------------------------------
 	//
 	// Planet-local. The light points TOWARD the star, matching the march.
+	//
+	// NO BASIS AND NO EXTENT. Both are derived from the light and the field by
+	// GasGiantShadow.ush, which the bake and the march share -- a copy computed
+	// here would be a second derivation that can disagree, and a map read in a
+	// basis it was not written in gives smooth, plausible, misplaced shadows.
 
 	FVector3f LightDir = FVector3f(0.0f, 0.0f, 1.0f);
-	FVector3f BasisU = FVector3f(1.0f, 0.0f, 0.0f);
-	FVector3f BasisV = FVector3f(0.0f, 1.0f, 0.0f);
 
 	FVector3f CameraLocal = FVector3f::ZeroVector;
 
@@ -104,7 +103,6 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 			&& MapTexture.IsValid()
 			&& MapSize.X > 0
 			&& MapSize.Y > 0
-			&& Extent > 0.0f
 			&& PlanetRadius > 0.0f;
 	}
 };
@@ -118,9 +116,6 @@ SHADER_PARAMETER(FIntPoint, ShadowMapSize)
 SHADER_PARAMETER(FVector2f, ShadowInvMapSize)
 
 SHADER_PARAMETER(FVector3f, ShadowLightDir)
-SHADER_PARAMETER(FVector3f, ShadowBasisU)
-SHADER_PARAMETER(FVector3f, ShadowBasisV)
-SHADER_PARAMETER(float, ShadowExtent)
 SHADER_PARAMETER(FVector3f, ShadowCameraLocal)
 
 SHADER_PARAMETER(float, ShadowPlanetRadius)
@@ -179,22 +174,6 @@ namespace GasGiantShadow
 {
 	/** Thread group edge. 8x8 = 64, matching the sim's 2D kernels. */
 	static constexpr int32 ThreadGroupSize = 8;
-
-	/** How far the map reaches past the cull radius. The limb is where the
-	 *  encoded quantities vary fastest, and a map cut exactly at the shell puts
-	 *  that variation against the clamp edge with nothing outside to blend
-	 *  toward. */
-	static constexpr float ExtentMargin = 1.02f;
-
-	/** Fills BasisU and BasisV for a planet-local light direction.
-	 *
-	 *  ANCHORED TO THE SPIN AXIS rather than to an arbitrary perpendicular, so
-	 *  the grid does not rotate between frames as the light moves. A rotating
-	 *  lattice re-phases the reconstruction filter every frame, which shimmers
-	 *  at the map's resolution limit even when nothing in the scene has moved.
-	 *  Falls back to X when the light is along the pole. */
-	CLOUDATMOSPHERE_API void BuildBasis(
-		const FVector3f& LightDir, FVector3f& OutU, FVector3f& OutV);
 
 	/** Adds the bake to the graph. The caller has already validated Params. */
 	CLOUDATMOSPHERE_API void AddBakePass_RenderThread(

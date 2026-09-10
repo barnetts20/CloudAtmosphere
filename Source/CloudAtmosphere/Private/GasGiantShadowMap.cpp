@@ -30,31 +30,6 @@ IMPLEMENT_GLOBAL_SHADER(
 
 namespace GasGiantShadow
 {
-	void BuildBasis(const FVector3f& LightDir, FVector3f& OutU, FVector3f& OutV)
-	{
-		const FVector3f L = LightDir.GetSafeNormal();
-
-		// The spin axis, projected off the light, on the VERTICAL axis -- so the
-		// pole runs up the map and the bands lie across it, which is how the
-		// planet reads in a viewport. Degenerate only when the light is along
-		// the pole, where any perpendicular is as stable as any other.
-		const FVector3f Axis = FVector3f(0.0f, 0.0f, 1.0f);
-
-		FVector3f V = Axis - L * FVector3f::DotProduct(Axis, L);
-
-		if (V.SizeSquared() < UE_KINDA_SMALL_NUMBER)
-		{
-			const FVector3f Fallback(1.0f, 0.0f, 0.0f);
-			V = Fallback - L * FVector3f::DotProduct(Fallback, L);
-		}
-
-		OutV = V.GetSafeNormal();
-
-		// Keeps (U, V, L) right-handed, so cross(U, V) is the light direction
-		// and the map is not mirrored.
-		OutU = FVector3f::CrossProduct(OutV, L);
-	}
-
 	void AddBakePass_RenderThread(FRDGBuilder& GraphBuilder, const FGasGiantShadowParams& Params)
 	{
 		check(IsInRenderingThread());
@@ -77,9 +52,6 @@ namespace GasGiantShadow
 			1.0f / static_cast<float>(Params.MapSize.Y));
 
 		P->ShadowLightDir = Params.LightDir;
-		P->ShadowBasisU = Params.BasisU;
-		P->ShadowBasisV = Params.BasisV;
-		P->ShadowExtent = Params.Extent;
 		P->ShadowCameraLocal = Params.CameraLocal;
 
 		P->ShadowPlanetRadius = Params.PlanetRadius;

@@ -3,7 +3,7 @@
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereMarch.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereSetup.ush"
-#include "/Plugin/CloudAtmosphere/Private/GasGiantFlow.ush"
+#include "/Plugin/CloudAtmosphere/Private/GasGiantShadow.ush"
 
 // ---------------------------------------------------------------------------
 // Gas giant cloud deck marched through the atmosphere's scattering model.
@@ -75,63 +75,6 @@
 // disagree, scale the fade ranges against the march target's pixel count.
 // ---------------------------------------------------------------------------
 
-/** Mip the SHADOW ray reads the structure volume at. The view ray still reads
- *  mip 0; this is the light path only.
- *
- *  A SHADOW IS A LOW-FREQUENCY QUANTITY. What it carries is the lump, not the
- *  lump's surface -- so the argument that killed footprint mips on the view path
- *  does not apply here. There, blurring along the shell erased the vertical
- *  structure a high aspect ratio builds and flattened a layered deck; here the
- *  silhouette is the whole signal and the fine detail is only variance.
- *
- *  AND THE SHADOW RAY CANNOT AFFORD THE FINE FREQUENCIES ANYWAY. Its step bound
- *  relaxes with transmittance down to the density gradient, which was a safe
- *  floor while the light path read nothing but the flow field -- one texel is
- *  far coarser than the ramp. A structure feature is finer than that floor, so
- *  a low-contribution sample lands below Nyquist and the jitter picks a side.
- *  Halving the frequency the layer HAS is more robust than trying to bound the
- *  step against a feature size the bake decides and the shader cannot read.
- *
- *  3 AT THE CURRENT DECK, and the number follows from the sampling rather than
- *  from taste. A structure feature is about 0.045 planet radii at mip 0, against
- *  a relaxed light step of 0.1, so mip 2 lands at 1.8 samples per feature -- at
- *  the edge, which reads as marginal-but-present grain. Mip 3 doubles the
- *  feature to 0.36 and clears it at the CHEAPEST step settings rather than the
- *  most expensive.
- *
- *  RAISING QUALITY DOES NOT CLOSE THIS GRAIN, WHICH IS WHY THE MIP IS THE LEVER.
- *  Below Nyquist each step lands inside one feature or another and the jitter
- *  decides which, so more samples change which lump was picked rather than
- *  averaging an error down. Variance collapses only on crossing into resolving
- *  the feature, and it is far cheaper to move the feature than the step.
- *
- *  0 restores the previous behaviour, for A/B against the noise. */
-#ifndef GG_LIGHT_STRUCTURE_MIP
-#define GG_LIGHT_STRUCTURE_MIP 3
-#endif
-
-/** How far transmittance may stretch the shadow ray's step, as a multiple of
- *  the resolution bound.
- *
- *  A CAP ON UNDER-SAMPLING, WHICH IS WHAT THE EYE ACTUALLY READS. The relaxation
- *  spends resolution where a sample's contribution has fallen, on the argument
- *  that absolute error is what matters. Deep inside the deck that argument
- *  fails: EVERY sample there is low contribution, the whole image is made of
- *  them, and what shows is relative error.
- *
- *  IT REPLACES THE GRADIENT AS THE FLOOR. The gradient was a safe backstop while
- *  the light path read nothing but the flow field, whose features are far
- *  coarser than the ramp. Structure features are finer, so the old floor let the
- *  step run several features long and the jitter chose between them.
- *
- *  TIGHTENING LightStepTexels INSTEAD IS THE WRONG LEVER. That is the bound at
- *  FULL contribution, where the sampling was already adequate, so it buys the
- *  same quiet at several times the cost. This costs only where the relaxation
- *  had already gone too far. */
-#ifndef GG_LIGHT_RELAX_MAX
-#define GG_LIGHT_RELAX_MAX 4.0f
-#endif
-
 /** Isolates one lighting term so a stray glow can be attributed rather than
  *  guessed at. Every mode returns that term alone, with transmittance
  *  untouched, so the composite still shapes it the way it shapes the real
@@ -157,16 +100,6 @@
  *  wrong usually comes from. */
 #ifndef GG_DEBUG_TERM
 #define GG_DEBUG_TERM 0
-#endif
-
-/** Optical depths at which a SHADOW ray is treated as fully blocked.
- *
- *  Lower than the view march's margin because the light march snaps to zero on
- *  reaching it, so being early costs a fraction of a percent of sun rather than
- *  a visible leak. Measured against the FASTEST channel for the same reason --
- *  the slower ones are within a percent, and the snap discards the difference. */
-#ifndef GG_SHADOW_SATURATION
-#define GG_SHADOW_SATURATION 5.0f
 #endif
 
 /** Optical depths below the deck floor at which the VIEW ray is provably
@@ -560,145 +493,6 @@ CompositeParams GGAtmo_BuildAtmo(
 		lightStepScale, stepScaleFactor);
 }
 
-/** Deck density AND band for a SHADOW ray, from ONE flow fetch, against seven
- *  for GG_Density.
- *
- *  BOTH FROM THE SAME PROBE. The shadow ray needs the band as well, to scale
- *  extinction by which material it is passing through, and the probe already
- *  returns it -- fetching density and band separately reads the same texel at
- *  the same position twice, in the loop that dominates a tangent view.
- *
- *  SHADOWING IS LOW FREQUENCY. What a light ray needs is how much deck lies
- *  between the sample and the star, not what the filaments look like along the
- *  way -- the detail it would resolve is finer than the shadow it casts.
- *  Reading the flow probe instead of the full field drops the warp loop and
- *  both volume samples.
- *
- *  BOTH OMISSIONS DARKEN, WHICH IS THE SAFE DIRECTION. The upper bound sits
- *  above the true deck, and the carves only ever lower it, so this
- *  overestimates depth rather than underestimating it. An underestimate would
- *  let light through where the deck is solid, which reads as holes.
- *
- *  No Simpson integration either: that exists to stop the deck top being a
- *  near-binary decision per step against the sampling lattice, and a shadow
- *  ray's contribution is an integral over its whole path rather than a visible
- *  surface. */
-float2 GGAtmo_DeckSampleForLight(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	Texture3D StructureVolume,
-	SamplerState StructureSampler,
-	float3 LocalPos,
-	float3 StructureWarp,
-	float StepHalfLength,
-	GGFieldParams F)
-{
-    const float Radius = length(LocalPos);
-
-    const float Height = (Radius - F.PlanetRadius) / F.Thickness;
-
-    const float3 Direction = LocalPos / max(Radius, 1e-4f);
-
-    const float3 N = normalize(GG_RotateZ(Direction, F.SpinAngle));
-
-    const float4 Flow0 = GG_SampleFlow(FlowField, FlowSampler, N, GG_FLOW_LAYER);
-
-    const GGFlowProbe Probe = GG_ProbeFromFlow(Flow0, F);
-
-    float Top = Probe.Top;
-    float ShapeStructure = 1.0f;
-
-	// -- Structure in the shadow ---------------------------------------------
-	//
-	// WHAT THE SHADOW RAY OTHERWISE CANNOT SEE. Without this it shades against
-	// a flow-only deck top: mid-scale lumps cast nothing, and eroded structure
-	// blocks light as completely as solid deck. Self-shadowing of relief is the
-	// strongest cue that a deck is geometry rather than a painted sphere.
-	//
-	// ONE FETCH, NOT FIVE. The lookup position needs the layer's warp, and
-	// rebuilding that here means the warp loop plus the deep flow read. It comes
-	// down from the view sample instead: the warp is a large-scale field and a
-	// shadow ray saturates within a fraction of a structure feature, so reusing
-	// one value misplaces the lookup by far less than omitting it misplaces the
-	// shadow.
-	//
-	// The DETAIL layer stays out. Its features are finer than a light step at
-	// any budget, so it would be sampled as noise rather than as shape -- and it
-	// is the layer that costs a second fetch under the crossfade.
-    BRANCH
-
-    if (F.StructureLight > 0.0f && F.StructureFade > 0.0f)
-    {
-        const float3 PStructure = normalize(N + StructureWarp * F.Scales.w);
-
-        const float4 Structure = StructureVolume.SampleLevel(StructureSampler,
-			PStructure * (F.Scales.y + Height * F.StructureVertical),
-			GG_LIGHT_STRUCTURE_MIP);
-
-        const float StructureMix = GG_PerlinWorley(
-			Structure.r,
-			GG_WorleyLadder(Structure.gba, F.StructureNoise.xyz));
-
-		// Both weightings MUST MATCH GG_Field's, or the deck the light sees is
-		// a different deck from the one the eye sees and the shadows sit beside
-		// the lumps that cast them.
-        const float Elevation = 1.0f - exp(-Probe.Band * Probe.Band);
-
-        const float Edge = lerp(F.EdgeBias, 1.0f, 1.0f - Elevation);
-
-        const float StructureWeight = saturate(Edge * F.StructureNoise.w * F.StructureFade);
-
-        Top += F.GradientDepth * F.StructureRelief * (StructureWeight * (StructureMix - 0.5f));
-
-        ShapeStructure = lerp(1.0f, StructureMix, StructureWeight);
-    }
-
-	// The floor follows the top, so the same over-estimate that thickens the
-	// deck also deepens the saturated region under it -- both darken, which is
-	// the safe direction here.
-    const float Floor = GG_DeckFloor(Top, F);
-
-    const float HalfStep = max(StepHalfLength, 0.0f);
-
-	// Below its own floor the column is saturated across the whole step, so the
-	// profile is skipped rather than the fetch -- the band is still wanted.
-    BRANCH
-
-    if (Height + HalfStep <= Floor)
-    {
-        return float2(1.0f, Probe.Band);
-    }
-
-	// THE PROFILE IS INTEGRATED ACROSS THE STEP, exactly as the view path does
-	// it, and for a sharper reason: this ray runs on a handful of steps, so one
-	// of them can be wider than the whole gradient. A point sample of a ramp
-	// narrower than the step is very nearly a coin flip -- it lands inside the
-	// deck or outside it -- and the jitter decides which. Exponentiate a couple
-	// of those into a transmittance and neighbouring pixels differ by factors,
-	// which is the scatter of bright and dark points rather than a field.
-	//
-	// Three closed-form evaluations and no extra fetch. What it buys is
-	// CONTINUITY rather than accuracy: the estimate now moves smoothly as the
-	// sample slides, which is what a blur can actually resolve.
-    const float RampNear = GG_DeckDensity(Height - HalfStep, Top, Floor, F.DensityCurve);
-    const float RampMid = GG_DeckDensity(Height, Top, Floor, F.DensityCurve);
-    const float RampFar = GG_DeckDensity(Height + HalfStep, Top, Floor, F.DensityCurve);
-
-    const float Gradient = (RampNear + 4.0f * RampMid + RampFar) / 6.0f;
-
-	// Erosion thins the shadow the same way it thins the view sample, so a
-	// worked surface transmits instead of blocking like solid deck.
-    const float DepthFraction = saturate((Top - Height) / max(Top - Floor, 1e-4f));
-
-    const float CarveWeight =
-		1.0f - smoothstep(0.0f, max(F.ErosionDepth, 1e-4f), DepthFraction);
-
-    const float CarveStructure = lerp(1.0f, ShapeStructure,
-		saturate(F.StructureErosion) * CarveWeight);
-
-    return float2(Gradient * CarveStructure, Probe.Band);
-}
-
 /** Transmittance from a sample toward the light, through air and deck.
  *
  *  Optical depth accumulated and exponentiated once, as in Atmo_LightMarch.
@@ -709,10 +503,8 @@ float2 GGAtmo_DeckSampleForLight(
  *  INTO it is what the multiple-scattering term in the main loop stands in for,
  *  and using the scattering coefficient here would count that loss twice. */
 float3 GGAtmo_LightMarch(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	Texture3D StructureVolume,
-	SamplerState StructureSampler,
+	Texture2D ShadowMap,
+	SamplerState ShadowSampler,
 	GGAtmoParams P,
 	out float OutLobeShadow)
 {
@@ -796,143 +588,47 @@ float3 GGAtmo_LightMarch(
         return float3(1.0f, 1.0f, 1.0f);
     }
 
-	// READ BACK FROM THE CULL RADIUS RATHER THAN RECOMPUTED, so the cone trace
-	// cannot bound the deck differently from the plan that plans for it. The
-	// radius already carries the fades folded in.
-    const float TopMax =
-		(P.Atmo.planetParams.cloudOuterRadius - P.Field.PlanetRadius) / P.Field.Thickness;
-
     const float3 LocalOrigin = GGAtmo_ToLocal(Start, P);
     const float3 LocalDir = mul(P.WorldToLocal, LightDir);
 
-    const float CoarseStep = max(
-		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f)
-		/ float(max(P.Atmo.lightRayParams.atmoLightSteps, 1));
-
-	// A RAY WHOSE CLOSEST APPROACH CLEARS THE DECK NEVER TOUCHES IT, so the
-	// search has nothing to find and the segment is pure air.
+	// -- The deck, as one texture read --------------------------------------
 	//
-	// EXACT, NOT A CLIMB TEST. Asking only whether the ray is climbing sends
-	// every slightly descending ray into a 24-probe cone trace, including the
-	// ones that level off well above the deck and never arrive. Those are the
-	// NEAR-TANGENT rays, which is exactly what a light ray is at the terminator
-	// -- the band where a shadow ray is already crossing ten times the deck a
-	// radial one does, and can least afford two dozen fetches for an answer that
-	// was available in closed form.
+	// Looked up rather than estimated, and the difference is not just cost. The
+	// per-ray estimator's error was additive in OPTICAL DEPTH and therefore
+	// multiplicative in brightness, so half a unit of noise showed as a 1.6x
+	// swing between neighbouring pixels -- stipple rather than grain, and a
+	// distribution that only tightens as the square root of the sample count.
+	// A map has no per-pixel error to tighten.
 	//
-	// Closest approach sits at t = -dot(O, D) for a unit D. Behind the origin,
-	// the ray is climbing away and the start radius is the minimum; ahead, the
-	// perpendicular distance is. The identity needs no square root until the
-	// comparison, and the comparison is against the CULL radius, which already
-	// carries the fades and the carve margin.
-    const float StartRadius = length(LocalOrigin);
-    const float StartHeight = (StartRadius - P.Field.PlanetRadius) / P.Field.Thickness;
-
-    const float ApproachT = -dot(LocalOrigin, LocalDir);
-
-    const float MinRadiusSq = (ApproachT > 0.0f)
-		? max(dot(LocalOrigin, LocalOrigin) - ApproachT * ApproachT, 0.0f)
-		: dot(LocalOrigin, LocalOrigin);
-
-    const float CullRadius = P.Atmo.planetParams.cloudOuterRadius;
-
-    if (StartHeight > TopMax && MinRadiusSq > CullRadius * CullRadius)
-    {
-        const int LastSeg = SegmentCount - 1;
-        if (LastSeg >= 0 && Segments[LastSeg].w > 0.5f)
-        {
-            Segments[LastSeg] = float4(Segments[LastSeg].x, Segments[LastSeg].y, CoarseStep, 0.0f);
-        }
-    }
-    else
-    {
-        GGAtmo_SplitDeckSegment(
-			FlowField, FlowSampler, LocalOrigin, LocalDir, TopMax, CoarseStep,
-			P.Field, Segments, SegmentCount);
-    }
-
-    float3 AtmoOptDepth = float3(0.0f, 0.0f, 0.0f);
-    float DeckOptDepth = 0.0f;
-
-	// SATURATION CUTOFF. The deck has no holes, so a shadow ray goes opaque
-	// within a few steps and every step after that is spent on light already
-	// extinguished. Accumulating optical depth and exponentiating once at the
-	// end -- correct for a medium with gaps -- has no early exit at all, which
-	// is what makes cloudLightSteps expensive here.
-	//
-	// 5 is transmittance 0.007: below anything visible, and far enough above
-	// zero that the cutoff itself cannot draw an edge.
+	// THE FASTEST CHANNEL IS DIVIDED BACK OUT. The bake folds
+	// cloudAbsorptionBeta's largest component into its accumulation so its
+	// thresholds mean transmittance; undoing it here leaves DeckOptDepth in the
+	// units the exponent below already expects, and the per-channel beta still
+	// does its own work there.
     const float3 AbsBeta = P.Atmo.cloudParams.cloudAbsBeta;
     const float AbsMax = max(AbsBeta.x, max(AbsBeta.y, AbsBeta.z));
-    const float SaturationDepth = GG_SHADOW_SATURATION / max(AbsMax, 1e-8f);
 
-    bool bSaturated = false;
+    const float ShadowTau =
+		GG_ShadowTau(ShadowMap, ShadowSampler, LocalOrigin, LocalDir, P.Field);
 
-	// THE RADIUS UNDER WHICH EVERY COLUMN IS SATURATED, which is the backstop or
-	// the lowest a column top can fall, whichever is lower -- relief is free to
-	// push a top under the backstop, and above such a top the ray is crossing
-	// clear air rather than deck. Same quantity the view march's opaque clip
-	// counts down from, and it has to stay the same or the two disagree about
-	// where the field stops varying.
-    float BoundMin, BoundMax;
-    GG_TopBounds(P.Field, 1.0f, 1.0f, BoundMin, BoundMax);
-
-    const float SaturatedRadius = P.Field.PlanetRadius
-		+ P.Field.Thickness * min(P.Field.Profile.y, BoundMin);
-
-	// THE STEP BOUND, AS A LENGTH. The two things a shadow ray has to resolve
-	// are how far it moves ACROSS the deck top and how far it moves THROUGH the
-	// gradient, so the shorter of the two governs. Steps longer than this stop
-	// estimating the column they cross and start choosing one.
+	// NO SATURATION SNAP. A marched estimate needed one: it broke out of its
+	// loop on reaching the threshold, and returning the residual it happened to
+	// hold leaked light on early-terminated rays only, coloured because the
+	// threshold fires on the fastest channel. Nothing here breaks -- the optical
+	// depth is read rather than accumulated -- so a snap would only convert a
+	// smooth field into a hard contour, and that contour lands on the map's
+	// lattice as an axis-aligned staircase along the shadow edge.
 	//
-	// Independent of the budget on purpose: a count divided into the span gives
-	// an overhead ray far more resolution than it needs and a grazing ray far
-	// less, because the span is the thing that changes.
-    const float DeckFeature = min(
-		GG_FlowTexelArc(FlowField, P.Atmo.planetParams.cloudOuterRadius),
-		P.Field.GradientDepth * P.Field.Thickness);
+	// The exponent below handles the deep end on its own. GG_ShadowTau already
+	// clamps its tail, so nothing here can run away.
+    const float DeckOptDepth = ShadowTau / max(AbsMax, 1e-8f);
 
-	// SCALED BY THE PARENT'S STEP GROWTH, like everything else on this ray.
-	// stepSizeMult exists so a coarsely sampled view ray does not spawn finely
-	// sampled light rays -- a shadow ray shades ONE view sample, and resolving
-	// the deck finer than that sample resolves the screen is work nobody sees.
+	// -- The air, still marched ---------------------------------------------
 	//
-	// Left unscaled this bound overrides that coupling: the view march coarsens
-	// with distance and the light march does not, so light cost stays flat while
-	// view cost falls and comes to dominate.
-	// ONCE PER RAY. The layer's lookup needs a warp, and rebuilding it at every
-	// step would be five reads a step to move the sample by a fraction of a
-	// feature. Two reads here, reused down the ray: the warp is a large-scale
-	// field and a shadow ray saturates well inside one structure feature.
-    const float3 StructureWarp = (P.Field.StructureLight > 0.0f && P.Field.StructureFade > 0.0f)
-		? GG_StructureWarpProbe(FlowField, FlowSampler, LocalOrigin, P.Field)
-		: float3(0.0f, 0.0f, 0.0f);
-
-    const float StepGrowth = max(P.Atmo.lightRayParams.stepSizeMult, 1.0f);
-
-    const float TightBound =
-		DeckFeature * max(P.Atmo.lightRayParams.stepScale, 0.01f) * StepGrowth;
-
-	// AND RELAXED BY TRANSMITTANCE, or this bound quietly repeals the budget
-	// above it. A limit on step LENGTH sets the iteration count on its own --
-	// span divided by the limit -- so a fixed one makes cloudLightSteps and its
-	// transmittance weighting do nothing at all, and every sample deep inside
-	// the deck pays the same as the first one on the surface.
-	//
-	// THE RELAXATION IS CAPPED AS A MULTIPLE OF THE BOUND, not at an absolute
-	// length. What the eye reads is how far past resolvable a sample has been
-	// stretched, and that ratio is the same quantity whatever the deck is tuned
-	// to -- an absolute floor holds at one tuning and is wrong at the next.
-	//
-	// Still never past the density ramp: a step wider than that stops
-	// integrating the profile and starts choosing a side of it.
-    const float LooseBound = min(
-		TightBound * GG_LIGHT_RELAX_MAX,
-		P.Field.GradientDepth * P.Field.Thickness * StepGrowth);
-
-    const float MaxDeckStep = max(
-		min(TightBound / max(P.Atmo.lightRayParams.budgetWeight, 1e-3f), LooseBound),
-		1e-3f);
+	// A smooth exponential over a short path with nothing to alias, which is why
+	// it keeps its own steps. It is now the entire per-pixel light cost, so it is
+	// the next thing worth measuring rather than the next thing worth tuning.
+    float3 AtmoOptDepth = float3(0.0f, 0.0f, 0.0f);
 
     const float RayStart = Segments[0].x;
     const float ReferenceLength = max(
@@ -943,62 +639,6 @@ float3 GGAtmo_LightMarch(
         const float SegStart = Segments[s].x;
         const float SegEnd = Segments[s].y;
         const float StepSize = Segments[s].z;
-
-		// DECK IS A RADIUS, NOT THE FINE-STEP FLAG. Everything at or below the
-		// cull radius owes deck extinction, including the coarse region under the
-		// floor where the field is uniform.
-		//
-		// Decided once per segment from its midpoint, the way Atmo_Plan decides
-		// which side of the shells a segment falls on. Per sample it would be a
-		// threshold against a jittered position, which dithers an edge.
-        const bool IsDeck = GGAtmo_SegmentIsDeck(Start, LightDir, SegStart, SegEnd, P);
-
-		// -- Closed form, where the field is provably constant ----------------
-		//
-		// Density is exactly 1 below SaturatedRadius, for every column, so the
-		// optical depth across a span that stays inside is beta times its
-		// length. Marching it samples a constant and returns the same answer for
-		// more work.
-		//
-		// AND IT IS THE SPAN THAT WAS POISONING THE ESTIMATE. Stepping it spends
-		// most of the budget where there is nothing to resolve, leaving the
-		// gradient -- the only part that varies -- to a couple of steps whose
-		// jitter then decides the result rather than refining it.
-		//
-		// BOTH ENDPOINTS INSIDE IS SUFFICIENT, since the region is a ball and
-		// the segment is a chord: convexity puts everything between them inside
-		// too. The planner already breaks a segment at that radius, so a span
-		// straddling it is the exception rather than the rule.
-        const float3 SegStartPos = LocalOrigin + LocalDir * SegStart;
-        const float3 SegEndPos = LocalOrigin + LocalDir * SegEnd;
-
-        BRANCH
-
-        if (IsDeck
-			&& length(SegStartPos) <= SaturatedRadius
-			&& length(SegEndPos) <= SaturatedRadius)
-        {
-			// One fetch for the band, at the midpoint. The band scales
-			// extinction, and its variation across a saturated span is the only
-			// thing left that is not constant -- a single read of it is the same
-			// approximation the saturation cutoff already makes.
-            const float3 SegMidPos = LocalOrigin + LocalDir * (0.5f * (SegStart + SegEnd));
-
-            const GGFlowProbe MidProbe =
-				GG_FlowProbe(FlowField, FlowSampler, SegMidPos, P.Field);
-
-            const float4 MidScatter = GGAtmo_BandScatter(MidProbe.Band, P.Scatter);
-
-            DeckOptDepth += MidScatter.a * (SegEnd - SegStart);
-
-            if (DeckOptDepth > SaturationDepth)
-            {
-                bSaturated = true;
-                break;
-            }
-
-            continue;
-        }
 
         float Pos = SegStart;
 
@@ -1013,14 +653,6 @@ float3 GGAtmo_LightMarch(
 				ReferenceLength, P.Atmo.mainRayParams.stepScaleFactor)
 				* P.Atmo.lightRayParams.stepSizeMult;
 
-			// The budget sets the step; this stops the budget from setting it
-			// longer than the deck can be resolved at. Air segments are exempt:
-			// their field is a smooth exponential with nothing to alias.
-            if (IsDeck)
-            {
-                CurrentStep = min(CurrentStep, MaxDeckStep);
-            }
-
             CurrentStep = min(CurrentStep, SegEnd - Pos);
 
 			// Salted by the parent step and by this step, so successive light
@@ -1032,8 +664,8 @@ float3 GGAtmo_LightMarch(
 
             const float3 SamplePos = Start + LightDir * (Pos + CurrentStep * 0.5f + Offset);
 
-            const float3 ToCentre = SamplePos - P.Atmo.planetParams.planetPos;
-            const float DistSq = dot(ToCentre, ToCentre);
+            const float3 ToCentreStep = SamplePos - P.Atmo.planetParams.planetPos;
+            const float DistSq = dot(ToCentreStep, ToCentreStep);
 
             if (DistSq < P.Atmo.planetParams.planetRadiusSq)
             {
@@ -1046,55 +678,8 @@ float3 GGAtmo_LightMarch(
 				P.Atmo.scatteringParams.rayScaleH, P.Atmo.scatteringParams.mieScaleH,
 				P.Atmo.scatteringParams.absHeight, P.Atmo.scatteringParams.absFalloff) * CurrentStep;
 
-            if (IsDeck)
-            {
-                const float3 LocalPos = GGAtmo_ToLocal(SamplePos, P);
-
-				// Half the step along the RADIUS, in atmosphere fractions, which
-				// is the axis the profile varies on.
-                const float StepHalfHeight = 0.5f * CurrentStep
-					* abs(dot(LocalDir, LocalPos / max(length(LocalPos), 1e-4f)))
-					/ max(P.Field.Thickness, 1e-4f);
-
-				// The band still scales extinction, so a belt shadows more than
-				// a zone. That difference is exactly the kind of low-frequency
-				// signal a shadow ray should carry, and it arrives on the same
-				// fetch the density came from.
-                const float2 Deck = GGAtmo_DeckSampleForLight(
-					FlowField, FlowSampler, StructureVolume, StructureSampler,
-					LocalPos, StructureWarp, StepHalfHeight, P.Field);
-
-                if (Deck.x > 0.0f)
-                {
-                    const float4 S = GGAtmo_BandScatter(Deck.y, P.Scatter);
-
-                    DeckOptDepth += Deck.x * S.a * CurrentStep;
-
-                    if (DeckOptDepth > SaturationDepth)
-                    {
-                        bSaturated = true;
-                        break;
-                    }
-                }
-            }
-
             Pos += CurrentStep;
         }
-
-        if (bSaturated)
-        {
-            break;
-        }
-    }
-
-	// SATURATION MEANS ZERO, NOT THE RESIDUAL THAT TRIPPED IT. The break asserts
-	// the ray is blocked, so returning what it happened to reach leaves a leak
-	// that only rays which broke early carry -- and the threshold fires on the
-	// fastest channel, so the leak is coloured. Giving it the last push it can
-	// no longer take itself removes both.
-    if (bSaturated)
-    {
-        return float3(0.0f, 0.0f, 0.0f);
     }
 
     return PlanetShadow * exp(-(P.Atmo.scatteringParams.rayBeta * AtmoOptDepth.x
@@ -1114,6 +699,8 @@ float4 GGAtmo_MainMarch(
 	SamplerState DetailSampler,
 	Texture3D StructureVolume,
 	SamplerState StructureSampler,
+	Texture2D ShadowMap,
+	SamplerState ShadowSampler,
 	GGAtmoParams P)
 {
     const float3 RayOrigin = P.Atmo.mainRayParams.cameraPos;
@@ -1480,8 +1067,7 @@ float4 GGAtmo_MainMarch(
 
                 float LobeShadow;
                 const float3 SunTransmittance = GGAtmo_LightMarch(
-					FlowField, FlowSampler, StructureVolume, StructureSampler,
-					P, LobeShadow);
+					ShadowMap, ShadowSampler, P, LobeShadow);
 
                 const float3 AtmoDens = (Height > 0.0f)
 					? Atmo_Density(Height,
