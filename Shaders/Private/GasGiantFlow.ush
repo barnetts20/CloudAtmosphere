@@ -84,7 +84,7 @@
  *  DetailNoise / StructureNoise  (WorleyG, WorleyB, WorleyA, Amount)
  *  Relief   (DeckTop, BandRelief, PressureRelief, StormTowerRelief)
  *  Profile  (AtmosphereThickness, DeckBackstop, VortexThreshold, GradientThickness)
- *  Crossfade (Period, DetailEnable, StructureEnable, unused)
+ *  Crossfade (Period, DetailEnable, StructureEnable, StructureLight)
  *
  *  Thickness, GradientDepth and SpinAngle are derived in GG_BuildField; the two
  *  fades are set per sample by the march. */
@@ -108,6 +108,12 @@ struct GGFieldParams
     float CrossfadeTime;
     float CrossfadeDetail;
     float CrossfadeStructure;
+
+	/** Whether a shadow ray samples the structure layer. Its own toggle rather
+	 *  than following StructureFade, because what it costs is a fetch per LIGHT
+	 *  step -- the fade decides whether the layer is visible, this decides
+	 *  whether it is worth shadowing. */
+    float StructureLight;
 
 	/** Bound on the deck's slope, GRADIENT DEPTHS per radian -- the same unit as
 	 *  the relief producing that slope, so it stays in step through an anchor
@@ -214,6 +220,7 @@ GGFieldParams GG_BuildField(
     F.CrossfadeTime = Time / max(Crossfade.x, 1e-3f);
     F.CrossfadeDetail = Crossfade.y;
     F.CrossfadeStructure = Crossfade.z;
+    F.StructureLight = Crossfade.w;
 
     F.PlanetRadius = PlanetRadius;
 
@@ -596,6 +603,42 @@ float GG_CloudTopUpper(
 		+ 0.5f * abs(F.StructureRelief));
 }
 
+
+/** The structure layer's warp at a point, from two flow reads.
+ *
+ *  FOR THE SHADOW RAY, WHICH CANNOT AFFORD GG_Field. The full warp is four Euler
+ *  steps; this is one, which agrees to first order -- the difference is second
+ *  order in WarpTime, and at any usable warp that is a small fraction of a
+ *  structure feature.
+ *
+ *  THE FINE TERM IS NOT OPTIONAL. At DetailWarpRatio 1 it is the same magnitude
+ *  as the coarse one, so dropping it to save a fetch would offset the shadow's
+ *  structure from the eye's by a whole feature -- lumps beside their own
+ *  shadows, which is worse than no shadow at all.
+ *
+ *  Once per light RAY, not per step. */
+float3 GG_StructureWarpProbe(
+	Texture2DArray FlowField,
+	SamplerState FlowSampler,
+	float3 P,
+	GGFieldParams F)
+{
+    const float3 N = normalize(GG_RotateZ(P, F.SpinAngle));
+
+    const float4 Flow0 = GG_SampleFlow(FlowField, FlowSampler, N, GG_FLOW_LAYER);
+
+    const float Zeta = (Flow0.w + F.Warps.z) * F.BandSharpness;
+
+    const float Turbulence = lerp(F.Warps.w, 1.0f, exp(-Zeta * Zeta));
+
+    const float3 Coarse = GG_FlowVelocity(N, Flow0) * (F.Warps.x * Turbulence);
+
+    const float3 PDetail = normalize(N + Coarse * F.Scales.z);
+
+    const float4 DeepFlow = GG_SampleFlow(FlowField, FlowSampler, PDetail, GG_DEEP_FLOW_LAYER);
+
+    return Coarse + GG_FlowVelocity(PDetail, DeepFlow) * (F.Warps.y * Turbulence);
+}
 
 /** Evaluates the cloud field at a direction on the sphere. Height is the
  *  shading point's atmosphere fraction and only affects the 3D volume lookups.

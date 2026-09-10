@@ -876,6 +876,23 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Deck|Surface|Warp")
 	bool bCrossfadeStructure = false;
 
+	/** Let the structure layer cast shadows and transmit where it is eroded.
+	 *
+	 *  WITHOUT IT A SHADOW RAY SHADES AGAINST A FLOW-ONLY DECK. Mid-scale lumps
+	 *  cast nothing and eroded structure blocks light as completely as solid
+	 *  deck, so relief reads only through the density gradient and the phase
+	 *  function -- plausible, but flat where it should be self-shadowing.
+	 *
+	 *  ONE VOLUME FETCH PER LIGHT STEP, plus two per light ray for the warp,
+	 *  and only inside StructureFadeNear + StructureFadeSpan. Beyond that the
+	 *  layer is faded out and this costs nothing, so the bill lands on the near
+	 *  and inside views rather than on orbit.
+	 *
+	 *  THE DETAIL LAYER IS NOT OFFERED. Its features are finer than a light step
+	 *  at any budget, so it would be sampled as noise rather than as shape. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Deck|Surface|Carve")
+	bool bStructureShadows = true;
+
 	/** Multiplies already-normalized vorticity, so 1 is neutral and the useful
 	 *  range is roughly 0.5 to 3. Too high flattens the elevation to its
 	 *  asymptote everywhere but the boundaries, turning the height field into
@@ -937,7 +954,7 @@ struct CLOUDATMOSPHERE_API FGasGiantDeckParams
 			CrossfadePeriod,
 			bCrossfadeDetail ? 1.0f : 0.0f,
 			bCrossfadeStructure ? 1.0f : 0.0f,
-			0.0f);
+			bStructureShadows ? 1.0f : 0.0f);
 	}
 
 	/** Ladder weights plus the layer's amount, as the material expects them. */

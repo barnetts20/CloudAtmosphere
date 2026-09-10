@@ -129,6 +129,7 @@ struct LightRayParams
 	 *  overrides the budget entirely and the transmittance weighting does
 	 *  nothing -- a step LIMIT and a step COUNT cannot both govern. */
     float budgetWeight;
+
 };
 
 struct CompositeParams

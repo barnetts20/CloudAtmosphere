@@ -75,6 +75,28 @@
 // disagree, scale the fade ranges against the march target's pixel count.
 // ---------------------------------------------------------------------------
 
+/** Mip the SHADOW ray reads the structure volume at. The view ray still reads
+ *  mip 0; this is the light path only.
+ *
+ *  A SHADOW IS A LOW-FREQUENCY QUANTITY. What it carries is the lump, not the
+ *  lump's surface -- so the argument that killed footprint mips on the view path
+ *  does not apply here. There, blurring along the shell erased the vertical
+ *  structure a high aspect ratio builds and flattened a layered deck; here the
+ *  silhouette is the whole signal and the fine detail is only variance.
+ *
+ *  AND THE SHADOW RAY CANNOT AFFORD THE FINE FREQUENCIES ANYWAY. Its step bound
+ *  relaxes with transmittance down to the density gradient, which was a safe
+ *  floor while the light path read nothing but the flow field -- one texel is
+ *  far coarser than the ramp. A structure feature is finer than that floor, so
+ *  a low-contribution sample lands below Nyquist and the jitter picks a side.
+ *  Halving the frequency the layer HAS is more robust than trying to bound the
+ *  step against a feature size the bake decides and the shader cannot read.
+ *
+ *  0 restores the previous behaviour, for A/B against the noise. */
+#ifndef GG_LIGHT_STRUCTURE_MIP
+#define GG_LIGHT_STRUCTURE_MIP 2
+#endif
+
 /** Isolates one lighting term so a stray glow can be attributed rather than
  *  guessed at. Every mode returns that term alone, with transmittance
  *  untouched, so the composite still shapes it the way it shapes the real
@@ -605,7 +627,10 @@ CompositeParams GGAtmo_BuildAtmo(
 float2 GGAtmo_DeckSampleForLight(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
+	Texture3D StructureVolume,
+	SamplerState StructureSampler,
 	float3 LocalPos,
+	float3 StructureWarp,
 	float StepHalfLength,
 	GGFieldParams F)
 {
@@ -615,12 +640,64 @@ float2 GGAtmo_DeckSampleForLight(
 
     const float3 Direction = LocalPos / max(Radius, 1e-4f);
 
-    const GGFlowProbe Probe = GG_FlowProbe(FlowField, FlowSampler, Direction, F);
+    const float3 N = normalize(GG_RotateZ(Direction, F.SpinAngle));
 
-	// The floor follows the probe's top, so the same over-estimate that thickens
-	// the deck also deepens the saturated region under it -- both darken, which
-	// is the safe direction here.
-    const float Floor = GG_DeckFloor(Probe.Top, F);
+    const float4 Flow0 = GG_SampleFlow(FlowField, FlowSampler, N, GG_FLOW_LAYER);
+
+    const GGFlowProbe Probe = GG_ProbeFromFlow(Flow0, F);
+
+    float Top = Probe.Top;
+    float ShapeStructure = 1.0f;
+
+	// -- Structure in the shadow ---------------------------------------------
+	//
+	// WHAT THE SHADOW RAY OTHERWISE CANNOT SEE. Without this it shades against
+	// a flow-only deck top: mid-scale lumps cast nothing, and eroded structure
+	// blocks light as completely as solid deck. Self-shadowing of relief is the
+	// strongest cue that a deck is geometry rather than a painted sphere.
+	//
+	// ONE FETCH, NOT FIVE. The lookup position needs the layer's warp, and
+	// rebuilding that here means the warp loop plus the deep flow read. It comes
+	// down from the view sample instead: the warp is a large-scale field and a
+	// shadow ray saturates within a fraction of a structure feature, so reusing
+	// one value misplaces the lookup by far less than omitting it misplaces the
+	// shadow.
+	//
+	// The DETAIL layer stays out. Its features are finer than a light step at
+	// any budget, so it would be sampled as noise rather than as shape -- and it
+	// is the layer that costs a second fetch under the crossfade.
+    BRANCH
+
+    if (F.StructureLight > 0.0f && F.StructureFade > 0.0f)
+    {
+        const float3 PStructure = normalize(N + StructureWarp * F.Scales.w);
+
+        const float4 Structure = StructureVolume.SampleLevel(StructureSampler,
+			PStructure * (F.Scales.y + Height * F.StructureVertical),
+			GG_LIGHT_STRUCTURE_MIP);
+
+        const float StructureMix = GG_PerlinWorley(
+			Structure.r,
+			GG_WorleyLadder(Structure.gba, F.StructureNoise.xyz));
+
+		// Both weightings MUST MATCH GG_Field's, or the deck the light sees is
+		// a different deck from the one the eye sees and the shadows sit beside
+		// the lumps that cast them.
+        const float Elevation = 1.0f - exp(-Probe.Band * Probe.Band);
+
+        const float Edge = lerp(F.EdgeBias, 1.0f, 1.0f - Elevation);
+
+        const float StructureWeight = saturate(Edge * F.StructureNoise.w * F.StructureFade);
+
+        Top += F.GradientDepth * F.StructureRelief * (StructureWeight * (StructureMix - 0.5f));
+
+        ShapeStructure = lerp(1.0f, StructureMix, StructureWeight);
+    }
+
+	// The floor follows the top, so the same over-estimate that thickens the
+	// deck also deepens the saturated region under it -- both darken, which is
+	// the safe direction here.
+    const float Floor = GG_DeckFloor(Top, F);
 
     const float HalfStep = max(StepHalfLength, 0.0f);
 
@@ -644,13 +721,23 @@ float2 GGAtmo_DeckSampleForLight(
 	// Three closed-form evaluations and no extra fetch. What it buys is
 	// CONTINUITY rather than accuracy: the estimate now moves smoothly as the
 	// sample slides, which is what a blur can actually resolve.
-    const float RampNear = GG_DeckDensity(Height - HalfStep, Probe.Top, Floor, F.DensityCurve);
-    const float RampMid = GG_DeckDensity(Height, Probe.Top, Floor, F.DensityCurve);
-    const float RampFar = GG_DeckDensity(Height + HalfStep, Probe.Top, Floor, F.DensityCurve);
+    const float RampNear = GG_DeckDensity(Height - HalfStep, Top, Floor, F.DensityCurve);
+    const float RampMid = GG_DeckDensity(Height, Top, Floor, F.DensityCurve);
+    const float RampFar = GG_DeckDensity(Height + HalfStep, Top, Floor, F.DensityCurve);
 
-    const float Density = (RampNear + 4.0f * RampMid + RampFar) / 6.0f;
+    const float Gradient = (RampNear + 4.0f * RampMid + RampFar) / 6.0f;
 
-    return float2(Density, Probe.Band);
+	// Erosion thins the shadow the same way it thins the view sample, so a
+	// worked surface transmits instead of blocking like solid deck.
+    const float DepthFraction = saturate((Top - Height) / max(Top - Floor, 1e-4f));
+
+    const float CarveWeight =
+		1.0f - smoothstep(0.0f, max(F.ErosionDepth, 1e-4f), DepthFraction);
+
+    const float CarveStructure = lerp(1.0f, ShapeStructure,
+		saturate(F.StructureErosion) * CarveWeight);
+
+    return float2(Gradient * CarveStructure, Probe.Band);
 }
 
 /** Transmittance from a sample toward the light, through air and deck.
@@ -665,6 +752,8 @@ float2 GGAtmo_DeckSampleForLight(
 float3 GGAtmo_LightMarch(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
+	Texture3D StructureVolume,
+	SamplerState StructureSampler,
 	GGAtmoParams P,
 	out float OutLobeShadow)
 {
@@ -833,6 +922,14 @@ float3 GGAtmo_LightMarch(
 	// Left unscaled this bound overrides that coupling: the view march coarsens
 	// with distance and the light march does not, so light cost stays flat while
 	// view cost falls and comes to dominate.
+	// ONCE PER RAY. The layer's lookup needs a warp, and rebuilding it at every
+	// step would be five reads a step to move the sample by a fraction of a
+	// feature. Two reads here, reused down the ray: the warp is a large-scale
+	// field and a shadow ray saturates well inside one structure feature.
+    const float3 StructureWarp = (P.Field.StructureLight > 0.0f && P.Field.StructureFade > 0.0f)
+		? GG_StructureWarpProbe(FlowField, FlowSampler, LocalOrigin, P.Field)
+		: float3(0.0f, 0.0f, 0.0f);
+
     const float StepGrowth = max(P.Atmo.lightRayParams.stepSizeMult, 1.0f);
 
     const float TightBound =
@@ -981,7 +1078,8 @@ float3 GGAtmo_LightMarch(
 				// signal a shadow ray should carry, and it arrives on the same
 				// fetch the density came from.
                 const float2 Deck = GGAtmo_DeckSampleForLight(
-					FlowField, FlowSampler, LocalPos, StepHalfHeight, P.Field);
+					FlowField, FlowSampler, StructureVolume, StructureSampler,
+					LocalPos, StructureWarp, StepHalfHeight, P.Field);
 
                 if (Deck.x > 0.0f)
                 {
@@ -1311,9 +1409,40 @@ float4 GGAtmo_MainMarch(
 
                 P.Atmo.lightRayParams.budgetWeight = LightBudgetWeight;
 
+				// THE FADES BELONG TO THE SAMPLE, NOT TO THE PATH. GG_BuildField
+				// leaves both at 1 and the march sets them per sample, so a
+				// shadow ray handed the unmodified field sees a layer that never
+				// fades -- shadowing structure the eye stopped drawing, at full
+				// cost, everywhere.
+				//
+				// Hoisted above the light march because that is what needs them
+				// first; the deck branch below reads the same two values, so the
+				// two paths cannot disagree about which layers exist here.
+				//
+				// Distance from the camera to THIS SAMPLE, not to the planet: a
+				// grazing ray's near end stays detailed while its far end fades,
+				// which is what a per-pixel measure would have done anyway.
+				//
+				// THE JITTERED POSITION, LIKE EVERYTHING ELSE IN THE LOOP. Read at
+				// the step centre the fade takes one value per step, and since
+				// transmittance is spent within a couple of samples the pixel
+				// inherits that value whole. Iso-step-index contours are rings
+				// about the view centre, so the lattice draws itself in the deck.
+				// The jitter is what hides that lattice everywhere else; the fade
+				// owes it too.
+                const float SampleDistance =
+					(Pos + CurrentStep * 0.5f + Offset) * InvPlanetRadius;
+
+                P.Field.DetailFade = 1.0f - smoothstep(
+					P.Field.DetailFadeNear, P.Field.DetailFadeFar, SampleDistance);
+
+                P.Field.StructureFade = 1.0f - smoothstep(
+					P.Field.StructureFadeNear, P.Field.StructureFadeFar, SampleDistance);
+
                 float LobeShadow;
                 const float3 SunTransmittance = GGAtmo_LightMarch(
-					FlowField, FlowSampler, P, LobeShadow);
+					FlowField, FlowSampler, StructureVolume, StructureSampler,
+					P, LobeShadow);
 
                 const float3 AtmoDens = (Height > 0.0f)
 					? Atmo_Density(Height,
@@ -1368,33 +1497,10 @@ float4 GGAtmo_MainMarch(
                     const float RadialRate = abs(dot(LocalDir, LocalUp));
                     const float StepHalfHeight = RadialRate * CurrentStep * 0.5f / P.Field.Thickness;
 
-					// Distance from the camera to THIS SAMPLE, not to the
-					// planet: a grazing ray's near end stays detailed while its
-					// far end fades, which is what a per-pixel measure would
-					// have done anyway.
-					//
-					// THE JITTERED POSITION, LIKE EVERYTHING ELSE IN THE LOOP. Read
-					// at the step centre the fade takes one value per step, and
-					// since transmittance is spent within a couple of samples the
-					// pixel inherits that value whole. Iso-step-index contours are
-					// rings about the view centre, so the lattice draws itself in
-					// the deck. The jitter is what hides that lattice everywhere
-					// else; the fade owes it too.
-                    const float ViewDistances =
-						(Pos + CurrentStep * 0.5f + Offset) * InvPlanetRadius;
-
-                    GGFieldParams FieldLOD = P.Field;
-
-                    FieldLOD.DetailFade = 1.0f - smoothstep(
-						P.Field.DetailFadeNear, P.Field.DetailFadeFar, ViewDistances);
-
-                    FieldLOD.StructureFade = 1.0f - smoothstep(
-						P.Field.StructureFadeNear, P.Field.StructureFadeFar, ViewDistances);
-
                     const float4 Deck = GG_Density(
 						FlowField, FlowSampler, DetailVolume, DetailSampler,
-			StructureVolume, StructureSampler,
-						LocalPos, StepHalfHeight, FieldLOD);
+						StructureVolume, StructureSampler,
+						LocalPos, StepHalfHeight, P.Field);
 
                     if (Deck.x > 0.0f)
                     {
