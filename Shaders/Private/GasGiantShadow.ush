@@ -31,10 +31,24 @@
 // about a scale factor beyond the beta both already read.
 // ---------------------------------------------------------------------------
 
-/** The three stored crossings. Spaced by what transmittance does rather than
- *  evenly: 0.25 is a 22% loss, 1.0 is 63%, 3.0 is 95%. The first is low on
+/** The four stored crossings. Spaced by what transmittance does rather than
+ *  evenly: 0.25 is a 22% loss, 1.0 is 63%, 3.0 is 95%. The second is low on
  *  purpose -- it is what resolves the soft top of the ramp, which is the part
- *  the eye reads and the part a linear fit gets worst. */
+ *  the eye reads and the part a linear fit gets worst.
+ *
+ *  THE FIRST IS THE SILHOUETTE, AND IT IS A THRESHOLD RATHER THAN A GEOMETRIC
+ *  ENTRY. A cone-traced deck top is a point sample of one column, so it cannot
+ *  be averaged over the texel the way extinction can -- and being the shadow's
+ *  leading edge, it is what a god ray draws. Point sampled, it snaps by a whole
+ *  texel as the deck advects past the lattice. Taken as a crossing of the same
+ *  subsampled accumulation as the others, it moves continuously.
+ *
+ *  Optical depth below it is treated as zero, which understates by at most
+ *  GG_SHADOW_TAU_ENTRY -- under two percent of brightness, and smooth. */
+#ifndef GG_SHADOW_TAU_ENTRY
+#define GG_SHADOW_TAU_ENTRY 0.02f
+#endif
+
 #ifndef GG_SHADOW_TAU0
 #define GG_SHADOW_TAU0 0.25f
 #endif
@@ -71,6 +85,25 @@
  *  against the clamp edge with nothing outside to blend toward. */
 #ifndef GG_SHADOW_EXTENT_MARGIN
 #define GG_SHADOW_EXTENT_MARGIN 1.02f
+#endif
+
+/** Lookup offset, in texels, applied per view sample.
+ *
+ *  THE OPPOSITE CASE TO THE BAKE. A stochastic offset in the bake would print as
+ *  fixed noise, because that lattice is shared by every pixel reading it and
+ *  nothing averages it. Here the offset is per pixel and per sample along the
+ *  ray, so the samples of one ray average the texel neighbourhood instead of
+ *  reading one point of it.
+ *
+ *  It earns its place in the tangent case: a view ray running parallel to the
+ *  light projects every one of its samples into nearly the same texel, so that
+ *  texel alone decides the whole ray and its error reaches the screen as a block
+ *  the size of a projected texel. Offsetting the reads is the only averaging
+ *  available there.
+ *
+ *  1.0 is a full texel. Larger softens the shadow; 0 disables. */
+#ifndef GG_SHADOW_LOOKUP_JITTER
+#define GG_SHADOW_LOOKUP_JITTER 1.0f
 #endif
 
 /** The map plane's axes for a planet-local light direction, orthonormal and
@@ -131,7 +164,8 @@ float GG_ShadowTauFromNodes(float4 Node, float Depth)
 
     if (Depth <= Node.y)
     {
-        return GG_SHADOW_TAU0 * saturate((Depth - Node.x) / max(Node.y - Node.x, 1e-4f));
+        return lerp(GG_SHADOW_TAU_ENTRY, GG_SHADOW_TAU0,
+			saturate((Depth - Node.x) / max(Node.y - Node.x, 1e-4f)));
     }
 
     if (Depth <= Node.z)
@@ -166,6 +200,7 @@ float GG_ShadowTau(
 	SamplerState ShadowSampler,
 	float3 LocalPos,
 	float3 LightLocal,
+	float2 JitterTexels,
 	GGFieldParams F)
 {
     float3 U, V;
@@ -197,7 +232,7 @@ float GG_ShadowTau(
     const float2 InvSize = 1.0f / Size;
 
 	// Texel centres, so the bilinear sampler returns each texel's own value.
-    const float2 Centre = UV * Size - 0.5f;
+    const float2 Centre = UV * Size - 0.5f + JitterTexels * GG_SHADOW_LOOKUP_JITTER;
     const float2 Base = floor(Centre);
 
     float2 Frac = Centre - Base;

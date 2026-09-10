@@ -608,8 +608,18 @@ float3 GGAtmo_LightMarch(
     const float3 AbsBeta = P.Atmo.cloudParams.cloudAbsBeta;
     const float AbsMax = max(AbsBeta.x, max(AbsBeta.y, AbsBeta.z));
 
+	// Salted by the pixel AND by the parent step, so neither successive samples
+	// along one ray nor neighbouring pixels read the map in phase. Both axes
+	// matter: the ray's samples are what average the texel neighbourhood, and
+	// the pixel term is what stops that average being identical next door.
+    const float2 ShadowJitter = float2(
+		Atmo_HashJitter(P.Atmo.mainRayParams.svxy,
+			uint(P.Atmo.lightRayParams.parentStepIndex) * 2749u + 11u) - 0.5f,
+		Atmo_HashJitter(P.Atmo.mainRayParams.svxy,
+			uint(P.Atmo.lightRayParams.parentStepIndex) * 2749u + 23u) - 0.5f);
+
     const float ShadowTau =
-		GG_ShadowTau(ShadowMap, ShadowSampler, LocalOrigin, LocalDir, P.Field);
+		GG_ShadowTau(ShadowMap, ShadowSampler, LocalOrigin, LocalDir, ShadowJitter, P.Field);
 
 	// NO SATURATION SNAP. A marched estimate needed one: it broke out of its
 	// loop on reaching the threshold, and returning the residual it happened to

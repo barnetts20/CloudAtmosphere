@@ -38,11 +38,11 @@
 #define GG_SHADOW_STEPS_PER_GRADIENT 8.0f
 #endif
 
-/** Most optical depth a single step may accumulate.
+/** Most optical depth a single step may accumulate, at zero accumulated depth.
  *
  *  GEOMETRY ALONE DOES NOT BOUND THIS. A step sized to the gradient carries
  *  whatever extinction the deck happens to have, so at a high authored optical
- *  depth all three thresholds fall inside one step, their crossings collapse to
+ *  depth all four thresholds fall inside one step, their crossings collapse to
  *  one linear interpolation across it, and the reconstruction inherits a lattice
  *  at the step spacing. The symptom is blockiness that appears with density
  *  rather than with distance, which reads as a resolution problem and is not.
@@ -50,6 +50,30 @@
  *  0.15 puts at least two steps below the first threshold at any density. */
 #ifndef GG_SHADOW_MAX_DTAU
 #define GG_SHADOW_MAX_DTAU 0.15f
+#endif
+
+/** How fast the allowance opens up as optical depth accumulates.
+ *
+ *  ALLOCATION BY OPTICAL DEPTH IS THE POINT, but a CONSTANT allowance resolves
+ *  the deep march far more finely than its nodes need. The thresholds are
+ *  0.02, 0.25, 1.0 and 3.0 -- spacing that roughly quadruples each time -- so
+ *  holding Delta-tau flat spends most of the budget between the last two, where
+ *  the sample is already 63% extinguished before the segment even starts.
+ *
+ *  Opening in proportion to accumulated depth keeps the RELATIVE accuracy of
+ *  every node about equal. At 1.0 the segment either side of a crossing is a
+ *  similar fraction of that crossing's own value, which is what the piecewise
+ *  reconstruction actually cares about; 0.0 is the flat allowance.
+ *
+ *  The lattice is unaffected -- this changes the demand, and the demand only
+ *  ever selects how far a fixed cell is halved. */
+#ifndef GG_SHADOW_DTAU_GROWTH
+#define GG_SHADOW_DTAU_GROWTH 1.0f
+#endif
+
+/** How far a lattice cell may be halved. Six gives 64x refinement. */
+#ifndef GG_SHADOW_MAX_HALVINGS
+#define GG_SHADOW_MAX_HALVINGS 6
 #endif
 
 /** Iteration cap. A grazing chord is long and the cone trace only skips the
@@ -97,9 +121,9 @@
 static const float2 GGShadow_SubOffsets[4] =
 {
     float2(-0.375f, -0.125f),
-    float2(-0.125f, 0.375f),
-    float2(0.125f, -0.375f),
-    float2(0.375f, 0.125f),
+    float2(-0.125f,  0.375f),
+    float2( 0.125f, -0.375f),
+    float2( 0.375f,  0.125f),
 };
 
 Texture2DArray ShadowFlowField;
@@ -228,6 +252,87 @@ float GGShadow_BandAlpha(float Band)
     return lerp(ShadowScatterAlphas.z, Hue, abs(T));
 }
 
+/** Extinction at a point, averaged across the texel's footprint.
+ *
+ *  Averaged as SIGMA -- averaging optical depths or whole sub-rays would push
+ *  the nonlinear part of the reconstruction through the mean and reintroduce the
+ *  bias the map exists to remove.
+ *
+ *  BOTH LAYERS, BOTH FADES. Detail is EROSION: GG_Density applies it as a carve,
+ *  so it lowers mean density rather than only adding variation, and dropping it
+ *  would leave the shadow deck uniformly denser than the visible one. A layer
+ *  may only be dropped from the map if it moves the variance and not the mean.
+ *  The fades vary over planet radii, so they are evaluated once here rather than
+ *  per subsample. */
+float GGShadow_Sigma(
+	float3 Pos,
+	float3 BasisU,
+	float3 BasisV,
+	float TexelWorld,
+	float StepHalfHeight,
+	float AbsMax,
+	GGFieldParams F)
+{
+    float FadeDetail, FadeStructure;
+    GGShadow_Fades(Pos, F, FadeDetail, FadeStructure);
+
+    F.DetailFade = FadeDetail;
+    F.StructureFade = FadeStructure;
+
+    float Density = 0.0f;
+
+	UNROLL
+
+    for (int Sub = 0; Sub < GG_SHADOW_SUBSAMPLES; Sub++)
+    {
+        const float2 Offset = (GG_SHADOW_SUBSAMPLES > 1)
+			? GGShadow_SubOffsets[Sub] * TexelWorld
+			: float2(0.0f, 0.0f);
+
+        const float3 SubPos = Pos + BasisU * Offset.x + BasisV * Offset.y;
+
+        const float4 Deck = GG_Density(
+			ShadowFlowField, ShadowFlowSampler,
+			ShadowDetailVolume, ShadowDetailSampler,
+			ShadowStructureVolume, ShadowStructureSampler,
+			SubPos, StepHalfHeight, F);
+
+		// Band scales extinction, so a belt shadows more than a zone, and it
+		// arrives on the same fetch the density came from.
+        Density += Deck.x * GGShadow_BandAlpha(Deck.y);
+    }
+
+    return Density * AbsMax / float(GG_SHADOW_SUBSAMPLES);
+}
+
+/** How far into a step optical depth reaches Target, in step lengths.
+ *
+ *  SIGMA IS LINEAR ACROSS THE STEP, so optical depth is quadratic and the
+ *  crossing is a root rather than a ratio. Treating density as constant instead
+ *  makes the crossing first-order accurate, and the residual moves whenever the
+ *  subdivision level changes -- which it does at fixed radii from the sub-light
+ *  point, since obliquity is radially symmetric there. The result is concentric
+ *  rings. Second order drops that by roughly the step ratio.
+ *
+ *  Falls back to the linear solve where the two ends agree, which is also where
+ *  the quadratic form loses conditioning. */
+float GGShadow_Crossing(float Target, float Tau, float SigmaA, float SigmaB, float Step)
+{
+    const float Remaining = Target - Tau;
+    const float Curve = 0.5f * (SigmaB - SigmaA) / max(Step, 1e-6f);
+
+    if (abs(Curve) < 1e-8f)
+    {
+        return saturate(Remaining / max(SigmaA * Step, 1e-8f));
+    }
+
+    const float Disc = SigmaA * SigmaA + 4.0f * Curve * Remaining;
+
+    const float Root = (-SigmaA + sqrt(max(Disc, 0.0f))) / (2.0f * Curve);
+
+    return saturate(Root / max(Step, 1e-6f));
+}
+
 [numthreads(GG_SHADOW_THREADS, GG_SHADOW_THREADS, 1)]
 void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
@@ -285,10 +390,19 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     float TEntry =
 		GG_DeckEntry(ShadowFlowField, ShadowFlowSampler, Origin, Dir, 0.0f, RayLength, TopMax, F);
 
-	// Converted from a lateral distance to a distance ALONG THE RAY by the rate
-	// the ray descends. A grazing ray covers a texel's width over a long span,
-	// so the back-off grows with obliquity, which is where columns inside one
-	// texel differ most.
+	// WHERE TO START MARCHING, NOT WHAT TO STORE. The traced entry is the centre
+	// column's deck top, which is a point sample and would snap by a texel as
+	// the deck advects. Nothing is written from it: the silhouette comes out of
+	// the accumulation as GG_SHADOW_TAU_ENTRY's crossing, like the other three.
+	//
+	// So this only has to be EARLY ENOUGH. Backing it off by a texel footprint
+	// covers neighbouring columns inside the texel that stand higher than the
+	// centre; starting in empty air costs steps and changes nothing, while
+	// starting late would clip their tops out of the average entirely.
+	//
+	// Converted from a lateral distance to a distance along the ray by the rate
+	// the ray descends, so the back-off grows with obliquity -- which is where
+	// columns inside one texel differ most.
     {
         const float3 EntryPos = Origin + Dir * TEntry;
         const float EntryRadius = max(length(EntryPos), 1e-4f);
@@ -313,16 +427,33 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     const float HeightStep =
 		F.GradientDepth * F.Thickness / max(GG_SHADOW_STEPS_PER_GRADIENT, 1.0f);
 
+	// The outer lattice: fixed multiples of this from t = 0. Constant along the
+	// ray, so a boundary is a property of the geometry alone and cannot move
+	// when the field changes.
+    const float CellSize = max(HeightStep, 1e-4f);
+
     float Tau = 0.0f;
     float LastSigma = 0.0f;
 
 	// Negative until crossed. Named rather than an array: a dynamically indexed
-	// local forces scratch memory for three values that unroll for free.
+	// local forces scratch memory for four values that unroll for free.
+    float NodeEntry = -1.0f;
     float Node0 = -1.0f;
     float Node1 = -1.0f;
     float Node2 = -1.0f;
 
-    float T = TEntry;
+	// ANCHORED AT THE SHELL ENTRY, NOT AT THE DECK'S. Snapping the start to the
+	// lattice means the sample positions do not slide when the cone trace flips
+	// from one column's top to the next -- which it does discontinuously as the
+	// deck advects, moving every crossing depth on that ray together.
+    float T = floor(TEntry / CellSize) * CellSize;
+
+	// Extinction at the march start. Each step samples only its FAR boundary and
+	// inherits the near one, so the boundary scheme costs the same one evaluation
+	// per step the midpoint scheme did -- plus this seed.
+    float SigmaPrev = GGShadow_Sigma(
+		Origin + Dir * T, ShadowBasisU, ShadowBasisV, TexelWorld,
+		0.5f * CellSize / F.Thickness, AbsMax, F);
 
 	[loop]
     for (int Iter = 0; Iter < GG_SHADOW_MAX_STEPS && T < RayLength; Iter++)
@@ -339,104 +470,97 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         const float LateralCost =
 			LateralRate / max(GG_FlowTexelArc(ShadowFlowField, Radius) * 0.5f, 1e-6f);
 
-        float Step = rsqrt(max(HeightCost * HeightCost + LateralCost * LateralCost, 1e-12f));
+        float Demand = rsqrt(max(HeightCost * HeightCost + LateralCost * LateralCost, 1e-12f));
 
-		// The extinction the last step actually found, which is the only
-		// estimate available before this step is taken. Self-correcting: a step
-		// that overshoots into dense deck shortens the next one, so the error is
+		// The extinction the last step actually found, which is the only estimate
+		// available before this step is taken. Self-correcting: a step that
+		// overshoots into dense deck shortens the next one, so the error is
 		// bounded by one step rather than carried.
         if (LastSigma > 0.0f)
         {
-            Step = min(Step, GG_SHADOW_MAX_DTAU / LastSigma);
+            const float Allowance = GG_SHADOW_MAX_DTAU * (1.0f + GG_SHADOW_DTAU_GROWTH * Tau);
+
+            Demand = min(Demand, Allowance / LastSigma);
         }
 
+		// -- Dyadic subdivision, not resizing --------------------------------
+		//
+		// The demand HALVES the cell rather than setting the step directly, so a
+		// density change SPLITS a boundary instead of shifting every boundary
+		// after it. Existing boundaries persist as the field evolves, which is
+		// what makes the quadrature converge frame to frame rather than dance:
+		// crossings are interpolated inside a step, so a lattice that re-phases
+		// moves the silhouette even when the deck has barely moved.
+        float Step = CellSize;
+
+		UNROLL
+
+        for (int Halve = 0; Halve < GG_SHADOW_MAX_HALVINGS; Halve++)
+        {
+            if (Step <= Demand)
+            {
+                break;
+            }
+
+            Step *= 0.5f;
+        }
+
+		// T sits on a lattice boundary and Step divides the cell, so this only
+		// ever trims the final partial step at the ray's end.
         Step = min(Step, RayLength - T);
 
 		// NO JITTER. A stochastic offset is what a per-pixel march needs to hide
 		// its lattice under a blur; here the lattice is in the map, shared by
-		// every pixel reading it, so jitter would print as fixed noise instead
-		// of averaging away.
-        const float3 Mid = Origin + Dir * (T + Step * 0.5f);
+		// every pixel reading it, so jitter would print as fixed noise rather
+		// than averaging away -- grain that sits still while the deck moves past.
+        const float3 Far = Origin + Dir * (T + Step);
 
 		// Half the step along the RADIUS, in atmosphere fractions, which is the
 		// axis the profile varies on.
         const float StepHalfHeight = RadialRate * Step * 0.5f / F.Thickness;
 
-        float MidDetail, MidStructure;
-        GGShadow_Fades(Mid, F, MidDetail, MidStructure);
+        const float SigmaNext = GGShadow_Sigma(
+			Far, ShadowBasisU, ShadowBasisV, TexelWorld, StepHalfHeight, AbsMax, F);
 
-		// BOTH LAYERS, BOTH FADES. The map cannot resolve detail spatially at
-		// this resolution, but detail is EROSION -- GG_Density applies it as a
-		// carve, so it lowers mean density rather than only adding variation.
-		// Omitting it leaves the shadow deck uniformly denser than the visible
-		// one, and the lit face pays for material the eye never sees.
-		//
-		// A layer may only be dropped from the map if it moves the variance and
-		// not the mean. Neither of these qualifies.
-		//
-		// Evaluated once per step rather than per subsample: the fades vary over
-		// planet radii, and a texel is not one.
-        F.DetailFade = MidDetail;
-        F.StructureFade = MidStructure;
+		// TRAPEZOID, NOT MIDPOINT. Sampling the boundaries makes sigma linear
+		// across the step, which makes optical depth quadratic and the crossings
+		// below solvable to second order. Same number of density evaluations.
+        const float TauNext = Tau + 0.5f * (SigmaPrev + SigmaNext) * Step;
 
-		// Extinction averaged across the texel's footprint, so the texel stands
-		// for its AREA rather than its centre. Averaged as SIGMA, inside the
-		// step -- averaging optical depths or whole sub-rays would push the
-		// nonlinear part of the reconstruction through the mean and reintroduce
-		// the bias the map exists to remove.
-        float Density = 0.0f;
-
-        UNROLL
-
-        for (int Sub = 0; Sub < GG_SHADOW_SUBSAMPLES; Sub++)
+        if (NodeEntry < 0.0f && TauNext >= GG_SHADOW_TAU_ENTRY)
         {
-            const float2 Offset = (GG_SHADOW_SUBSAMPLES > 1)
-				? GGShadow_SubOffsets[Sub] * TexelWorld
-				: float2(0.0f, 0.0f);
-
-            const float3 SubPos = Mid + ShadowBasisU * Offset.x + ShadowBasisV * Offset.y;
-
-            const float4 Deck = GG_Density(
-				ShadowFlowField, ShadowFlowSampler,
-				ShadowDetailVolume, ShadowDetailSampler,
-				ShadowStructureVolume, ShadowStructureSampler,
-				SubPos, StepHalfHeight, F);
-
-			// Band scales extinction, so a belt shadows more than a zone, and it
-			// arrives on the same fetch the density came from.
-            Density += Deck.x * GGShadow_BandAlpha(Deck.y);
+            NodeEntry = T + Step * GGShadow_Crossing(
+				GG_SHADOW_TAU_ENTRY, Tau, SigmaPrev, SigmaNext, Step);
         }
-
-        const float Sigma = Density * AbsMax / float(GG_SHADOW_SUBSAMPLES);
-
-        const float TauNext = Tau + Sigma * Step;
-
-		// Where inside this step the threshold fell. Density is constant across
-		// the step by construction, so the crossing is linear in T and no search
-		// is needed.
-        const float InvRise = 1.0f / max(TauNext - Tau, 1e-6f);
 
         if (Node0 < 0.0f && TauNext >= GG_SHADOW_TAU0)
         {
-            Node0 = T + Step * saturate((GG_SHADOW_TAU0 - Tau) * InvRise);
+            Node0 = T + Step * GGShadow_Crossing(
+				GG_SHADOW_TAU0, Tau, SigmaPrev, SigmaNext, Step);
         }
 
         if (Node1 < 0.0f && TauNext >= GG_SHADOW_TAU1)
         {
-            Node1 = T + Step * saturate((GG_SHADOW_TAU1 - Tau) * InvRise);
+            Node1 = T + Step * GGShadow_Crossing(
+				GG_SHADOW_TAU1, Tau, SigmaPrev, SigmaNext, Step);
         }
 
         if (Node2 < 0.0f && TauNext >= GG_SHADOW_TAU2)
         {
-            Node2 = T + Step * saturate((GG_SHADOW_TAU2 - Tau) * InvRise);
+            Node2 = T + Step * GGShadow_Crossing(
+				GG_SHADOW_TAU2, Tau, SigmaPrev, SigmaNext, Step);
         }
 
         Tau = TauNext;
 
-        if (Sigma > 0.0f)
+		// The far boundary's extinction, which is exact at the next step's start
+		// rather than an average over the last one.
+        if (SigmaNext > 0.0f)
         {
-            LastSigma = Sigma;
+            LastSigma = SigmaNext;
         }
+
+        SigmaPrev = SigmaNext;
 
         T += Step;
 
@@ -454,20 +578,12 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	// run the deck path at all. A zero LastSigma sends it to the sentinel.
     const float TailRate = 1.0f / max(LastSigma, 1e-6f);
 
-    if (Node0 < 0.0f)
-    {
-        Node0 = T + (GG_SHADOW_TAU0 - Tau) * TailRate;
-    }
-    if (Node1 < 0.0f)
-    {
-        Node1 = T + (GG_SHADOW_TAU1 - Tau) * TailRate;
-    }
-    if (Node2 < 0.0f)
-    {
-        Node2 = T + (GG_SHADOW_TAU2 - Tau) * TailRate;
-    }
+    if (NodeEntry < 0.0f) { NodeEntry = T + (GG_SHADOW_TAU_ENTRY - Tau) * TailRate; }
+    if (Node0 < 0.0f) { Node0 = T + (GG_SHADOW_TAU0 - Tau) * TailRate; }
+    if (Node1 < 0.0f) { Node1 = T + (GG_SHADOW_TAU1 - Tau) * TailRate; }
+    if (Node2 < 0.0f) { Node2 = T + (GG_SHADOW_TAU2 - Tau) * TailRate; }
 
-    float4 Out = float4(TEntry, Node0, Node1, Node2) / F.Thickness;
+    float4 Out = float4(NodeEntry, Node0, Node1, Node2) / F.Thickness;
 
 	// NO DEBUG REMAP HERE. The map is read by the march, so a define that
 	// rescales what is written silently rescales the lighting with it -- and the
