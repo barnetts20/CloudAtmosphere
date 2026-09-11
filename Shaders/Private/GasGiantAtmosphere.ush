@@ -1,7 +1,7 @@
 #pragma once
 
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
-#include "/Plugin/CloudAtmosphere/Private/AtmosphereMarch.ush"
+#include "/Plugin/CloudAtmosphere/Private/AtmospherePlan.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereSetup.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTransmittance.ush"
 #include "/Plugin/CloudAtmosphere/Private/GasGiantShadow.ush"

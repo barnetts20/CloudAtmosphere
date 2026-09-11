@@ -1,0 +1,137 @@
+#pragma once
+
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
+
+// Ray planning: the segment list both marches walk, and the bounds on it.
+//
+// Shared by the terrestrial march and the gas giant one, which are otherwise
+// separate models. Anything below this line is common; AtmosphereMarch.ush above
+// it is the terrestrial model alone.
+
+/** Slots in the segment array. Six boundaries give at most five spans: atmo
+ *  entry, cloud outer near, cloud inner near, cloud inner far, cloud outer far,
+ *  atmo exit. */
+#ifndef ATMO_MAX_SEGMENTS
+#define ATMO_MAX_SEGMENTS 5
+#endif
+
+/** Safety bound on a march loop. The loops are while() on distance, so this is
+ *  what stops a degenerate step size from hanging the shader. It is also what
+ *  catches a grazing ray that is dense enough to keep stepping and thin enough
+ *  never to reach the transmittance early-out: such a ray stops with whatever
+ *  transmittance it had, which reads as a hard edge at the limb. */
+#ifndef ATMO_MAX_ITER
+#define ATMO_MAX_ITER 256
+#endif
+
+/** Builds the segment list for a ray. Returns the count; each segment is
+ *  (start, end, stepSize, isCloudBand).
+ *
+ *  STEP SIZES COME FROM THE SHELLS, NOT FROM THIS RAY'S CHORD. cloudSteps means
+ *  samples across the band's radial depth for every ray, so a grazing ray takes
+ *  more steps because it genuinely traverses more cloud rather than being handed
+ *  coarser ones to compensate. Sized from the chord instead, a limb ray through
+ *  a thin band gets steps longer by 2*sqrt(2*R*d)/d -- two orders of magnitude
+ *  at planetary scale -- at exactly the angle where its path through cloud is
+ *  longest and the integral hardest.
+ *
+ *  The boundary list is built in ORDER and never sorted, which works only
+ *  because the guards enforce the ordering as they go: each candidate is
+ *  admitted only if it lies beyond the previous one. A sort would be more
+ *  obviously correct and would cost more than the guards do. */
+int Atmo_Plan(
+	float3 origin,
+	float3 dir,
+	float maxDist,
+	PlanetParams planet,
+	int atmoSteps,
+	int cloudSteps,
+	out float4 segments[ATMO_MAX_SEGMENTS])
+{
+    int segmentCount = 0;
+
+	UNROLL
+    for (int Clear = 0; Clear < ATMO_MAX_SEGMENTS; Clear++)
+    {
+        segments[Clear] = 0.0;
+    }
+
+    float2 atmoHit = Atmo_RaySphere(origin, dir, planet.planetPos, planet.atmoRadius);
+    if (atmoHit.y < 0.0)
+    {
+        return 0;
+    }
+
+    float atmoStart = max(atmoHit.x, 0.0);
+    float atmoEnd = min(atmoHit.y, maxDist);
+    if (atmoStart >= atmoEnd)
+    {
+        return 0;
+    }
+
+	// Floored at one: the counts arrive from material pins, and a zero divisor
+	// makes an infinite step that covers the segment in a single sample.
+    const float coarseStep =
+		max(planet.atmoRadius - planet.planetRadius, 1e-4f) / float(max(atmoSteps, 1));
+
+    float2 cloudOHit = Atmo_RaySphere(origin, dir, planet.planetPos, planet.cloudOuterRadius);
+    float2 cloudIHit = Atmo_RaySphere(origin, dir, planet.planetPos, planet.cloudInnerRadius);
+
+    bool hasCloudOuter = cloudOHit.y > 0.0 && cloudOHit.x < maxDist;
+    bool hasCloudInner = cloudIHit.y > 0.0 && cloudIHit.x < maxDist;
+
+	// No cloud band on this ray: one segment, whole atmosphere, coarse.
+    if (!hasCloudOuter)
+    {
+        segments[0] = float4(atmoStart, atmoEnd, coarseStep, 0.0);
+        return 1;
+    }
+
+    float co_near = max(cloudOHit.x, 0.0);
+    float co_far = min(cloudOHit.y, maxDist);
+    float ci_near = hasCloudInner ? max(cloudIHit.x, 0.0) : -1.0;
+    float ci_far = hasCloudInner ? min(cloudIHit.y, maxDist) : -1.0;
+
+    float boundaries[6];
+    int bCount = 0;
+
+    boundaries[bCount++] = atmoStart;
+    if (co_near > atmoStart && co_near < atmoEnd)
+        boundaries[bCount++] = co_near;
+    if (hasCloudInner && ci_near > atmoStart && ci_near < atmoEnd && ci_near > co_near)
+        boundaries[bCount++] = ci_near;
+    if (hasCloudInner && ci_far > atmoStart && ci_far < atmoEnd && ci_far > ci_near)
+        boundaries[bCount++] = ci_far;
+    if (co_far > atmoStart && co_far < atmoEnd)
+        boundaries[bCount++] = co_far;
+    boundaries[bCount++] = atmoEnd;
+
+    const float bandThickness = max(planet.cloudOuterRadius - planet.cloudInnerRadius, 1e-4f);
+
+    const float fineStep = bandThickness / float(max(cloudSteps, 1));
+
+	// Emit the segments with their step sizes. A segment is fine if its MIDPOINT
+	// lies in the band, which the boundaries above make exact: the band's
+	// crossings are themselves boundaries, so no segment straddles one.
+    for (int j = 0; j < bCount - 1; j++)
+    {
+        float segStart = boundaries[j];
+        float segEnd = boundaries[j + 1];
+        if (segEnd <= segStart)
+            continue;
+
+        float midDist = (segStart + segEnd) * 0.5;
+        float3 midPos = origin + dir * midDist;
+        float midRadius = length(midPos - planet.planetPos);
+
+        bool inCloudBand = (midRadius >= planet.cloudInnerRadius && midRadius <= planet.cloudOuterRadius);
+
+        segments[segmentCount] = float4(segStart, segEnd, inCloudBand ? fineStep : coarseStep, inCloudBand ? 1.0 : 0.0);
+        segmentCount++;
+
+        if (segmentCount >= ATMO_MAX_SEGMENTS)
+            break;
+    }
+
+    return segmentCount;
+}
