@@ -524,15 +524,6 @@ struct CLOUDATMOSPHERE_API FGasGiantProfileParams
 	 *  one for one. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float DeckBackstop = 0.3f;
-
-	/** Where the mass sits inside the gradient, without moving either boundary.
-	 *  1 is centred, below 1 pulls density toward the top.
-	 *
-	 *  ABOVE 0.5 THE ONSET IS C1. At 0.5 the slope at the deck top goes finite,
-	 *  which creases along the whole top; below it the top hardens into an edge.
-	 *  A look control rather than a bounded one. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", ClampMax = "4.0"))
-	float DensityCurve = 1.0f;
 };
 
 /** How the simulation shapes the deck: bands, pressure and storms. Every relief
@@ -759,8 +750,9 @@ struct CLOUDATMOSPHERE_API FGasGiantNoiseLayerParams
  *
  *  Scatter is single-scattering albedo. Extinction is RGB tint with the amount
  *  in A, multiplying the deck's solved extinction: 1 is neutral, and "darker
- *  bands eat more light" is one amount against another. The march applies
- *  ExtinctionBase's tint to every band; each band's amount is its own. */
+ *  bands eat more light" is one amount against another. The view ray applies
+ *  each band's tint and amount where it samples; the light ray takes the
+ *  amounts from the shadow map and the tint of the band it arrives at. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FGasGiantBandParams
 {
@@ -806,8 +798,20 @@ struct CLOUDATMOSPHERE_API FGasGiantExtinctionParams
 {
 	GENERATED_BODY()
 
+	/** Where the mass sits inside the gradient, without moving either boundary.
+	 *  1 is centred, below 1 pulls density toward the top. DeckOpticalDepth is
+	 *  solved against the curve's mean, so this redistributes the deck's mass
+	 *  without changing how much light it removes.
+	 *
+	 *  ABOVE 0.5 THE ONSET IS C1. At 0.5 the slope at the deck top goes finite,
+	 *  which creases along the whole top; below it the top hardens into an edge.
+	 *  A look control rather than a bounded one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", ClampMax = "4.0"))
+	float DensityCurve = 1.0f;
+
 	/** Total optical depth from the deck top to the surface at core density,
-	 *  down a column with no relief. Below about 8 the sky shows through. */
+	 *  down a column with no relief, at any DensityCurve. Below about 8 the sky
+	 *  shows through. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
 	float DeckOpticalDepth = 2000.0f;
 

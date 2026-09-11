@@ -85,6 +85,21 @@
 #define GG_SHADOW_MIN_TAU_SCALE 1e-3f
 #endif
 
+/** The smallest and largest channel across the three bands' extinction tints.
+ *
+ *  THE FOLD CONSTANT. The map stores optical depth scaled by the largest
+ *  channel any band can have, so its thresholds mean transmittance on the
+ *  fastest channel anywhere; the reader divides the same constant back out and
+ *  applies the receiving band's tint. Both sides compute it here, from the
+ *  same three tints. The smallest channel sets the saturation ceiling. */
+float2 GG_ExtinctionTintRange(float3 TintNegative, float3 TintPositive, float3 TintBase)
+{
+    const float3 Lo = min(TintNegative, min(TintPositive, TintBase));
+    const float3 Hi = max(TintNegative, max(TintPositive, TintBase));
+
+    return float2(min(Lo.x, min(Lo.y, Lo.z)), max(Hi.x, max(Hi.y, Hi.z)));
+}
+
 /** Written where a threshold is never reached, and where the ray misses the
  *  shell. Far past any real chord, so reconstruction reads zero rather than
  *  needing a validity test. */

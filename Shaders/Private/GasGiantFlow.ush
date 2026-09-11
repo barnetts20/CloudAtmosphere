@@ -554,9 +554,9 @@ float GG_DeckFloor(float Top, GGFieldParams F)
 
 /** The deck's extinction coefficient per atmosphere thickness, solved so a ray
  *  down an unrelieved column accumulates DeckOpticalDepth at core density: the
- *  gradient integrates to half its span, plus the saturated region below the
- *  floor. Multiply by a tint for colour and divide by Thickness for world
- *  units.
+ *  gradient integrates to its mean density over its span, plus the saturated
+ *  region below the floor. Multiply by a band's extinction for colour and
+ *  divide by Thickness for world units.
  *
  *  SOLVED RATHER THAN AUTHORED, so retuning the shell or the anchors leaves the
  *  deck's opacity where it was put. Shared by the march and the bake, which is
@@ -566,7 +566,31 @@ float GG_DeckBeta(GGFieldParams F, float DeckOpticalDepth)
 {
     const float Floor = GG_DeckFloor(F.DeckBase, F);
 
-    return DeckOpticalDepth / max(0.5f * (F.DeckBase + Floor), 1e-4f);
+	// The gradient's mean density, which DensityCurve moves: the integral of
+	// smoothstep(T^c) over [0,1] is 3/(2c+1) - 2/(3c+1), a half at c = 1. Using
+	// it rather than a fixed half keeps DeckOpticalDepth exact at any curve, so
+	// the curve redistributes mass inside the gradient without changing how
+	// much light the deck removes.
+    const float C = max(F.DensityCurve, 1e-4f);
+    const float MeanDensity = 3.0f / (2.0f * C + 1.0f) - 2.0f / (3.0f * C + 1.0f);
+
+    return DeckOpticalDepth / max(Floor + MeanDensity * (F.DeckBase - Floor), 1e-4f);
+}
+
+
+/** The band at a planet-local position from one bilinear tap of the top flow
+ *  layer, without the shapes' BandShift. For what varies over a band's width
+ *  rather than a feature's: the colour of extinction a light ray crossed. */
+float GG_BandCoarse(Texture2DArray FlowField, SamplerState FlowSampler, float3 LocalPos, GGFieldParams F)
+{
+    const float3 N = normalize(GG_RotateZ(normalize(LocalPos), F.SpinAngle));
+
+    const float U = frac(atan2(N.y, N.x) * (0.5f / PI));
+    const float V = 0.5f + 0.5f * N.z;
+
+    const float Vorticity = FlowField.SampleLevel(FlowSampler, float3(U, V, GG_FLOW_LAYER), 0.0f).w;
+
+    return (Vorticity + F.BandBias) * F.BandSharpness;
 }
 
 

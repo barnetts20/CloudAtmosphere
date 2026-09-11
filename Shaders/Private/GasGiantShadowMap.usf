@@ -138,8 +138,9 @@ SamplerState StructureVolumeSampler;
 RWTexture2DArray<float4> ShadowMapUAV;
 
 /** Each band's extinction: rgb tint, amount in a. The map stores one scalar
- *  depth, so the bake reads the amounts; the albedo belongs to the scattering
- *  site and stays per-pixel. */
+ *  depth, so the bake weights density by the amounts and folds in the largest
+ *  tint channel; the colour is applied from the receiver's band where the
+ *  depth is read. The albedo belongs to the scattering site. */
 float4 ExtinctionNegative;
 float4 ExtinctionPositive;
 float4 ExtinctionBase;
@@ -486,10 +487,12 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	// sees it; F.Thickness IS that thickness. Skipping the divide leaves every
 	// reconstructed optical depth too large by a whole atmosphere thickness in
 	// WORLD UNITS: the deck reads as opaque everywhere.
-    const float3 AbsBeta = ExtinctionBase.rgb
-		* (GG_DeckBeta(F, DeckOpticalDepth) * LightExtinctionFraction / F.Thickness);
-
-    const float AbsMax = max(AbsBeta.x, max(AbsBeta.y, AbsBeta.z));
+	//
+	// THE FOLD CONSTANT: the light coefficient times the largest tint channel of
+	// any band, so the stored thresholds mean transmittance on the fastest
+	// channel anywhere. The march divides the same constant back out.
+    const float AbsMax = GG_DeckBeta(F, DeckOpticalDepth) * LightExtinctionFraction / F.Thickness
+		* GG_ExtinctionTintRange(ExtinctionNegative.rgb, ExtinctionPositive.rgb, ExtinctionBase.rgb).y;
 
 	// The radial advance a step is allowed. The gradient is the only part of the
 	// profile that varies, so it is what the budget is spent on.

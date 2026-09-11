@@ -23,11 +23,21 @@
  *  divided by the size of the region actually being written, or the ray fans
  *  out over the whole screen while only a quarter of it is filled.
  *
+ *  FALLS BACK TO THE VIEW SIZE when rtSize is under two pixels, which is what
+ *  it reads where the pass producing it has not run -- the material editor's
+ *  preview. The result is then a full-resolution ray, correct for a view that
+ *  was never downsampled.
+ *
  *  The 0.5 depth in clip space is arbitrary: any depth on the ray works, since
  *  the result is normalized. */
+float2 Atmo_MarchSize(float2 rtSize)
+{
+    return all(rtSize >= 2.0f) ? rtSize : View.ViewSizeAndInvSize.xy;
+}
+
 float3 Atmo_RayDirection(float2 svPosition, float2 rtSize)
 {
-    float2 screenUV = svPosition / rtSize;
+    float2 screenUV = svPosition / Atmo_MarchSize(rtSize);
 
     float2 ClipXY = screenUV * float2(2, -2) + float2(-1, 1);
 
