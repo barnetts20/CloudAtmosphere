@@ -1,7 +1,5 @@
 #pragma once
 
-#include "/Plugin/CloudAtmosphere/Private/GasGiantConstants.ush"
-
 // ---------------------------------------------------------------------------
 // Grid, topology and operators for the gas giant flow sim.
 //

@@ -1,7 +1,5 @@
 #pragma once
 
-#include "/Plugin/CloudAtmosphere/Private/GasGiantConstants.ush"
-
 // ---------------------------------------------------------------------------
 // Gas giant cloud deck: the field the march samples.
 //

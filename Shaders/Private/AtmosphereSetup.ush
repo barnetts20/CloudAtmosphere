@@ -127,7 +127,6 @@ CompositeParams Atmo_BuildParams(
     params.planetParams.atmoRadius = atmoRadius;
     params.planetParams.cloudOuterRadius = cloudOuterRadius;
     params.planetParams.cloudInnerRadius = cloudInnerRadius;
-    params.planetParams.planetRadiusSq = planetRadius * planetRadius;
     params.planetParams.cloudOuterRadiusSq = cloudOuterRadius * cloudOuterRadius;
     params.planetParams.cloudInnerRadiusSq = cloudInnerRadius * cloudInnerRadius;
 

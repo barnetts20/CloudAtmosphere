@@ -1,7 +1,5 @@
 #pragma once
 
-#include "/Plugin/CloudAtmosphere/Private/GasGiantConstants.ush"
-
 // ---------------------------------------------------------------------------
 // The zonal jet profile, and everything derived from it.
 //

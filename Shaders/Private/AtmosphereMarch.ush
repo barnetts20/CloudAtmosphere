@@ -525,10 +525,10 @@ float4 Atmo_MainMarch(
 
 	// Phase is constant along the ray: it depends only on the angle between the
 	// view and the light, and both are fixed per pixel. Hoisted out of the loop.
-    float phaseDual = Atmo_PhaseDualLobe(input.scatteringParams.cosTheta,
+    float phaseDual = max(Atmo_PhaseDualLobe(input.scatteringParams.cosTheta,
 		input.cloudParams.cloudPhaseParams.r,
 		input.cloudParams.cloudPhaseParams.g,
-		input.cloudParams.cloudPhaseParams.b);
+		input.cloudParams.cloudPhaseParams.b), 0.05);
 
     float phaseIsotropic = 1.0 / (4.0 * 3.14159265);
 

@@ -1,49 +1,21 @@
 #pragma once
 
-// ---------------------------------------------------------------------------
-// Parameter structs and shared helpers for the atmosphere raymarcher.
+// Parameter structs and shared math for the atmosphere march. Compiled into
+// material Custom nodes and into AtmosphereTransmittance.usf.
 //
-// MIGRATED VERBATIM. Every expression in this file and its siblings is
-// character-for-character what the Custom node contained, reorganised into
-// files and nothing more. That is deliberate: the migration is verifiable only
-// if the render is pixel-identical before and after, and any improvement folded
-// in here would make a difference impossible to attribute.
-//
-// The known faults are recorded where they live, as comments, and left alone.
-// See the notes on step sizing in AtmosphereMarch.ush.
-//
-// WHY STRUCTS RATHER THAN LONG PARAMETER LISTS.
-//
-// The march is recursive in the sense that the main ray spawns a light ray at
-// every step, and both need the same planet, scattering and cloud state. Passed
-// as loose parameters that is fifty-odd arguments threaded through two call
-// levels, and every one is a chance for two call sites to disagree.
-//
-// Bundled, adding a parameter touches the struct and the one place that fills
-// it. The gas giant density function is on its way to the same treatment for
-// the same reason.
-// ---------------------------------------------------------------------------
+// Space is camera-relative: the view ray starts at the origin and planetPos is
+// the planet centre relative to the camera. Lengths are world units.
 
-/** Fraction of a step a sample is jittered across.
- *
- *  1 IS THE ONLY CORRECT VALUE, WHICH IS WHY IT IS NOT A HANDLE. The sample sits
- *  at the step centre plus (seed - 0.5) * step * this, so at 1 it is uniform
- *  across its own step and the march is a stratified estimator: one sample per
- *  stratum, no gaps and no overlap.
- *
- *  Below 1 the samples cluster at step centres and the strata have gaps between
- *  them, which puts the step lattice back into the image as banding. Above 1 a
- *  sample crosses into its neighbour's stratum, so some of the ray is covered
- *  twice and some not at all.
- *
- *  0 IS A DIAGNOSTIC, NOT A SETTING. It converts sampling noise back into the
- *  banding it was hiding, which is the fastest way to tell whether an artefact
- *  is an integration error or something else. A step bound is what fixes the
- *  banding it reveals -- turning jitter down only hides the symptom again. */
+/** Jitter span as a fraction of a step. At 1 each sample is uniform over its own
+ *  step, a stratified estimator with no gaps or overlap; below 1 the step lattice
+ *  returns as banding, above 1 strata overlap. 0 is a diagnostic that exposes
+ *  step banding. */
 #ifndef ATMO_STEP_JITTER
 #define ATMO_STEP_JITTER 1.0
 #endif
 
+/** Cloud state. The gas giant path reads only cloudScatBeta, cloudAbsBeta and
+ *  cloudAmb; the rest serve the terrestrial density. */
 struct CloudParams
 {
     float cloudScale;
@@ -57,24 +29,18 @@ struct CloudParams
     float detailNoiseScale;
     float detailNoiseErode;
     float4 animationWeights;
-    float4 cloudPhaseParams;
-    float3 cloudScatBeta;
-    float3 cloudAbsBeta;
-	/** rgb ambient colour, a the FLOOR its terminator falloff lerps from.
-	 *
-	 *  A ZERO FLOOR LEAVES THE TERM ALMOST NO RANGE. Ambient stands in for light
-	 *  that bounced several times, and behind an opaque planet there is none --
-	 *  but gated to exactly zero it is also swamped by direct light everywhere
-	 *  it is not zero, so the whole control lives inside the terminator's width.
-	 *  The floor is what buys it a night side. */
-    float4 cloudAmb;
+    float4 cloudPhaseParams; // (gForward, gBack, forwardWeight, multi-scatter weight)
+    float3 cloudScatBeta; // per world unit
+    float3 cloudAbsBeta; // per world unit
+    float4 cloudAmb; // rgb colour, a night-side floor for Atmo_AmbientFactor
 };
 
+/** Planet and shell radii. The cloud radii bound the band the march spends
+ *  cloudSteps on. */
 struct PlanetParams
 {
-    float3 planetPos;
+    float3 planetPos; // camera-relative centre
     float planetRadius;
-    float planetRadiusSq;
     float atmoRadius;
     float cloudOuterRadius;
     float cloudInnerRadius;
@@ -84,40 +50,42 @@ struct PlanetParams
 
 struct ScatterParams
 {
-    float cosTheta;
-    float3 rayBeta;
+    float cosTheta; // dot(view, light)
+    float3 rayBeta; // per world unit, at zero altitude
     float3 mieBeta;
     float3 absBeta;
-    float4 atmoAmbient;
-    float rayScaleH;
+    float4 atmoAmbient; // rgb colour, a night-side floor
+    float rayScaleH; // world units
     float mieScaleH;
     float absHeight;
     float absFalloff;
-    float phaseR;
+    float phaseR; // phases at cosTheta, constant per pixel
     float phaseM;
 };
 
 struct MainRayParams
 {
-    float2 svxy;
-    float3 originalCameraPos;
-    float3 cameraPos;
+    float2 svxy; // pixel position, jitter seed
+    float3 originalCameraPos; // absolute camera position, for world-anchored noise
+    float3 cameraPos; // ray origin, always zero
     float3 cameraDir;
     float3 lightCol;
-    float sceneDepth;
+    float sceneDepth; // ray length limit
     int atmoSteps;
     int cloudSteps;
-    float stepScaleFactor;
+    float stepScaleFactor; // growthRate for Atmo_AdaptiveStepSize
 };
 
+/** Light-ray state, filled per view step by the march. */
 struct LightRayParams
 {
     float3 samplePos;
     float3 lightDir;
-    float stepSizeMult;
-    int parentStepIndex;
+    float stepSizeMult; // parent step's growth, carried into the terrestrial light march
+    int parentStepIndex; // salts the light ray's jitter
 };
 
+/** Everything one march reads, built once per pixel. */
 struct CompositeParams
 {
     PlanetParams planetParams;
@@ -127,147 +95,101 @@ struct CompositeParams
     LightRayParams lightRayParams;
 };
 
-// ---------------------------------------------------------------------------
-// Free functions
-//
-// These were members of a SharedFunctions struct that carried the cloud texture
-// and its sampler. As free functions taking the texture explicitly they can be
-// called from anywhere without threading an object through, which matters once
-// the density function becomes swappable between the terrestrial and gas giant
-// models.
-// ---------------------------------------------------------------------------
-
-/** Ray against a sphere. Returns (near, far), or (-1,-1) on a miss.
+/** Ray against a sphere: (near, far) distances along dir, or (-1, -1) on a miss.
+ *  dir must be normalized.
  *
- *  Direction must be normalized: the quadratic drops its leading coefficient on
- *  that assumption, so an unnormalized direction silently scales both roots. */
+ *  Pitfall: the discriminant is a small difference of large squares, and no one
+ *  form holds it in fp32 everywhere. Within 1.5 radii it is b^2 - (L - r)(L + r),
+ *  which keeps the altitude L - r exact near the surface; beyond, r^2 - |perp|^2
+ *  from the ray's perpendicular offset, whose error grows with L * r rather than
+ *  L^2. Each form alone is one to three orders of magnitude worse on the other
+ *  side, and the worst case is the grazing ray at the limb. */
 float2 Atmo_RaySphere(float3 origin, float3 dir, float3 center, float radius)
 {
-    float3 oc = origin - center;
-    float b = dot(oc, dir);
-    float c = dot(oc, oc) - radius * radius;
-    float disc = b * b - c;
+    const float3 oc = origin - center;
+    const float b = dot(oc, dir);
+    const float dist2 = dot(oc, oc);
+    const float dist = sqrt(dist2);
+    const float3 perp = oc - b * dir;
+    const float r2 = radius * radius;
+
+    const float disc = (dist2 > 2.25 * r2)
+        ? r2 - dot(perp, perp)
+        : b * b - (dist - radius) * (dist + radius);
 
     if (disc < 0.0)
     {
         return float2(-1.0, -1.0);
     }
 
-    float sq = sqrt(disc);
+    const float sq = sqrt(disc);
 
     return float2(-b - sq, -b + sq);
 }
 
-/** Rayleigh phase. Symmetric forward and back, which is why the sky is bright
- *  in both directions and Mie is not. */
+/** Rayleigh phase, per steradian. */
 float Atmo_PhaseRayleigh(float cosTheta)
 {
-    return 3.0 / (16.0 * 3.14159265) * (1.0 + cosTheta * cosTheta);
+    return 3.0 / (16.0 * PI) * (1.0 + cosTheta * cosTheta);
 }
 
-/** Henyey-Greenstein. Used for Mie directly, and twice inside the dual lobe. */
+/** Henyey-Greenstein phase, per steradian. g > 0 scatters forward. */
 float Atmo_PhaseHG(float cosTheta, float g)
 {
-    float g2 = g * g;
+    const float g2 = g * g;
 
-    return (1.0 - g2) / (4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5));
+    return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5));
 }
 
-/** Two HG lobes, forward and back, mixed.
- *
- *  Cloud droplets scatter strongly forward and weakly back, and a single lobe
- *  cannot do both -- which is what makes a cloud lit from behind glow at its
- *  edge while staying bright when lit from in front. The floor at 0.05 stands
- *  in for the multiple scattering that keeps a real cloud's shadow side from
- *  going black. */
+/** Forward and back HG lobes mixed by forwardWeight. Normalized, with no floor:
+ *  light reaching the shadow side is the caller's multiple-scattering term. */
 float Atmo_PhaseDualLobe(float cosTheta, float gForward, float gBack, float forwardWeight)
 {
-    float forward = Atmo_PhaseHG(cosTheta, gForward);
-    float backward = Atmo_PhaseHG(cosTheta, -gBack);
-
-    return max(lerp(backward, forward, forwardWeight), .05);
+    return lerp(Atmo_PhaseHG(cosTheta, -gBack), Atmo_PhaseHG(cosTheta, gForward), forwardWeight);
 }
 
-/** Weight on an ambient term at a given sun elevation.
- *
- *  ONE DERIVATION FOR BOTH PATHS AND BOTH TERMS. Air ambient and cloud ambient
- *  answer the same question -- how much bounced light reaches here -- and a
- *  second copy of this curve would let them disagree about where night starts.
- *
- *  Terminator is the half-width in cosine of sun elevation: 0.15 is about nine
- *  degrees either side of the geometric terminator. Floor is what survives on
- *  the far side. */
+/** Ambient weight at a sun elevation (cosine): ambientFloor on the night side,
+ *  1 on the day side, smoothstepped across +-terminator. Shared by air and cloud
+ *  ambient on both paths, so they agree on where night starts. */
 float Atmo_AmbientFactor(float sunElevation, float terminator, float ambientFloor)
 {
-    return lerp(saturate(ambientFloor), 1.0,
-		smoothstep(-terminator, terminator, sunElevation));
+    return lerp(saturate(ambientFloor), 1.0, smoothstep(-terminator, terminator, sunElevation));
 }
 
-/** Rayleigh, Mie and absorber density at an altitude, as (ray, mie, abs).
- *
- *  The first two are exponential with their own scale heights. The absorber is
- *  a Lorentzian centred on absHeight and multiplied by the Rayleigh profile --
- *  ozone, which sits in a layer rather than falling off from the ground. */
+/** Air densities at an altitude, as (rayleigh, mie, absorber). Rayleigh and Mie
+ *  fall off exponentially; the absorber is a Lorentzian layer centred on
+ *  absHeight, scaled by the Rayleigh profile. AtmoT_Profile keeps the scale
+ *  heights positive. */
 float3 Atmo_Density(float height, float rayScaleH, float mieScaleH, float absHeight, float absFalloff)
 {
-    float rayDensity = exp(-height / rayScaleH);
-    float mieDensity = exp(-height / mieScaleH);
+    const float rayDensity = exp(-height / rayScaleH);
+    const float mieDensity = exp(-height / mieScaleH);
 
-    float safeFalloff = max(absFalloff, 0.0001);
-    float denom = (absHeight - height) / safeFalloff;
-    float absDensity = (1.0 / (denom * denom + 1.0)) * rayDensity;
+    const float denom = (absHeight - height) / max(absFalloff, 0.0001);
+    const float absDensity = (1.0 / (denom * denom + 1.0)) * rayDensity;
 
     return float3(rayDensity, mieDensity, absDensity);
 }
 
-/** Step size growing with progress along the ray.
+/** Step size at pos: baseStep, growing linearly to baseStep * (1 + growthRate)
+ *  over referenceLength of travel from rayStart, then held.
  *
- *  THE DENOMINATOR IS A FIXED REFERENCE, NOT THE RAY'S OWN SPAN.
- *
- *  It used to be rayLength, the length of this particular ray's plan. Two rays
- *  crossing the same world point at different angles therefore reached
- *  different points on the growth ramp, so the step size at a given place
- *  depended on the geometry of the ray that got there -- and the surface where
- *  that quantity changes is a curve on screen.
- *
- *  The numerator stays per-ray, and should: distance travelled INTO the
- *  atmosphere is a real, physically meaningful quantity, and spending budget
- *  near the entry is what growth is for. It was the denominator that made it
- *  a locus.
- *
- *  referenceLength is the atmosphere's own thickness, identical for every ray,
- *  so growthRate now means "how much the step has grown after crossing one
- *  atmosphere depth" rather than "after crossing however much this ray had". */
+ *  Pitfall: referenceLength must be the same for every ray (the atmosphere
+ *  thickness). A per-ray length makes the step at a point depend on the ray that
+ *  reached it, and the transition prints as a curve on screen. */
 float Atmo_AdaptiveStepSize(float baseStep, float pos, float rayStart, float referenceLength, float growthRate)
 {
-    float t = saturate((pos - rayStart) / referenceLength);
+    const float t = saturate((pos - rayStart) / referenceLength);
 
     return baseStep * (1.0 + t * growthRate);
 }
 
-/** Per-pixel seed for the main ray, from the integer pixel coordinate. */
-/** White-noise jitter value in [0,1) for a pixel and a step, from an integer
- *  hash.
- *
- *  WHITE, DELIBERATELY, AND SEPARATE FROM Atmo_RaySeed. A light march runs on a
- *  handful of steps, so its jitter is nearly the whole of its variance -- and a
- *  low-sample estimator driven by a REGULAR sequence prints that sequence into
- *  the image as a grid rather than as grain. The view ray takes sixty-four
- *  steps and averages its own dither, so a structured low-discrepancy sequence
- *  suits it; this one does not.
- *
- *  EACH AXIS IS MIXED BEFORE THEY MEET. Hashing a LINEAR combination of x and y
- *  gives every pixel on a lattice line the same seed, and one avalanche round
- *  does not break that up -- the residual is spatially correlated, which is the
- *  one kind of noise a blur cannot remove. Two multiplies and the Murmur3
- *  finalizer decorrelate neighbours properly.
- *
- *  The salt is what separates one light ray from the next, and the light ray
- *  from the view ray that spawned it: sharing a value there makes the two
- *  jitters move together, which is structure again by another route. */
+/** White-noise value in [0,1) from a pixel and a salt, for light rays: at a
+ *  handful of steps a structured sequence prints as a grid. Callers salt by step
+ *  index so light rays decorrelate from each other and from the view ray. */
 float Atmo_HashJitter(float2 svxy, uint salt)
 {
-    uint2 p = uint2(svxy);
+    const uint2 p = uint2(svxy);
 
     uint h = p.x * 0x9E3779B1u;
     h ^= p.y * 0x85EBCA77u;
@@ -279,40 +201,19 @@ float Atmo_HashJitter(float2 svxy, uint salt)
     h *= 0xC2B2AE35u;
     h ^= h >> 16;
 
-    return float(h) * (1.0 / 4294967296.0);
+    return float(h >> 8) * (1.0 / 16777216.0);
 }
 
-float Atmo_RaySeed(float2 svxy)
-{
-	// INTERLEAVED GRADIENT NOISE. Its whole design goal is dither that a small
-	// blur resolves cleanly, which is exactly the job here: the composite pass
-	// exists to hide this noise, and a blur removes uncorrelated noise well and
-	// correlated noise badly.
-	//
-	// PITFALL: an integer hash over a LINEAR combination of x and y leaves
-	// every pixel on a lattice line sharing a seed, and one avalanche round
-	// does not break that up. What survives reads as a woven or hatched grain
-	// that no blur radius removes -- widening it only produces a blurrier
-	// weave. This form has no such lattice.
-    return frac(52.9829189 * frac(0.06711056 * svxy.x + 0.00583715 * svxy.y));
-}
-
-/** Jitter for one step of a view ray, from the pixel and the step index.
+/** View-ray jitter in [0,1): interleaved gradient noise, which a small blur
+ *  resolves cleanly, with its input advanced per step.
  *
- *  A GOLDEN-RATIO ADVANCE OFF ONE SEED CORRELATES EVERY STEP ACROSS THE SCREEN.
- *  Each pixel walks a well-distributed sequence, which is why banding goes away
- *  -- but at a given step index the offsets differ between pixels by a constant,
- *  so all sixty-four steps carry the SAME spatial pattern, merely shifted. The
- *  per-pixel errors then add rather than cancel, and since iso-step-index
- *  contours are rings about the view centre, the residual is a set of rings that
- *  the deck slides through as the camera moves.
- *
- *  Offsetting the noise's INPUT by the step index keeps the spatial
- *  distribution well behaved at every step while decorrelating one step from the
- *  next, so the sixty-four errors average instead of accumulating. The constant
- *  is the one interleaved gradient noise is normally advanced by per frame; the
- *  step index serves the same purpose here. */
+ *  Pitfall: advancing the output instead (one seed plus a golden-ratio step)
+ *  gives every step the same spatial pattern shifted, and the errors sum into
+ *  rings about the view centre. Pitfall: hashing a linear combination of x and y
+ *  leaves lattice-line correlation that no blur radius removes. */
 float Atmo_StepJitter(float2 svxy, int stepIndex)
 {
-    return Atmo_RaySeed(svxy + 5.588238 * float(stepIndex));
+    const float2 p = svxy + 5.588238 * float(stepIndex);
+
+    return frac(52.9829189 * frac(0.06711056 * p.x + 0.00583715 * p.y));
 }

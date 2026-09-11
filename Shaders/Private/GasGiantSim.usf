@@ -49,6 +49,7 @@
 // ---------------------------------------------------------------------------
 
 #include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/Common.ush"
 #include "/Plugin/CloudAtmosphere/Private/GasGiantJets.ush"
 #include "/Plugin/CloudAtmosphere/Private/GasGiantSimCommon.ush"
 
