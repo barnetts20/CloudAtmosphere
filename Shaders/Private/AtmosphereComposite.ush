@@ -1,58 +1,45 @@
 #pragma once
 
-// ---------------------------------------------------------------------------
-// Composite: the third pass.
+// Composite: the third pass. Upscales and blurs the reduced-resolution march
+// back over the scene, and it is doing two jobs rather than one.
 //
-// Upscales and blurs the reduced-resolution march back over the scene. It is
-// doing two jobs, and only one of them is what it looks like.
+// The obvious job is upsampling. The other is hiding the march's sampling noise,
+// which is worth being explicit about: the blur radius is paying for
+// undersampling in the march rather than for resolution. Cost is quadratic in
+// the radius and each tap costs two fetches, one colour and one depth, so
+// anything that quiets the march buys more here than anywhere else.
 //
-// The obvious one is upsampling. The other is hiding the march's sampling
-// noise -- and that is worth being explicit about, because it means the blur
-// radius is currently paying for undersampling in the march rather than for
-// resolution. The cost is quadratic in the radius, so anything that quiets the
-// march buys more here than it does anywhere else.
-//
-// A BLUR CANNOT REMOVE CORRELATED NOISE. If the march's dither carries lattice
-// structure, widening this radius produces a blurrier version of the same
-// pattern. Atmo_RaySeed is where that gets fixed, not here.
-// ---------------------------------------------------------------------------
+// PITFALL: a blur cannot remove correlated noise. If the march's dither carries
+// lattice structure, widening this radius produces a blurrier version of the
+// same pattern. Atmo_StepJitter is where that is fixed, not here.
 
-/** Depth-aware blur of the atmosphere buffer, composited over the scene.
+/** Depth-aware blur of the atmosphere buffer, composited over the scene. Radius
+ *  is in SOURCE pixels, so at half-per-axis a radius of 6 reaches twelve
+ *  full-resolution pixels. BlurWeight lerps back toward the untouched centre,
+ *  making the blur an authored amount rather than all or nothing.
  *
- *  Radius is in SOURCE pixels, so at half-per-axis a radius of 6 reaches twelve
- *  full-resolution pixels. The loop is bounded by a (2r+1) square but only taps
- *  inside the inscribed disc are taken -- about 79% of them.
+ *  CIRCULAR, NOT SQUARE: the loop is bounded by a (2r+1) square and only the 79%
+ *  of taps inside the inscribed disc are taken. A square support reaches
+ *  r*sqrt(2) into its corners, so unless the falloff has already killed those
+ *  weights the kernel is longer on the diagonals than on the axes, and that
+ *  anisotropy prints as a hatch on any grain the blur fails to remove.
  *
- *  CIRCULAR, NOT SQUARE. A square support reaches r*sqrt(2) into its corners,
- *  so unless the falloff has already killed those weights the kernel is longer
- *  on the diagonals than on the axes. That anisotropy prints as a hatch on any
- *  grain the blur fails to remove, and the corner taps were the least useful
- *  ones being paid for.
+ *  Falloff is a DIVISOR of the radius, sigma = radius / falloff, which fixes the
+ *  kernel's SHAPE and leaves only its size authored. An independent sigma can
+ *  leave the edge weights near 1, which is a box blur, and a box response has
+ *  side lobes on the axes -- hatching for the same reason the square does.
  *
- *  Falloff sets the Gaussian's width as a DIVISOR of the radius: sigma =
- *  radius / falloff. Tying the two fixes the SHAPE of the kernel and leaves
- *  only its size authored. A sigma set independently can leave the edge weights
- *  near 1, which is a box blur, and a box response has side lobes on the axes
- *  -- hatching for the same reason the square support does.
- *
- *  DepthTapScale is full-resolution pixels per source pixel. The colour tap
+ *  DepthTapScale is full-resolution pixels per source pixel: the colour tap
  *  moves in source texels while the depth tap moves in screen UV, so without it
  *  a tap's depth weight is read from the right direction at the wrong distance
  *  and the silhouette protection is quietly weaker than it reads.
  *
- *  BlurWeight lerps back toward the untouched centre sample, which is what
- *  makes the blur an authored amount rather than all or nothing.
- *
- *  PARAMETERS AND THE TEXTURE ID HAVE TO BE PASSED IN.
- *
- *  SceneTextureFetch is a MACRO, not a function -- it expands to
- *  SceneTextureFetchFunc(Parameters, id, offset), and both Parameters and the
- *  Tex struct are locals of the generated custom-expression function. Neither
- *  exists in an included file, so the macro cannot be used here at all.
- *
- *  Calling the underlying function directly does work, because that IS declared
- *  by the time material includes are emitted. It just needs the two locals
- *  handed to it explicitly, which is what these arguments are for. */
+ *  PITFALL: the parameters and the texture id have to be passed in.
+ *  SceneTextureFetch is a MACRO expanding to SceneTextureFetchFunc(Parameters,
+ *  id, offset), and both Parameters and the Tex struct are locals of the
+ *  generated custom-expression function, so it cannot be used from an included
+ *  file at all. The underlying function is declared by the time material
+ *  includes are emitted and does work, given those locals explicitly. */
 float4 Atmo_Composite(
 	FMaterialPixelParameters Parameters,
 	int SceneTextureId,
@@ -66,7 +53,11 @@ float4 Atmo_Composite(
 	float depthTapScale,
 	float blurWeight)
 {
-    float4 sum = center;
+	// COLOUR ONLY. Blurring transmittance would soften the boundary between
+	// atmosphere in front of this pixel and clear air, which is the edge the
+	// depth weight below exists to preserve: colour may bleed across a
+	// silhouette, occlusion may not.
+    float3 sum = center.rgb;
     float totalWeight = 1.0;
 
     const float radiusF = float(max(radius, 1));
@@ -93,14 +84,13 @@ float4 Atmo_Composite(
                 continue;
 
             float2 offset = float2(x, y);
-            float4 s = SceneTextureFetchFunc(Parameters, SceneTextureId, offset);
+            float3 s = SceneTextureFetchFunc(Parameters, SceneTextureId, offset).rgb;
 
             float spatialW = exp(-dist2 * invW);
 
-			// DEPTH WEIGHT, and it is what stops the blur bleeding atmosphere
-			// across a silhouette. Normalized by the centre depth so the
-			// tolerance is relative -- an absolute threshold would be far too
-			// tight at planetary distance and far too loose up close.
+			// Normalized by the centre depth so the tolerance is relative: an
+			// absolute threshold would be far too tight at planetary distance
+			// and far too loose up close.
             float2 sampleUV = screenUV + offset * depthTexel;
             float sampleDepth = CalcSceneDepth(sampleUV);
             float depthDiff = abs(centerDepth - sampleDepth) / max(centerDepth, 1.0);
@@ -113,16 +103,7 @@ float4 Atmo_Composite(
         }
     }
 
-    float4 atmo = lerp(center, sum / totalWeight, saturate(blurWeight));
+    const float3 atmo = lerp(center.rgb, sum / totalWeight, saturate(blurWeight));
 
-	// THE ALPHA IS TAKEN UNBLURRED, AND THAT IS DELIBERATE.
-	//
-	// Blurring the transmittance would soften the boundary between "atmosphere
-	// in front of this pixel" and "clear", which is exactly the edge the depth
-	// weight above is working to preserve. Colour can bleed; occlusion cannot.
-    float centerAlpha = center.a;
-
-    float3 finalColor = atmo.rgb + sceneColor * centerAlpha;
-
-    return float4(finalColor, 1.0);
+    return float4(atmo + sceneColor * center.a, 1.0);
 }
