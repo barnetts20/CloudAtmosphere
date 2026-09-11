@@ -18,7 +18,7 @@
 // for light to interact with. It passes through to the march untouched, to be
 // spent on extinction and scattering colour.
 //
-// UNITS. Three absolutes, all atmosphere fractions: DeckBase, DeckBackstop and
+// UNITS. Three absolutes, all atmosphere fractions: DeckTop, DeckBackstop and
 // GradientThickness. Every relief amount, both carves, ErosionDepth and
 // DeckSlope are fractions of GradientThickness. Thickness is the only
 // world-space length. Space is planet-local, spin axis on
@@ -90,6 +90,13 @@
 /** Fraction of the cone-trace advance actually taken. Under 1 because the deck
  *  slope bound is authored, and an under-declared slope is the one way the
  *  entry search steps over the surface. */
+/** How sharply the hemisphere factor switches sign at the equator: the argument
+ *  of tanh against sin(latitude). 20 reaches three quarters of full strength
+ *  three degrees from the equator. */
+#ifndef GG_HEMISPHERE_SHARPNESS
+#define GG_HEMISPHERE_SHARPNESS 20.0f
+#endif
+
 #ifndef GG_CONE_RELAXATION
 #define GG_CONE_RELAXATION 0.9f
 #endif
@@ -109,6 +116,14 @@ struct GGFieldParams
 
     float PlanetRadius;
     float HeightScale;
+
+	/** Where an unrelieved column's top sits, an atmosphere fraction. Relief
+	 *  shapes the deck around it and never moves it as a whole. */
+    float DeckTop;
+
+	/** Width of the band below the shell top across which density fades to
+	 *  zero, as a fraction of atmosphere thickness. Floored above zero. */
+    float CeilingFalloff;
 
 	/** How far the density ramp reaches below a column's own top, and the unit
 	 *  every relief amount is a fraction of. Floored against division. */
@@ -162,10 +177,6 @@ struct GGFieldParams
 	 *  reads. */
     float Thickness;
 
-	/** The unrelieved altitude every column is built from, solved from DeckTop
-	 *  so CeilingReserve of the upward reach lands on it. */
-    float DeckBase;
-
 	/** The deep flow layer's step length: WarpTime * DeepShearRatio. */
     float DeepShearTime;
 
@@ -207,9 +218,8 @@ GGFieldParams GG_BuildField(
 	float PlanetRadius,
 	float HeightScale,
 	float Time,
-	float SimTimeScale,
 	float DeckTop,
-	float CeilingReserve,
+	float CeilingFalloff,
 	float GradientThickness,
 	float DeckBackstop,
 	float DensityCurve,
@@ -298,30 +308,18 @@ GGFieldParams GG_BuildField(
 
     F.Thickness = max(PlanetRadius * HeightScale, 1e-4f);
 
-	// THE BASE HANGS FROM THE CEILING. Every upward term at its most generous:
-	// Elevation is in [0,1] so the band gives half its relief either side of the
-	// base; pressure is soft-saturated to [-1,1]; the structure carve is signed,
-	// half each way; the detail carve follows GG_DETAIL_RELIEF_CENTRED. The
-	// same terms GG_TopBounds sums, so its OutMax lands CeilingReserve of the
-	// way above DeckTop.
-#if GG_DETAIL_RELIEF_CENTRED
-    const float DetailUp = 0.5f * abs(DetailRelief);
-#else
-    const float DetailUp = max(-DetailRelief, 0.0f);
-#endif
-    const float UpBudget = 0.5f * abs(BandRelief) + abs(PressureRelief)
-		+ 0.5f * abs(StructureRelief) + DetailUp + max(StormTowerRelief, 0.0f);
-
-    F.DeckBase = DeckTop - GradientThickness * UpBudget * CeilingReserve;
+    F.DeckTop = DeckTop;
+    F.CeilingFalloff = max(CeilingFalloff, 1e-3f);
 
     F.DeepShearTime = WarpTime * DeepShearRatio;
     F.SpinAngle = -RotationWeight * Time;
 
-	// CrossfadePeriod is authored in simulated seconds and converted to real
-	// ones here. Both floors keep a zero from becoming a divide: a zero period
-	// is a stopped clock.
-    const float CrossfadePeriodReal = CrossfadePeriod / max(SimTimeScale, 1e-4f);
-    F.CrossfadeTime = Time / max(CrossfadePeriodReal, 1e-3f);
+	// TIME AND PERIOD ARE BOTH SIMULATED SECONDS. Time is the sim's clock, which
+	// already runs TimeScale times faster than real time, so the crossfade keeps
+	// pace with the flow at any sim speed. PITFALL: scaling the period by
+	// TimeScale as well counts the speed twice. Floored so a zero period is a
+	// stopped clock rather than a divide.
+    F.CrossfadeTime = Time / max(CrossfadePeriod, 1e-3f);
 
     F.StructureVertical = StructureScale * StructureAspect * HeightScale;
     F.DetailVertical = DetailScale * DetailAspect * HeightScale;
@@ -414,12 +412,16 @@ float GG_PerlinWorley(float Perlin, float WorleyF1)
  *        GG_FlowVelocity. Two components because a tangent vector has two
  *        degrees of freedom and the third channel is worth more elsewhere.
  *    z   The EDDY streamfunction, psi with its zonal mean removed: zero in
- *        undisturbed flow, positive in anticyclones, negative in cyclones. Raw
- *        psi is dominated by its latitude ramp, so every use would land on
+ *        undisturbed flow, positive for clockwise rotation seen from outside.
+ *        Raw psi is dominated by its latitude ramp, so every use would land on
  *        bands rather than storms.
- *    w   Normalized vorticity, near [-1,1]. THE BAND SIGNAL, arriving already
- *        meandering and wrapped around vortices, since the sim transports
- *        vorticity. */
+ *    w   Normalized vorticity, near [-1,1], positive counterclockwise. THE BAND
+ *        SIGNAL, arriving already meandering and wrapped around vortices,
+ *        since the sim transports vorticity.
+ *
+ *  PITFALL: both are rotation senses, not cyclone or anticyclone -- which one
+ *  a sense is flips at the equator. Read them through GG_PressureFromFlow and
+ *  GG_BandFromFlow, never raw. */
 float4 GG_SampleFlow(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
 {
     const float U = frac(atan2(N.y, N.x) * (0.5f / PI));
@@ -474,6 +476,35 @@ float4 GG_SampleFlow(Texture2DArray FlowField, SamplerState FlowSampler, float3 
 }
 
 
+/** +1 in the northern hemisphere, -1 in the southern, passing smoothly through
+ *  zero at the equator. N is a unit direction in the field's frame.
+ *
+ *  WHY THE FLOW'S SIGNS NEED IT. The sim's channels are rotation senses seen
+ *  from outside the planet, and the Coriolis parameter that turns a rotation
+ *  sense into cyclone or anticyclone changes sign at the equator. Smooth
+ *  rather than sign(): a hard switch would seam along the equator, and within a
+ *  few degrees of it rotation stops organizing the weather anyway. */
+float GG_Hemisphere(float3 N)
+{
+    return tanh(GG_HEMISPHERE_SHARPNESS * N.z);
+}
+
+/** Pressure from a flow sample: the eddy streamfunction times the hemisphere.
+ *  Positive in anticyclones (high pressure) in both hemispheres. */
+float GG_PressureFromFlow(float4 Flow, float3 N)
+{
+    return Flow.z * GG_Hemisphere(N);
+}
+
+/** The band value from a flow sample: vorticity made anticyclonic-positive in
+ *  both hemispheres, biased and sharpened. Positive is a zone, negative a belt,
+ *  zero a boundary -- the same in the north as in the south. */
+float GG_BandFromFlow(float4 Flow, float3 N, GGFieldParams F)
+{
+    return (-Flow.w * GG_Hemisphere(N) + F.BandBias) * F.BandSharpness;
+}
+
+
 /** Arc length of one flow texel at a given radius, in world units.
  *
  *  THE FINEST THING THE DECK TOP CAN VARY OVER. GG_FlowProbe reads nothing but
@@ -510,6 +541,23 @@ float3 GG_FlowVelocity(float3 N, float4 Flow)
     const float3 North = float3(-N.z * N.x / C, -N.z * N.y / C, C);
 
     return East * Flow.x + North * Flow.y;
+}
+
+
+/** The shell's ceiling: 1 below the falloff band, 0 at the atmosphere top,
+ *  smoothstep between. Multiplies every density the deck returns.
+ *
+ *  WHAT LETS RARE FEATURES REACH THE SHELL. A tower that would cross it
+ *  softens into a flattened cap instead of being cut, so the deck never has
+ *  to sit lower to make room for its tallest outlier. Smoothstep, not linear:
+ *  a slope break at the band's lower edge draws a line at one altitude across
+ *  every tower that reaches it.
+ *
+ *  PITFALL: DeckTop belongs below the band. A typical top inside it thins the
+ *  whole deck, and DeckOpticalDepth stops being exact. */
+float GG_CeilingFade(float Height, GGFieldParams F)
+{
+    return 1.0f - smoothstep(1.0f - F.CeilingFalloff, 1.0f, Height);
 }
 
 
@@ -564,7 +612,7 @@ float GG_DeckFloor(float Top, GGFieldParams F)
  *  sees it go opaque. */
 float GG_DeckBeta(GGFieldParams F, float DeckOpticalDepth)
 {
-    const float Floor = GG_DeckFloor(F.DeckBase, F);
+    const float Floor = GG_DeckFloor(F.DeckTop, F);
 
 	// The gradient's mean density, which DensityCurve moves: the integral of
 	// smoothstep(T^c) over [0,1] is 3/(2c+1) - 2/(3c+1), a half at c = 1. Using
@@ -574,7 +622,7 @@ float GG_DeckBeta(GGFieldParams F, float DeckOpticalDepth)
     const float C = max(F.DensityCurve, 1e-4f);
     const float MeanDensity = 3.0f / (2.0f * C + 1.0f) - 2.0f / (3.0f * C + 1.0f);
 
-    return DeckOpticalDepth / max(Floor + MeanDensity * (F.DeckBase - Floor), 1e-4f);
+    return DeckOpticalDepth / max(Floor + MeanDensity * (F.DeckTop - Floor), 1e-4f);
 }
 
 
@@ -588,14 +636,39 @@ float GG_BandCoarse(Texture2DArray FlowField, SamplerState FlowSampler, float3 L
     const float U = frac(atan2(N.y, N.x) * (0.5f / PI));
     const float V = 0.5f + 0.5f * N.z;
 
-    const float Vorticity = FlowField.SampleLevel(FlowSampler, float3(U, V, GG_FLOW_LAYER), 0.0f).w;
-
-    return (Vorticity + F.BandBias) * F.BandSharpness;
+    return GG_BandFromFlow(FlowField.SampleLevel(FlowSampler, float3(U, V, GG_FLOW_LAYER), 0.0f), N, F);
 }
 
 
-/** Cloud top altitude, an atmosphere fraction. Flow first -- band elevation,
+/** Signed band height from the band value: zones (positive, anticyclonic)
+ *  toward +1, belts (negative, cyclonic) toward -1, zero on the boundaries
+ *  between them. BandSharpness, already folded into Band, sets how quickly a
+ *  band reaches its full height.
+ *
+ *  SMOOTH THROUGH ZERO: the magnitude is 1 - exp(-Band^2), which starts
+ *  quadratically, so the sign change is C1. A plain clamp of Band kinks where
+ *  it pins, and the kink is a crease along every band contour. */
+float GG_BandHeight(float Band)
+{
+    return sign(Band) * (1.0f - exp(-Band * Band));
+}
+
+
+/** Which way a storm moves the deck: up over anticyclones (positive pressure),
+ *  down into cyclones. A plain sign is safe here because every use is
+ *  multiplied by the vortex gate, which is zero around zero pressure. */
+float GG_StormSign(float Pressure)
+{
+    return (Pressure >= 0.0f) ? 1.0f : -1.0f;
+}
+
+
+/** Cloud top altitude, an atmosphere fraction. Flow first -- band height,
  *  pressure lift, storm towers -- then the two carves.
+ *
+ *  ZONES SIT HIGH AND BELTS LOW, by the sign of the band: zones are where fresh
+ *  ammonia condenses at altitude, belts where the line of sight reaches deeper
+ *  material. The boundaries meet at DeckTop.
  *
  *  THE PRESSURE SIGN IS NOT ARBITRARY. Anticyclones are high pressure, rising,
  *  condensing fresh ammonia above the haze, so they must sit HIGH. Backwards,
@@ -611,11 +684,16 @@ float GG_BandCoarse(Texture2DArray FlowField, SamplerState FlowSampler, float3 L
  *  ReliefScale collapses band relief under strain and deliberately does NOT
  *  touch the lift or the towers -- those are vertical motion rather than
  *  stretched material, so thinning them flattens storms exactly where the flow
- *  is most active. The tower term is gated on vortex strength: ungated, Worley
+ *  is most active. The storm term is gated on vortex strength: ungated, Worley
  *  F1 is polka dots. StormCells is inverted because F1 is minimal at cell
- *  CENTRES, which is where a tower belongs. */
+ *  CENTRES, which is where a storm belongs.
+ *
+ *  EVERY TERM IS CENTRED ON ZERO, so none of them moves the deck as a body and
+ *  DeckTop stays the typical top however they are tuned or varied. The storm
+ *  term follows the pressure sign: towers over anticyclones, funnels into
+ *  cyclones. */
 float GG_CloudTop(
-	float Elevation,
+	float BandHeight,
 	float CarveDetail,
 	float ReliefStructure,
 	float Pressure,
@@ -625,7 +703,8 @@ float GG_CloudTop(
 {
     const float D = F.GradientThickness;
 
-    float Top = F.DeckBase + D * ReliefScale * F.BandRelief * (Elevation - 0.5f);
+	// Half each way, so zones sit BandRelief above belts.
+    float Top = F.DeckTop + D * ReliefScale * 0.5f * F.BandRelief * BandHeight;
 
     Top -= D * F.DetailRelief * CarveDetail;
     Top += D * F.StructureRelief * ReliefStructure;
@@ -634,7 +713,7 @@ float GG_CloudTop(
 
     const float Vortex = smoothstep(F.VortexThreshold, 1.0f, abs(Pressure));
 
-    Top += D * F.StormTowerRelief * (1.0f - StormCells) * Vortex;
+    Top += D * F.StormTowerRelief * GG_StormSign(Pressure) * (1.0f - StormCells) * Vortex;
 
     return Top;
 }
@@ -659,8 +738,8 @@ struct GGFlowProbe
  *  search that overestimates stops short and takes another iteration; one that
  *  underestimates steps over the surface and misses cloud entirely. So the band
  *  contributes max(BandTerm, 0) -- ReliefScale is in [0,1] and multiplies a term
- *  that changes sign -- and the tower is at full height wherever its gate is
- *  open. NO CARVE MARGIN IN IT: the entry search pays an extra iteration for a
+ *  that changes sign -- and the storm term likewise at full height wherever its
+ *  gate is open. NO CARVE MARGIN IN IT: the entry search pays an extra iteration for a
  *  loose bound, but the shadow ray reads Top as the deck's ACTUAL height and
  *  pays in optical depth, where half a gradient darkens the deck to nothing.
  *  The search's margin lives in GG_CloudTopUpper instead.
@@ -673,30 +752,32 @@ struct GGFlowProbe
  *  GG_Field's unshifted values, or the saturated region tints differently from
  *  the gradient above it. GG_Density takes BandShift to zero at the floor so
  *  the two meet there. */
-GGFlowProbe GG_ProbeFromFlow(float4 Flow, GGFieldParams F)
+GGFlowProbe GG_ProbeFromFlow(float4 Flow, float3 N, GGFieldParams F)
 {
     GGFlowProbe Probe;
 
-    Probe.Band = (Flow.w + F.BandBias) * F.BandSharpness;
-    Probe.Pressure = Flow.z;
-
-    const float Elevation = 1.0f - exp(-Probe.Band * Probe.Band);
+    Probe.Band = GG_BandFromFlow(Flow, N, F);
+    Probe.Pressure = GG_PressureFromFlow(Flow, N);
 
     const float D = F.GradientThickness;
 
-    const float Base = F.DeckBase + D * F.PressureRelief * Probe.Pressure;
+    const float Base = F.DeckTop + D * F.PressureRelief * Probe.Pressure;
 
-    const float BandTerm = F.BandRelief * (Elevation - 0.5f);
+    const float BandTerm = 0.5f * F.BandRelief * GG_BandHeight(Probe.Band);
 
     const float Vortex = smoothstep(F.VortexThreshold, 1.0f, abs(Probe.Pressure));
 
-    Probe.Top = Base + D * (max(BandTerm, 0.0f) + max(F.StormTowerRelief, 0.0f) * Vortex);
+	// At full height wherever the gate is open: the storm cells only scale it
+	// toward zero, so this brackets it from both sides.
+    const float StormTerm = F.StormTowerRelief * GG_StormSign(Probe.Pressure) * Vortex;
+
+    Probe.Top = Base + D * (max(BandTerm, 0.0f) + max(StormTerm, 0.0f));
 
     const float CarveDown = max(F.DetailRelief, 0.0f) * saturate(F.DetailFade)
 		+ 0.5f * abs(F.StructureRelief) * saturate(F.StructureFade);
 
     Probe.TopLower = Base
-		+ D * (min(BandTerm, 0.0f) + min(F.StormTowerRelief, 0.0f) * Vortex - CarveDown);
+		+ D * (min(BandTerm, 0.0f) + min(StormTerm, 0.0f) - CarveDown);
 
     return Probe;
 }
@@ -713,7 +794,7 @@ GGFlowProbe GG_FlowProbe(
 {
     const float3 N = normalize(GG_RotateZ(P, F.SpinAngle));
 
-    return GG_ProbeFromFlow(GG_SampleFlow(FlowField, FlowSampler, N, GG_FLOW_LAYER), F);
+    return GG_ProbeFromFlow(GG_SampleFlow(FlowField, FlowSampler, N, GG_FLOW_LAYER), N, F);
 }
 
 
@@ -729,8 +810,8 @@ float GG_CloudTopUpper(
 {
     const float Top = GG_FlowProbe(FlowField, FlowSampler, P, F).Top;
 
-    return Top + F.GradientThickness * (max(-F.DetailRelief, 0.0f)
-		+ 0.5f * abs(F.StructureRelief));
+    return min(Top + F.GradientThickness * (max(-F.DetailRelief, 0.0f)
+		+ 0.5f * abs(F.StructureRelief)), 1.0f);
 }
 
 
@@ -835,21 +916,18 @@ GGFieldSample GG_Field(
 	float Height,
 	GGFieldParams F)
 {
-    const float Pressure = Flow0.z;
+    const float Pressure = GG_PressureFromFlow(Flow0, N);
 
-    const float Zeta = (Flow0.w + F.BandBias) * F.BandSharpness;
+    const float Zeta = GG_BandFromFlow(Flow0, N, F);
 
     const float BandSigned = Zeta;
 
 
-	// Zero at a band boundary, one at a core, so boundaries sit LOW and
-	// interiors pile UP -- right physically, since boundaries are the jets and
-	// material thins where it is strained. SMOOTH, NOT saturate(abs()): that
-	// form kinks where it pins at one and again at the zero crossing, which is
-	// a C1 break in the cloud top reading as creases along band contours.
-    const float Elevation = 1.0f - exp(-Zeta * Zeta);
-
-    const float Boundary = 1.0f - Elevation;
+	// One on a band boundary, falling to zero in a band's interior: where the
+	// jets and their shear live. Weights the turbulence and the carves' edge
+	// bias. The same curve GG_BandHeight takes its magnitude from, so heights
+	// and weights agree about where the boundaries are.
+    const float Boundary = exp(-Zeta * Zeta);
 
 
 	// Turbulence follows the shear and the shear lives at the boundaries, so
@@ -1109,7 +1187,7 @@ GGFieldSample GG_Field(
     GGFieldSample Out;
 
     Out.Top = GG_CloudTop(
-		Elevation, CarveDetail, ReliefStructure, Pressure, StormGate, ReliefScale, F);
+		GG_BandHeight(Zeta), CarveDetail, ReliefStructure, Pressure, StormGate, ReliefScale, F);
     Out.Pressure = Pressure;
     Out.Band = BandSigned;
     Out.BandShift = BandShift;
@@ -1170,7 +1248,7 @@ float4 GG_Density(
 
     const float4 Flow0 = GG_SampleFlow(FlowField, FlowSampler, N, GG_FLOW_LAYER);
 
-    const GGFlowProbe Probe = GG_ProbeFromFlow(Flow0, F);
+    const GGFlowProbe Probe = GG_ProbeFromFlow(Flow0, N, F);
 
     BRANCH
 
@@ -1187,7 +1265,12 @@ float4 GG_Density(
 	// with solid deck.
     if (Height + HalfStep <= GG_DeckFloor(Probe.TopLower, F))
     {
-        return float4(1.0f, Probe.Band, Probe.Pressure, Probe.Top);
+		// A tall column's saturated region can reach the ceiling band, so the
+		// fade applies here too, integrated across the step as below.
+        const float Ceiling = (GG_CeilingFade(Height - HalfStep, F)
+			+ 4.0f * GG_CeilingFade(Height, F) + GG_CeilingFade(Height + HalfStep, F)) / 6.0f;
+
+        return float4(Ceiling, Probe.Band, Probe.Pressure, Probe.Top);
     }
 
     const GGFieldSample Field = GG_Field(
@@ -1206,9 +1289,14 @@ float4 GG_Density(
 	// locus that is a line on screen. The top varies slowly across one step, so
 	// it is evaluated once at the centre and only the profile is integrated:
 	// three closed-form evaluations, no extra fetches.
-    const float RampNear = GG_DeckDensity(Height - HalfStep, Top, Bottom, F.DensityCurve);
-    const float RampMid = GG_DeckDensity(Height, Top, Bottom, F.DensityCurve);
-    const float RampFar = GG_DeckDensity(Height + HalfStep, Top, Bottom, F.DensityCurve);
+	// The ceiling fade rides the same three points, since its band can be
+	// narrower than a step.
+    const float RampNear = GG_DeckDensity(Height - HalfStep, Top, Bottom, F.DensityCurve)
+		* GG_CeilingFade(Height - HalfStep, F);
+    const float RampMid = GG_DeckDensity(Height, Top, Bottom, F.DensityCurve)
+		* GG_CeilingFade(Height, F);
+    const float RampFar = GG_DeckDensity(Height + HalfStep, Top, Bottom, F.DensityCurve)
+		* GG_CeilingFade(Height + HalfStep, F);
 
     const float Gradient = (RampNear + 4.0f * RampMid + RampFar) / 6.0f;
 
@@ -1254,13 +1342,15 @@ float4 GG_Density(
 
 /** Closed-form bounds on the cloud top, in atmosphere fractions.
  *
- *  EVERY TERM IN GG_CloudTop HAS TO APPEAR HERE, and in the upward budget
- *  GG_BuildField solves DeckBase from. An underestimate is not conservative, it
- *  is a clipping error: the cull radius comes from OutMax, so a term left out
- *  slices the tops off exactly the features it belongs to. Elevation is in
- *  [0,1] so the band contributes half of BandRelief either side of the base;
- *  pressure is soft-saturated sim-side so it contributes the whole of
- *  PressureRelief; ReliefScale never exceeds one, so ignoring it errs safe.
+ *  EVERY TERM IN GG_CloudTop HAS TO APPEAR HERE. An underestimate is not
+ *  conservative, it is a clipping error: the cull radius comes from OutMax, so
+ *  a term left out slices the tops off exactly the features it belongs to.
+ *  OutMax never exceeds 1, where GG_CeilingFade has taken density to zero.
+ *  GG_BandHeight is in [-1,1] and scaled by a half, so the band contributes
+ *  half of BandRelief either side of DeckTop; pressure is soft-saturated
+ *  sim-side so it contributes the whole of PressureRelief; the storm term
+ *  reaches the whole of StormTowerRelief either way, towers up and funnels
+ *  down; ReliefScale never exceeds one, so ignoring it errs safe.
  *
  *  THE CARVES ARE SCALED BY THE FADES, because a bound reserving room for a
  *  layer a faded ray never sees coarsens the march wherever that layer is
@@ -1281,7 +1371,8 @@ void GG_TopBounds(
 {
     const float D = F.GradientThickness;
 
-    const float Span = D * (0.5f * abs(F.BandRelief) + abs(F.PressureRelief));
+    const float Span = D * (0.5f * abs(F.BandRelief) + abs(F.PressureRelief)
+		+ abs(F.StormTowerRelief));
 
 
 	// Structure is signed about the median, so half of its reach lands in each
@@ -1306,8 +1397,10 @@ void GG_TopBounds(
     const float DetailUp = (F.DetailRelief < 0.0f) ? DetailCarve : 0.0f;
 #endif
 
-    OutMin = F.DeckBase - Span - StructureHalf - DetailDown;
+    OutMin = F.DeckTop - Span - StructureHalf - DetailDown;
 
-    OutMax = F.DeckBase + Span + StructureHalf + DetailUp
-		+ D * max(F.StormTowerRelief, 0.0f);
+	// CLAMPED AT THE SHELL: the ceiling fade leaves no density above it. Unclamped,
+	// a tall rare feature would widen the marched band and coarsen every step
+	// for the sake of a few columns.
+    OutMax = min(F.DeckTop + Span + StructureHalf + DetailUp, 1.0f);
 }

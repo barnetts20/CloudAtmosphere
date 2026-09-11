@@ -404,10 +404,11 @@ struct CLOUDATMOSPHERE_API FTerrestrialCloudParams
 // NAMES MATCH THE STACK. Each member's name is its material parameter, its
 // Custom node pin and its shader term; the noise layers' members take their
 // layer's prefix there (StructureScale, DetailScale), and bools drop their b.
-// These structs are pure data: every derived quantity -- the deck base, the
+// These structs are data: every derived quantity -- the deck base, the
 // verticals, the fade far edges, the extinction coefficients -- is computed
 // once, in GG_BuildField and GG_DeckBeta, which the march and the shadow bake
-// share.
+// share. The Solved readouts are the exception, filled by the actor for
+// display and never pushed.
 //
 // UNITS. HeightScale is a fraction of planet radius. Every deck height is a
 // fraction of atmosphere thickness, and every relief amount a fraction of
@@ -481,30 +482,25 @@ struct CLOUDATMOSPHERE_API FGasGiantProfileParams
 {
 	GENERATED_BODY()
 
-	/** THE CEILING the deck hangs from, as a fraction of atmosphere thickness.
-	 *  Relief works DOWNWARD from here, so the cloud tops stay put and
-	 *  GradientThickness spends itself on depth.
+	/** Where an unrelieved column's top sits, as a fraction of atmosphere
+	 *  thickness. Relief shapes the deck around it and never moves it as a
+	 *  whole, so every relief control is independent of deck altitude.
 	 *
-	 *  PITFALL: the deck's highest reach, GG_TopBounds' OutMax, must stay at or
-	 *  below 1. It sits above DeckTop by the unreserved share of the upward
-	 *  relief. Past 1 Atmo_Plan clips the tallest columns, slicing the tops off
-	 *  exactly where features are tallest. */
+	 *  PITFALL: keep it below 1 - CeilingFalloff. A typical top inside the
+	 *  ceiling band thins the whole deck, and DeckOpticalDepth stops being
+	 *  exact. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float DeckTop = 0.95f;
+	float DeckTop = 0.85f;
 
-	/** How much of the relief's upward reach is reserved BELOW DeckTop.
+	/** Width of the band under the shell top across which density fades to
+	 *  zero, as a fraction of atmosphere thickness.
 	 *
-	 *  1 hangs the whole joint worst case below it, so no column can exceed
-	 *  DeckTop -- but that case essentially never happens, so the visible tops
-	 *  sit well under it. 0 puts DeckTop at the unrelieved base, and the tops
-	 *  climb with thickness instead.
-	 *
-	 *  BETWEEN THEM IS WHERE THE TOPS HOLD STILL. Reserve roughly what the up
-	 *  terms attain together and the general tops land near DeckTop at any
-	 *  thickness, while the rare joint maxima -- storm towers over a pressure
-	 *  high -- poke above it. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float CeilingReserve = 0.4f;
+	 *  WHAT LETS RARE FEATURES REACH THE SHELL. A storm tower that would cross it
+	 *  flattens into a soft cap instead of being cut, so the deck never sits
+	 *  lower to make room for its tallest outlier. Wider gives rounder domes,
+	 *  narrower flatter caps. Not optional: at zero the cut would be hard. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "0.5"))
+	float CeilingFalloff = 0.05f;
 
 	/** How far the density gradient reaches below a column's own top, and the
 	 *  unit every relief amount is a fraction of.
@@ -524,6 +520,12 @@ struct CLOUDATMOSPHERE_API FGasGiantProfileParams
 	 *  one for one. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float DeckBackstop = 0.3f;
+
+	/** READOUT, not authored. The highest every relief term together could
+	 *  reach, before the ceiling. Above 1 - CeilingFalloff the tallest features
+	 *  are being capped by the band; past 1 by the excess shown. */
+	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly)
+	float SolvedTopMax = 0.0f;
 };
 
 /** How the simulation shapes the deck: bands, pressure and storms. Every relief
@@ -543,10 +545,14 @@ struct CLOUDATMOSPHERE_API FGasGiantFlowParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float BandBias = 0.3f;
 
-	/** Height between a jet and a zone. Wants to be large: bands are geometry
-	 *  rather than a pattern painted on a sphere. */
+	/** Height of zones above belts, a fraction of GradientThickness: each moves
+	 *  half of it from DeckTop, zones up and belts down, meeting at DeckTop on
+	 *  the band boundaries. Positive lifts the anticyclonic zones. BandSharpness sets
+	 *  how quickly a band reaches its full height, BandBias which family
+	 *  dominates. Bands are geometry rather than a pattern painted on a
+	 *  sphere. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float BandRelief = -0.5f;
+	float BandRelief = 0.3f;
 
 	/** How far pressure lifts the deck. Anticyclones rise, cyclones sink. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
@@ -556,8 +562,11 @@ struct CLOUDATMOSPHERE_API FGasGiantFlowParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float VortexThreshold = 0.9f;
 
-	/** Added height of a convective tower where VortexThreshold's gate is open.
-	 *  Gated by the structure volume's storm channel. */
+	/** How far the strongest vortices move the deck, where VortexThreshold's
+	 *  gate is open and the structure volume's storm channel peaks. Follows the
+	 *  pressure sign: towers rising over anticyclones, funnels sinking into
+	 *  cyclones. Negative swaps them. Centred on zero, so it never moves the
+	 *  deck as a body. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float StormTowerRelief = 0.1f;
 
@@ -596,9 +605,8 @@ struct CLOUDATMOSPHERE_API FGasGiantMotionParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TurbulenceFloor = 0.5f;
 
-	/** How long a crossfade phase takes, in SIMULATED seconds. GG_BuildField
-	 *  converts it with SimTimeScale, so the noise keeps pace with the flow
-	 *  however the sim speed moves.
+	/** How long a crossfade phase takes, in SIMULATED seconds -- the clock the
+	 *  flow runs on, so the noise keeps pace with it at any sim speed.
 	 *
 	 *  A SPEED CONTROL, NOT A DURATION: how far a phase travels is fixed by the
 	 *  warp. Long periods separate the two phases further and ghost harder in

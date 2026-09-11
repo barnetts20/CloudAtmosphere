@@ -46,9 +46,8 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 	float PlanetRadius = 0.0f;
 	float HeightScale = 0.0f;
 	float Time = 0.0f;
-	float SimTimeScale = 0.0f;
 	float DeckTop = 0.0f;
-	float CeilingReserve = 0.0f;
+	float CeilingFalloff = 0.0f;
 	float GradientThickness = 0.0f;
 	float DeckBackstop = 0.0f;
 	float DensityCurve = 0.0f;
@@ -146,9 +145,8 @@ SHADER_PARAMETER(FVector3f, ShadowCameraLocal)
 SHADER_PARAMETER(float, PlanetRadius)
 SHADER_PARAMETER(float, HeightScale)
 SHADER_PARAMETER(float, Time)
-SHADER_PARAMETER(float, SimTimeScale)
 SHADER_PARAMETER(float, DeckTop)
-SHADER_PARAMETER(float, CeilingReserve)
+SHADER_PARAMETER(float, CeilingFalloff)
 SHADER_PARAMETER(float, GradientThickness)
 SHADER_PARAMETER(float, DeckBackstop)
 SHADER_PARAMETER(float, DensityCurve)

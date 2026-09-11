@@ -57,9 +57,8 @@ namespace GasGiantShadow
 		P->PlanetRadius = Params.PlanetRadius;
 		P->HeightScale = Params.HeightScale;
 		P->Time = Params.Time;
-		P->SimTimeScale = Params.SimTimeScale;
 		P->DeckTop = Params.DeckTop;
-		P->CeilingReserve = Params.CeilingReserve;
+		P->CeilingFalloff = Params.CeilingFalloff;
 		P->GradientThickness = Params.GradientThickness;
 		P->DeckBackstop = Params.DeckBackstop;
 		P->DensityCurve = Params.DensityCurve;

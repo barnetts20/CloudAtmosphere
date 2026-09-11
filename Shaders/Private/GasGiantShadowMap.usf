@@ -179,9 +179,8 @@ float3 ShadowCameraLocal;
 float PlanetRadius;
 float HeightScale;
 float Time;
-float SimTimeScale;
 float DeckTop;
-float CeilingReserve;
+float CeilingFalloff;
 float GradientThickness;
 float DeckBackstop;
 float DensityCurve;
@@ -229,9 +228,8 @@ GGFieldParams GGShadow_Field()
 		PlanetRadius,
 		HeightScale,
 		Time,
-		SimTimeScale,
 		DeckTop,
-		CeilingReserve,
+		CeilingFalloff,
 		GradientThickness,
 		DeckBackstop,
 		DensityCurve,

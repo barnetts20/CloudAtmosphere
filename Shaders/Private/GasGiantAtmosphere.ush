@@ -45,7 +45,7 @@
 // by atmosphere thickness, but leaves the RADII in world units. So
 // GGFieldParams.PlanetRadius is the same value as the PlanetRadius pin, and
 // Thickness is the atmosphere thickness in world units alongside it -- the deck
-// has no shell of its own, and DeckBase and DeckBackstop place it inside the
+// has no shell of its own, and DeckTop and DeckBackstop place it inside the
 // air as fractions of that thickness. Relief is a fraction of
 // GradientThickness.
 //
