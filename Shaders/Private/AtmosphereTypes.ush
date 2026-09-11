@@ -158,14 +158,14 @@ float Atmo_AmbientFactor(float sunElevation, float terminator, float ambientFloo
 
 /** Air densities at an altitude, as (rayleigh, mie, absorber). Rayleigh and Mie
  *  fall off exponentially; the absorber is a Lorentzian layer centred on
- *  absHeight, scaled by the Rayleigh profile. AtmoT_Profile keeps the scale
- *  heights positive. */
+ *  absHeight, scaled by the Rayleigh profile. Takes the profile as AtmoT_Profile
+ *  returns it, already clamped away from zero, so nothing is guarded per sample. */
 float3 Atmo_Density(float height, float rayScaleH, float mieScaleH, float absHeight, float absFalloff)
 {
     const float rayDensity = exp(-height / rayScaleH);
     const float mieDensity = exp(-height / mieScaleH);
 
-    const float denom = (absHeight - height) / max(absFalloff, 0.0001);
+    const float denom = (absHeight - height) / absFalloff;
     const float absDensity = (1.0 / (denom * denom + 1.0)) * rayDensity;
 
     return float3(rayDensity, mieDensity, absDensity);

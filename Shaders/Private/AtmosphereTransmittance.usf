@@ -2,22 +2,20 @@
 #include "/Engine/Private/Common.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTransmittance.ush"
 
-// ---------------------------------------------------------------------------
 // Air transmittance table bake. One thread per texel: invert the mapping,
 // integrate the three densities to the atmosphere top, store.
 //
-// STATIC, NOT PER FRAME. The table depends only on the radii and the air
-// profile, so it is rebaked when those change and otherwise left alone.
-// ---------------------------------------------------------------------------
+// Static, not per frame -- the table depends only on the radii and the air
+// profile, and is rebaked when those change.
 
 #ifndef ATMO_TRANSMITTANCE_THREADS
 #define ATMO_TRANSMITTANCE_THREADS 8
 #endif
 
-/** Midpoint samples per texel ray. The bake runs once per change, so this is
- *  priced against accuracy alone. A grazing ray from the ground spends only a
- *  fraction of its length where the density is significant, and that fraction
- *  is what the count has to resolve. */
+/** Midpoint samples per texel ray. Priced against accuracy alone, since the bake
+ *  runs once per change. At 128 the worst case is the straight-up ray at the
+ *  shortest authored scale height, about 0.1% low; rays toward the horizon climb
+ *  in altitude so slowly near the start that they are exact to fp32. */
 #ifndef ATMO_TRANSMITTANCE_STEPS
 #define ATMO_TRANSMITTANCE_STEPS 128
 #endif
@@ -47,7 +45,8 @@ void MainTransmittanceCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		TransmittanceProfilePins.x, TransmittanceProfilePins.y,
 		TransmittanceProfilePins.z, TransmittanceProfilePins.w);
 
-	// Texel centres map to exact unit endpoints, the inverse of AtmoT_UnitToUV.
+	// Endpoint mapping, the inverse of AtmoT_UnitToUV: texel 0 is exactly 0 and
+	// the last texel exactly 1, so the lookup reads back what was baked.
     const float XMu = float(Texel.x) / float(ATMO_TRANSMITTANCE_WIDTH - 1);
     const float XR = float(Texel.y) / float(ATMO_TRANSMITTANCE_HEIGHT - 1);
 
@@ -65,12 +64,13 @@ void MainTransmittanceCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         const float T = (float(i) + 0.5f) * Step;
 
 		// Floored at the surface: a horizon ray touches it at one point, and
-		// rounding can place a sample a hair under, where exp(-h/H) grows.
+		// rounding can put a sample a hair under, where exp(-h/H) grows.
         const float SampleRadius = sqrt(max(R * R + T * T + 2.0f * R * Mu * T, 0.0f));
         const float Height = max(SampleRadius - Radii.x, 0.0f);
 
         Sum += Atmo_Density(Height, Profile.x, Profile.y, Profile.z, Profile.w);
     }
 
+	// Alpha is unused; the lookup reads rgb.
     TransmittanceUAV[Texel] = float4(Sum * Step, 0.0f);
 }
