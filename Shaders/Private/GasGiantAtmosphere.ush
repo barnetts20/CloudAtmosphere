@@ -111,6 +111,16 @@
 #define GG_VIEW_OPAQUE_DEPTH 14.0f
 #endif
 
+/** Transmittance below which a ray is opaque and stops.
+ *
+ *  PITFALL: wherever a march ends on this it must also snap to zero. The
+ *  threshold asserts opacity, so returning the residual that tripped it leaves a
+ *  leak carried only by rays that stopped early -- and since it fires on one
+ *  channel while the others are still short, that leak is coloured. */
+#ifndef GG_OPAQUE_TRANSMITTANCE
+#define GG_OPAQUE_TRANSMITTANCE 0.001f
+#endif
+
 // The two layers fade on their own schedules because they do different jobs.
 //
 // DETAIL is micro variance -- the texture you see standing next to a cloud. It
