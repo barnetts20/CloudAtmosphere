@@ -10,8 +10,9 @@ class FRDGBuilder;
 /** Everything the shadow bake reads, flattened for the render thread.
  *
  *  Copied into a render command, so it holds no UObject -- the same split
- *  FGasGiantSimParams draws. Filled from FGasGiantDeckParams' own getters, which
- *  is what keeps the deck the light sees identical to the deck the eye sees.
+ *  FGasGiantSimParams draws. Filled from the same deck groups and derivations
+ *  ApplyGasGiantParams pushes to the material, which is what keeps the deck the
+ *  light sees identical to the deck the eye sees.
  *
  *  NOT PART OF FGasGiantSimParams. That struct is the fluid solver's state and
  *  changes when the solver does; this changes when the deck or the light does.
