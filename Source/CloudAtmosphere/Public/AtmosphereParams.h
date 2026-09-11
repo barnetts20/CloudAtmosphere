@@ -43,16 +43,6 @@
 
 class UGasGiantSimConfig;
 
-/** MIRRORS GG_DETAIL_RELIEF_CENTRED in GasGiantFlow.ush, and the two must be
- *  changed together. The shader plans the marched band from GG_TopBounds while
- *  the actor culls from GetTopMax, so a disagreement about which side the detail
- *  carve reserves slices the deck against a shell sized for the other setting.
- *
- *  A pair of defines is the wrong shape for this and it should collapse to one
- *  once the look question is settled -- whichever wins becomes the code. */
-#ifndef GG_DETAIL_RELIEF_CENTRED
-#define GG_DETAIL_RELIEF_CENTRED 1
-#endif
 class UVolumeTexture;
 
 /** Which cloud model the march stage uses.
@@ -411,6 +401,14 @@ struct CLOUDATMOSPHERE_API FTerrestrialCloudParams
 // pulled out of its struct's group, and category-less members then sort after
 // every member that has one.
 //
+// NAMES MATCH THE STACK. Each member's name is its material parameter, its
+// Custom node pin and its shader term; the noise layers' members take their
+// layer's prefix there (StructureScale, DetailScale), and bools drop their b.
+// These structs are pure data: every derived quantity -- the deck base, the
+// verticals, the fade far edges, the extinction coefficients -- is computed
+// once, in GG_BuildField and GG_DeckBeta, which the march and the shadow bake
+// share.
+//
 // UNITS. HeightScale is a fraction of planet radius. Every deck height is a
 // fraction of atmosphere thickness, and every relief amount a fraction of
 // GradientThickness. Fade distances are planet radii.
@@ -463,26 +461,13 @@ struct CLOUDATMOSPHERE_API FGasGiantAtmosphereLightingParams
 	 *  opaque to the limb, so there is no lit surface under the air to bounce
 	 *  anything back up. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
-	FLinearColor Ambient = FLinearColor(0.0001f, 0.0001f, 0.0001f, 1.0f);
+	FLinearColor AtmosphereAmbient = FLinearColor(0.0001f, 0.0001f, 0.0001f, 1.0f);
 
 	/** What the ambient's terminator falloff lerps from. At zero the term has
 	 *  almost no range, since it is swamped by direct light everywhere it is
 	 *  not zero; the floor is what buys it a night side. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float AmbientFloor = 0.0001f;
-
-	/** Packed as the material's air parameters take them. */
-	FAtmosphereAirScatteringParams GetAirScattering() const
-	{
-		FAtmosphereAirScatteringParams Out;
-		Out.RayleighBeta = FLinearColor(RayleighBeta.R, RayleighBeta.G, RayleighBeta.B, RayleighScaleHeight);
-		Out.MieBeta = FLinearColor(MieBeta.R, MieBeta.G, MieBeta.B, MieScaleHeight);
-		Out.MieG = MieG;
-		Out.AbsorptionBeta = FLinearColor(AbsorptionBeta.R, AbsorptionBeta.G, AbsorptionBeta.B, AbsorptionAltitude);
-		Out.AbsorptionFalloff = AbsorptionFalloff;
-		Out.Ambient = FLinearColor(Ambient.R, Ambient.G, Ambient.B, AmbientFloor);
-		return Out;
-	}
+	float AtmosphereAmbientFloor = 0.0001f;
 };
 
 /** The deck's vertical profile: where it hangs and how density ramps into it.
@@ -500,9 +485,10 @@ struct CLOUDATMOSPHERE_API FGasGiantProfileParams
 	 *  Relief works DOWNWARD from here, so the cloud tops stay put and
 	 *  GradientThickness spends itself on depth.
 	 *
-	 *  PITFALL: the deck's highest reach, FGasGiantDeckShape::TopMax, must stay
-	 *  at or below 1. Past it Atmo_Plan clips the tallest columns, slicing the
-	 *  tops off exactly where features are tallest. */
+	 *  PITFALL: the deck's highest reach, GG_TopBounds' OutMax, must stay at or
+	 *  below 1. It sits above DeckTop by the unreserved share of the upward
+	 *  relief. Past 1 Atmo_Plan clips the tallest columns, slicing the tops off
+	 *  exactly where features are tallest. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float DeckTop = 0.95f;
 
@@ -619,9 +605,9 @@ struct CLOUDATMOSPHERE_API FGasGiantMotionParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TurbulenceFloor = 0.5f;
 
-	/** How long a crossfade phase takes, in SIMULATED seconds. The actor divides
-	 *  by the sim's TimeScale, so the noise keeps pace with the flow however
-	 *  the sim speed moves.
+	/** How long a crossfade phase takes, in SIMULATED seconds. GG_BuildField
+	 *  converts it with SimTimeScale, so the noise keeps pace with the flow
+	 *  however the sim speed moves.
 	 *
 	 *  A SPEED CONTROL, NOT A DURATION: how far a phase travels is fixed by the
 	 *  warp. Long periods separate the two phases further and ghost harder in
@@ -736,19 +722,6 @@ struct CLOUDATMOSPHERE_API FGasGiantNoiseLayerParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	bool bCrossfade = false;
 
-	float GetFadeFar() const
-	{
-		return FadeNear + FadeSpan;
-	}
-
-	/** Noise units the shell spans vertically. Scaled by the height scale, which
-	 *  is what makes Aspect a ratio: heights reaching the field are fractions of
-	 *  shell thickness while the horizontal scale is against planet radius. */
-	float GetVertical(float AtmosphereHeightScale) const
-	{
-		return Scale * Aspect * AtmosphereHeightScale;
-	}
-
 	static FGasGiantNoiseLayerParams MakeStructureDefaults()
 	{
 		FGasGiantNoiseLayerParams Out;
@@ -786,7 +759,8 @@ struct CLOUDATMOSPHERE_API FGasGiantNoiseLayerParams
  *
  *  Scatter is single-scattering albedo. Extinction is RGB tint with the amount
  *  in A, multiplying the deck's solved extinction: 1 is neutral, and "darker
- *  bands eat more light" is one amount against another. */
+ *  bands eat more light" is one amount against another. The march applies
+ *  ExtinctionBase's tint to every band; each band's amount is its own. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FGasGiantBandParams
 {
@@ -815,24 +789,6 @@ struct CLOUDATMOSPHERE_API FGasGiantBandParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float BandScale = 2.0f;
 
-	/** Albedo with the band's extinction amount in A, as the march reads a
-	 *  band's share of the extinction. */
-	FLinearColor GetScatterNegative() const { return PackScatter(ScatterNegative, ExtinctionNegative); }
-	FLinearColor GetScatterPositive() const { return PackScatter(ScatterPositive, ExtinctionPositive); }
-	FLinearColor GetScatterBase() const { return PackScatter(ScatterBase, ExtinctionBase); }
-
-	/** The one extinction tint the march applies to every band: the base
-	 *  band's. */
-	FLinearColor GetExtinctionTint() const
-	{
-		return FLinearColor(ExtinctionBase.R, ExtinctionBase.G, ExtinctionBase.B, 1.0f);
-	}
-
-private:
-	static FLinearColor PackScatter(const FLinearColor& Albedo, const FLinearColor& Extinction)
-	{
-		return FLinearColor(Albedo.R, Albedo.G, Albedo.B, Extinction.A);
-	}
 };
 
 /** How much light the deck removes.
@@ -860,21 +816,6 @@ struct CLOUDATMOSPHERE_API FGasGiantExtinctionParams
 	 *  full coefficient counts that loss twice. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float LightExtinctionFraction = 0.5f;
-
-	/** The view-ray coefficient, solved so a ray down an unrelieved column from
-	 *  Top to Floor accumulates DeckOpticalDepth at core density. The gradient
-	 *  integrates to half its span, plus the saturated region below the floor.
-	 *  The band extinctions ride on top. */
-	float GetDeckBeta(float Top, float Floor) const
-	{
-		return DeckOpticalDepth / FMath::Max(0.5f * (Top + Floor), KINDA_SMALL_NUMBER);
-	}
-
-	/** The same solve, scaled down for the light ray. */
-	float GetDeckLightBeta(float Top, float Floor) const
-	{
-		return GetDeckBeta(Top, Floor) * LightExtinctionFraction;
-	}
 };
 
 /** The deck's phase function and its ambient. */
@@ -898,19 +839,10 @@ struct CLOUDATMOSPHERE_API FGasGiantPhaseParams
 	/** The deck's ambient colour. Its own floor, since the deck and the air go
 	 *  dark at different rates. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
-	FLinearColor Ambient = FLinearColor(0.0001f, 0.0001f, 0.0001f, 1.0f);
+	FLinearColor CloudAmbient = FLinearColor(0.0001f, 0.0001f, 0.0001f, 1.0f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float AmbientFloor = 0.001f;
-
-	/** Packed as the material's cloud parameters take them. */
-	FAtmosphereCloudScatteringParams GetCloudScattering() const
-	{
-		FAtmosphereCloudScatteringParams Out;
-		Out.Ambient = FLinearColor(Ambient.R, Ambient.G, Ambient.B, AmbientFloor);
-		Out.PhaseParams = FLinearColor(ForwardG, BackwardG, ForwardWeight, 0.0f);
-		return Out;
-	}
+	float CloudAmbientFloor = 0.001f;
 };
 
 /** Octaves after Wrenninge: octave i sees the deck toward the light at
@@ -1012,75 +944,4 @@ struct CLOUDATMOSPHERE_API FGasGiantRaymarchParams
 	 *  over the surface, so raise it first if tangent-angle slicing appears. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
 	float DeckSlope = 8.0f;
-
-	/** Packed as the material's common parameters take them. */
-	FAtmosphereRaymarchParams GetRaymarch() const
-	{
-		FAtmosphereRaymarchParams Out;
-		Out.AtmosphereSteps = AtmosphereSteps;
-		Out.CloudSteps = CloudSteps;
-		Out.StepScaleFactor = StepScaleFactor;
-		Out.ViewStepPixels = ViewStepPixels;
-		return Out;
-	}
-};
-
-/** The deck's derived heights, solved from the profile and every relief term.
- *  In atmosphere thicknesses. NOT A UPROPERTY: recomputed where it is read.
- *
- *  MUST MATCH GG_TopBounds in GasGiantFlow.ush, which derives the same bounds
- *  from the base the shader is given. */
-struct FGasGiantDeckShape
-{
-	/** The unrelieved altitude every column is built from: far enough below
-	 *  DeckTop that CeilingReserve of the upward reach lands on it. What the
-	 *  shader receives as DeckTop. */
-	float Base = 0.0f;
-
-	/** The highest the deck can reach, and the cull radius. Keep at or below 1. */
-	float TopMax = 0.0f;
-
-	/** The lowest a column top can fall; every column is saturated below it. */
-	float TopMin = 0.0f;
-
-	/** Where the gradient bottoms out on an unrelieved column. Matches
-	 *  GG_DeckFloor, which does the same clamp per column. */
-	float NominalFloor = 0.0f;
-
-	static FGasGiantDeckShape Solve(
-		const FGasGiantProfileParams& Profile,
-		const FGasGiantFlowParams& Flow,
-		const FGasGiantNoiseLayerParams& Structure,
-		const FGasGiantNoiseLayerParams& Detail)
-	{
-#if GG_DETAIL_RELIEF_CENTRED
-		const float DetailUp = 0.5f * FMath::Abs(Detail.Relief);
-		const float DetailDown = 0.5f * FMath::Abs(Detail.Relief);
-#else
-		const float DetailUp = FMath::Max(-Detail.Relief, 0.0f);
-		const float DetailDown = FMath::Max(Detail.Relief, 0.0f);
-#endif
-		// Every upward term at its most generous: Elevation is in [0,1] so the
-		// band gives half its relief either side of the base; pressure is
-		// soft-saturated to [-1,1]; the structure carve is signed, half each way.
-		const float UpBudget = 0.5f * FMath::Abs(Flow.BandRelief)
-			+ FMath::Abs(Flow.PressureRelief)
-			+ 0.5f * FMath::Abs(Structure.Relief)
-			+ DetailUp
-			+ FMath::Max(Flow.StormTowerRelief, 0.0f);
-
-		const float DownBudget = 0.5f * FMath::Abs(Flow.BandRelief)
-			+ FMath::Abs(Flow.PressureRelief)
-			+ 0.5f * FMath::Abs(Structure.Relief)
-			+ DetailDown;
-
-		const float Gradient = Profile.GradientThickness;
-
-		FGasGiantDeckShape Out;
-		Out.Base = Profile.DeckTop - Gradient * UpBudget * Profile.CeilingReserve;
-		Out.TopMax = Out.Base + Gradient * UpBudget;
-		Out.TopMin = Out.Base - Gradient * DownBudget;
-		Out.NominalFloor = FMath::Min(FMath::Max(Out.Base - Gradient, Profile.DeckBackstop), Out.Base);
-		return Out;
-	}
 };

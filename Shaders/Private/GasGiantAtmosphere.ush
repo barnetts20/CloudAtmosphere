@@ -43,11 +43,11 @@
 //
 // UNITS. Atmo_BuildParams scales the extinction coefficients and scale heights
 // by atmosphere thickness, but leaves the RADII in world units. So
-// GGFieldParams.PlanetRadius is the same value as the planetRadius pin, and
-// Profile.x is the atmosphere thickness in world units alongside it -- the
-// deck has no shell of its own, and DeckTop and DeckBackstop place it inside the
-// air as fractions of that thickness. Relief is a fraction of the distance
-// between the two, not of the thickness.
+// GGFieldParams.PlanetRadius is the same value as the PlanetRadius pin, and
+// Thickness is the atmosphere thickness in world units alongside it -- the deck
+// has no shell of its own, and DeckBase and DeckBackstop place it inside the
+// air as fractions of that thickness. Relief is a fraction of
+// GradientThickness.
 //
 // SPACE. The march runs camera-relative and world-oriented; the field is
 // planet-local with the spin axis on Z. WorldToLocal carries that rotation. For
@@ -125,37 +125,42 @@
 // The ranges themselves live on GGFieldParams, since a fade distance is a
 // property of the noise rather than of the march -- see the comment there.
 
-/** Per-band scattering, blended by the signed band channel.
+/** The deck's material and how it is lit.
  *
- *  Three sets rather than one because zones and belts are different material,
- *  not the same material at different brightness. Setting all three equal gives
- *  the single-set case, so this costs nothing until it is used.
+ *  Per band, three sets rather than one because zones and belts are different
+ *  material, not the same material at different brightness:
  *
- *  rgb  Single-scattering albedo. What fraction of extinction is scattered
- *       rather than absorbed, per channel. This is the colour, and it has no
- *       terrestrial equivalent.
- *  a    MULTIPLIER on cloudScatterBeta, not an absolute coefficient. 1 is
- *       neutral. "Darker bands eat more light" is Neg.a against Pos.a.
+ *  rgb  Single-scattering albedo, from ScatterX. What fraction of extinction is
+ *       scattered rather than absorbed, per channel.
+ *  a    The band's extinction amount, from ExtinctionX.a: a MULTIPLIER on the
+ *       deck's solved extinction, 1 neutral. A multiplier because the base is
+ *       thickness-relative, so a resize changes the deck's opacity no more than
+ *       the air's.
  *
- *  A MULTIPLIER BECAUSE THE BASE IS THICKNESS-RELATIVE. Atmo_BuildParams
- *  divides every extinction coefficient by atmosphere thickness so a planet can
- *  be resized without retuning its air. An absolute coefficient here would sit
- *  outside that convention, and resizing the planet would then change the
- *  deck's opacity while leaving the atmosphere's alone.
- *
- *  Ambient, the isotropic multiple-scattering weight and the light ray's
- *  absorption all come from CloudParams -- cloudAmbient, cloudPhaseParams.a and
- *  cloudAbsorptionBeta respectively. None of them wants a per-band form: the
- *  deck light is multiplied by the band albedo, so all three are already tinted
- *  by the band they land on.
+ *  The extinction TINT reaching the march is ExtinctionBase's, applied to every
+ *  band through cloudScatterBeta; see GGAtmo_BuildAtmo.
  *
  *  BandScale sets where the ramp saturates, matching GG_BandColour's Scale. */
 struct GGScatterParams
 {
-    float4 ScatterNeg;
-    float4 ScatterPos;
+    float4 ScatterNegative;
+    float4 ScatterPositive;
     float4 ScatterBase;
     float BandScale;
+
+	/** Dual-lobe phase: forward g, backward g magnitude, forward share. */
+    float ForwardG;
+    float BackwardG;
+    float ForwardWeight;
+
+	/** Octave i sees the deck's optical depth toward the light scaled by
+	 *  OctaveAttenuation^i, weighs OctaveContribution^i, and uses the phase
+	 *  with both lobes' g scaled by OctaveEccentricity^i. Octave 0 is single
+	 *  scattering. OctaveCount is whole and in [1, GG_MS_MAX_OCTAVES]. */
+    float OctaveCount;
+    float OctaveAttenuation;
+    float OctaveContribution;
+    float OctaveEccentricity;
 
 	/** Width of the planet-shadow falloff, as a fraction of atmosphere
 	 *  thickness. What shapes the terminator: the geometric shadow of a sphere
@@ -172,23 +177,12 @@ struct GGScatterParams
 	 *  direction, so the sharp forward peak washes out. */
     float MieLobeDecay;
 
-	/** Exponent on the shadow for the ANISOTROPIC terms only.
-	 *
-	 *  THE LOBE AND THE ISOTROPIC TERM WANT DIFFERENT SHADOWS. The lobe arrives
-	 *  along one path and is genuinely hard-shadowed; the isotropic term stands
-	 *  in for multiply-scattered light, which wraps around the terminator.
-	 *  Sharing one factor forces a choice between a hard terminator and a glow.
-	 *
-	 *  A power on the same smoothstep rather than a narrower one, so no new
-	 *  endpoint appears -- the curve stays C1 where it already was and only its
-	 *  tail is crushed. */
+	/** Exponent on the planet shadow for the ANISOTROPIC terms only. The lobe
+	 *  arrives along one path and is genuinely hard-shadowed. A power on the
+	 *  same smoothstep rather than a narrower one, so no new endpoint appears
+	 *  -- the curve stays C1 where it already was and only its tail is
+	 *  crushed. */
     float LobeShadowPower;
-
-	/** Multiple-scattering octaves as (Count, Attenuation, Contribution,
-	 *  Eccentricity). Octave i sees the deck's optical depth toward the light
-	 *  scaled by Attenuation^i, weighs Contribution^i, and uses the phase with
-	 *  both lobes' g scaled by Eccentricity^i. Octave 0 is single scattering. */
-    float4 Octaves;
 };
 
 /** Most octaves GGAtmo_BuildScatter accepts. The per-octave constants are
@@ -211,7 +205,7 @@ struct GGAtmoParams
 	/** March pixels a view step is allowed to span. The step budget sizes the
 	 *  march against the DECK; this sizes it against the SCREEN, and the screen
 	 *  is what decides whether the extra samples are visible. */
-    float StepPixels;
+    float ViewStepPixels;
 };
 
 /** Angular width of one march pixel, from the ray directions either side of it.
@@ -239,9 +233,29 @@ float4 GGAtmo_BandScatter(float Band, GGScatterParams S)
 {
     const float T = clamp(Band * S.BandScale, -1.0f, 1.0f);
 
-    const float4 Hue = (T < 0.0f) ? S.ScatterNeg : S.ScatterPos;
+    const float4 Hue = (T < 0.0f) ? S.ScatterNegative : S.ScatterPositive;
 
     return lerp(S.ScatterBase, Hue, abs(T));
+}
+
+/** World-to-planet-local rotation from the planet's orientation quaternion.
+ *
+ *  Each row is a local axis in world space, rotated from the unit axis the same
+ *  way FQuat::RotateVector does it, so the matrix is the one the actor's
+ *  forward, right and up vectors would give. Called once per pixel. */
+float3x3 GGAtmo_WorldToLocal(float4 PlanetRotation)
+{
+    const float3 Q = PlanetRotation.xyz;
+    const float W = PlanetRotation.w;
+
+    const float3 TX = 2.0f * cross(Q, float3(1.0f, 0.0f, 0.0f));
+    const float3 TY = 2.0f * cross(Q, float3(0.0f, 1.0f, 0.0f));
+    const float3 TZ = 2.0f * cross(Q, float3(0.0f, 0.0f, 1.0f));
+
+    return float3x3(
+		float3(1.0f, 0.0f, 0.0f) + W * TX + cross(Q, TX),
+		float3(0.0f, 1.0f, 0.0f) + W * TY + cross(Q, TY),
+		float3(0.0f, 0.0f, 1.0f) + W * TZ + cross(Q, TZ));
 }
 
 /** Camera-relative world position to planet-local, in the field's own frame. */
@@ -360,44 +374,51 @@ void GGAtmo_SplitDeckSegment(
     SegmentCount++;
 }
 
-/** Fills GGScatterParams.
- *
- *  Set all three sets equal for a single-material deck. BandScale sets where
- *  the ramp saturates; matching it to the debug view's inverse DebugScale makes
- *  the material and the debug view agree about band boundaries.
- *
- *  LobeParams is (TerminatorSoftness, AmbientTerminator, MieLobeDecay,
- *  LobeShadowPower). Four lighting scalars in one float4 because they are tuned
- *  together and against each other: the softness sets the terminator's width
- *  and the power crushes the tail the lobe would otherwise leak through it.
- *
- *  OctaveParams is (Count, Attenuation, Contribution, Eccentricity); see
- *  GGScatterParams.Octaves. */
+/** Fills GGScatterParams from the Bands, Phase, Multiple Scattering and
+ *  Terminator groups, in panel order. Set all three bands equal for a
+ *  single-material deck. */
 GGScatterParams GGAtmo_BuildScatter(
-	float4 ScatterNeg,
-	float4 ScatterPos,
-	float4 ScatterBase,
+	float3 ScatterNegative,
+	float4 ExtinctionNegative,
+	float3 ScatterPositive,
+	float4 ExtinctionPositive,
+	float3 ScatterBase,
+	float4 ExtinctionBase,
 	float BandScale,
-	float4 LobeParams,
-	float4 OctaveParams)
+	float ForwardG,
+	float BackwardG,
+	float ForwardWeight,
+	float OctaveCount,
+	float OctaveAttenuation,
+	float OctaveContribution,
+	float OctaveEccentricity,
+	float TerminatorSoftness,
+	float AmbientTerminator,
+	float MieLobeDecay,
+	float LobeShadowPower)
 {
     GGScatterParams S;
 
-    S.ScatterNeg = ScatterNeg;
-    S.ScatterPos = ScatterPos;
-    S.ScatterBase = ScatterBase;
+    S.ScatterNegative = float4(ScatterNegative, ExtinctionNegative.a);
+    S.ScatterPositive = float4(ScatterPositive, ExtinctionPositive.a);
+    S.ScatterBase = float4(ScatterBase, ExtinctionBase.a);
     S.BandScale = BandScale;
+
+    S.ForwardG = ForwardG;
+    S.BackwardG = BackwardG;
+    S.ForwardWeight = ForwardWeight;
+
+    S.OctaveCount = clamp(round(OctaveCount), 1.0f, float(GG_MS_MAX_OCTAVES));
+    S.OctaveAttenuation = saturate(OctaveAttenuation);
+    S.OctaveContribution = saturate(OctaveContribution);
+    S.OctaveEccentricity = saturate(OctaveEccentricity);
 
 	// Floored where zero is degenerate: the softness divides a smoothstep's
 	// width, and a zero-width one is a step along the light's tangent cone.
-    S.TerminatorSoftness = max(LobeParams.x, 1e-4f);
-    S.AmbientTerminator = max(LobeParams.y, 1e-4f);
-    S.MieLobeDecay = max(LobeParams.z, 0.0f);
-    S.LobeShadowPower = max(LobeParams.w, 0.0f);
-
-    S.Octaves = float4(
-		clamp(round(OctaveParams.x), 1.0f, float(GG_MS_MAX_OCTAVES)),
-		saturate(OctaveParams.yzw));
+    S.TerminatorSoftness = max(TerminatorSoftness, 1e-4f);
+    S.AmbientTerminator = max(AmbientTerminator, 1e-4f);
+    S.MieLobeDecay = max(MieLobeDecay, 0.0f);
+    S.LobeShadowPower = max(LobeShadowPower, 0.0f);
 
     return S;
 }
@@ -423,32 +444,41 @@ GGScatterParams GGAtmo_BuildScatter(
  *
  *  Only the terrestrial cloud SHAPE arguments are passed as zero -- the noise
  *  volume, its coverage and its height curve, none of which this path samples.
- *  The scattering ones are real and shared: cloudScatterBeta is the deck's base
- *  extinction, cloudAbsorptionBeta its light-ray extinction, cloudAmbient its
- *  ambient, and cloudPhaseParams drives both the dual-lobe phase and the
- *  isotropic multiple-scattering weight. */
+ *  The phase is zero too: the deck reads its own from GGScatterParams.
+ *
+ *  THE EXTINCTION IS SOLVED, NOT PASSED. GG_DeckBeta turns DeckOpticalDepth
+ *  into a coefficient from the field's own anchors, tinted by ExtinctionBase;
+ *  the light ray's is LightExtinctionFraction of it. The bake solves the same
+ *  way from the same values.
+ *
+ *  Air colours arrive as rgb with their profile terms as scalars, and are
+ *  packed here into the float4s Atmo_BuildParams takes. */
 CompositeParams GGAtmo_BuildAtmo(
-	float2 svPosition,
-	float3 rayDir,
-	float3 cameraPos,
-	float3 atmoPos,
-	float atmoRadius,
-	float sceneDepth,
-	float3 lightDirection,
-	float3 lightColor,
-	float4 rayleighBeta,
-	float4 mieBeta,
-	float4 absorptionBeta,
-	float absorptionFalloff,
-	float4 atmoAmbient,
-	float mieG,
-	float3 cloudScatterBeta,
-	float3 cloudAbsorptionBeta,
-	float4 cloudAmbient,
-	float4 cloudPhaseParams,
-	int mainAtmoSteps,
-	int mainCloudSteps,
-	float stepScaleFactor,
+	float2 SvPosition,
+	float3 RayDir,
+	float3 CameraPosition,
+	float SceneDepth,
+	float3 PlanetCenter,
+	float3 LightDirection,
+	float3 LightColor,
+	float3 RayleighBeta,
+	float RayleighScaleHeight,
+	float3 MieBeta,
+	float MieScaleHeight,
+	float MieG,
+	float3 AbsorptionBeta,
+	float AbsorptionAltitude,
+	float AbsorptionFalloff,
+	float3 AtmosphereAmbient,
+	float AtmosphereAmbientFloor,
+	float4 ExtinctionBase,
+	float DeckOpticalDepth,
+	float LightExtinctionFraction,
+	float3 CloudAmbient,
+	float CloudAmbientFloor,
+	float AtmosphereSteps,
+	float CloudSteps,
+	float StepScaleFactor,
 	GGFieldParams F)
 {
 	// -- Bounds, with the layers' fades folded in ---------------------------
@@ -468,7 +498,7 @@ CompositeParams GGAtmo_BuildAtmo(
     GG_TopBounds(F, 1.0f, 1.0f, TopMin, TopMax);
 
     const float NearestApproach = max(
-		length(cameraPos - atmoPos) - (F.PlanetRadius + F.Thickness * TopMax),
+		length(CameraPosition - PlanetCenter) - (F.PlanetRadius + F.Thickness * TopMax),
 		0.0f) / max(F.PlanetRadius, 1e-4f);
 
     GG_TopBounds(
@@ -488,22 +518,28 @@ CompositeParams GGAtmo_BuildAtmo(
 	// it unless relief pushed the whole column under, so a coarse step
 	// integrates what is left and transmittance ends the ray within a couple of
 	// them.
-    const float CloudInner = max(F.PlanetRadius + F.Thickness * F.Profile.y, 1e-4f);
+    const float CloudInner = max(F.PlanetRadius + F.Thickness * F.DeckBackstop, 1e-4f);
+
+    const float3 CloudScatterBeta = ExtinctionBase.rgb * GG_DeckBeta(F, DeckOpticalDepth);
 
     return Atmo_BuildParams(
-		svPosition, rayDir, cameraPos, atmoPos,
-		F.PlanetRadius, atmoRadius, CloudOuter, CloudInner,
-		sceneDepth, lightDirection, lightColor,
-		rayleighBeta, mieBeta, absorptionBeta, absorptionFalloff,
-		atmoAmbient, mieG,
-		cloudScatterBeta, cloudAbsorptionBeta, cloudAmbient,
-		cloudPhaseParams,
+		SvPosition, RayDir, CameraPosition, PlanetCenter,
+		F.PlanetRadius, F.PlanetRadius + F.Thickness, CloudOuter, CloudInner,
+		SceneDepth, LightDirection, LightColor,
+		float4(RayleighBeta, RayleighScaleHeight),
+		float4(MieBeta, MieScaleHeight),
+		float4(AbsorptionBeta, AbsorptionAltitude),
+		AbsorptionFalloff,
+		float4(AtmosphereAmbient, AtmosphereAmbientFloor), MieG,
+		CloudScatterBeta, CloudScatterBeta * LightExtinctionFraction,
+		float4(CloudAmbient, CloudAmbientFloor),
+		float4(0.0f, 0.0f, 0.0f, 0.0f),
 		0.0f, float2(0.0f, 0.0f), 0.0f, 0.0f,
 		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
 		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
 		0.0f, 0.0f, float4(0.0f, 0.0f, 0.0f, 0.0f),
-		mainAtmoSteps, mainCloudSteps,
-		stepScaleFactor);
+		(int) AtmosphereSteps, (int) CloudSteps,
+		StepScaleFactor);
 }
 
 /** Light reaching a sample, as the air's transmittance with the planet shadow
@@ -627,7 +663,7 @@ float3 GGAtmo_LightMarch(
 	// smallest of those products is. See GG_SHADOW_SATURATION.
     const float AbsMin = min(AbsBeta.x, min(AbsBeta.y, AbsBeta.z));
     const float DeepestOctave =
-		pow(max(P.Scatter.Octaves.y, 1e-4f), P.Scatter.Octaves.x - 1.0f);
+		pow(max(P.Scatter.OctaveAttenuation, 1e-4f), P.Scatter.OctaveCount - 1.0f);
     const float TauScale = max(AbsMin / max(AbsMax, 1e-8f) * DeepestOctave, GG_SHADOW_MIN_TAU_SCALE);
 
     const float ShadowTau =
@@ -742,7 +778,7 @@ float4 GGAtmo_MainMarch(
 	// ScatterX.a multipliers are not visible here and a band below 1 saturates
 	// slower. Erring deep costs a step; erring shallow blacks out cloud that
 	// should still be visible.
-    const float OpaqueFraction = min(P.Field.Profile.y, BoundMin)
+    const float OpaqueFraction = min(P.Field.DeckBackstop, BoundMin)
 		- GG_VIEW_OPAQUE_DEPTH / max(BetaMin, 1e-6f);
 
     bool bClippedOpaque = false;
@@ -841,8 +877,6 @@ float4 GGAtmo_MainMarch(
     const float ReferenceLength = max(
 		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f);
 
-    const float PhaseIsotropic = 1.0f / (4.0f * PI);
-
 	// Per-octave constants, fixed per pixel since the view and the light are:
 	// phase times contribution, the optical-depth factor, and how much of the
 	// lobe shadow the octave keeps. Octave 0 is exactly single scattering -- the
@@ -860,19 +894,19 @@ float4 GGAtmo_MainMarch(
 
         for (int o = 0; o < GG_MS_MAX_OCTAVES; o++)
         {
-            if (float(o) < P.Scatter.Octaves.x)
+            if (float(o) < P.Scatter.OctaveCount)
             {
                 OctaveWeight[o] = Contrib * Atmo_PhaseDualLobe(P.Atmo.scatteringParams.cosTheta,
-					P.Atmo.cloudParams.cloudPhaseParams.r * Ecc,
-					P.Atmo.cloudParams.cloudPhaseParams.g * Ecc,
-					P.Atmo.cloudParams.cloudPhaseParams.b);
+					P.Scatter.ForwardG * Ecc,
+					P.Scatter.BackwardG * Ecc,
+					P.Scatter.ForwardWeight);
                 OctaveAtten[o] = Atten;
                 OctaveEcc[o] = Ecc;
             }
 
-            Atten *= P.Scatter.Octaves.y;
-            Contrib *= P.Scatter.Octaves.z;
-            Ecc *= P.Scatter.Octaves.w;
+            Atten *= P.Scatter.OctaveAttenuation;
+            Contrib *= P.Scatter.OctaveContribution;
+            Ecc *= P.Scatter.OctaveEccentricity;
         }
     }
 
@@ -910,10 +944,10 @@ float4 GGAtmo_MainMarch(
 			// swallows the feature it is meant to be integrating, and no
 			// footprint argument makes that acceptable -- an unresolved gradient
 			// is wrong everywhere, not just where it is too small to see.
-            const float FootprintStep = Pos * P.PixelAngle * P.StepPixels;
+            const float FootprintStep = Pos * P.PixelAngle * P.ViewStepPixels;
 
             const float FeatureCap = min(
-				P.Field.GradientDepth * P.Field.Thickness,
+				P.Field.GradientThickness * P.Field.Thickness,
 				P.Atmo.scatteringParams.rayScaleH);
 
             float CurrentStep = Atmo_AdaptiveStepSize(BaseStepSize, Pos, RayStart,
@@ -1117,22 +1151,12 @@ float4 GGAtmo_MainMarch(
 						// extinction, not less cloud.
                         const float4 S = GGAtmo_BandScatter(Deck.y, P.Scatter);
 
-                        const float3 IncomingLight =
-							P.Atmo.mainRayParams.lightCol * SunTransmittance;
-
-						// Isotropic multiple scattering, standing in for light
-						// that bounced several times before arriving. Without
-						// it the shadow side goes black, since single
-						// scattering has nothing to deliver there.
-                        const float3 MultiScatter = IncomingLight * PhaseIsotropic
-							* P.Atmo.cloudParams.cloudPhaseParams.a;
-
 						// Single scattering and the octaves above it. Each later
 						// octave sees less of the deck toward the light and a
 						// broader phase, which is what reaches deep into thick
 						// cloud and softens the silver rim outward. Its lobe
-						// shadow fades with its eccentricity: an isotropic
-						// octave wraps the terminator as MultiScatter does.
+						// shadow fades with its eccentricity, so a near-isotropic
+						// octave wraps the terminator the way bounced light does.
 						//
 						// PITFALL: at low deck optical depth every octave sees
 						// full transmittance, so thin cloud brightens by the sum
@@ -1153,7 +1177,6 @@ float4 GGAtmo_MainMarch(
                         }
 
                         const float3 DeckLight = P.Atmo.mainRayParams.lightCol * OctaveLight
-							+ MultiScatter
 							+ P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb.rgb
 								* DeckAmbientFactor;
 
@@ -1173,7 +1196,7 @@ float4 GGAtmo_MainMarch(
 
 #if GG_DEBUG_TERM == 3
 						DebugAccum += Transmittance
-							* (P.Atmo.mainRayParams.lightCol * OctaveLight + MultiScatter)
+							* (P.Atmo.mainRayParams.lightCol * OctaveLight)
 							* S.rgb * (1.0f - DeckStepTransmittance);
 #elif GG_DEBUG_TERM == 4
 						DebugAccum += Transmittance

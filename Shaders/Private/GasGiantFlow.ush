@@ -18,10 +18,10 @@
 // for light to interact with. It passes through to the march untouched, to be
 // spent on extinction and scattering colour.
 //
-// UNITS. Three absolutes, all atmosphere fractions: DeckTop and DeckBackstop in
-// Relief.x and Profile.y, GradientThickness in Profile.w. Every relief amount,
-// both carves, ErosionDepth and DeckSlope are fractions of GradientThickness.
-// Profile.x is the only world-space length. Space is planet-local, spin axis on
+// UNITS. Three absolutes, all atmosphere fractions: DeckBase, DeckBackstop and
+// GradientThickness. Every relief amount, both carves, ErosionDepth and
+// DeckSlope are fractions of GradientThickness. Thickness is the only
+// world-space length. Space is planet-local, spin axis on
 // Z; positions arrive as unit directions except in GG_Density.
 // ---------------------------------------------------------------------------
 
@@ -95,184 +95,244 @@
 #endif
 
 
-/** Everything the field, density and deck-top functions read. The float4s are
- *  packed by the material from named scalars:
+/** Everything the field, density and deck-top functions read.
  *
- *  Scales   (DetailScale, StructureScale, DetailWarpInherit, StructureWarpInherit)
- *  Warps    (WarpTime, DetailWarp, BandBias, TurbulenceFloor)
- *  DetailNoise / StructureNoise  (WorleyG, WorleyB, WorleyA, Amount)
- *  Relief   (DeckTop, BandRelief, PressureRelief, StormTowerRelief)
- *  Profile  (AtmosphereThickness, DeckBackstop, VortexThreshold, GradientThickness)
- *  Crossfade (Period, DetailEnable, StructureEnable, unused)
- *
- *  BandMix  (Structure, Detail)
- *
- *  Thickness, GradientDepth and SpinAngle are derived in GG_BuildField; the two
- *  fades are set per sample by the march. */
+ *  NAMES MATCH THE STACK. Every authored member carries the name of its C++
+ *  property, material parameter and Custom node pin; the layer members take
+ *  their layer's prefix. Members below the authored ones are DERIVED in
+ *  GG_BuildField and are named for what they are, never reusing an authored
+ *  name for a different quantity. The two fades are set per sample by the
+ *  march. */
 struct GGFieldParams
 {
-    float4 Scales;
-    float4 Warps;
-
-    float4 DetailNoise;
-    float4 StructureNoise;
-
-    float EdgeBias;
-
-    float4 Relief;
-    float4 Profile;
-	/** Elapsed time in crossfade PERIODS. Only its fraction is read, so the two
-	 *  phases sit half a period apart whatever the whole part is.
-	 *
-	 *  Zero on either enable leaves that layer sampled once, at the full warp,
-	 *  exactly as it is with the feature off. */
-    float CrossfadeTime;
-    float CrossfadeDetail;
-    float CrossfadeStructure;
-
-	/** Bound on the deck's slope, GRADIENT DEPTHS per radian -- the same unit as
-	 *  the relief producing that slope, so it stays in step through an anchor
-	 *  retune. Read only by the entry search's cone angle: under-declaring it is
-	 *  the one way that search steps over the surface. */
-    float DeckSlope;
+	// -- Authored ------------------------------------------------------------
 
     float PlanetRadius;
+    float HeightScale;
+
+	/** How far the density ramp reaches below a column's own top, and the unit
+	 *  every relief amount is a fraction of. Floored against division. */
+    float GradientThickness;
+    float DeckBackstop;
+    float DensityCurve;
+
+    float BandSharpness;
+    float BandBias;
+    float BandRelief;
+    float PressureRelief;
+    float VortexThreshold;
+    float StormTowerRelief;
+    float ReliefThinning;
+
+    float WarpTime;
+    float TurbulenceFloor;
+
+    float EdgeBias;
+    float ErosionDepth;
+
+	/** Worley rung weights in xyz, the layer's amount in w. */
+    float4 StructureNoiseWeights;
+    float StructureScale;
+    float StructureRelief;
+    float StructureErosion;
+    float StructureFlowInherit;
+    float StructureShearInherit;
+    float StructureFadeNear;
+    float StructureBandMix;
+    float StructureCrossfade;
+
+    float4 DetailNoiseWeights;
+    float DetailScale;
+    float DetailRelief;
+    float DetailErosion;
+    float DetailFlowInherit;
+    float DetailShearInherit;
+    float DetailFadeNear;
+    float DetailBandMix;
+    float DetailCrossfade;
+
+	/** Bound on the deck's slope, GRADIENT DEPTHS per radian. Read only by the
+	 *  entry search's cone angle: under-declaring it is the one way that search
+	 *  steps over the surface. */
+    float DeckSlope;
+
+	// -- Derived -------------------------------------------------------------
+
+	/** Atmosphere thickness in world units: the one absolute length the field
+	 *  reads. */
     float Thickness;
 
+	/** The unrelieved altitude every column is built from, solved from DeckTop
+	 *  so CeilingReserve of the upward reach lands on it. */
+    float DeckBase;
 
-	/** Profile.w. How far the density ramp reaches below a column's own top, and
-	 *  the unit every relief amount is a fraction of. Uniform across the deck:
-	 *  the gradient is what surface shading reads, and a span measured to a flat
-	 *  floor stretches over crests and collapses in troughs. */
-    float GradientDepth;
+	/** The deep flow layer's step length: WarpTime * DeepShearRatio. */
+    float DeepShearTime;
 
     float SpinAngle;
 
-    float BandSharpness;
-    float ReliefThinning;
-    float DetailErosion;
-    float DetailRelief;
+	/** Elapsed time in crossfade PERIODS. Only its fraction is read, so the two
+	 *  phases sit half a period apart whatever the whole part is. */
+    float CrossfadeTime;
 
-    float ErosionDepth;
-
-    float DensityCurve;
-
-
-	/** Noise units the shell spans, per layer; the ratio to a layer's horizontal
-	 *  scale is its ASPECT. PITFALL: an exaggerated aspect does not read as tall
-	 *  noise. The UVW scale then swings by a large factor across the shell, so
-	 *  the pattern RESCALES with sample altitude -- and altitude within a step
-	 *  moves with step size, which grows with distance, so it swims as the
-	 *  camera pulls back. */
-    float DetailVertical;
+	/** Noise units the shell spans vertically, per layer. Scale * Aspect *
+	 *  HeightScale, which is what makes the aspect a ratio: heights reaching
+	 *  the field are fractions of shell thickness while the horizontal scale is
+	 *  against planet radius. */
     float StructureVertical;
+    float DetailVertical;
 
-    float StructureRelief;
-    float StructureErosion;
+	/** FadeNear + FadeSpan, held above FadeNear. */
+    float StructureFadeFar;
+    float DetailFadeFar;
 
-	/** How far each layer's signed shape moves the MATERIAL boundary, as
-	 *  (Structure, Detail). At 1 a full-strength shape moves Band by one unit,
-	 *  the width of the Boundary term. The sign picks which family rising shapes
-	 *  carry. */
-    float2 BandMix;
-
+	// -- Per sample ----------------------------------------------------------
 
 	/** Per-layer level of detail, 1 at full strength and 0 faded out. Each scales
-	 *  its layer's carve and erosion and gates the fetches feeding it, so a
-	 *  sample with both faded costs one fetch instead of seven. */
-    float DetailFade;
+	 *  its layer's carve and erosion and gates the fetches feeding it. */
     float StructureFade;
-
-
-	/** Where each layer fades, in PLANET RADII from camera to sample. A property
-	 *  of the noise rather than the march: tiling frequency scales with the
-	 *  layer's scale, so the distance at which it starts aliasing goes as one
-	 *  over that scale. Retuning a scale without its fade either leaves visible
-	 *  tiling or discards structure that still resolved. */
-    float DetailFadeNear;
-    float DetailFadeFar;
-    float StructureFadeNear;
-    float StructureFadeFar;
+    float DetailFade;
 };
 
 
-/** Fills GGFieldParams from the material's pin values. RotationWeight is the
- *  planet's own rotation; the sim runs in the rotating frame, so it applies to
- *  the SAMPLING POSITION rather than to the flow, negated because rotating the
- *  sample point backwards carries the field forwards. */
+/** Fills GGFieldParams from the authored values, in panel order, and derives
+ *  the rest. The bake calls it with the same values, so every derivation here
+ *  is shared by the deck the eye sees and the deck the light sees.
+ *
+ *  RotationWeight is the planet's own rotation; the sim runs in the rotating
+ *  frame, so it applies to the SAMPLING POSITION rather than to the flow,
+ *  negated because rotating the sample point backwards carries the field
+ *  forwards. */
 GGFieldParams GG_BuildField(
 	float PlanetRadius,
+	float HeightScale,
 	float Time,
-	float RotationWeight,
-	float4 Scales,
-	float4 Warps,
-	float4 DetailNoise,
-	float4 StructureNoise,
-	float EdgeBias,
-	float DeckSlope,
-	float4 Crossfade,
-	float4 Relief,
-	float4 Profile,
-	float BandSharpness,
-	float ReliefThinning,
-	float DetailVertical,
-	float StructureVertical,
-	float DetailErosion,
-	float DetailRelief,
-	float ErosionDepth,
+	float SimTimeScale,
+	float DeckTop,
+	float CeilingReserve,
+	float GradientThickness,
+	float DeckBackstop,
 	float DensityCurve,
+	float BandSharpness,
+	float BandBias,
+	float BandRelief,
+	float PressureRelief,
+	float VortexThreshold,
+	float StormTowerRelief,
+	float ReliefThinning,
+	float RotationWeight,
+	float WarpTime,
+	float DeepShearRatio,
+	float TurbulenceFloor,
+	float CrossfadePeriod,
+	float EdgeBias,
+	float ErosionDepth,
+	float4 StructureNoiseWeights,
+	float StructureScale,
+	float StructureAspect,
 	float StructureRelief,
 	float StructureErosion,
-	float4 FadeRanges,
-	float2 BandMix)
+	float StructureFlowInherit,
+	float StructureShearInherit,
+	float StructureFadeNear,
+	float StructureFadeSpan,
+	float StructureBandMix,
+	float StructureCrossfade,
+	float4 DetailNoiseWeights,
+	float DetailScale,
+	float DetailAspect,
+	float DetailRelief,
+	float DetailErosion,
+	float DetailFlowInherit,
+	float DetailShearInherit,
+	float DetailFadeNear,
+	float DetailFadeSpan,
+	float DetailBandMix,
+	float DetailCrossfade,
+	float DeckSlope)
 {
     GGFieldParams F;
 
-    F.Scales = Scales;
-    F.Warps = Warps;
-    F.DetailNoise = DetailNoise;
-    F.StructureNoise = StructureNoise;
-    F.EdgeBias = EdgeBias;
-
-    F.Relief = Relief;
-    F.Profile = Profile;
-    F.DeckSlope = DeckSlope;
-
-	// Floored so a zero period is a stopped clock rather than a divide.
-    F.CrossfadeTime = Time / max(Crossfade.x, 1e-3f);
-    F.CrossfadeDetail = Crossfade.y;
-    F.CrossfadeStructure = Crossfade.z;
-
     F.PlanetRadius = PlanetRadius;
+    F.HeightScale = HeightScale;
 
-    F.Thickness = max(Profile.x, 1e-4f);
-
-    F.GradientDepth = max(Profile.w, 1e-4f);
-    F.SpinAngle = -RotationWeight * Time;
+    F.GradientThickness = max(GradientThickness, 1e-4f);
+    F.DeckBackstop = DeckBackstop;
+    F.DensityCurve = DensityCurve;
 
     F.BandSharpness = BandSharpness;
+    F.BandBias = BandBias;
+    F.BandRelief = BandRelief;
+    F.PressureRelief = PressureRelief;
+    F.VortexThreshold = VortexThreshold;
+    F.StormTowerRelief = StormTowerRelief;
     F.ReliefThinning = ReliefThinning;
-    F.DetailVertical = DetailVertical;
-    F.StructureVertical = StructureVertical;
-    F.DetailErosion = DetailErosion;
-    F.DetailRelief = DetailRelief;
+
+    F.WarpTime = WarpTime;
+    F.TurbulenceFloor = TurbulenceFloor;
+
+    F.EdgeBias = EdgeBias;
     F.ErosionDepth = ErosionDepth;
-    F.DensityCurve = DensityCurve;
+
+    F.StructureNoiseWeights = StructureNoiseWeights;
+    F.StructureScale = StructureScale;
     F.StructureRelief = StructureRelief;
     F.StructureErosion = StructureErosion;
+    F.StructureFlowInherit = StructureFlowInherit;
+    F.StructureShearInherit = StructureShearInherit;
+    F.StructureFadeNear = StructureFadeNear;
+    F.StructureBandMix = StructureBandMix;
+    F.StructureCrossfade = StructureCrossfade;
 
-    F.DetailFade = 1.0f;
+    F.DetailNoiseWeights = DetailNoiseWeights;
+    F.DetailScale = DetailScale;
+    F.DetailRelief = DetailRelief;
+    F.DetailErosion = DetailErosion;
+    F.DetailFlowInherit = DetailFlowInherit;
+    F.DetailShearInherit = DetailShearInherit;
+    F.DetailFadeNear = DetailFadeNear;
+    F.DetailBandMix = DetailBandMix;
+    F.DetailCrossfade = DetailCrossfade;
+
+    F.DeckSlope = DeckSlope;
+
+    F.Thickness = max(PlanetRadius * HeightScale, 1e-4f);
+
+	// THE BASE HANGS FROM THE CEILING. Every upward term at its most generous:
+	// Elevation is in [0,1] so the band gives half its relief either side of the
+	// base; pressure is soft-saturated to [-1,1]; the structure carve is signed,
+	// half each way; the detail carve follows GG_DETAIL_RELIEF_CENTRED. The
+	// same terms GG_TopBounds sums, so its OutMax lands CeilingReserve of the
+	// way above DeckTop.
+#if GG_DETAIL_RELIEF_CENTRED
+    const float DetailUp = 0.5f * abs(DetailRelief);
+#else
+    const float DetailUp = max(-DetailRelief, 0.0f);
+#endif
+    const float UpBudget = 0.5f * abs(BandRelief) + abs(PressureRelief)
+		+ 0.5f * abs(StructureRelief) + DetailUp + max(StormTowerRelief, 0.0f);
+
+    F.DeckBase = DeckTop - GradientThickness * UpBudget * CeilingReserve;
+
+    F.DeepShearTime = WarpTime * DeepShearRatio;
+    F.SpinAngle = -RotationWeight * Time;
+
+	// CrossfadePeriod is authored in simulated seconds and converted to real
+	// ones here. Both floors keep a zero from becoming a divide: a zero period
+	// is a stopped clock.
+    const float CrossfadePeriodReal = CrossfadePeriod / max(SimTimeScale, 1e-4f);
+    F.CrossfadeTime = Time / max(CrossfadePeriodReal, 1e-3f);
+
+    F.StructureVertical = StructureScale * StructureAspect * HeightScale;
+    F.DetailVertical = DetailScale * DetailAspect * HeightScale;
+
+	// Each far edge held above its own near one: equal endpoints make smoothstep
+	// a step, and a step here is a ring across the disc at a fixed distance.
+    F.StructureFadeFar = StructureFadeNear + max(StructureFadeSpan, 1e-4f);
+    F.DetailFadeFar = DetailFadeNear + max(DetailFadeSpan, 1e-4f);
+
     F.StructureFade = 1.0f;
-
-
-	// Each Far held above its own Near: equal endpoints make smoothstep a step,
-	// and a step here is a ring across the disc at a fixed distance.
-    F.DetailFadeNear = FadeRanges.x;
-    F.DetailFadeFar = max(FadeRanges.y, FadeRanges.x + 1e-4f);
-    F.StructureFadeNear = FadeRanges.z;
-    F.StructureFadeFar = max(FadeRanges.w, FadeRanges.z + 1e-4f);
-
-    F.BandMix = BandMix;
+    F.DetailFade = 1.0f;
 
     return F;
 }
@@ -475,7 +535,7 @@ float GG_DeckDensity(float Height, float Top, float Bottom, float Curve)
 
 
 /** Where a column's gradient bottoms out: the authored thickness below its own
- *  top, backstopped by Profile.y. THE ONE PLACE THE FLOOR IS DERIVED -- the
+ *  top, backstopped by DeckBackstop. THE ONE PLACE THE FLOOR IS DERIVED -- the
  *  profile, the erosion normalization and the solid-region skip all have to
  *  agree about it or the skip fills in cloud the profile left transparent.
  *
@@ -488,7 +548,25 @@ float GG_DeckDensity(float Height, float Top, float Bottom, float Curve)
  *  what lets the skip test a lower bound. */
 float GG_DeckFloor(float Top, GGFieldParams F)
 {
-    return min(max(Top - F.GradientDepth, F.Profile.y), Top);
+    return min(max(Top - F.GradientThickness, F.DeckBackstop), Top);
+}
+
+
+/** The deck's extinction coefficient per atmosphere thickness, solved so a ray
+ *  down an unrelieved column accumulates DeckOpticalDepth at core density: the
+ *  gradient integrates to half its span, plus the saturated region below the
+ *  floor. Multiply by a tint for colour and divide by Thickness for world
+ *  units.
+ *
+ *  SOLVED RATHER THAN AUTHORED, so retuning the shell or the anchors leaves the
+ *  deck's opacity where it was put. Shared by the march and the bake, which is
+ *  what keeps the depth at which the map goes opaque the depth at which the eye
+ *  sees it go opaque. */
+float GG_DeckBeta(GGFieldParams F, float DeckOpticalDepth)
+{
+    const float Floor = GG_DeckFloor(F.DeckBase, F);
+
+    return DeckOpticalDepth / max(0.5f * (F.DeckBase + Floor), 1e-4f);
 }
 
 
@@ -521,18 +599,18 @@ float GG_CloudTop(
 	float ReliefScale,
 	GGFieldParams F)
 {
-    const float D = F.GradientDepth;
+    const float D = F.GradientThickness;
 
-    float Top = F.Relief.x + D * ReliefScale * F.Relief.y * (Elevation - 0.5f);
+    float Top = F.DeckBase + D * ReliefScale * F.BandRelief * (Elevation - 0.5f);
 
     Top -= D * F.DetailRelief * CarveDetail;
     Top += D * F.StructureRelief * ReliefStructure;
 
-    Top += D * F.Relief.z * Pressure;
+    Top += D * F.PressureRelief * Pressure;
 
-    const float Vortex = smoothstep(F.Profile.z, 1.0f, abs(Pressure));
+    const float Vortex = smoothstep(F.VortexThreshold, 1.0f, abs(Pressure));
 
-    Top += D * F.Relief.w * (1.0f - StormCells) * Vortex;
+    Top += D * F.StormTowerRelief * (1.0f - StormCells) * Vortex;
 
     return Top;
 }
@@ -575,26 +653,26 @@ GGFlowProbe GG_ProbeFromFlow(float4 Flow, GGFieldParams F)
 {
     GGFlowProbe Probe;
 
-    Probe.Band = (Flow.w + F.Warps.z) * F.BandSharpness;
+    Probe.Band = (Flow.w + F.BandBias) * F.BandSharpness;
     Probe.Pressure = Flow.z;
 
     const float Elevation = 1.0f - exp(-Probe.Band * Probe.Band);
 
-    const float D = F.GradientDepth;
+    const float D = F.GradientThickness;
 
-    const float Base = F.Relief.x + D * F.Relief.z * Probe.Pressure;
+    const float Base = F.DeckBase + D * F.PressureRelief * Probe.Pressure;
 
-    const float BandTerm = F.Relief.y * (Elevation - 0.5f);
+    const float BandTerm = F.BandRelief * (Elevation - 0.5f);
 
-    const float Vortex = smoothstep(F.Profile.z, 1.0f, abs(Probe.Pressure));
+    const float Vortex = smoothstep(F.VortexThreshold, 1.0f, abs(Probe.Pressure));
 
-    Probe.Top = Base + D * (max(BandTerm, 0.0f) + max(F.Relief.w, 0.0f) * Vortex);
+    Probe.Top = Base + D * (max(BandTerm, 0.0f) + max(F.StormTowerRelief, 0.0f) * Vortex);
 
     const float CarveDown = max(F.DetailRelief, 0.0f) * saturate(F.DetailFade)
 		+ 0.5f * abs(F.StructureRelief) * saturate(F.StructureFade);
 
     Probe.TopLower = Base
-		+ D * (min(BandTerm, 0.0f) + min(F.Relief.w, 0.0f) * Vortex - CarveDown);
+		+ D * (min(BandTerm, 0.0f) + min(F.StormTowerRelief, 0.0f) * Vortex - CarveDown);
 
     return Probe;
 }
@@ -627,7 +705,7 @@ float GG_CloudTopUpper(
 {
     const float Top = GG_FlowProbe(FlowField, FlowSampler, P, F).Top;
 
-    return Top + F.GradientDepth * (max(-F.DetailRelief, 0.0f)
+    return Top + F.GradientThickness * (max(-F.DetailRelief, 0.0f)
 		+ 0.5f * abs(F.StructureRelief));
 }
 
@@ -690,7 +768,7 @@ float GG_DeckEntry(
         const float Horizontal = sqrt(max(1.0f - ProbeRate * ProbeRate, 0.0f));
 
         const float ClosingRate = -ProbeRate
-			+ Horizontal * max(F.DeckSlope, 0.1f) * F.GradientDepth * F.Thickness
+			+ Horizontal * max(F.DeckSlope, 0.1f) * F.GradientThickness * F.Thickness
 				/ max(ProbeRadius, 1e-4f);
 
         const float Advance = (ProbeHeight - TopUpper) * F.Thickness / max(ClosingRate, 1e-5f);
@@ -735,7 +813,7 @@ GGFieldSample GG_Field(
 {
     const float Pressure = Flow0.z;
 
-    const float Zeta = (Flow0.w + F.Warps.z) * F.BandSharpness;
+    const float Zeta = (Flow0.w + F.BandBias) * F.BandSharpness;
 
     const float BandSigned = Zeta;
 
@@ -753,9 +831,9 @@ GGFieldSample GG_Field(
 	// Turbulence follows the shear and the shear lives at the boundaries, so
 	// zone interiors go nearly laminar. Without it the bands read as one
 	// scalloped curve repeated all the way round.
-    const float Turbulence = lerp(F.Warps.w, 1.0f, Boundary);
+    const float Turbulence = lerp(F.TurbulenceFloor, 1.0f, Boundary);
 
-    const float StepTime = (F.Warps.x * Turbulence) / (float) GG_WARP_ITERATIONS;
+    const float StepTime = (F.WarpTime * Turbulence) / (float) GG_WARP_ITERATIONS;
 
     float3 Pos = N;
 
@@ -792,7 +870,7 @@ GGFieldSample GG_Field(
     const float3 FlowWarp = Warped - N;
 
     float Ridge = 0.5f;
-    float3 DetailWarp = 0.0f;
+    float3 DeepShear = 0.0f;
 
 	// -- Crossfade ----------------------------------------------------------
 	//
@@ -827,39 +905,41 @@ GGFieldSample GG_Field(
     const bool bWantDetail = (F.DetailFade > 0.0f);
     const bool bWantStructure = (F.StructureFade > 0.0f);
 
-    float3 PDetail = N;
-
     BRANCH
 
-
-	// Fine shear, WANTED BY BOTH LAYERS. A different sim slice
+	// DEEP SHEAR, ONE STEP THROUGH THE DEEP FLOW LAYER. A different sim slice
 	// from the coarse warp, which is what produces genuine vertical wind shear.
-	// Inherits only a FRACTION of the coarse displacement, since a displacement
-	// field with a large gradient IS strain. OUTSIDE THE DETAIL BRANCH, BECAUSE
-	// THIS IS GEOMETRY RATHER THAN NOISE: the structure layer positions itself
-	// with it, so computing it only where detail survives would make structure
-	// warp differently either side of the detail fade -- a discontinuity in
-	// MOTION, which softening the fade cannot hide.
+	// Sampled at the detail layer's flow-only position. OUTSIDE EITHER LAYER'S
+	// BRANCH, BECAUSE THIS IS GEOMETRY RATHER THAN NOISE: computed only where
+	// one layer survives, the other would warp differently either side of that
+	// layer's fade -- a discontinuity in MOTION, which softening cannot hide.
     if (bWantDetail || bWantStructure)
     {
-        PDetail = normalize(N + FlowWarp * F.Scales.z);
+        const float3 PShear = normalize(N + FlowWarp * F.DetailFlowInherit);
 
-        const float4 DeepFlow = GG_SampleFlow(FlowField, FlowSampler, PDetail, GG_DEEP_FLOW_LAYER);
+        const float4 DeepFlow = GG_SampleFlow(FlowField, FlowSampler, PShear, GG_DEEP_FLOW_LAYER);
 
-        DetailWarp = GG_FlowVelocity(PDetail, DeepFlow) * (F.Warps.y * Turbulence);
+        DeepShear = GG_FlowVelocity(PShear, DeepFlow) * (F.DeepShearTime * Turbulence);
     }
+
+	// Each layer's displacement: its FlowInherit of the coarse warp plus its
+	// ShearInherit of the deep shear. A displacement field with a large gradient
+	// IS strain, so inheriting one whole imposes an order-one strain on a layer
+	// regardless of its own flow.
+    const float3 DetailWarp = FlowWarp * F.DetailFlowInherit + DeepShear * F.DetailShearInherit;
+    const float3 StructureWarp = FlowWarp * F.StructureFlowInherit + DeepShear * F.StructureShearInherit;
 
     BRANCH
 
     if (bWantDetail)
     {
-		// SAMPLED IN TRUE 3D. PDetail is a unit direction, so PDetail * Scale
+		// SAMPLED IN TRUE 3D. The position is a unit direction, so it times Scale
 		// alone traces a sphere through the volume -- a 2D slice discarding the
 		// vertical structure the bake put there. NO INDEPENDENT DRIFT: a clock
 		// scrolling the volume through its own domain makes the detail change
 		// whether or not anything is happening to it, which is grain by
-		// definition. If it looks pinned, raise Warps.x.
-        const float UVWScale = F.Scales.x + Height * F.DetailVertical;
+		// definition. If it looks pinned, raise WarpTime.
+        const float UVWScale = F.DetailScale + Height * F.DetailVertical;
 
 		// MIP 0, ALWAYS. A footprint-derived mip blurs along the shell and
 		// erases the vertical structure a high aspect ratio builds, flattening a
@@ -870,15 +950,15 @@ GGFieldSample GG_Field(
 
         BRANCH
 
-        if (F.CrossfadeDetail > 0.0f)
+        if (F.DetailCrossfade > 0.0f)
         {
-			// The two phases differ only in how far along the SAME warp they
-			// sit, so one flow loop serves both. The deep-flow fetch stays on
-			// the unphased position: it decides how the layer is sheared, not
+			// The two phases differ only in how far along the SAME displacement
+			// they sit, so one flow loop serves both. The deep-flow fetch stays
+			// on the unphased position: it decides how the layer is sheared, not
 			// where it is, and a second fetch of it would double the loop's cost
 			// to move a displacement the crossfade is already blending across.
-            const float3 PA = normalize(N + FlowWarp * (F.Scales.z * WarpMulA));
-            const float3 PB = normalize(N + FlowWarp * (F.Scales.z * WarpMulB));
+            const float3 PA = normalize(N + DetailWarp * WarpMulA);
+            const float3 PB = normalize(N + DetailWarp * WarpMulB);
 
             DetailSample = lerp(
 				DetailVolume.SampleLevel(DetailSampler, PB * UVWScale, 0.0f),
@@ -888,12 +968,12 @@ GGFieldSample GG_Field(
         else
         {
             DetailSample = DetailVolume.SampleLevel(
-				DetailSampler, PDetail * UVWScale, 0.0f);
+				DetailSampler, normalize(N + DetailWarp) * UVWScale, 0.0f);
         }
 
         Ridge = GG_PerlinWorley(
 			DetailSample.r,
-			GG_WorleyLadder(DetailSample.gba, F.DetailNoise.xyz));
+			GG_WorleyLadder(DetailSample.gba, F.DetailNoiseWeights.xyz));
     }
 
 
@@ -906,16 +986,14 @@ GGFieldSample GG_Field(
 
     if (bWantStructure)
     {
-        const float3 StructureWarp = FlowWarp + DetailWarp;
-
-        const float UVWScale = F.Scales.y + Height * F.StructureVertical;
+        const float UVWScale = F.StructureScale + Height * F.StructureVertical;
 
         BRANCH
 
-        if (F.CrossfadeStructure > 0.0f)
+        if (F.StructureCrossfade > 0.0f)
         {
-            const float3 PA = normalize(N + StructureWarp * (F.Scales.w * WarpMulA));
-            const float3 PB = normalize(N + StructureWarp * (F.Scales.w * WarpMulB));
+            const float3 PA = normalize(N + StructureWarp * WarpMulA);
+            const float3 PB = normalize(N + StructureWarp * WarpMulB);
 
             Structure = lerp(
 				StructureVolume.SampleLevel(StructureSampler, PB * UVWScale, 0.0f),
@@ -924,10 +1002,10 @@ GGFieldSample GG_Field(
         }
         else
         {
-			// Its own inheritance, and 0 is legitimate rather than degenerate:
-			// this layer breaks the flow into rounded shapes, and a shape
-			// dragged through the flow field is no longer round.
-            const float3 PStructure = normalize(N + StructureWarp * F.Scales.w);
+			// Zero inheritance is legitimate rather than degenerate: this layer
+			// breaks the flow into rounded shapes, and a shape dragged through the
+			// flow field is no longer round.
+            const float3 PStructure = normalize(N + StructureWarp);
 
             Structure = StructureVolume.SampleLevel(
 				StructureSampler, PStructure * UVWScale, 0.0f);
@@ -946,7 +1024,7 @@ GGFieldSample GG_Field(
 
     const float StrainRate = length(LastVelocity - FirstVelocity) / max(Travelled, 1e-5f);
 
-    const float Winding = StrainRate * F.Warps.x;
+    const float Winding = StrainRate * F.WarpTime;
 
     const float ReliefScale = 1.0f / (1.0f + F.ReliefThinning * Winding);
 
@@ -958,14 +1036,14 @@ GGFieldSample GG_Field(
 
     const float StructureMix = GG_PerlinWorley(
 		Structure.r,
-		GG_WorleyLadder(Structure.gba, F.StructureNoise.xyz));
+		GG_WorleyLadder(Structure.gba, F.StructureNoiseWeights.xyz));
 
 
 	// Fade enters HERE rather than at the consumption sites, so it scales the
 	// noise's EFFECT and leaves its scale alone -- structure stays the same size
 	// as it dims rather than growing.
-    const float DetailWeight = saturate(Edge * F.DetailNoise.w * F.DetailFade);
-    const float StructureWeight = saturate(Edge * F.StructureNoise.w * F.StructureFade);
+    const float DetailWeight = saturate(Edge * F.DetailNoiseWeights.w * F.DetailFade);
+    const float StructureWeight = saturate(Edge * F.StructureNoiseWeights.w * F.StructureFade);
 
 
 	// EROSION KEEPS ITS NEUTRAL AT 1, since it multiplies density and may only
@@ -994,8 +1072,8 @@ GGFieldSample GG_Field(
 	// zero contour and redraws the clean line as a discontinuity. The detail
 	// term is median-centred regardless of GG_DETAIL_RELIEF_CENTRED; the
 	// one-sided carve would push every boundary toward one family.
-    const float BandShift = 2.0f * (F.BandMix.x * ReliefStructure
-		+ F.BandMix.y * DetailWeight * (0.5f - Ridge));
+    const float BandShift = 2.0f * (F.StructureBandMix * ReliefStructure
+		+ F.DetailBandMix * DetailWeight * (0.5f - Ridge));
 
 
 	// THE TOWER GATE RIDES THE SAME FADE. Left raw it holds full height to the
@@ -1152,14 +1230,13 @@ float4 GG_Density(
 
 /** Closed-form bounds on the cloud top, in atmosphere fractions.
  *
- *  EVERY TERM IN GG_CloudTop HAS TO APPEAR HERE, and it must stay in step with
- *  GetTopMax/GetTopMin in AtmosphereParams.h, which say the same thing in
- *  another language. An underestimate is not conservative, it is a clipping
- *  error: the cull radius comes from OutMax, so a term left out slices the tops
- *  off exactly the features it belongs to. Elevation is in [0,1] so the band
- *  contributes half of Relief.y either side of the base; pressure is
- *  soft-saturated sim-side so it contributes the whole of Relief.z; ReliefScale
- *  never exceeds one, so ignoring it errs safe.
+ *  EVERY TERM IN GG_CloudTop HAS TO APPEAR HERE, and in the upward budget
+ *  GG_BuildField solves DeckBase from. An underestimate is not conservative, it
+ *  is a clipping error: the cull radius comes from OutMax, so a term left out
+ *  slices the tops off exactly the features it belongs to. Elevation is in
+ *  [0,1] so the band contributes half of BandRelief either side of the base;
+ *  pressure is soft-saturated sim-side so it contributes the whole of
+ *  PressureRelief; ReliefScale never exceeds one, so ignoring it errs safe.
  *
  *  THE CARVES ARE SCALED BY THE FADES, because a bound reserving room for a
  *  layer a faded ray never sees coarsens the march wherever that layer is
@@ -1178,9 +1255,9 @@ void GG_TopBounds(
 	out float OutMin,
 	out float OutMax)
 {
-    const float D = F.GradientDepth;
+    const float D = F.GradientThickness;
 
-    const float Span = D * (0.5f * abs(F.Relief.y) + abs(F.Relief.z));
+    const float Span = D * (0.5f * abs(F.BandRelief) + abs(F.PressureRelief));
 
 
 	// Structure is signed about the median, so half of its reach lands in each
@@ -1205,8 +1282,8 @@ void GG_TopBounds(
     const float DetailUp = (F.DetailRelief < 0.0f) ? DetailCarve : 0.0f;
 #endif
 
-    OutMin = F.Relief.x - Span - StructureHalf - DetailDown;
+    OutMin = F.DeckBase - Span - StructureHalf - DetailDown;
 
-    OutMax = F.Relief.x + Span + StructureHalf + DetailUp
-		+ D * max(F.Relief.w, 0.0f);
+    OutMax = F.DeckBase + Span + StructureHalf + DetailUp
+		+ D * max(F.StormTowerRelief, 0.0f);
 }

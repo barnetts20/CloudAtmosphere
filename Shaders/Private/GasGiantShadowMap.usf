@@ -126,26 +126,29 @@ static const float2 GGShadow_SubOffsets[4] =
     float2(0.375f, 0.125f),
 };
 
-Texture2DArray ShadowFlowField;
-SamplerState ShadowFlowSampler;
+Texture2DArray FlowTarget;
+SamplerState FlowTargetSampler;
 
-Texture3D ShadowDetailVolume;
-SamplerState ShadowDetailSampler;
+Texture3D DetailVolume;
+SamplerState DetailVolumeSampler;
 
-Texture3D ShadowStructureVolume;
-SamplerState ShadowStructureSampler;
+Texture3D StructureVolume;
+SamplerState StructureVolumeSampler;
 
 RWTexture2DArray<float4> ShadowMapUAV;
 
-/** (ScatterNeg.a, ScatterPos.a, ScatterBase.a, BandScale). The per-band
- *  extinction MULTIPLIER only -- the albedo belongs to the scattering site and
- *  stays per-pixel. */
-float4 ShadowScatterAlphas;
+/** Each band's extinction: rgb tint, amount in a. The map stores one scalar
+ *  depth, so the bake reads the amounts; the albedo belongs to the scattering
+ *  site and stays per-pixel. */
+float4 ExtinctionNegative;
+float4 ExtinctionPositive;
+float4 ExtinctionBase;
+float BandScale;
 
-/** cloudAbsorptionBeta AS PUSHED, before the material's divide by atmosphere
- *  thickness. The march applies that divide in AtmosphereSetup; the bake applies
- *  it where AbsMax is taken. Whichever side converts, both must. */
-float3 ShadowAbsBeta;
+/** Solved into the light ray's coefficient by GG_DeckBeta, as the material
+ *  solves it. */
+float DeckOpticalDepth;
+float LightExtinctionFraction;
 
 int2 ShadowMapSize;
 float2 ShadowInvMapSize;
@@ -166,64 +169,108 @@ float3 ShadowLightDir;
  *  It is a property of the delivery, not of the pass. */
 float3 ShadowCameraLocal;
 
-// -- GG_BuildField pins, in its argument order ------------------------------
+// -- GG_BuildField's arguments, in its order -------------------------------
 //
-// The same values the material composes from its own pins, so there is one
+// The same values the material passes, under the same names, so there is one
 // derivation of the deck rather than two. Any addition to GG_BuildField's
 // signature has to appear here and in FGasGiantShadowParams.
 
-float ShadowPlanetRadius;
-float ShadowTime;
-float ShadowRotationWeight;
-float4 ShadowScales;
-float4 ShadowWarps;
-float4 ShadowDetailNoise;
-float4 ShadowStructureNoise;
-float ShadowEdgeBias;
-float ShadowDeckSlope;
-float4 ShadowCrossfade;
-float4 ShadowRelief;
-float4 ShadowProfile;
-float ShadowBandSharpness;
-float ShadowReliefThinning;
-float ShadowDetailVertical;
-float ShadowStructureVertical;
-float ShadowDetailErosion;
-float ShadowDetailRelief;
-float ShadowErosionDepth;
-float ShadowDensityCurve;
-float ShadowStructureRelief;
-float ShadowStructureErosion;
-float4 ShadowFadeRanges;
-float2 ShadowBandMix;
+float PlanetRadius;
+float HeightScale;
+float Time;
+float SimTimeScale;
+float DeckTop;
+float CeilingReserve;
+float GradientThickness;
+float DeckBackstop;
+float DensityCurve;
+float BandSharpness;
+float BandBias;
+float BandRelief;
+float PressureRelief;
+float VortexThreshold;
+float StormTowerRelief;
+float ReliefThinning;
+float RotationWeight;
+float WarpTime;
+float DeepShearRatio;
+float TurbulenceFloor;
+float CrossfadePeriod;
+float EdgeBias;
+float ErosionDepth;
+float4 StructureNoiseWeights;
+float StructureScale;
+float StructureAspect;
+float StructureRelief;
+float StructureErosion;
+float StructureFlowInherit;
+float StructureShearInherit;
+float StructureFadeNear;
+float StructureFadeSpan;
+float StructureBandMix;
+float StructureCrossfade;
+float4 DetailNoiseWeights;
+float DetailScale;
+float DetailAspect;
+float DetailRelief;
+float DetailErosion;
+float DetailFlowInherit;
+float DetailShearInherit;
+float DetailFadeNear;
+float DetailFadeSpan;
+float DetailBandMix;
+float DetailCrossfade;
+float DeckSlope;
 
 GGFieldParams GGShadow_Field()
 {
     return GG_BuildField(
-		ShadowPlanetRadius,
-		ShadowTime,
-		ShadowRotationWeight,
-		ShadowScales,
-		ShadowWarps,
-		ShadowDetailNoise,
-		ShadowStructureNoise,
-		ShadowEdgeBias,
-		ShadowDeckSlope,
-		ShadowCrossfade,
-		ShadowRelief,
-		ShadowProfile,
-		ShadowBandSharpness,
-		ShadowReliefThinning,
-		ShadowDetailVertical,
-		ShadowStructureVertical,
-		ShadowDetailErosion,
-		ShadowDetailRelief,
-		ShadowErosionDepth,
-		ShadowDensityCurve,
-		ShadowStructureRelief,
-		ShadowStructureErosion,
-		ShadowFadeRanges,
-		ShadowBandMix);
+		PlanetRadius,
+		HeightScale,
+		Time,
+		SimTimeScale,
+		DeckTop,
+		CeilingReserve,
+		GradientThickness,
+		DeckBackstop,
+		DensityCurve,
+		BandSharpness,
+		BandBias,
+		BandRelief,
+		PressureRelief,
+		VortexThreshold,
+		StormTowerRelief,
+		ReliefThinning,
+		RotationWeight,
+		WarpTime,
+		DeepShearRatio,
+		TurbulenceFloor,
+		CrossfadePeriod,
+		EdgeBias,
+		ErosionDepth,
+		StructureNoiseWeights,
+		StructureScale,
+		StructureAspect,
+		StructureRelief,
+		StructureErosion,
+		StructureFlowInherit,
+		StructureShearInherit,
+		StructureFadeNear,
+		StructureFadeSpan,
+		StructureBandMix,
+		StructureCrossfade,
+		DetailNoiseWeights,
+		DetailScale,
+		DetailAspect,
+		DetailRelief,
+		DetailErosion,
+		DetailFlowInherit,
+		DetailShearInherit,
+		DetailFadeNear,
+		DetailFadeSpan,
+		DetailBandMix,
+		DetailCrossfade,
+		DeckSlope);
 }
 
 /** Per-layer level of detail at a point, from its distance to the camera.
@@ -247,11 +294,11 @@ void GGShadow_Fades(float3 LocalPos, GGFieldParams F, out float OutDetail, out f
  *  blends them through their midpoint and loses the boundary between them. */
 float GGShadow_BandAlpha(float Band)
 {
-    const float T = clamp(Band * ShadowScatterAlphas.w, -1.0f, 1.0f);
+    const float T = clamp(Band * BandScale, -1.0f, 1.0f);
 
-    const float Hue = (T < 0.0f) ? ShadowScatterAlphas.x : ShadowScatterAlphas.y;
+    const float Hue = (T < 0.0f) ? ExtinctionNegative.a : ExtinctionPositive.a;
 
-    return lerp(ShadowScatterAlphas.z, Hue, abs(T));
+    return lerp(ExtinctionBase.a, Hue, abs(T));
 }
 
 /** Extinction at a point, averaged across the texel's footprint.
@@ -294,9 +341,9 @@ float GGShadow_Sigma(
         const float3 SubPos = Pos + BasisU * Offset.x + BasisV * Offset.y;
 
         const float4 Deck = GG_Density(
-			ShadowFlowField, ShadowFlowSampler,
-			ShadowDetailVolume, ShadowDetailSampler,
-			ShadowStructureVolume, ShadowStructureSampler,
+			FlowTarget, FlowTargetSampler,
+			DetailVolume, DetailVolumeSampler,
+			StructureVolume, StructureVolumeSampler,
 			SubPos, StepHalfHeight, F);
 
 		// Band scales extinction, so a belt shadows more than a zone, and it
@@ -411,7 +458,7 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     const float TexelWorld = 2.0f * ShadowExtent / float(max(ShadowMapSize.x, 1));
 
     float TEntry =
-		GG_DeckEntry(ShadowFlowField, ShadowFlowSampler, Origin, Dir, 0.0f, RayLength, TopMax, F);
+		GG_DeckEntry(FlowTarget, FlowTargetSampler, Origin, Dir, 0.0f, RayLength, TopMax, F);
 
 	// WHERE TO START MARCHING, NOT WHAT TO STORE. The traced entry is the centre
 	// column's deck top, which is a point sample and would snap by a texel as
@@ -434,21 +481,20 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         TEntry = max(0.0f, TEntry - TexelWorld * GG_SHADOW_ENTRY_BACKOFF / max(EntryRate, 0.1f));
     }
 
-	// MATCHES THE MATERIAL'S CONVERSION. AtmosphereSetup divides the pushed
-	// absorption beta by the atmosphere thickness before the march ever sees it,
-	// and F.Thickness IS that thickness -- both are Profile.x. Folding the raw
-	// value in here instead leaves every reconstructed optical depth too large
-	// by a whole atmosphere thickness in WORLD UNITS, which is tens of thousands
-	// of them: the deck reads as opaque everywhere and the only way to see lit
-	// cloud is to wind the authored optical depth up by the same factor.
-    const float3 AbsBeta = ShadowAbsBeta / max(F.Thickness, 1e-4f);
+	// MATCHES THE MATERIAL'S CONVERSION. GG_DeckBeta is per atmosphere
+	// thickness and AtmosphereSetup divides by that thickness before the march
+	// sees it; F.Thickness IS that thickness. Skipping the divide leaves every
+	// reconstructed optical depth too large by a whole atmosphere thickness in
+	// WORLD UNITS: the deck reads as opaque everywhere.
+    const float3 AbsBeta = ExtinctionBase.rgb
+		* (GG_DeckBeta(F, DeckOpticalDepth) * LightExtinctionFraction / F.Thickness);
 
     const float AbsMax = max(AbsBeta.x, max(AbsBeta.y, AbsBeta.z));
 
 	// The radial advance a step is allowed. The gradient is the only part of the
 	// profile that varies, so it is what the budget is spent on.
     const float HeightStep =
-		F.GradientDepth * F.Thickness / max(GG_SHADOW_STEPS_PER_GRADIENT, 1.0f);
+		F.GradientThickness * F.Thickness / max(GG_SHADOW_STEPS_PER_GRADIENT, 1.0f);
 
 	// The outer lattice: fixed multiples of this from t = 0. Constant along the
 	// ray, so a boundary is a property of the geometry alone and cannot move
@@ -491,7 +537,7 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         const float HeightCost = RadialRate / max(HeightStep, 1e-6f);
 
         const float LateralCost =
-			LateralRate / max(GG_FlowTexelArc(ShadowFlowField, Radius) * 0.5f, 1e-6f);
+			LateralRate / max(GG_FlowTexelArc(FlowTarget, Radius) * 0.5f, 1e-6f);
 
         float Demand = rsqrt(max(HeightCost * HeightCost + LateralCost * LateralCost, 1e-12f));
 

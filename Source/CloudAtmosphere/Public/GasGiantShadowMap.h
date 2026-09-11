@@ -39,47 +39,69 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 
 	// -- Deck ---------------------------------------------------------------
 	//
-	// GG_BuildField's argument list, in its order. An addition there has to
-	// appear here and in GasGiantShadowMap.usf.
+	// GG_BuildField's arguments, in its order and under its names -- the same
+	// names the material parameters carry. An addition there has to appear here
+	// and in GasGiantShadowMap.usf.
 
 	float PlanetRadius = 0.0f;
+	float HeightScale = 0.0f;
 	float Time = 0.0f;
-	float RotationWeight = 0.0f;
-
-	FVector4f Scales = FVector4f::Zero();
-	FVector4f Warps = FVector4f::Zero();
-	FVector4f DetailNoise = FVector4f::Zero();
-	FVector4f StructureNoise = FVector4f::Zero();
-
-	float EdgeBias = 0.0f;
-	float DeckSlope = 0.0f;
-
-	FVector4f Crossfade = FVector4f::Zero();
-	FVector4f Relief = FVector4f::Zero();
-	FVector4f Profile = FVector4f::Zero();
-
-	float BandSharpness = 0.0f;
-	float ReliefThinning = 0.0f;
-	float DetailVertical = 0.0f;
-	float StructureVertical = 0.0f;
-	float DetailErosion = 0.0f;
-	float DetailRelief = 0.0f;
-	float ErosionDepth = 0.0f;
+	float SimTimeScale = 0.0f;
+	float DeckTop = 0.0f;
+	float CeilingReserve = 0.0f;
+	float GradientThickness = 0.0f;
+	float DeckBackstop = 0.0f;
 	float DensityCurve = 0.0f;
+	float BandSharpness = 0.0f;
+	float BandBias = 0.0f;
+	float BandRelief = 0.0f;
+	float PressureRelief = 0.0f;
+	float VortexThreshold = 0.0f;
+	float StormTowerRelief = 0.0f;
+	float ReliefThinning = 0.0f;
+	float RotationWeight = 0.0f;
+	float WarpTime = 0.0f;
+	float DeepShearRatio = 0.0f;
+	float TurbulenceFloor = 0.0f;
+	float CrossfadePeriod = 0.0f;
+	float EdgeBias = 0.0f;
+	float ErosionDepth = 0.0f;
+	FVector4f StructureNoiseWeights = FVector4f::Zero();
+	float StructureScale = 0.0f;
+	float StructureAspect = 0.0f;
 	float StructureRelief = 0.0f;
 	float StructureErosion = 0.0f;
+	float StructureFlowInherit = 0.0f;
+	float StructureShearInherit = 0.0f;
+	float StructureFadeNear = 0.0f;
+	float StructureFadeSpan = 0.0f;
+	float StructureBandMix = 0.0f;
+	float StructureCrossfade = 0.0f;
+	FVector4f DetailNoiseWeights = FVector4f::Zero();
+	float DetailScale = 0.0f;
+	float DetailAspect = 0.0f;
+	float DetailRelief = 0.0f;
+	float DetailErosion = 0.0f;
+	float DetailFlowInherit = 0.0f;
+	float DetailShearInherit = 0.0f;
+	float DetailFadeNear = 0.0f;
+	float DetailFadeSpan = 0.0f;
+	float DetailBandMix = 0.0f;
+	float DetailCrossfade = 0.0f;
+	float DeckSlope = 0.0f;
 
-	FVector4f FadeRanges = FVector4f::Zero();
-	FVector2f BandMix = FVector2f::ZeroVector;
+	// -- Extinction ---------------------------------------------------------
+	//
+	// Each band's rgb tint and amount in a, plus what GG_DeckBeta solves the
+	// light ray's coefficient from. The albedo is a property of the scattering
+	// site, not of the medium the light crossed, and stays per-pixel.
 
-	/** (ScatterNeg.a, ScatterPos.a, ScatterBase.a, BandScale). The per-band
-	 *  extinction multiplier only. The albedo is a property of the scattering
-	 *  site, not of the medium the light crossed, and stays per-pixel. */
-	FVector4f ScatterAlphas = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
-
-	/** cloudAbsorptionBeta. Its fastest channel scales the accumulation so the
-	 *  stored thresholds mean transmittance. */
-	FVector3f AbsBeta = FVector3f::OneVector;
+	FVector4f ExtinctionNegative = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
+	FVector4f ExtinctionPositive = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
+	FVector4f ExtinctionBase = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
+	float BandScale = 1.0f;
+	float DeckOpticalDepth = 0.0f;
+	float LightExtinctionFraction = 0.0f;
 
 	// -- Resources ----------------------------------------------------------
 
@@ -121,43 +143,70 @@ SHADER_PARAMETER(FVector2f, ShadowInvMapSize)
 SHADER_PARAMETER(FVector3f, ShadowLightDir)
 SHADER_PARAMETER(FVector3f, ShadowCameraLocal)
 
-SHADER_PARAMETER(float, ShadowPlanetRadius)
-SHADER_PARAMETER(float, ShadowTime)
-SHADER_PARAMETER(float, ShadowRotationWeight)
-SHADER_PARAMETER(FVector4f, ShadowScales)
-SHADER_PARAMETER(FVector4f, ShadowWarps)
-SHADER_PARAMETER(FVector4f, ShadowDetailNoise)
-SHADER_PARAMETER(FVector4f, ShadowStructureNoise)
-SHADER_PARAMETER(float, ShadowEdgeBias)
-SHADER_PARAMETER(float, ShadowDeckSlope)
-SHADER_PARAMETER(FVector4f, ShadowCrossfade)
-SHADER_PARAMETER(FVector4f, ShadowRelief)
-SHADER_PARAMETER(FVector4f, ShadowProfile)
-SHADER_PARAMETER(float, ShadowBandSharpness)
-SHADER_PARAMETER(float, ShadowReliefThinning)
-SHADER_PARAMETER(float, ShadowDetailVertical)
-SHADER_PARAMETER(float, ShadowStructureVertical)
-SHADER_PARAMETER(float, ShadowDetailErosion)
-SHADER_PARAMETER(float, ShadowDetailRelief)
-SHADER_PARAMETER(float, ShadowErosionDepth)
-SHADER_PARAMETER(float, ShadowDensityCurve)
-SHADER_PARAMETER(float, ShadowStructureRelief)
-SHADER_PARAMETER(float, ShadowStructureErosion)
-SHADER_PARAMETER(FVector4f, ShadowFadeRanges)
-SHADER_PARAMETER(FVector2f, ShadowBandMix)
-SHADER_PARAMETER(FVector4f, ShadowScatterAlphas)
-SHADER_PARAMETER(FVector3f, ShadowAbsBeta)
+SHADER_PARAMETER(float, PlanetRadius)
+SHADER_PARAMETER(float, HeightScale)
+SHADER_PARAMETER(float, Time)
+SHADER_PARAMETER(float, SimTimeScale)
+SHADER_PARAMETER(float, DeckTop)
+SHADER_PARAMETER(float, CeilingReserve)
+SHADER_PARAMETER(float, GradientThickness)
+SHADER_PARAMETER(float, DeckBackstop)
+SHADER_PARAMETER(float, DensityCurve)
+SHADER_PARAMETER(float, BandSharpness)
+SHADER_PARAMETER(float, BandBias)
+SHADER_PARAMETER(float, BandRelief)
+SHADER_PARAMETER(float, PressureRelief)
+SHADER_PARAMETER(float, VortexThreshold)
+SHADER_PARAMETER(float, StormTowerRelief)
+SHADER_PARAMETER(float, ReliefThinning)
+SHADER_PARAMETER(float, RotationWeight)
+SHADER_PARAMETER(float, WarpTime)
+SHADER_PARAMETER(float, DeepShearRatio)
+SHADER_PARAMETER(float, TurbulenceFloor)
+SHADER_PARAMETER(float, CrossfadePeriod)
+SHADER_PARAMETER(float, EdgeBias)
+SHADER_PARAMETER(float, ErosionDepth)
+SHADER_PARAMETER(FVector4f, StructureNoiseWeights)
+SHADER_PARAMETER(float, StructureScale)
+SHADER_PARAMETER(float, StructureAspect)
+SHADER_PARAMETER(float, StructureRelief)
+SHADER_PARAMETER(float, StructureErosion)
+SHADER_PARAMETER(float, StructureFlowInherit)
+SHADER_PARAMETER(float, StructureShearInherit)
+SHADER_PARAMETER(float, StructureFadeNear)
+SHADER_PARAMETER(float, StructureFadeSpan)
+SHADER_PARAMETER(float, StructureBandMix)
+SHADER_PARAMETER(float, StructureCrossfade)
+SHADER_PARAMETER(FVector4f, DetailNoiseWeights)
+SHADER_PARAMETER(float, DetailScale)
+SHADER_PARAMETER(float, DetailAspect)
+SHADER_PARAMETER(float, DetailRelief)
+SHADER_PARAMETER(float, DetailErosion)
+SHADER_PARAMETER(float, DetailFlowInherit)
+SHADER_PARAMETER(float, DetailShearInherit)
+SHADER_PARAMETER(float, DetailFadeNear)
+SHADER_PARAMETER(float, DetailFadeSpan)
+SHADER_PARAMETER(float, DetailBandMix)
+SHADER_PARAMETER(float, DetailCrossfade)
+SHADER_PARAMETER(float, DeckSlope)
+
+SHADER_PARAMETER(FVector4f, ExtinctionNegative)
+SHADER_PARAMETER(FVector4f, ExtinctionPositive)
+SHADER_PARAMETER(FVector4f, ExtinctionBase)
+SHADER_PARAMETER(float, BandScale)
+SHADER_PARAMETER(float, DeckOpticalDepth)
+SHADER_PARAMETER(float, LightExtinctionFraction)
 
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, ShadowMapUAV)
 
-SHADER_PARAMETER_TEXTURE(Texture2DArray, ShadowFlowField)
-SHADER_PARAMETER_SAMPLER(SamplerState, ShadowFlowSampler)
+SHADER_PARAMETER_TEXTURE(Texture2DArray, FlowTarget)
+SHADER_PARAMETER_SAMPLER(SamplerState, FlowTargetSampler)
 
-SHADER_PARAMETER_TEXTURE(Texture3D, ShadowDetailVolume)
-SHADER_PARAMETER_SAMPLER(SamplerState, ShadowDetailSampler)
+SHADER_PARAMETER_TEXTURE(Texture3D, DetailVolume)
+SHADER_PARAMETER_SAMPLER(SamplerState, DetailVolumeSampler)
 
-SHADER_PARAMETER_TEXTURE(Texture3D, ShadowStructureVolume)
-SHADER_PARAMETER_SAMPLER(SamplerState, ShadowStructureSampler)
+SHADER_PARAMETER_TEXTURE(Texture3D, StructureVolume)
+SHADER_PARAMETER_SAMPLER(SamplerState, StructureVolumeSampler)
 
 END_SHADER_PARAMETER_STRUCT()
 
