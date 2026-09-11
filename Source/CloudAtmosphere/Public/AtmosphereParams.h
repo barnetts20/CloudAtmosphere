@@ -158,13 +158,12 @@ struct CLOUDATMOSPHERE_API FAtmosphereGeometryParams
 	GENERATED_BODY()
 
 	/** Atmosphere top, as a fraction of planet radius above the surface. The
-	 *  ceiling every other shell in the system is expressed against. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001"))
+	 *  ceiling every other shell in the system is expressed against.
+	 *
+	 *  DisplayPriority puts it first in whichever group it is inlined into; on
+	 *  the gas giant that group also holds the deck's shape members. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", DisplayPriority = "0"))
 	float HeightScale = 0.2f;
-
-	/** Vertical offset applied to the atmosphere floor. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float FloorOffset = 0.0f;
 
 	/** Atmosphere outer radius in world units. */
 	float GetAtmosphereRadius(float PlanetRadius) const
@@ -172,12 +171,12 @@ struct CLOUDATMOSPHERE_API FAtmosphereGeometryParams
 		return PlanetRadius * (1.0f + HeightScale);
 	}
 
-	/** A shell of half a planet radius. The deck's world thickness is solved
+	/** A shell one planet radius deep. The deck's world thickness is solved
 	 *  from this, so it sets the deck's depth as much as the air's. */
 	static FAtmosphereGeometryParams MakeGasGiantDefaults()
 	{
 		FAtmosphereGeometryParams Params;
-		Params.HeightScale = 0.5f;
+		Params.HeightScale = 1.0f;
 		return Params;
 	}
 };
@@ -241,17 +240,21 @@ struct CLOUDATMOSPHERE_API FAtmosphereAirScatteringParams
 	{
 		FAtmosphereAirScatteringParams Params;
 
-		Params.RayleighBeta = FLinearColor(5.291136f, 23.918262f, 32.0f, 0.4f);
+		Params.RayleighBeta = FLinearColor(11.899769f, 24.921608f, 32.0f, 0.45f);
 
-		// Only the scale height moves. A deck whose peaks reach most of the way
-		// up the shell needs aerosol that still exists above them, where a
-		// terrestrial haze layer sits far below the cloud band.
-		Params.MieBeta = FLinearColor(1.0f, 0.83163f, 0.71612f, 0.25f);
+		// A deck whose peaks reach most of the way up the shell needs aerosol
+		// that still exists above them, where a terrestrial haze layer sits far
+		// below the cloud band.
+		Params.MieBeta = FLinearColor(1.0f, 0.893109f, 0.755932f, 0.25f);
+		Params.MieG = 0.95f;
+
+		Params.AbsorptionBeta = FLinearColor(0.05f, 0.05f, 0.05f, 0.15f);
+		Params.AbsorptionFalloff = 0.1f;
 
 		// Near-black, with a floor to match. The deck is opaque to the limb, so
 		// there is no lit surface under the air to bounce anything back up --
 		// what the terrestrial value stands in for does not exist here.
-		Params.Ambient = FLinearColor(0.0002f, 0.0002f, 0.0002f, 0.0002f);
+		Params.Ambient = FLinearColor(0.0001f, 0.0001f, 0.0001f, 0.0001f);
 
 		return Params;
 	}
@@ -1210,6 +1213,34 @@ struct CLOUDATMOSPHERE_API FGasGiantScatterParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Terminator", meta = (ClampMin = "0.0"))
 	float LobeShadowPower = 6.0f;
 
+	// -- Multiple scattering ------------------------------------------------
+	//
+	// Octaves after Wrenninge: octave i sees the deck toward the light at
+	// Attenuation^i of its optical depth, weighs Contribution^i, and uses the
+	// phase with its g scaled by Eccentricity^i. Later octaves reach deeper and
+	// scatter more broadly, which gives the glow inside thick cloud and softens
+	// the silver rim. Cost is one exp per octave per deck sample.
+
+	/** Octaves including single scattering. 1 is single scattering only. The
+	 *  isotropic term, the cloud scattering set's PhaseParams.A, overlaps what
+	 *  the octaves supply, so it usually wants lowering as this rises. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Cloud Scattering|Multiple Scattering", meta = (ClampMin = "1", ClampMax = "4"))
+	int32 OctaveCount = 1;
+
+	/** Optical-depth factor per octave. Lower lets later octaves reach deeper. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Cloud Scattering|Multiple Scattering", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float OctaveAttenuation = 0.5f;
+
+	/** Weight factor per octave. Thin cloud brightens by the sum of the
+	 *  weights, since every octave sees it at full transmittance. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Cloud Scattering|Multiple Scattering", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float OctaveContribution = 0.5f;
+
+	/** Phase anisotropy factor per octave. Lower makes later octaves more
+	 *  isotropic, and releases them from the lobe shadow in proportion. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Cloud Scattering|Multiple Scattering", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float OctaveEccentricity = 0.5f;
+
 	// -- Extinction ---------------------------------------------------------
 	//
 	// DeckOpticalDepth and BandScale are declared here and shown with the DECK,
@@ -1242,17 +1273,16 @@ struct CLOUDATMOSPHERE_API FGasGiantScatterParams
 	// that survives both.
 	//
 	// PITFALL: too low and the deck never saturates, which is a PERFORMANCE bug
-	// as much as a visual one. Both early-outs -- the main march's transmittance
-	// test and the light march's saturation cutoff -- are dead code until a ray
-	// can actually go opaque, so every ray burns its full step budget and
-	// spawns a full light march. A deck you can see the sky through is a deck
-	// costing several times what it should.
+	// as much as a visual one. The main march's transmittance early-out is dead
+	// code until a ray can actually go opaque, so every ray burns its full step
+	// budget. A deck you can see the sky through is a deck costing several
+	// times what it should.
 
 	/** Total optical depth from the deck top to the surface at core density.
 	 *  30 is transmittance 1e-13 at the base, saturating within a few percent
 	 *  of the deck depth. Below about 8 the sky starts showing through. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Gas Giant Deck|Shape", meta = (ClampMin = "0.1"))
-	float DeckOpticalDepth = 100.0f;
+	float DeckOpticalDepth = 2000.0f;
 
 	/** Per-channel tint on that depth. Wavelength-dependent extinction, on top
 	 *  of the albedo in the scatter sets. Neutral at (1,1,1). */
@@ -1275,6 +1305,14 @@ struct CLOUDATMOSPHERE_API FGasGiantScatterParams
 	{
 		return FLinearColor(TerminatorSoftness, AmbientTerminator,
 			MieLobeDecay, LobeShadowPower);
+	}
+
+	/** (Count, Attenuation, Contribution, Eccentricity), as GGAtmo_BuildScatter
+	 *  takes them. */
+	FLinearColor GetOctaveParams() const
+	{
+		return FLinearColor(static_cast<float>(OctaveCount), OctaveAttenuation,
+			OctaveContribution, OctaveEccentricity);
 	}
 
 	/** Cloud Beta, solved so a ray down a column with no relief accumulates

@@ -183,7 +183,17 @@ struct GGScatterParams
 	 *  endpoint appears -- the curve stays C1 where it already was and only its
 	 *  tail is crushed. */
     float LobeShadowPower;
+
+	/** Multiple-scattering octaves as (Count, Attenuation, Contribution,
+	 *  Eccentricity). Octave i sees the deck's optical depth toward the light
+	 *  scaled by Attenuation^i, weighs Contribution^i, and uses the phase with
+	 *  both lobes' g scaled by Eccentricity^i. Octave 0 is single scattering. */
+    float4 Octaves;
 };
+
+/** Most octaves GGAtmo_BuildScatter accepts. The per-octave constants are
+ *  packed in float4s, so this cannot exceed 4. */
+#define GG_MS_MAX_OCTAVES 4
 
 /** Everything the gas giant march reads. CompositeParams carries the planet,
  *  the air and the ray; GGFieldParams carries the deck. */
@@ -359,13 +369,17 @@ void GGAtmo_SplitDeckSegment(
  *  LobeParams is (TerminatorSoftness, AmbientTerminator, MieLobeDecay,
  *  LobeShadowPower). Four lighting scalars in one float4 because they are tuned
  *  together and against each other: the softness sets the terminator's width
- *  and the power crushes the tail the lobe would otherwise leak through it. */
+ *  and the power crushes the tail the lobe would otherwise leak through it.
+ *
+ *  OctaveParams is (Count, Attenuation, Contribution, Eccentricity); see
+ *  GGScatterParams.Octaves. */
 GGScatterParams GGAtmo_BuildScatter(
 	float4 ScatterNeg,
 	float4 ScatterPos,
 	float4 ScatterBase,
 	float BandScale,
-	float4 LobeParams)
+	float4 LobeParams,
+	float4 OctaveParams)
 {
     GGScatterParams S;
 
@@ -380,6 +394,10 @@ GGScatterParams GGAtmo_BuildScatter(
     S.AmbientTerminator = max(LobeParams.y, 1e-4f);
     S.MieLobeDecay = max(LobeParams.z, 0.0f);
     S.LobeShadowPower = max(LobeParams.w, 0.0f);
+
+    S.Octaves = float4(
+		clamp(round(OctaveParams.x), 1.0f, float(GG_MS_MAX_OCTAVES)),
+		saturate(OctaveParams.yzw));
 
     return S;
 }
@@ -488,10 +506,12 @@ CompositeParams GGAtmo_BuildAtmo(
 		stepScaleFactor);
 }
 
-/** Transmittance from a sample toward the light, through air and deck.
+/** Light reaching a sample, as the air's transmittance with the planet shadow
+ *  folded in, plus the deck's optical depth toward the light separately.
  *
- *  Both optical depths are read -- the air's from the transmittance table, the
- *  deck's from the shadow map -- and exponentiated once.
+ *  THE DECK TERM COMES BACK UNEXPONENTIATED because the multiple-scattering
+ *  octaves each attenuate it by their own factor. Single scattering is
+ *  AirTransmittance * exp(-cloudAbsBeta * OutDeckOptDepth).
  *
  *  The deck's optical depth is band-scaled, so a belt absorbs more than a zone.
  *  It resolves through cloudAbsorptionBeta rather than cloudScatterBeta: light
@@ -505,9 +525,11 @@ float3 GGAtmo_LightMarch(
 	Texture2D TransmittanceTable,
 	SamplerState TransmittanceSampler,
 	GGAtmoParams P,
-	out float OutLobeShadow)
+	out float OutLobeShadow,
+	out float OutDeckOptDepth)
 {
     OutLobeShadow = 0.0f;
+    OutDeckOptDepth = 0.0f;
 
     const float3 LightDir = P.Atmo.lightRayParams.lightDir;
     const float3 Start = P.Atmo.lightRayParams.samplePos;
@@ -583,9 +605,9 @@ float3 GGAtmo_LightMarch(
 	//
 	// THE FASTEST CHANNEL IS DIVIDED BACK OUT. The bake folds
 	// cloudAbsorptionBeta's largest component into its accumulation so its
-	// thresholds mean transmittance; undoing it here leaves DeckOptDepth in the
-	// units the exponent below already expects, and the per-channel beta still
-	// does its own work there.
+	// thresholds mean transmittance; undoing it here leaves the depth in the
+	// units cloudAbsBeta multiplies, so the per-channel beta still does its own
+	// work in the caller.
     const float3 AbsBeta = P.Atmo.cloudParams.cloudAbsBeta;
     const float AbsMax = max(AbsBeta.x, max(AbsBeta.y, AbsBeta.z));
 
@@ -599,9 +621,18 @@ float3 GGAtmo_LightMarch(
 		Atmo_HashJitter(P.Atmo.mainRayParams.svxy,
 			uint(P.Atmo.lightRayParams.parentStepIndex) * 2749u + 23u) - 0.5f);
 
+	// THE CEILING IS SET ON THE MOST TRANSMISSIVE TERM. The caller exponentiates
+	// this depth per channel at cloudAbsBeta / AbsMax of its value, and each
+	// octave at Attenuation^i of that, so saturated deck is only dark if the
+	// smallest of those products is. See GG_SHADOW_SATURATION.
+    const float AbsMin = min(AbsBeta.x, min(AbsBeta.y, AbsBeta.z));
+    const float DeepestOctave =
+		pow(max(P.Scatter.Octaves.y, 1e-4f), P.Scatter.Octaves.x - 1.0f);
+    const float TauScale = max(AbsMin / max(AbsMax, 1e-8f) * DeepestOctave, GG_SHADOW_MIN_TAU_SCALE);
+
     const float ShadowTau =
 		GG_ShadowTau(ShadowMap, ShadowSampler, LocalOrigin, LocalDir,
-			ShadowCameraLocal, ShadowJitter, P.Field);
+			ShadowCameraLocal, ShadowJitter, GG_SHADOW_SATURATION / TauScale, P.Field);
 
 	// NO SATURATION SNAP. A marched estimate needed one: it broke out of its
 	// loop on reaching the threshold, and returning the residual it happened to
@@ -611,9 +642,9 @@ float3 GGAtmo_LightMarch(
 	// smooth field into a hard contour, and that contour lands on the map's
 	// lattice as an axis-aligned staircase along the shadow edge.
 	//
-	// The exponent below handles the deep end on its own. GG_ShadowTau already
-	// clamps its tail, so nothing here can run away.
-    const float DeckOptDepth = ShadowTau / max(AbsMax, 1e-8f);
+	// The deep end needs no handling here: GG_ShadowTau bounds its tail at a
+	// ceiling every channel and octave reads as dark.
+    OutDeckOptDepth = ShadowTau / max(AbsMax, 1e-8f);
 
 	// -- The air --------------------------------------------------------------
 	//
@@ -635,8 +666,7 @@ float3 GGAtmo_LightMarch(
 
     return PlanetShadow * exp(-(P.Atmo.scatteringParams.rayBeta * AtmoOptDepth.x
 		+ P.Atmo.scatteringParams.mieBeta * AtmoOptDepth.y
-		+ P.Atmo.scatteringParams.absBeta * AtmoOptDepth.z
-		+ P.Atmo.cloudParams.cloudAbsBeta * DeckOptDepth));
+		+ P.Atmo.scatteringParams.absBeta * AtmoOptDepth.z));
 }
 
 /** Marches the atmosphere and the cloud deck toward the camera.
@@ -811,13 +841,40 @@ float4 GGAtmo_MainMarch(
     const float ReferenceLength = max(
 		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f);
 
-	// Constant along the ray: both the view and the light are fixed per pixel.
-    const float PhaseDual = Atmo_PhaseDualLobe(P.Atmo.scatteringParams.cosTheta,
-		P.Atmo.cloudParams.cloudPhaseParams.r,
-		P.Atmo.cloudParams.cloudPhaseParams.g,
-		P.Atmo.cloudParams.cloudPhaseParams.b);
-
     const float PhaseIsotropic = 1.0f / (4.0f * PI);
+
+	// Per-octave constants, fixed per pixel since the view and the light are:
+	// phase times contribution, the optical-depth factor, and how much of the
+	// lobe shadow the octave keeps. Octave 0 is exactly single scattering -- the
+	// authored dual lobe, full optical depth, full lobe shadow. Unused octaves
+	// carry zero weight.
+    float4 OctaveWeight = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float4 OctaveAtten = float4(1.0f, 1.0f, 1.0f, 1.0f);
+    float4 OctaveEcc = float4(1.0f, 1.0f, 1.0f, 1.0f);
+    {
+        float Atten = 1.0f;
+        float Contrib = 1.0f;
+        float Ecc = 1.0f;
+
+        UNROLL
+
+        for (int o = 0; o < GG_MS_MAX_OCTAVES; o++)
+        {
+            if (float(o) < P.Scatter.Octaves.x)
+            {
+                OctaveWeight[o] = Contrib * Atmo_PhaseDualLobe(P.Atmo.scatteringParams.cosTheta,
+					P.Atmo.cloudParams.cloudPhaseParams.r * Ecc,
+					P.Atmo.cloudParams.cloudPhaseParams.g * Ecc,
+					P.Atmo.cloudParams.cloudPhaseParams.b);
+                OctaveAtten[o] = Atten;
+                OctaveEcc[o] = Ecc;
+            }
+
+            Atten *= P.Scatter.Octaves.y;
+            Contrib *= P.Scatter.Octaves.z;
+            Ecc *= P.Scatter.Octaves.w;
+        }
+    }
 
 
     int StepIndex = 0;
@@ -986,9 +1043,13 @@ float4 GGAtmo_MainMarch(
 					P.Field.StructureFadeNear, P.Field.StructureFadeFar, SampleDistance);
 
                 float LobeShadow;
-                const float3 SunTransmittance = GGAtmo_LightMarch(
+                float DeckOptDepth;
+                const float3 AirTransmittance = GGAtmo_LightMarch(
 					ShadowMap, ShadowSampler, ShadowCameraLocal,
-					TransmittanceTable, TransmittanceSampler, P, LobeShadow);
+					TransmittanceTable, TransmittanceSampler, P, LobeShadow, DeckOptDepth);
+
+                const float3 SunTransmittance = AirTransmittance
+					* exp(-P.Atmo.cloudParams.cloudAbsBeta * DeckOptDepth);
 
                 const float3 AtmoDens = (Height > 0.0f)
 					? Atmo_Density(Height,
@@ -1066,7 +1127,32 @@ float4 GGAtmo_MainMarch(
                         const float3 MultiScatter = IncomingLight * PhaseIsotropic
 							* P.Atmo.cloudParams.cloudPhaseParams.a;
 
-                        const float3 DeckLight = IncomingLight * PhaseDual * LobeShadow
+						// Single scattering and the octaves above it. Each later
+						// octave sees less of the deck toward the light and a
+						// broader phase, which is what reaches deep into thick
+						// cloud and softens the silver rim outward. Its lobe
+						// shadow fades with its eccentricity: an isotropic
+						// octave wraps the terminator as MultiScatter does.
+						//
+						// PITFALL: at low deck optical depth every octave sees
+						// full transmittance, so thin cloud brightens by the sum
+						// of the contributions. Contribution is the handle.
+                        float3 OctaveLight = float3(0.0f, 0.0f, 0.0f);
+
+                        UNROLL
+
+                        for (int o = 0; o < GG_MS_MAX_OCTAVES; o++)
+                        {
+                            if (OctaveWeight[o] > 0.0f)
+                            {
+                                OctaveLight += OctaveWeight[o]
+									* lerp(1.0f, LobeShadow, OctaveEcc[o])
+									* AirTransmittance
+									* exp(-P.Atmo.cloudParams.cloudAbsBeta * DeckOptDepth * OctaveAtten[o]);
+                            }
+                        }
+
+                        const float3 DeckLight = P.Atmo.mainRayParams.lightCol * OctaveLight
 							+ MultiScatter
 							+ P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb.rgb
 								* DeckAmbientFactor;
@@ -1086,7 +1172,8 @@ float4 GGAtmo_MainMarch(
 							DeckLight * S.rgb * (1.0f - DeckStepTransmittance);
 
 #if GG_DEBUG_TERM == 3
-						DebugAccum += Transmittance * (IncomingLight * PhaseDual + MultiScatter)
+						DebugAccum += Transmittance
+							* (P.Atmo.mainRayParams.lightCol * OctaveLight + MultiScatter)
 							* S.rgb * (1.0f - DeckStepTransmittance);
 #elif GG_DEBUG_TERM == 4
 						DebugAccum += Transmittance

@@ -61,16 +61,28 @@
 #define GG_SHADOW_TAU2 3.0f
 #endif
 
-/** Optical depth at which the tail extrapolation stops growing.
+/** Optical depth at which the tail extrapolation stops growing, on the MOST
+ *  TRANSMISSIVE term the caller will exponentiate. Under a percent at 5.
  *
  *  A CEILING, NOT A CUTOFF. Past the last stored node the reconstruction
  *  continues at the final segment's rate, which is unbounded on a dense column;
  *  this keeps it finite. It must not be used to snap transmittance to zero --
  *  a hard threshold on a texel-interpolated field draws an axis-aligned
- *  staircase along whatever contour it falls on. At 5 on the fastest channel
- *  the exponent is already under a percent, so there is nothing to gain. */
+ *  staircase along whatever contour it falls on.
+ *
+ *  PITFALL: the map's depth is on the fastest channel, and the reader sees it
+ *  scaled down -- by each slower channel's share of the fastest, and by any
+ *  multiple-scattering attenuation. A ceiling applied to the fastest channel
+ *  leaves those glowing through saturated deck. The caller divides this by
+ *  the smallest such scale and passes the result to GG_ShadowTau. */
 #ifndef GG_SHADOW_SATURATION
 #define GG_SHADOW_SATURATION 5.0f
+#endif
+
+/** Floor on that scale. A channel or octave the deck barely attenuates cannot
+ *  be made opaque by any finite ceiling; this caps the ceiling instead. */
+#ifndef GG_SHADOW_MIN_TAU_SCALE
+#define GG_SHADOW_MIN_TAU_SCALE 1e-3f
 #endif
 
 /** Written where a threshold is never reached, and where the ray misses the
@@ -227,8 +239,8 @@ float2 GG_ShadowCascadeCentre(
  *  Piecewise linear through the four stored nodes, monotone by construction
  *  because the nodes are sorted by the depth they were crossed at. Past the last
  *  node the final segment's rate continues: a sample there is deep inside
- *  saturated deck, so the value only has to stay large. */
-float GG_ShadowTauFromNodes(float4 Node, float Depth)
+ *  saturated deck, so the value only has to stay large. Ceiling bounds it. */
+float GG_ShadowTauFromNodes(float4 Node, float Depth, float Ceiling)
 {
     if (Depth <= Node.x)
     {
@@ -255,7 +267,7 @@ float GG_ShadowTauFromNodes(float4 Node, float Depth)
 
     const float TailRate = (GG_SHADOW_TAU2 - GG_SHADOW_TAU1) / max(Node.w - Node.z, 1e-4f);
 
-    return min(GG_SHADOW_TAU2 + (Depth - Node.w) * TailRate, GG_SHADOW_SATURATION);
+    return min(GG_SHADOW_TAU2 + (Depth - Node.w) * TailRate, Ceiling);
 }
 
 /** Optical depth from one cascade slice, at a point already projected into the
@@ -280,7 +292,8 @@ float GG_ShadowTauSlice(
 	float2 Centre,
 	float Extent,
 	float Depth,
-	float2 JitterTexels)
+	float2 JitterTexels,
+	float Ceiling)
 {
     const float2 UV = (Plane - Centre) / Extent * 0.5f + 0.5f;
 
@@ -303,10 +316,10 @@ float GG_ShadowTauSlice(
     const float4 N01 = ShadowMap.SampleLevel(ShadowSampler, UV00 + float3(0.0f, InvSize.y, 0.0f), 0.0f);
     const float4 N11 = ShadowMap.SampleLevel(ShadowSampler, UV00 + float3(InvSize, 0.0f), 0.0f);
 
-    const float T00 = GG_ShadowTauFromNodes(N00, Depth);
-    const float T10 = GG_ShadowTauFromNodes(N10, Depth);
-    const float T01 = GG_ShadowTauFromNodes(N01, Depth);
-    const float T11 = GG_ShadowTauFromNodes(N11, Depth);
+    const float T00 = GG_ShadowTauFromNodes(N00, Depth, Ceiling);
+    const float T10 = GG_ShadowTauFromNodes(N10, Depth, Ceiling);
+    const float T01 = GG_ShadowTauFromNodes(N01, Depth, Ceiling);
+    const float T11 = GG_ShadowTauFromNodes(N11, Depth, Ceiling);
 
     return lerp(lerp(T00, T10, Frac.x), lerp(T01, T11, Frac.x), Frac.y);
 }
@@ -326,7 +339,9 @@ float GG_ShadowTauSlice(
  *
  *  Walked outermost inward: the disc always contains the sample, and each finer
  *  level that also contains it replaces the result, blended across its own edge.
- *  Nested extents make that composition exact rather than an approximation. */
+ *  Nested extents make that composition exact rather than an approximation.
+ *
+ *  Ceiling bounds the tail past the last node; see GG_SHADOW_SATURATION. */
 float GG_ShadowTau(
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
@@ -334,6 +349,7 @@ float GG_ShadowTau(
 	float3 LightLocal,
 	float3 CameraLocal,
 	float2 JitterTexels,
+	float Ceiling,
 	GGFieldParams F)
 {
     float3 U, V;
@@ -364,7 +380,7 @@ float GG_ShadowTau(
 
     float Tau = GG_ShadowTauSlice(
 		ShadowMap, ShadowSampler, 0, Plane, float2(0.0f, 0.0f),
-		GG_ShadowCascadeExtent(F, 0), Depth, JitterTexels);
+		GG_ShadowCascadeExtent(F, 0), Depth, JitterTexels, Ceiling);
 
     UNROLL
 
@@ -390,7 +406,7 @@ float GG_ShadowTau(
         }
 
         const float Finer = GG_ShadowTauSlice(
-			ShadowMap, ShadowSampler, Level, Plane, Centre, Extent, Depth, JitterTexels);
+			ShadowMap, ShadowSampler, Level, Plane, Centre, Extent, Depth, JitterTexels, Ceiling);
 
         Tau = lerp(Finer, Tau, smoothstep(GG_SHADOW_NEAR_BLEND, 1.0f, Edge));
     }
