@@ -1,0 +1,175 @@
+#pragma once
+
+// Opaque-geometry occlusion for a light-space bake, as one scalar per ray.
+// Model-independent: no field header, so both bakes include it unchanged.
+//
+// A CAPTURE IS SELF-DESCRIBING. Everything needed to project into it travels in
+// AtmoOccluderFrame, so the bake never assumes a capture shares a cascade's
+// basis, extent or centre. Matching them makes the resample an identity;
+// mismatching costs resolution, never placement.
+//
+// THE DEPTH IS LINEAR AND ORTHOGRAPHIC -- distance from the capture plane along
+// the direction light travels. PITFALL: the engine's PERSPECTIVE device-Z
+// conversion subtracts an epsilon that saturates depth at planetary range (half
+// the true distance at 1000 km). The orthographic conversion carries no such
+// term, so a capture left perspective inherits that error silently.
+
+/** No occluder. Finite rather than infinite: it passes through the bake's min()
+ *  and world-unit clamps as an ordinary number. */
+#define ATMO_OCC_NO_HIT 3.402823e+38f
+
+/** Lateral taps per ray, across the capture's own texel.
+ *
+ *  CONSERVATIVE, NOT SMOOTH. The minimum is taken, dilating an occluder by at
+ *  most 3/8 of a capture texel so a silhouette clipping the texel still shadows.
+ *  The format stores WHERE a threshold is crossed, not how much of a texel is
+ *  covered, so there is no coverage to average. */
+#ifndef ATMO_OCC_SUBSAMPLES
+#define ATMO_OCC_SUBSAMPLES 4
+#endif
+
+/** Rotated grid, in texels: one tap per row and per column, which resolves an
+ *  edge at any orientation better than an axis-aligned quad. */
+static const float2 AtmoOcc_SubOffsets[4] =
+{
+    float2(-0.375f, -0.125f),
+    float2(-0.125f, 0.375f),
+    float2(0.125f, -0.375f),
+    float2(0.375f, 0.125f),
+};
+
+/** One capture's placement, planet-local, in world units.
+ *
+ *  U AND V ARE THE IMAGE'S OWN AXES -- right and up, read off the capture
+ *  component's transform rather than rebuilt from the light, so a mirrored basis
+ *  is not expressible. Valid gates every fetch: a placeholder black texture
+ *  reads as depth 0, an occluder sitting on the capture plane, which would
+ *  shadow the whole level. */
+struct AtmoOccluderFrame
+{
+    float3 U;
+    float3 V;
+
+	/** Plane centre in (U, V). */
+    float2 Centre;
+
+	/** Half-width of the capture. */
+    float Extent;
+
+	/** Capture plane's distance from the planet centre, along +L. */
+    float PlaneDist;
+
+	/** Far clip, from the plane. Background reads at or past it. */
+    float Far;
+
+    float Valid;
+};
+
+/** Unpacks the three float4s the CPU sends per level, three uniform slots
+ *  instead of seven. FGasGiantOccluderFrame's pack helpers mirror this layout,
+ *  and nothing checks that they still agree. */
+AtmoOccluderFrame AtmoOcc_MakeFrame(float4 PackedU, float4 PackedV, float4 PackedPlane)
+{
+    AtmoOccluderFrame Frame;
+
+    Frame.U = PackedU.xyz;
+    Frame.Extent = PackedU.w;
+
+    Frame.V = PackedV.xyz;
+    Frame.PlaneDist = PackedV.w;
+
+    Frame.Centre = PackedPlane.xy;
+    Frame.Far = PackedPlane.z;
+    Frame.Valid = PackedPlane.w;
+
+    return Frame;
+}
+
+/** Planet-local position to capture UV. Only the perpendicular components
+ *  matter, so any point on the ray gives the same UV.
+ *
+ *  V IS FLIPPED because a render target's first row is the top of the image,
+ *  where the view's up axis points. Unflipped, shadows land mirrored about the
+ *  capture's horizontal centre line -- plausible on a symmetric scene and wrong
+ *  everywhere else. */
+bool AtmoOcc_Project(AtmoOccluderFrame Frame, float3 LocalPos, out float2 OutUV)
+{
+    const float2 Plane = float2(dot(LocalPos, Frame.U), dot(LocalPos, Frame.V));
+
+    const float2 Relative = (Plane - Frame.Centre) / max(Frame.Extent, 1e-4f);
+
+    OutUV = float2(Relative.x * 0.5f + 0.5f, 0.5f - Relative.y * 0.5f);
+
+    return Frame.Valid > 0.0f && all(abs(Relative) < 1.0f);
+}
+
+/** Capture depth to the bake's ray parameter. The capture origin sits at
+ *  +L * PlaneDist, so an occluder at depth Z is at dot(pos, -L) = Z - PlaneDist,
+ *  and the bake's origin is at dot(Origin, -L) = -HalfChord. A negative result
+ *  is an occluder above the shell entry. */
+float AtmoOcc_RayDepth(float Z, AtmoOccluderFrame Frame, float HalfChord)
+{
+    return Z - Frame.PlaneDist + HalfChord;
+}
+
+/** Nearest occluder on one ray from one level, in the bake's ray parameter.
+ *  Returns whether the level COVERS the ray, separately from whether it found
+ *  anything, so a caller walking finest to coarsest stops at the first level
+ *  that owns the point.
+ *
+ *  PITFALL: stopping there means an occluder culled from that level -- by its
+ *  view distance cap or its cadence -- is not recovered from a coarser level
+ *  that did capture it. A min across all levels instead lets a coarse texel's
+ *  half-texel bleed override the fine level wherever the two overlap. */
+bool AtmoOcc_QueryLevel(
+	Texture2D DepthTexture,
+	SamplerState DepthSampler,
+	AtmoOccluderFrame Frame,
+	float3 LocalPos,
+	float HalfChord,
+	out float OutRayDepth)
+{
+    OutRayDepth = ATMO_OCC_NO_HIT;
+
+    float2 UV;
+
+    if (!AtmoOcc_Project(Frame, LocalPos, UV))
+    {
+        return false;
+    }
+
+	// From the texture, not the frame, so the footprint is right even when a
+	// level is bound at a size the cascade is not.
+    uint Width, Height;
+    DepthTexture.GetDimensions(Width, Height);
+
+    const float2 TexelUV = 1.0f / float2(max(Width, 1u), max(Height, 1u));
+
+    float Nearest = ATMO_OCC_NO_HIT;
+
+    UNROLL
+
+    for (int Sub = 0; Sub < ATMO_OCC_SUBSAMPLES; Sub++)
+    {
+        const float2 Offset = (ATMO_OCC_SUBSAMPLES > 1)
+			? AtmoOcc_SubOffsets[Sub] * TexelUV
+			: float2(0.0f, 0.0f);
+
+        const float Z = DepthTexture.SampleLevel(DepthSampler, UV + Offset, 0.0f).r;
+
+		// Zero is the capture plane, which sits outside the shell where nothing
+		// real can be, so it is how a cleared or never-rendered target reads.
+		// At or past the far clip is background.
+        if (Z > 0.0f && Z < Frame.Far)
+        {
+            Nearest = min(Nearest, Z);
+        }
+    }
+
+    if (Nearest < ATMO_OCC_NO_HIT)
+    {
+        OutRayDepth = AtmoOcc_RayDepth(Nearest, Frame, HalfChord);
+    }
+
+    return true;
+}

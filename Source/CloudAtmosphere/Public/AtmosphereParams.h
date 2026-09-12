@@ -33,6 +33,8 @@
 #include "UObject/ObjectMacros.h"
 #include "AtmosphereParams.generated.h"
 
+class AActor;
+
 class UGasGiantSimConfig;
 
 class UVolumeTexture;
@@ -115,6 +117,120 @@ struct CLOUDATMOSPHERE_API FAtmosphereSimulationParams
 	 *  subsystem is per-world, so two planets starting it fight. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	bool bStartOnBeginPlay = true;
+};
+
+/** Opaque geometry casting into the deck shadow map: moons, hanging objects,
+ *  terrain, a mesh inner surface. One orthographic depth capture per cascade,
+ *  each sized and centred on that cascade, feeding the bake one occluder depth
+ *  per texel ray.
+ *
+ *  COST IS THE SCENE, NOT THE BAKE. Each enabled level runs the scene's depth
+ *  pass for its own view every time it captures, while the bake gets CHEAPER on
+ *  occluded rays because the march stops at the occluder. The cadences and the
+ *  disc switch are the levers; nothing here changes the map's format or what the
+ *  march does with it. */
+USTRUCT(BlueprintType)
+struct CLOUDATMOSPHERE_API FGasGiantOccluderShadowParams
+{
+	GENERATED_BODY()
+
+	/** Off destroys the capture components and their targets, and the bake runs
+	 *  exactly as it does without this feature. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	bool bEnabled = false;
+
+	// Which levels capture. A level that is off binds nothing and reports
+	// invalid, so a ray it would have covered falls through to the next coarser
+	// level that is on -- which is how one level is isolated during bring-up.
+	//
+	// The disc is the most expensive of the three, being a planet-sized depth
+	// pass, and only eclipse-scale occluders need it.
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled"))
+	bool bCaptureDisc = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled"))
+	bool bCaptureStructure = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled"))
+	bool bCaptureDetail = true;
+
+	/** Renders the captures as LDR COLOUR instead of depth, so the targets show
+	 *  what each capture actually frames. The depths are then meaningless and
+	 *  every level reports invalid, so the bake ignores them and the deck
+	 *  shadows alone remain.
+	 *
+	 *  This answers the first question any missing shadow raises -- whether the
+	 *  capture is rendering at all and whether it is pointed at the planet --
+	 *  which a depth target cannot, its values running to 1e8 and displaying as
+	 *  flat white. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled"))
+	bool bDebugColorCapture = false;
+
+	// Frames between captures per level, 1 being every frame. A level holds its
+	// last capture and the frame it rendered with between refreshes, so a stale
+	// capture is placed correctly and only late.
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled && bCaptureDisc", ClampMin = "1"))
+	int32 DiscIntervalFrames = 8;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled && bCaptureStructure", ClampMin = "1"))
+	int32 StructureIntervalFrames = 4;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled && bCaptureDetail", ClampMin = "1"))
+	int32 DetailIntervalFrames = 1;
+
+	/** How far the capture plane sits off the planet, as a multiple of the outer
+	 *  shell. THE NEAR PLANE IS AT THE CAPTURE, so this is the ceiling on what
+	 *  can cast: anything farther from the planet centre along the light is
+	 *  clipped and casts nothing, and an object STRADDLING the plane loses its
+	 *  near cap, which shrinks its shadow to whatever rim still sits below.
+	 *
+	 *  Raise it to cover moons and high orbits. The cost is depth range, not
+	 *  resolution -- the capture's width does not change with it, because the
+	 *  projection is orthographic. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "1.1"))
+	float CaptureDistanceScale = 4.0f;
+
+	/** View distance cap per capture, as a fraction of its FAR PLANE rather than
+	 *  of its width: the plane sits well off the planet, so a cap measured
+	 *  against a narrow level's own extent would cull the deck itself. 1 culls
+	 *  exactly where the far plane does; 0 leaves the engine default. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0", ClampMax = "1.0"))
+	float MaxViewDistanceScale = 1.0f;
+
+	/** Excluded from every capture. For anything that renders opaque depth but
+	 *  should not shadow the deck -- a skybox shell, a visual proxy for the
+	 *  planet itself. The atmosphere actor hides its own children regardless. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled"))
+	TArray<TObjectPtr<AActor>> HiddenActors;
+
+	/** Frames between captures for a cascade index, 0 being the disc. */
+	int32 GetIntervalFrames(int32 Level) const
+	{
+		if (Level <= 0)
+		{
+			return FMath::Max(DiscIntervalFrames, 1);
+		}
+
+		return FMath::Max(Level == 1 ? StructureIntervalFrames : DetailIntervalFrames, 1);
+	}
+
+	/** Whether a cascade index captures at all. */
+	bool IsLevelEnabled(int32 Level) const
+	{
+		if (!bEnabled)
+		{
+			return false;
+		}
+
+		if (Level <= 0)
+		{
+			return bCaptureDisc;
+		}
+
+		return Level == 1 ? bCaptureStructure : bCaptureDetail;
+	}
 };
 
 /** Where the shell sits. Planet Center and Planet Radius come from the actor's

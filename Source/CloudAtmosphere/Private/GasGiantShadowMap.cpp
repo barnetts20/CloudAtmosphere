@@ -139,6 +139,38 @@ namespace GasGiantShadow
 		P->StructureVolumeSampler =
 			TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
 
+		// -- Occluders ------------------------------------------------------
+		//
+		// POINT, NOT BILINEAR. Filtering across a depth discontinuity invents
+		// intermediate depths that belong to no surface, and they read as a
+		// shadow ramp trailing off every silhouette.
+		P->OccluderDepthSampler =
+			TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+
+		// Black stands in for a missing or not-yet-rendered capture so the
+		// binding is always complete. It must never be READ: black is depth 0,
+		// an occluder on the capture plane, which would shadow the whole level.
+		// PackPlane's Valid short-circuits the lookup before any fetch.
+		auto DepthOrBlack = [](const FGasGiantOccluderFrame& Frame) -> FRHITexture*
+			{
+				return Frame.IsUsable()
+					? Frame.DepthTexture.GetReference()
+					: GBlackTexture->TextureRHI.GetReference();
+			};
+
+		for (int32 Level = 0; Level < CascadeCount; ++Level)
+		{
+			const FGasGiantOccluderFrame& Frame = Params.Occluders[Level];
+
+			P->OccluderU[Level] = Frame.PackU();
+			P->OccluderV[Level] = Frame.PackV();
+			P->OccluderPlane[Level] = Frame.PackPlane();
+		}
+
+		P->OccluderDepth0 = DepthOrBlack(Params.Occluders[0]);
+		P->OccluderDepth1 = DepthOrBlack(Params.Occluders[1]);
+		P->OccluderDepth2 = DepthOrBlack(Params.Occluders[2]);
+
 		// One slice per cascade on Z. The shader derives each level's extent and
 		// centre from its own slice index, so nothing about a level crosses from
 		// here and the bake cannot disagree with the march about where a slice sits.

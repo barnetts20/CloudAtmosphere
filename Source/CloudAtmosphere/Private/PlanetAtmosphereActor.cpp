@@ -3,6 +3,8 @@
 #include "Engine/DirectionalLight.h"
 #include "Components/DirectionalLightComponent.h"
 #include "Components/PostProcessComponent.h"
+#include "Components/SceneCaptureComponent2D.h"
+#include "Math/OrthoMatrix.h"
 #include "Engine/VolumeTexture.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/TextureRenderTarget2DArray.h"
@@ -166,6 +168,13 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
 
     AtmosphereRoot = CreateDefaultSubobject<USceneComponent>(TEXT("AtmosphereRoot"));
     SetRootComponent(AtmosphereRoot);
+
+    // Past any authored interval, so every level captures on its first tick
+    // rather than shadowing nothing until its cadence comes round.
+    for (int32 Level = 0; Level < GasGiantShadow::CascadeCount; ++Level)
+    {
+        FramesSinceCapture[Level] = MAX_int32;
+    }
 
     // Default radius = max(OceanRadius, PlanetRadius) at planet defaults:
     // PlanetRadius(100M) + SeaLevel(0.5) * NoiseAmplitude(15M) = 107,500,000 cm
@@ -518,6 +527,8 @@ void APlanetAtmosphereActor::DestroyChildActors()
     }
     MID_Atmosphere = nullptr;
     MID_Postprocess = nullptr;
+
+    DestroyGasGiantOccluderCaptures();
 }
 
 // --------------------------------------------------------------------------
@@ -911,6 +922,507 @@ bool APlanetAtmosphereActor::PrepareGasGiantShadowTarget()
     return true;
 }
 
+// --------------------------------------------------------------------------
+// Occluder depth captures
+//
+// One orthographic depth capture per cascade, looking down the light at the
+// planet. The bake turns each texel's captured depth into the ray parameter at
+// which an opaque surface blocks the light, and clamps the deck's four crossing
+// nodes to it.
+//
+// THE CAPTURE DESCRIBES ITSELF. Its axes are read back off the component's own
+// transform and travel to the bake in FGasGiantOccluderFrame, so nothing here
+// has to agree with GasGiantShadow.ush about where a cascade is. Matching the
+// cascade's extent, resolution and texel snapping is what makes the resample an
+// identity and keeps the two lattices moving together; a mismatch costs
+// resolution and lattice stability, never placement.
+//
+// ORTHOGRAPHIC IS NOT A CHOICE OF FRAMING. The engine's perspective depth
+// conversion carries an epsilon that saturates at planetary range -- half the
+// true distance at 1000 km -- while the orthographic conversion is exact. A
+// capture left perspective inherits that silently.
+// --------------------------------------------------------------------------
+
+/** GG_ShadowBasis's rule, on the CPU, in planet-local space. Anchored to the
+ *  spin axis so the grid does not rotate as the light moves. Used only to place
+ *  and snap the captures; the frame the bake reads comes off the component. */
+static void OccluderBasisLocal(const FVector3f& L, FVector3f& OutU, FVector3f& OutV)
+{
+    FVector3f V = FVector3f(0.0f, 0.0f, 1.0f) - L * L.Z;
+
+    if (V.SizeSquared() < 1e-6f)
+    {
+        V = FVector3f(1.0f, 0.0f, 0.0f) - L * L.X;
+    }
+
+    OutV = V.GetSafeNormal();
+    OutU = FVector3f::CrossProduct(OutV, L);
+}
+
+/** Set once per component. The capture wants opaque depth and nothing else:
+ *  every lit, translucent or post-processed feature is both wasted work and a
+ *  chance for something that writes no depth to matter. */
+static void ConfigureOccluderCapture(
+    USceneCaptureComponent2D* Capture, const FGasGiantOccluderShadowParams& Settings)
+{
+    Capture->bCaptureEveryFrame = false;
+    Capture->bCaptureOnMovement = false;
+
+    // CaptureScene EARLY-OUTS ON IsVisible. A capture that is not visible is
+    // not a capture that renders nothing -- it never runs at all, and leaves a
+    // cleared target that reads as an occluder on the capture plane.
+    Capture->SetVisibility(true);
+
+    // The root carries the planet radius as scale. Nothing in the capture path
+    // reads it, but a component sitting at 1e8 scale is a trap for anything
+    // that later does.
+    Capture->SetWorldScale3D(FVector::OneVector);
+
+    // Manual cadence, so the view state is reused rather than rebuilt per call.
+    Capture->bAlwaysPersistRenderingState = true;
+
+    // Linear world-unit depth in R. PITFALL: the equivalent perspective path
+    // saturates at range; see the note above.
+    Capture->CaptureSource = Settings.bDebugColorCapture
+        ? SCS_FinalColorLDR
+        : SCS_SceneDepth;
+
+    Capture->ProjectionType = ECameraProjectionMode::Orthographic;
+    Capture->bUseCustomProjectionMatrix = true;
+
+    Capture->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_RenderScenePrimitives;
+
+    Capture->PostProcessBlendWeight = 0.0f;
+    Capture->bEnableClipPlane = false;
+
+    FEngineShowFlags& Flags = Capture->ShowFlags;
+
+    // Lighting stays ON in the debug view: an unlit capture of an unlit scene
+    // is a silhouette against a silhouette, which cannot be read.
+    const bool bDebug = Settings.bDebugColorCapture;
+
+    Flags.SetLighting(bDebug);
+    Flags.SetDynamicShadows(false);
+    Flags.SetSkyLighting(bDebug);
+    Flags.SetAtmosphere(false);
+    Flags.SetFog(false);
+    Flags.SetVolumetricFog(false);
+    Flags.SetPostProcessing(bDebug);
+    Flags.SetBloom(false);
+    Flags.SetAntiAliasing(false);
+    Flags.SetMotionBlur(false);
+
+    // Anything that does not write opaque depth contributes nothing and costs a
+    // pass.
+    Flags.SetTranslucency(false);
+    Flags.SetParticles(false);
+    Flags.SetDecals(false);
+}
+
+bool APlanetAtmosphereActor::PrepareGasGiantOccluderCaptures()
+{
+    if (BuiltType != EPlanetAtmosphereType::GasGiant || !GasGiantOccluderShadows.bEnabled)
+    {
+        DestroyGasGiantOccluderCaptures();
+
+        return false;
+    }
+
+    OccluderCaptures.SetNum(GasGiantShadow::CascadeCount);
+    OccluderDepthTargets.SetNum(GasGiantShadow::CascadeCount);
+
+    // The cascade's resolution, so the capture and the slice share a texel grid
+    // and the resample is an identity.
+    const int32 Edge = FMath::Clamp(GasGiantShadowResolution, 64, 4096);
+
+    // R32F, NOT A HALF FORMAT. Eleven mantissa bits is a part in four thousand
+    // of the distance -- kilometres at planetary range, against a comparison
+    // measured in metres. RGBA8 only ever holds the debug view.
+    const ETextureRenderTargetFormat Format = GasGiantOccluderShadows.bDebugColorCapture
+        ? RTF_RGBA8
+        : RTF_R32f;
+
+    bool bAnyLive = false;
+
+    for (int32 Level = 0; Level < GasGiantShadow::CascadeCount; ++Level)
+    {
+        if (!GasGiantOccluderShadows.IsLevelEnabled(Level))
+        {
+            if (OccluderCaptures[Level])
+            {
+                OccluderCaptures[Level]->DestroyComponent();
+                OccluderCaptures[Level] = nullptr;
+            }
+
+            OccluderDepthTargets[Level] = nullptr;
+            OccluderFrames[Level] = FGasGiantOccluderFrame();
+            FramesSinceCapture[Level] = MAX_int32;
+
+            continue;
+        }
+
+        UTextureRenderTarget2D* Target = OccluderDepthTargets[Level];
+
+        const bool bRebuild = Target
+            && (Target->SizeX != Edge || Target->SizeY != Edge
+                || Target->RenderTargetFormat != Format);
+
+        if (!Target || bRebuild)
+        {
+            if (!Target)
+            {
+                Target = NewObject<UTextureRenderTarget2D>(this, NAME_None, RF_Transient);
+
+                Target->ClearColor = FLinearColor::Black;
+                Target->bAutoGenerateMips = false;
+                Target->AddressX = TA_Clamp;
+                Target->AddressY = TA_Clamp;
+
+                OccluderDepthTargets[Level] = Target;
+            }
+
+            Target->RenderTargetFormat = Format;
+
+            Target->InitAutoFormat(Edge, Edge);
+            Target->UpdateResourceImmediate(true);
+
+            // A rebuilt target is cleared, and a cleared R32F reads as depth
+            // zero -- an occluder on the capture plane. The level stays invalid
+            // until it has rendered again.
+            FramesSinceCapture[Level] = MAX_int32;
+            OccluderFrames[Level].bCaptured = false;
+        }
+
+        USceneCaptureComponent2D* Capture = OccluderCaptures[Level];
+
+        if (!Capture)
+        {
+            Capture = NewObject<USceneCaptureComponent2D>(this, NAME_None, RF_Transient);
+
+            Capture->SetupAttachment(AtmosphereRoot);
+            Capture->RegisterComponent();
+
+            OccluderCaptures[Level] = Capture;
+        }
+
+        // Reapplied rather than set once: the capture source and the show flags
+        // follow the debug toggle, which is editable while the actor runs.
+        ConfigureOccluderCapture(Capture, GasGiantOccluderShadows);
+
+        Capture->TextureTarget = Target;
+
+        bAnyLive = true;
+    }
+
+    return bAnyLive;
+}
+
+void APlanetAtmosphereActor::UpdateGasGiantOccluderCaptures(
+    float PlanetRadius, const FVector& PlanetCenter,
+    const FVector3f& LightLocal, const FVector3f& CameraLocal,
+    FGasGiantShadowParams& Params)
+{
+    if (!PrepareGasGiantOccluderCaptures())
+    {
+        return;
+    }
+
+    const FVector AxisX = GetActorForwardVector();
+    const FVector AxisY = GetActorRightVector();
+    const FVector AxisZ = GetActorUpVector();
+
+    auto ToLocal = [&AxisX, &AxisY, &AxisZ](const FVector& V)
+        {
+            return FVector3f(
+                static_cast<float>(FVector::DotProduct(AxisX, V)),
+                static_cast<float>(FVector::DotProduct(AxisY, V)),
+                static_cast<float>(FVector::DotProduct(AxisZ, V)));
+        };
+
+    auto ToWorld = [&AxisX, &AxisY, &AxisZ](const FVector3f& V)
+        {
+            return AxisX * V.X + AxisY * V.Y + AxisZ * V.Z;
+        };
+
+    FVector3f BasisU, BasisV;
+    OccluderBasisLocal(LightLocal, BasisU, BasisV);
+
+    const FVector LightWorld = ToWorld(LightLocal);
+    const FVector BasisUWorld = ToWorld(BasisU);
+    const FVector BasisVWorld = ToWorld(BasisV);
+
+    // A SUPERSET OF THE SHADER'S DISC, not a reproduction of it. The shader's
+    // extent comes from GG_TopBounds, which is not worth a second derivation
+    // here; the unfaded shell bounds it from above, so a capture sized to the
+    // shell always covers the slice and the extra width costs a little
+    // resolution. Levels 1 and 2 ARE the shader's expression, because there it
+    // is an authored fade times a radius rather than a derivation.
+    const float Disc = PlanetRadius * (1.0f + GasGiantGeometry.HeightScale)
+        * GasGiantShadow::CaptureExtentMargin;
+
+    const float StructureFar = PlanetRadius *
+        (GasGiantStructureLayer.FadeNear + FMath::Max(GasGiantStructureLayer.FadeSpan, 1e-4f));
+
+    const float DetailFar = PlanetRadius *
+        (GasGiantDetailLayer.FadeNear + FMath::Max(GasGiantDetailLayer.FadeSpan, 1e-4f));
+
+    float Extents[GasGiantShadow::CascadeCount];
+    Extents[0] = Disc;
+    Extents[1] = FMath::Min(StructureFar, Extents[0]);
+    Extents[2] = FMath::Min(DetailFar, Extents[1]);
+
+    // EVERY LEVEL SHARES ONE PLANE, well off the planet along the light.
+    //
+    // THE NEAR PLANE IS AT THE CAPTURE, which the engine's own orthographic
+    // captures assume too, so this distance is the ceiling on what can cast:
+    // anything above it is clipped. Pulling the plane back rather than pushing
+    // the near plane negative keeps every captured depth positive, which is what
+    // lets zero stay the sentinel for a texel the capture never wrote.
+    const float PlaneDist = Disc * FMath::Max(GasGiantOccluderShadows.CaptureDistanceScale, 1.1f);
+
+    // A shell diameter past the planet centre, so the far side of the deck is
+    // comfortably inside and background is unambiguous.
+    const float Far = PlaneDist + 2.0f * Disc;
+
+    const int32 Edge = FMath::Clamp(GasGiantShadowResolution, 64, 4096);
+
+    for (int32 Level = 0; Level < GasGiantShadow::CascadeCount; ++Level)
+    {
+        USceneCaptureComponent2D* Capture = OccluderCaptures[Level];
+
+        if (!Capture || !OccluderDepthTargets[Level] || Extents[Level] <= 0.0f)
+        {
+            continue;
+        }
+
+        const float Extent = Extents[Level];
+
+        // GG_ShadowCascadeCentre's snapping, at the same extent and resolution,
+        // so the capture and the cascade slice step together. Unsnapped, the
+        // occluder shadow crawls against the deck shadow around it as the
+        // camera moves.
+        FVector2f Centre = FVector2f::ZeroVector;
+
+        if (Level > 0)
+        {
+            const float TexelSize = 2.0f * Extent / static_cast<float>(Edge);
+
+            const FVector2f Plane(
+                FVector3f::DotProduct(CameraLocal, BasisU),
+                FVector3f::DotProduct(CameraLocal, BasisV));
+
+            Centre = FVector2f(
+                FMath::FloorToFloat(Plane.X / TexelSize) * TexelSize,
+                FMath::FloorToFloat(Plane.Y / TexelSize) * TexelSize);
+        }
+
+        const FVector Location = PlanetCenter
+            + LightWorld * PlaneDist
+            + BasisUWorld * Centre.X
+            + BasisVWorld * Centre.Y;
+
+        // Looking down the direction light travels, pole up. The image's right
+        // axis is whatever this rotation produces; it is read back below rather
+        // than assumed, which is what makes a mirrored capture unexpressible.
+        Capture->SetWorldLocationAndRotation(
+            Location, FRotationMatrix::MakeFromXZ(-LightWorld, BasisVWorld).Rotator());
+
+        Capture->OrthoWidth = 2.0f * Extent;
+
+        // EXPLICIT CLIP PLANES. The engine's default orthographic far plane is
+        // WORLD_MAX/8, which leaves the bake no way to tell background from
+        // geometry. Near at the capture plane, far a shell diameter past the
+        // planet centre.
+        Capture->CustomProjectionMatrix =
+            FReversedZOrthoMatrix(Extent, Extent, 1.0f / Far, 0.0f);
+
+        Capture->MaxViewDistanceOverride = GasGiantOccluderShadows.MaxViewDistanceScale > 0.0f
+            ? Far * GasGiantOccluderShadows.MaxViewDistanceScale
+            : -1.0f;
+
+        Capture->HiddenActors.Reset();
+
+        for (const TObjectPtr<AActor>& Hidden : GasGiantOccluderShadows.HiddenActors)
+        {
+            if (Hidden)
+            {
+                Capture->HiddenActors.Add(Hidden);
+            }
+        }
+
+        // The atmosphere's own actors. None of them render opaque depth, so
+        // this is insurance rather than a fix.
+        Capture->HiddenActors.Add(this);
+
+        if (PostProcessVolume)
+        {
+            Capture->HiddenActors.Add(PostProcessVolume);
+        }
+
+        if (SunLight)
+        {
+            Capture->HiddenActors.Add(SunLight);
+        }
+
+        FGasGiantOccluderFrame& Frame = OccluderFrames[Level];
+
+        const int32 Interval = GasGiantOccluderShadows.GetIntervalFrames(Level);
+
+        if (FramesSinceCapture[Level] < Interval)
+        {
+            ++FramesSinceCapture[Level];
+        }
+        else
+        {
+            Capture->CaptureScene();
+
+            FramesSinceCapture[Level] = 1;
+
+            // RECORDED FROM THE COMPONENT, AFTER IT MOVED, and only on the tick
+            // it actually rendered. A level on a slow cadence then keeps the
+            // placement its image was taken with; reusing this tick's placement
+            // would drag that image across the deck as the light turns.
+            Frame.U = ToLocal(Capture->GetRightVector());
+            Frame.V = ToLocal(Capture->GetUpVector());
+
+            const FVector3f OffsetLocal = ToLocal(Location - PlanetCenter);
+
+            Frame.Centre = FVector2f(
+                FVector3f::DotProduct(OffsetLocal, Frame.U),
+                FVector3f::DotProduct(OffsetLocal, Frame.V));
+
+            Frame.Extent = Extent;
+            Frame.PlaneDist = PlaneDist;
+            Frame.Far = Far;
+
+            // The debug view holds colour, not depth. Left valid it would read
+            // as an occluder a few centimetres off the capture plane across the
+            // whole level and black the deck out.
+            Frame.bCaptured = !GasGiantOccluderShadows.bDebugColorCapture;
+        }
+
+        // The resource, not the frame: a render target can be recreated under
+        // us between captures, and a stale handle is the one part of this that
+        // does not describe where the image was taken.
+        if (FTextureRenderTargetResource* DepthRes =
+            OccluderDepthTargets[Level]->GameThread_GetRenderTargetResource())
+        {
+            Frame.DepthTexture = DepthRes->GetRenderTargetTexture();
+        }
+
+        Params.Occluders[Level] = Frame;
+    }
+}
+
+void APlanetAtmosphereActor::DestroyGasGiantOccluderCaptures()
+{
+    for (TObjectPtr<USceneCaptureComponent2D>& Capture : OccluderCaptures)
+    {
+        if (Capture)
+        {
+            Capture->DestroyComponent();
+            Capture = nullptr;
+        }
+    }
+
+    OccluderDepthTargets.Reset();
+
+    for (int32 Level = 0; Level < GasGiantShadow::CascadeCount; ++Level)
+    {
+        OccluderFrames[Level] = FGasGiantOccluderFrame();
+        FramesSinceCapture[Level] = MAX_int32;
+    }
+}
+
+void APlanetAtmosphereActor::LogGasGiantOccluderCaptures()
+{
+    for (int32 Level = 0; Level < GasGiantShadow::CascadeCount; ++Level)
+    {
+        const FGasGiantOccluderFrame& Frame = OccluderFrames[Level];
+
+        UTextureRenderTarget2D* Target = OccluderDepthTargets.IsValidIndex(Level)
+            ? OccluderDepthTargets[Level].Get()
+            : nullptr;
+
+        if (!Target)
+        {
+            UE_LOG(LogTemp, Log, TEXT("%s occluder %d: no target (level off or feature disabled)."),
+                *GetName(), Level);
+
+            continue;
+        }
+
+        FTextureRenderTargetResource* Res = Target->GameThread_GetRenderTargetResource();
+
+        TArray<FLinearColor> Pixels;
+
+        if (!Res || !Res->ReadLinearColorPixels(Pixels) || Pixels.Num() == 0)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("%s occluder %d: target could not be read back."),
+                *GetName(), Level);
+
+            continue;
+        }
+
+        // Three populations, and which one dominates is the answer. Zero is a
+        // texel the capture never wrote. At or past Far is background. Between
+        // them is geometry, and its absence is the whole failure.
+        int32 Cleared = 0;
+        int32 Background = 0;
+        int32 Geometry = 0;
+
+        float NearestZ = TNumericLimits<float>::Max();
+        float FarthestZ = 0.0f;
+
+        for (const FLinearColor& Pixel : Pixels)
+        {
+            const float Z = Pixel.R;
+
+            if (Z <= 0.0f)
+            {
+                ++Cleared;
+            }
+            else if (Z >= Frame.Far)
+            {
+                ++Background;
+            }
+            else
+            {
+                ++Geometry;
+
+                NearestZ = FMath::Min(NearestZ, Z);
+                FarthestZ = FMath::Max(FarthestZ, Z);
+            }
+        }
+
+        const int32 CentreIndex =
+            FMath::Clamp((Target->SizeY / 2) * Target->SizeX + Target->SizeX / 2, 0, Pixels.Num() - 1);
+
+        UE_LOG(LogTemp, Log,
+            TEXT("%s occluder %d: valid=%d extent=%.0f planeDist=%.0f far=%.0f | ")
+            TEXT("geometry=%.2f%% background=%.2f%% cleared=%.2f%% | centre=%.0f"),
+            *GetName(), Level, Frame.IsUsable() ? 1 : 0,
+            Frame.Extent, Frame.PlaneDist, Frame.Far,
+            100.0f * Geometry / Pixels.Num(),
+            100.0f * Background / Pixels.Num(),
+            100.0f * Cleared / Pixels.Num(),
+            Pixels[CentreIndex].R);
+
+        if (Geometry > 0)
+        {
+            // PlaneDist - Z is the surface's distance from the planet centre
+            // along the light, which is the number to check a placed test mesh
+            // against. Negative means it is on the far side of the centre.
+            UE_LOG(LogTemp, Log,
+                TEXT("%s occluder %d: nearest surface %.0f from planet centre along the light, ")
+                TEXT("farthest %.0f."),
+                *GetName(), Level,
+                Frame.PlaneDist - NearestZ,
+                Frame.PlaneDist - FarthestZ);
+        }
+    }
+}
+
 void APlanetAtmosphereActor::PrepareTransmittanceTable()
 {
     if (!TransmittanceTable)
@@ -1156,6 +1668,19 @@ void APlanetAtmosphereActor::RequestGasGiantShadowBake(
     Params.FlowTexture = FlowRes->GetRenderTargetTexture();
 
     Params.MapTexture = MapRes->GetRenderTargetTexture();
+
+    // -- Occluders ----------------------------------------------------------
+    //
+    // A level with no capture leaves its frame invalid and the bake skips it,
+    // so this cannot refuse the deck bake -- the difference is a planet with no
+    // geometry shadows rather than a planet with no shadows.
+    //
+    // CaptureScene enqueues from here, during the actor tick; the bake goes out
+    // from the subsystem's tick afterwards, so a capture taken this frame is
+    // already in flight when the bake reads it. Nothing depends on that: the
+    // frame travels with the image, so a stale capture is placed correctly.
+    UpdateGasGiantOccluderCaptures(
+        PlanetRadius, PlanetCenter, Params.LightDir, Params.CameraLocal, Params);
 
     Sim->RequestShadowBake(Params);
 }

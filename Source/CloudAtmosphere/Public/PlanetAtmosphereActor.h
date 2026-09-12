@@ -33,8 +33,10 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "AtmosphereParams.h"
 #include "AtmosphereTransmittance.h"
+#include "GasGiantShadowMap.h"
 #include "PlanetAtmosphereActor.generated.h"
 
+class USceneCaptureComponent2D;
 class UTextureRenderTarget2D;
 class UTextureRenderTarget2DArray;
 
@@ -95,6 +97,18 @@ public:
     UFUNCTION(BlueprintCallable, CallInEditor, Category = "CloudAtmosphere")
     void RebuildMaterialInstances();
 
+    /** Reads each occluder capture back and logs what is actually in it: how
+     *  much of the level is geometry rather than background, the nearest and
+     *  farthest surface, and where the nearest one sits along the light.
+     *
+     *  THE DEPTH TARGETS CANNOT BE READ BY EYE. Every real depth at planetary
+     *  scale is far above 1 and displays saturated, so a capture holding only
+     *  background and a capture holding an occluder look the same.
+     *
+     *  Stalls on the GPU. A diagnostic, not something to call per frame. */
+    UFUNCTION(BlueprintCallable, CallInEditor, Category = "CloudAtmosphere")
+    void LogGasGiantOccluderCaptures();
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline")
     FAtmosphereCompositeParams Composite;
 
@@ -127,6 +141,13 @@ public:
      *  shadows rather than aliasing them. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ClampMin = "128", ClampMax = "4096"))
     int32 GasGiantShadowResolution = 1024;
+
+    /** Opaque geometry casting into the deck shadow map. NOT INLINED with
+     *  ShowOnlyInnerProperties, unlike the model groups below: the edit
+     *  condition is what hides it on a terrestrial planet, and that condition
+     *  does not survive inlining. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides))
+    FGasGiantOccluderShadowParams GasGiantOccluderShadows;
 
     // --- Atmosphere ---
     //
@@ -382,6 +403,51 @@ private:
     /** Suppresses the per-tick repeat of the shadow target complaint. Cleared
      *  when a usable target appears, so a fixed asset logs its recovery. */
     bool bWarnedShadowTarget = false;
+
+    // --- Occluder captures ---
+    //
+    // One orthographic depth capture per cascade, created on demand and torn
+    // down when the feature is off or the planet is not a gas giant. Transient
+    // and unassignable: unlike the shadow target there is nothing to watch in
+    // them that the shadow target does not already show.
+
+    // TArray rather than a fixed array on the reflected members: the header
+    // tool wants a literal bound, and a second spelling of CascadeCount is a
+    // number that can drift from the one the dispatch uses. Sized to
+    // GasGiantShadow::CascadeCount wherever they are touched.
+
+    UPROPERTY(Transient)
+    TArray<TObjectPtr<USceneCaptureComponent2D>> OccluderCaptures;
+
+    /** Visible so a capture can be opened and looked at. There is nothing to
+     *  read in a depth target by eye -- its values run to 1e8 and display flat
+     *  white -- but with bDebugColorCapture on it shows the scene from the
+     *  light, which is what tells a missing shadow from a missing capture. */
+    UPROPERTY(Transient, VisibleInstanceOnly, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
+    TArray<TObjectPtr<UTextureRenderTarget2D>> OccluderDepthTargets;
+
+    /** The frame each capture ACTUALLY RENDERED WITH, not the one computed this
+     *  tick. A level on a slow cadence is then placed correctly and only late,
+     *  where reusing this tick's frame would drag its last image across the
+     *  deck as the light moves. */
+    FGasGiantOccluderFrame OccluderFrames[GasGiantShadow::CascadeCount];
+
+    int32 FramesSinceCapture[GasGiantShadow::CascadeCount];
+
+    /** Creates or destroys the capture components and their R32F targets to
+     *  match the current settings and resolution. Returns whether any level is
+     *  live. */
+    bool PrepareGasGiantOccluderCaptures();
+
+    /** Places each capture in the light's frame, captures the levels due this
+     *  frame, and fills Params.Occluders from what each level last rendered. */
+    void UpdateGasGiantOccluderCaptures(
+        float PlanetRadius, const FVector& PlanetCenter,
+        const FVector3f& LightLocal, const FVector3f& CameraLocal,
+        FGasGiantShadowParams& Params);
+
+    /** Frees the capture components and targets. */
+    void DestroyGasGiantOccluderCaptures();
 
     /** Creates the transmittance table if needed, rebakes it when its inputs or
      *  its resource change, and pushes it to the march material. */

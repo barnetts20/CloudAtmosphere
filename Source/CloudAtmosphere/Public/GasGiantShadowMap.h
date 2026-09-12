@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Containers/StaticArray.h"
 #include "GlobalShader.h"
 #include "ShaderParameterStruct.h"
 #include "RenderGraphResources.h"
@@ -21,7 +22,67 @@ namespace GasGiantShadow
 	 *  through ModifyCompilationEnvironment, so a define set here would move the
 	 *  bake without moving the march that reads it. Edit the pair together. */
 	static constexpr int32 CascadeCount = 3;
+
+	/** How far a depth capture reaches past the disc, as a multiple of the
+	 *  planet's outer shell. ONLY A LOWER BOUND: the capture has to be at least
+	 *  as wide as the shader's GG_SHADOW_EXTENT_MARGIN slice, and wider costs
+	 *  resolution rather than correctness, so this does not have to track that
+	 *  define exactly -- it must simply never be smaller. */
+	static constexpr float CaptureExtentMargin = 1.02f;
 }
+
+/** One depth capture's placement, planet-local, as the bake reads it.
+ *
+ *  THE CAPTURE DESCRIBES ITSELF. U and V are the capture image's right and up
+ *  axes, taken off the component's own transform rather than rebuilt from the
+ *  light, so the bake cannot disagree with the capture about where a texel is
+ *  and a mirrored basis is not expressible. Alignment with a cascade is a sizing
+ *  convenience that makes the resample an identity; a mismatch costs resolution,
+ *  never placement.
+ *
+ *  Render-thread safe: plain data plus an RHI handle, no UObject. */
+struct CLOUDATMOSPHERE_API FGasGiantOccluderFrame
+{
+	FVector3f U = FVector3f(1.0f, 0.0f, 0.0f);
+	FVector3f V = FVector3f(0.0f, 1.0f, 0.0f);
+
+	/** Plane centre in (U, V), world units. */
+	FVector2f Centre = FVector2f::ZeroVector;
+
+	/** Half-width of the capture, world units. */
+	float Extent = 0.0f;
+
+	/** Capture plane's distance from the planet centre, along the light. */
+	float PlaneDist = 0.0f;
+
+	/** Far clip, world units from the plane. Background reads at or past it. */
+	float Far = 0.0f;
+
+	FTextureRHIRef DepthTexture;
+
+	/** Set once the capture has actually rendered. A level that has never
+	 *  captured must stay invalid: a cleared R32F target reads as depth zero,
+	 *  which is an occluder sitting on the capture plane and shadows the whole
+	 *  level. */
+	bool bCaptured = false;
+
+	bool IsUsable() const
+	{
+		return bCaptured && DepthTexture.IsValid() && Extent > 0.0f && Far > 0.0f;
+	}
+
+	// The three float4s the shader unpacks in AtmoOcc_MakeFrame. Changing a
+	// layout here means changing it there; there is no binding that checks it.
+
+	FVector4f PackU() const { return FVector4f(U.X, U.Y, U.Z, Extent); }
+
+	FVector4f PackV() const { return FVector4f(V.X, V.Y, V.Z, PlaneDist); }
+
+	FVector4f PackPlane() const
+	{
+		return FVector4f(Centre.X, Centre.Y, Far, IsUsable() ? 1.0f : 0.0f);
+	}
+};
 
 /** Everything the shadow bake reads, flattened for the render thread.
  *
@@ -140,6 +201,14 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 	 *  unwritten and the march reads whatever the target held. */
 	FTextureRHIRef MapTexture;
 
+	// -- Occluders ----------------------------------------------------------
+
+	/** One depth capture per cascade, each optional. NOT PART OF IsUsable: a
+	 *  level with no capture disables itself and the deck still bakes, which is
+	 *  the difference between a planet with no geometry shadows and a planet
+	 *  with no shadows. */
+	TStaticArray<FGasGiantOccluderFrame, GasGiantShadow::CascadeCount> Occluders;
+
 	/** Whether the bake has everything it needs. Checked before the render
 	 *  command is enqueued, since a params struct is cheaper to reject on the
 	 *  game thread than a dispatch is to unwind on the render thread. */
@@ -230,7 +299,23 @@ SHADER_PARAMETER_SAMPLER(SamplerState, DetailVolumeSampler)
 SHADER_PARAMETER_TEXTURE(Texture3D, StructureVolume)
 SHADER_PARAMETER_SAMPLER(SamplerState, StructureVolumeSampler)
 
+SHADER_PARAMETER_ARRAY(FVector4f, OccluderU, [GasGiantShadow::CascadeCount])
+SHADER_PARAMETER_ARRAY(FVector4f, OccluderV, [GasGiantShadow::CascadeCount])
+SHADER_PARAMETER_ARRAY(FVector4f, OccluderPlane, [GasGiantShadow::CascadeCount])
+
+SHADER_PARAMETER_TEXTURE(Texture2D, OccluderDepth0)
+SHADER_PARAMETER_TEXTURE(Texture2D, OccluderDepth1)
+SHADER_PARAMETER_TEXTURE(Texture2D, OccluderDepth2)
+
+SHADER_PARAMETER_SAMPLER(SamplerState, OccluderDepthSampler)
+
 END_SHADER_PARAMETER_STRUCT()
+
+// The captures are bound one name per level, and the shader walks them finest
+// first through an unrolled chain, so a fourth cascade is not just a larger
+// array. Caught here rather than as an unbound-parameter warning.
+static_assert(GasGiantShadow::CascadeCount == 3,
+	"OccluderDepth0..2 and GGShadow_Occlusion are written out per cascade.");
 
 class FGasGiantShadowBakeCS : public FGlobalShader
 {
