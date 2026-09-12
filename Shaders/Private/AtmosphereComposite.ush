@@ -104,6 +104,6 @@ float4 Atmo_Composite(
     }
 
     const float3 atmo = lerp(center.rgb, sum / totalWeight, saturate(blurWeight));
-
+    //return float4(center.aaa, 1.0);
     return float4(atmo + sceneColor * center.a, 1.0);
 }

@@ -738,7 +738,12 @@ float4 GGAtmo_MainMarch(
 		min(P.Scatter.ExtinctionPositive.rgb * P.Scatter.ExtinctionPositive.a,
 			P.Scatter.ExtinctionBase.rgb * P.Scatter.ExtinctionBase.a));
 
-    const float BetaMin = P.Atmo.cloudParams.cloudScatBeta.x * min(BandLow.x, min(BandLow.y, BandLow.z));
+	// PER ATMOSPHERE THICKNESS, to match OutMin and DeckBackstop. cloudScatBeta is
+	// per WORLD unit, having been divided by thickness in Atmo_BuildParams, so the
+	// depth below would otherwise be a world length subtracted from a fraction --
+	// at planetary scale that is always hugely negative and the clip never fires.
+    const float BetaMin = P.Atmo.cloudParams.cloudScatBeta.x
+		* min(BandLow.x, min(BandLow.y, BandLow.z)) * P.Field.Thickness;
 
 	// COUNTED DOWN FROM WHERE EVERY COLUMN IS SATURATED, which is the backstop
 	// or the lowest a column top can fall, whichever is lower. Relief is free to

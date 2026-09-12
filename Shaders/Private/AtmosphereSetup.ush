@@ -38,21 +38,16 @@ float3 Atmo_RayDirection(float2 svPosition, float2 rtSize)
     return normalize(WorldDir.xyz / WorldDir.w);
 }
 
-/** Blends between ignoring scene depth and using it. Scene depth loses
- *  precision badly at planetary distances, so from outside the atmosphere it is
- *  unusable, but from inside it is what stops the march running through terrain.
- *  Blended on altitude: fully trusted at the cloud deck, fully ignored at the
- *  atmosphere's outer edge. The ignored case is camDist * 2 rather than a huge
- *  number, so the lerp does not lose its near end to precision as it starts. */
-float Atmo_CorrectedDepth(float camDist, float sceneDepth, float atmoRadius, float cloudOuterRadius)
-{
-    float outerBlend = saturate((atmoRadius - camDist) / (atmoRadius - cloudOuterRadius));
-
-    return lerp(camDist * 2, sceneDepth, outerBlend);
-}
-
 /** Fills CompositeParams from the material's pin values. The gas giant path
  *  passes zero for every terrestrial cloud-shape argument, which it never reads.
+ *
+ *  PITFALL: sceneDepth is a TRUE RAY DISTANCE, not the SceneDepth node. The
+ *  march spends it as a bound on the ray parameter, so it has to be measured
+ *  along the ray rather than along the view axis, and it has to hold precision
+ *  at planetary range. Build it as length(AbsoluteWorldPosition - CameraPositionWS),
+ *  which is LWC-aware and lands camera-relative; the SceneDepth node is neither,
+ *  and wiring it gives a march that stops short off-axis and drifts with
+ *  distance.
  *
  *  SCALED BY ATMOSPHERE THICKNESS ON THE WAY IN. Every coefficient and scale
  *  height arrives as a fraction of the atmosphere's depth rather than in world
@@ -105,7 +100,6 @@ CompositeParams Atmo_BuildParams(
     const float atmoThickness = atmoRadius - planetRadius;
 
     const float3 crPlanetPos = atmoPos - cameraPos;
-    const float camDist = length(crPlanetPos);
 
     const float cosTheta = dot(rayDir, lightDirection);
 
@@ -161,7 +155,7 @@ CompositeParams Atmo_BuildParams(
     params.mainRayParams.originalCameraPos = cameraPos;
     params.mainRayParams.cameraDir = rayDir;
     params.mainRayParams.lightCol = lightColor;
-    params.mainRayParams.sceneDepth = Atmo_CorrectedDepth(camDist, sceneDepth, atmoRadius, cloudOuterRadius);
+    params.mainRayParams.sceneDepth = sceneDepth;
     params.mainRayParams.atmoSteps = mainAtmoSteps;
     params.mainRayParams.cloudSteps = mainCloudSteps;
     params.mainRayParams.stepScaleFactor = stepScaleFactor;
