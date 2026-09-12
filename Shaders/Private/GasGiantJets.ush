@@ -1,49 +1,29 @@
 #pragma once
 
-// ---------------------------------------------------------------------------
-// The zonal jet profile, and everything derived from it.
+// The zonal jet profile and everything derived from it. READ ONLY BY
+// GasGiantSim.usf: the sim evaluates the rate for its nudging target and the
+// DERIVATIVE for the initial vorticity field. The material draws its bands from
+// the vorticity channel the sim transports, not from this profile, so nothing
+// here reaches the material path.
 //
-// WHY THIS IS ITS OWN FILE.
+// EVERYTHING HERE IS A FUNCTION OF S = sin(latitude), NOT LATITUDE. Jets come
+// out equal AREA rather than equal angle, so they stop crowding into the poles,
+// and S is already the sim's grid coordinate -- no transcendental to get here.
 //
-// The profile is now read from two places that cannot include each other. The
-// material samples it once per density sample for band brightness. The sim
-// evaluates it every step for the nudging target, and evaluates its DERIVATIVE
-// to build the initial vorticity field.
-//
-// Duplicating it would be the worst possible failure: the sim would maintain
-// jets at latitudes where the material draws no bands, and the mismatch would
-// drift with every parameter tweak while looking, at any single moment, like a
-// plausible planet with the bands slightly off the flow. One definition.
-//
-// EVERYTHING HERE IS A FUNCTION OF S = sin(latitude), NOT LATITUDE.
-//
-// Jets come out equal AREA rather than equal angle, so they stop crowding into
-// the poles. It is also the sim's grid coordinate and the material's V
-// coordinate, which is why neither side needs a transcendental to get here.
-//
-// RATES ARE ANGULAR, IN RADIANS PER UNIT TIME, ON A UNIT SPHERE.
-//
-// No planet radius appears anywhere in this file or in the sim. Linear speed
-// would have to be divided by cos(latitude) to become an angle, which is
-// singular at the poles for no benefit, and carrying a radius through the sim
-// would reintroduce exactly the units mismatch that cost hours when decoded
-// gradients were combined with a rate.
-// ---------------------------------------------------------------------------
+// RATES ARE ANGULAR, IN RADIANS PER UNIT TIME, ON A UNIT SPHERE. No planet
+// radius appears here or in the sim: linear speed would have to be divided by
+// cos(latitude) to become an angle, singular at the poles for no benefit, and a
+// radius carried through the sim is a units mismatch waiting to happen.
 
-/** The raw alternating shape, before plateau shaping. Roughly [-1.45, 1.45].
+/** The raw alternating shape, roughly [-1.45, 1.45]. EVEN in S, so mirrored
+ *  latitudes rotate the same way -- an odd form counter-rotates the hemispheres
+ *  and puts a shear seam along the equator. The second cosine sits at an
+ *  incommensurate frequency so jet spacing stops looking regular, and both terms
+ *  are pure cosines with no phase offset, which keeps the sum even and smooth
+ *  across the equator. PITFALL: a phase offset or an abs() puts a kink at S = 0.
  *
- *  EVEN in S, so mirrored latitudes rotate the same way. An odd form makes the
- *  hemispheres counter-rotate, which puts a shear seam along the equator and is
- *  not what any real gas giant does.
- *
- *  The second cosine is at an incommensurate frequency so jet spacing stops
- *  looking regular. Both terms are pure cosines with no phase offset, which is
- *  what keeps the sum even and also smooth across the equator -- a phase offset
- *  or an abs() would put a kink at S = 0.
- *
- *  Asymmetry adds a small ODD term back. Perfect mirror symmetry is its own
- *  artifact: the eye picks it up immediately and it reads as a decal rather
- *  than a planet. */
+ *  Asymmetry adds a small ODD term back, because perfect mirror symmetry is its
+ *  own artifact and reads as a decal rather than a planet. */
 float GG_JetRaw(float S, float BandCount, float Asymmetry)
 {
     const float K = BandCount * PI;
@@ -68,19 +48,14 @@ float GG_JetRawSlope(float S, float BandCount, float Asymmetry)
     return D;
 }
 
-/** 1/1.45. Normalizes the raw range to roughly [-1,1] so the width parameters
- *  mean the same thing regardless of Asymmetry.
- *
- *  Named rather than written inline in three places, which is how the slope
- *  function ended up carrying it and the shape function ended up carrying it
- *  separately. */
+/** 1/1.45, normalizing the raw range to roughly [-1,1] so WidthBias means the
+ *  same thing regardless of Asymmetry. Named rather than inline, so the shape
+ *  and its slope cannot carry different constants. */
 #define GG_JET_NORM 0.6897f
 
-/** The normalized, offset raw shape. This is the quantity that gets clamped and
- *  shaped downstream, and the quantity whose derivative is GG_JetScaledSlope.
- *
- *  Pulled out so that the clamp test and the slope can be taken against the
- *  same expression. */
+/** The normalized, offset raw shape: what the saturation is applied to, and the
+ *  quantity whose derivative is GG_JetScaledSlope. WidthBias offsets it so zones
+ *  and belts need not be the same width. */
 float GG_JetScaled(float S, float BandCount, float Asymmetry, float WidthBias)
 {
     return GG_JetRaw(S, BandCount, Asymmetry) * GG_JET_NORM - WidthBias;
@@ -91,42 +66,29 @@ float GG_JetScaled(float S, float BandCount, float Asymmetry, float WidthBias)
 #define GG_JET_SAT_KNEE  0.5f
 #define GG_JET_SAT_WIDTH 1.0f
 
-/** Smooth saturation of the jet rate, replacing what used to be clamp(x,-1,1).
+/** Smooth saturation of the jet rate. Below the knee it is exactly the identity,
+ *  so the profile is untouched wherever saturation is not biting.
  *
- *  A HARD CLAMP HERE IS A VORTEX SHEET, AND VORTEX SHEETS ARE UNCONDITIONALLY
- *  UNSTABLE.
- *
- *  This is the single most expensive thing to have got wrong in this system, so
- *  it is worth stating the chain plainly. A clamp is continuous but has a
- *  CORNER. A corner in R is a step in R'. And
+ *  PITFALL: A HARD CLAMP HERE IS A VORTEX SHEET, AND VORTEX SHEETS ARE
+ *  UNCONDITIONALLY UNSTABLE. A clamp is continuous but has a CORNER; a corner in
+ *  R is a step in R'; and
  *
  *      zeta(S) = 2 S R(S) - (1 - S^2) R'(S)
  *
- *  so a step in R' is a STEP IN VORTICITY -- a vortex sheet. Kelvin-Helmholtz
- *  says a vortex sheet is unstable at every wavenumber, with a growth rate that
- *  increases with wavenumber, so no rotation rate stabilises one: the
- *  Rayleigh-Kuo requirement at the corner is unbounded because d(zeta)/dS there
- *  is a delta function rather than a large number.
+ *  so a step in R' is a STEP IN VORTICITY. Kelvin-Helmholtz makes a vortex sheet
+ *  unstable at every wavenumber with a growth rate rising with wavenumber, so no
+ *  rotation rate stabilises one -- the Rayleigh-Kuo requirement at the corner is
+ *  unbounded, d(zeta)/dS being a delta function rather than a large number.
+ *  Measured on a representative profile a hard clamp is active on about 3% of
+ *  latitudes and raises the required PlanetaryVorticity from 28 to over 1400: the
+ *  profile looks stable everywhere you would think to check and is catastrophic
+ *  on a few rows, showing as bands that hold, perturb at the jet cores, roll up
+ *  and merge.
  *
- *  Measured on a representative profile, the hard clamp is active on about 3%
- *  of latitudes and raises the required PlanetaryVorticity from 28 to over
- *  1400. So the profile looks stable everywhere you would think to check, and
- *  is catastrophically unstable on a few rows -- which shows up as bands that
- *  hold, then perturb at the jet cores, then roll up and merge. Exactly the
- *  failure that reads as "the physics does not work".
- *
- *  It was harmless for as long as the clamped rate only fed band brightness and
- *  relief thinning, where a corner is invisible. It stopped being harmless the
- *  moment the rate started defining a flow.
- *
- *  C2 is the requirement, not merely C1. zeta depends on R', so continuous R'
- *  removes the sheet; but Rayleigh-Kuo tests d(zeta)/dS which depends on R'',
- *  so a C1 saturation still leaves a finite jump there and still needs beta
- *  near 100. The quintic below has continuous value, slope AND curvature, which
- *  brings the requirement down to essentially what the unclamped profile needs.
- *
- *  Below the knee this is exactly the identity, so the profile is untouched
- *  wherever the clamp was not biting anyway. */
+ *  C2 IS THE REQUIREMENT, NOT MERELY C1. zeta depends on R', so continuous R'
+ *  removes the sheet, but Rayleigh-Kuo tests d(zeta)/dS, which depends on R'' --
+ *  a C1 saturation leaves a finite jump there and still needs beta near 100. The
+ *  quintic below is continuous in value, slope AND curvature. */
 float GG_JetSaturate(float X)
 {
     const float A = abs(X);
@@ -174,89 +136,30 @@ float GG_JetSaturateSlope(float X)
     return 1.0f - (6.0f * U3 * U2 - 15.0f * U3 * U + 10.0f * U3);
 }
 
-/** d(GG_JetScaled)/dS, THROUGH THE SATURATION.
+/** d(GG_JetScaled)/dS, THROUGH THE SATURATION. The saturation does bite --
+ *  Asymmetry and WidthBias both push the sum past unity at ordinary settings --
+ *  so the unsaturated derivative is wrong in exactly those regions, which are
+ *  the jet peaks.
  *
- *  This is a correctness fix, not a refinement. GG_ZonalRate is built on
- *  clamp(GG_JetScaled, -1, 1), and the clamp does bite: Asymmetry and WidthBias
- *  both push the sum past unity for ordinary settings. The unclamped derivative
- *  is therefore WRONG in exactly the saturated regions -- and those are the jet
- *  peaks, the strongest-flow parts of the profile.
- *
- *  It mattered little when this only fed relief thinning, where being wrong at
- *  a peak scaled a term that was already small. It matters completely now that
- *  it IS the zonal vorticity: a nonzero slope where the rate is constant tells
- *  the sim there is shear where there is none, and the initial condition would
- *  contain vorticity sheets along every jet core that the flow does not
- *  support. The sim would then spend its spin-up dismantling them, and the
- *  result would look like the seeding "didn't take". */
+ *  PITFALL: this IS the zonal vorticity. A nonzero slope where the rate is
+ *  constant tells the sim there is shear where there is none, so the initial
+ *  condition carries vorticity sheets along every jet core that the flow does
+ *  not support. The sim spends its spin-up dismantling them, which reads as the
+ *  seeding not having taken. */
 float GG_JetScaledSlope(float S, float BandCount, float Asymmetry, float WidthBias)
 {
     const float Scaled = GG_JetScaled(S, BandCount, Asymmetry, WidthBias);
 
 	// Chain rule through the saturation, evaluated at the same expression
-	// GG_JetShaped saturates. The two cannot disagree about where the knee is,
-	// which was the failure the previous version of this function had: it
-	// tested a clamp condition the shaping applied and returned a slope the
-	// shaping did not have.
+	// GG_ZonalRate saturates, so the two cannot disagree about where the knee
+	// is.
     return GG_JetSaturateSlope(Scaled) * GG_JetRawSlope(S, BandCount, Asymmetry) * GG_JET_NORM;
 }
 
-/** Plateau shaping, and the boundary mask that falls out of it.
- *
- *  THIS IS WHY BANDS HAVE A SOLID MIDDLE.
- *
- *  A sum of cosines is curving everywhere and is flat nowhere, so a band built
- *  from one has no interior -- only a rising edge that immediately becomes a
- *  falling edge. Jupiter is the opposite: wide flat zones and belts with narrow
- *  transitions between them. Pushing the raw shape through a smoothstep of
- *  controllable width produces genuine plateaus.
- *
- *  Shaping is MONOTONE, so it moves no zero crossings. Bands and jets stay
- *  registered with each other however hard this is driven.
- *
- *  BandShape.x  Flatness. 0 leaves the raw curve, 1 is nearly a square wave.
- *  BandShape.y  Width bias, so zones and belts need not be the same width.
- *  BandShape.z  Relief thinning; consumed by the material only.
- *
- *  OutBoundary is 1 at a transition and 0 in a plateau. It is 4t(1-t) on the
- *  smoothstep's own parameter, so it costs a multiply and tracks the shaping
- *  exactly rather than approximating it. */
-void GG_JetShaped(
-	float S,
-	float BandCount,
-	float Asymmetry,
-	float3 BandShape,
-	out float OutShape,
-	out float OutBoundary,
-	out float OutRaw)
-{
-    const float Raw = GG_JetScaled(S, BandCount, Asymmetry, BandShape.y);
-
-    const float Width = max(1.0f - BandShape.x, 0.02f);
-
-    const float T = saturate((Raw + Width) / (2.0f * Width));
-
-    OutShape = 2.0f * (T * T * (3.0f - 2.0f * T)) - 1.0f;
-    OutBoundary = 4.0f * T * (1.0f - T);
-
-	// Unshaped, and SATURATED rather than clamped. The RATE uses this rather
-	// than OutShape,
-	// because a plateau has zero slope and dRate/dS is the entire source of
-	// shear -- shaping the rate flattens the winding out of every band interior.
-	//
-	// Registration survives the split: both are monotone functions of the same
-	// raw value, so they share every zero crossing however differently they are
-	// shaped.
-    OutRaw = GG_JetSaturate(Raw);
-}
-
-/** The equatorial jet enhancement, and its derivative.
- *
- *  Added AFTER the plateau shaping, deliberately. Shaping it would flatten the
- *  equatorial jet into just another plateau and lose the one profile feature
- *  that is genuinely a peak rather than a step. The base shape already puts a
- *  prograde jet at S = 0 because cos(0) is 1; this shapes an existing jet
- *  rather than inventing one. */
+/** The equatorial jet enhancement, and its derivative. Added AFTER the
+ *  saturation, so the one profile feature that is genuinely a peak keeps its
+ *  peak. The base shape already puts a prograde jet at S = 0, cos(0) being 1, so
+ *  this sharpens an existing jet rather than inventing one. */
 float GG_EquatorialBoost(float S, float EquatorialBoost)
 {
     return EquatorialBoost * exp(-S * S * 12.0f);
@@ -267,99 +170,68 @@ float GG_EquatorialBoostSlope(float S, float EquatorialBoost)
     return -24.0f * S * EquatorialBoost * exp(-S * S * 12.0f);
 }
 
-/** Angular rate. Radians per unit time, positive prograde (eastward).
- *
- *  What makes STRUCTURE is dRate/dS, not Rate. A constant added to every
- *  latitude is a rigid spin and produces no shear at all; only the differences
- *  between latitudes wind anything. */
+/** Angular rate. Radians per unit time, positive prograde (eastward). What makes
+ *  STRUCTURE is dRate/dS, not Rate: a constant added to every latitude is a rigid
+ *  spin producing no shear, and only the differences between latitudes wind
+ *  anything. */
 float GG_ZonalRate(
 	float S,
 	float BandCount,
 	float JetStrength,
 	float EquatorialBoost,
 	float Asymmetry,
-	float3 BandShape)
+	float WidthBias)
 {
-    float Shape, Boundary, Raw;
-    GG_JetShaped(S, BandCount, Asymmetry, BandShape, Shape, Boundary, Raw);
+    const float Raw = GG_JetSaturate(GG_JetScaled(S, BandCount, Asymmetry, WidthBias));
 
     return JetStrength * (Raw + GG_EquatorialBoost(S, EquatorialBoost));
 }
 
-/** d(GG_ZonalRate)/dS. Term-for-term the derivative of the line above,
- *  including the clamp, which is why GG_JetScaledSlope exists.
- *
- *  This is the local shear rate. The material uses it for relief thinning; the
- *  sim needs it for the zonal vorticity below. */
+/** d(GG_ZonalRate)/dS, term for term including the saturation, which is why
+ *  GG_JetScaledSlope exists. The local shear rate, and what the zonal vorticity
+ *  below is built from. */
 float GG_ZonalRateSlope(
 	float S,
 	float BandCount,
 	float JetStrength,
 	float EquatorialBoost,
 	float Asymmetry,
-	float3 BandShape)
+	float WidthBias)
 {
-    const float RawSlope = GG_JetScaledSlope(S, BandCount, Asymmetry, BandShape.y);
+    const float RawSlope = GG_JetScaledSlope(S, BandCount, Asymmetry, WidthBias);
 
     return JetStrength * (RawSlope + GG_EquatorialBoostSlope(S, EquatorialBoost));
 }
 
-/** RELATIVE VORTICITY OF THE PRESCRIBED ZONAL FLOW, as a function of S.
- *
- *  THIS IS THE INITIAL CONDITION AND THE NUDGING TARGET. Everything the sim
- *  does to maintain jets comes through this one function.
+/** RELATIVE VORTICITY OF THE PRESCRIBED ZONAL FLOW, as a function of S. THE
+ *  INITIAL CONDITION AND THE NUDGING TARGET: everything the sim does to maintain
+ *  jets comes through this one function.
  *
  *  The general form for a zonal flow is
  *
  *      zeta = -(1 / (a cos(phi))) d(u cos(phi)) / d(phi)
  *
- *  which is where a radius and two cosines appear, and where a pole
- *  singularity appears with them. None of that survives the change of
- *  variable. On a unit sphere with an ANGULAR rate R(S), the eastward speed is
- *  u = R * cos(phi), so u cos(phi) = R (1 - S^2), and since d/d(phi) = cos(phi)
- *  d/dS the two cosines cancel against the prefactor exactly:
+ *  which is where a radius, two cosines and a pole singularity appear. None of
+ *  that survives the change of variable: on a unit sphere with an ANGULAR rate
+ *  R(S) the eastward speed is u = R cos(phi), so u cos(phi) = R (1 - S^2), and
+ *  since d/d(phi) = cos(phi) d/dS the cosines cancel against the prefactor:
  *
  *      zeta(S) = -d/dS[ (1 - S^2) R(S) ] = 2 S R(S) - (1 - S^2) R'(S)
  *
- *  No radius, no division, no singularity. It is finite and correct at S = +-1,
- *  where it reduces to 2 R(+-1) -- solid-body rotation about the pole, which is
- *  what a smooth field must do there.
- *
- *  This is the same collapse that makes the Laplacian clean in this coordinate,
- *  and it is the main reason the sim grid is in sin(latitude): the alternative
- *  is carrying 1/cos(phi) through both the initial condition and the operator
- *  and hoping the singularities cancel numerically. */
+ *  No radius, no division, no singularity, and finite at S = +-1 where it
+ *  reduces to 2 R(+-1) -- solid-body rotation about the pole, which is what a
+ *  smooth field must do there. The same collapse that makes the Laplacian clean
+ *  in this coordinate, and the main reason the grid is in sin(latitude). */
 float GG_ZonalVorticity(
 	float S,
 	float BandCount,
 	float JetStrength,
 	float EquatorialBoost,
 	float Asymmetry,
-	float3 BandShape)
+	float WidthBias)
 {
-    const float R = GG_ZonalRate(S, BandCount, JetStrength, EquatorialBoost, Asymmetry, BandShape);
-    const float RSlope = GG_ZonalRateSlope(S, BandCount, JetStrength, EquatorialBoost, Asymmetry, BandShape);
+    const float R = GG_ZonalRate(S, BandCount, JetStrength, EquatorialBoost, Asymmetry, WidthBias);
+    const float RSlope = GG_ZonalRateSlope(S, BandCount, JetStrength, EquatorialBoost, Asymmetry, WidthBias);
 
     return 2.0f * S * R - (1.0f - S * S) * RSlope;
-}
-
-/** Band brightness, derived from the same shape as the jets.
- *
- *  Bands mark jets -- zones and belts are the visible signature of the shear
- *  between them -- so shaping the two with independent functions that merely
- *  share a frequency lets them drift out of phase, and then the bands sit in
- *  the wrong place relative to the flow supposedly making them.
- *
- *  Takes an already-warped coordinate, so meander and jitter survive. */
-float GG_BandProfile(
-	float BandCoord,
-	float BandCount,
-	float Asymmetry,
-	float3 BandShape,
-	float BandSharpness)
-{
-    float Shape, Boundary, Raw;
-    GG_JetShaped(BandCoord, BandCount, Asymmetry, BandShape, Shape, Boundary, Raw);
-
-    return saturate(0.5f + 0.5f * Shape * BandSharpness);
 }

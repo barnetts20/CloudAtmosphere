@@ -502,6 +502,14 @@ struct CLOUDATMOSPHERE_API FGasGiantFlowParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.05", ClampMax = "45.0"))
 	float HemisphereBlend = 3.0f;
 
+	/** How far local vorticity widens that band, as a multiple of it at full
+	 *  normalized vorticity. The sign flip is exactly the equator and stays so;
+	 *  this varies only the WIDTH, which is what keeps a vortex straddling the
+	 *  equator from being bisected along a fixed latitude however strong it is.
+	 *  0 gives a band of constant width, which reads as a perfect annulus. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "8.0"))
+	float HemisphereVariance = 2.0f;
+
 	/** Height of zones above belts, a fraction of GradientThickness: each moves
 	 *  half of it from DeckTop, zones up and belts down, meeting at DeckTop on the
 	 *  band boundaries. Positive lifts the anticyclonic zones. Bands are geometry

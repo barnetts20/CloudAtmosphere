@@ -141,10 +141,12 @@ struct GGFieldParams
 	/** The deep flow layer's step length: WarpTime * DeepShearRatio. */
     float DeepShearTime;
 
-	/** tanh argument per unit sin(latitude): the reciprocal of HemisphereBlend's
-	 *  sine, so the blend reaches about three quarters of full strength at that
-	 *  latitude. */
-    float HemisphereSharpness;
+	/** HemisphereBlend as a half-width in sin(latitude). The blend reaches about
+	 *  three quarters of full strength at that distance from the equator. */
+    float HemisphereHalfWidth;
+
+	/** How far vorticity widens that half-width, from HemisphereVariance. */
+    float HemisphereVariance;
 
     float SpinAngle;
 
@@ -189,6 +191,7 @@ GGFieldParams GG_BuildField(
 	float BandSharpness,
 	float BandBias,
 	float HemisphereBlend,
+	float HemisphereVariance,
 	float BandRelief,
 	float PressureRelief,
 	float VortexThreshold,
@@ -279,7 +282,8 @@ GGFieldParams GG_BuildField(
 
 	// Floored against a zero width, which would make GG_Hemisphere a sign() and
 	// seam along the equator.
-    F.HemisphereSharpness = 1.0f / max(sin(radians(HemisphereBlend)), 1e-4f);
+    F.HemisphereHalfWidth = max(sin(radians(HemisphereBlend)), 1e-4f);
+    F.HemisphereVariance = max(HemisphereVariance, 0.0f);
 
 	// Time and period are both simulated seconds: Time is the sim's clock, which
 	// already runs TimeScale times faster than real time, so the crossfade keeps
@@ -427,21 +431,32 @@ float4 GG_SampleFlow(Texture2DArray FlowField, SamplerState FlowSampler, float3 
 }
 
 /** +1 in the northern hemisphere, -1 in the southern, smoothly through zero at
- *  the equator. N is a unit direction in the field's frame. The sim's channels
- *  are rotation senses, and the Coriolis parameter that turns one into cyclone
- *  or anticyclone changes sign at the equator. Smooth rather than sign(): a hard
- *  switch seams there, and within a few degrees rotation stops organizing the
- *  weather anyway. HemisphereBlend sets how wide that band is. */
-float GG_Hemisphere(float3 N, GGFieldParams F)
+ *  the equator. N is a unit direction in the field's frame, Flow its sample.
+ *
+ *  THE SIGN FLIP IS EXACTLY A LATITUDE CIRCLE and carries no variance: the
+ *  Coriolis parameter is 2 omega sin(latitude), with no longitude term, so which
+ *  rotation sense is cyclonic really does change at latitude zero everywhere.
+ *  What varies is the WIDTH of the indifferent band either side, because what
+ *  the eye reads is where rotation stops organizing the weather -- roughly where
+ *  local vorticity rivals the planetary term. HemisphereBlend sets the quiet-air
+ *  width and HemisphereVariance widens it with |zeta|.
+ *
+ *  PITFALL: a constant width makes the band a perfect annulus, and a vortex
+ *  straddling the equator is then bisected along a fixed latitude however strong
+ *  it is. Widening with the flow lets a strong feature carry its own neutral
+ *  band across and survive as one feature. */
+float GG_Hemisphere(float4 Flow, float3 N, GGFieldParams F)
 {
-    return tanh(F.HemisphereSharpness * N.z);
+    const float HalfWidth = F.HemisphereHalfWidth * (1.0f + F.HemisphereVariance * abs(Flow.w));
+
+    return tanh(N.z / HalfWidth);
 }
 
 /** Pressure from a flow sample: the eddy streamfunction times the hemisphere.
  *  Positive in anticyclones (high pressure) in both hemispheres. */
 float GG_PressureFromFlow(float4 Flow, float3 N, GGFieldParams F)
 {
-    return Flow.z * GG_Hemisphere(N, F);
+    return Flow.z * GG_Hemisphere(Flow, N, F);
 }
 
 /** The band value from a flow sample: vorticity made anticyclonic-positive in
@@ -449,7 +464,7 @@ float GG_PressureFromFlow(float4 Flow, float3 N, GGFieldParams F)
  *  zero a boundary -- the same in the north as in the south. */
 float GG_BandFromFlow(float4 Flow, float3 N, GGFieldParams F)
 {
-    return (-Flow.w * GG_Hemisphere(N, F) + F.BandBias) * F.BandSharpness;
+    return (-Flow.w * GG_Hemisphere(Flow, N, F) + F.BandBias) * F.BandSharpness;
 }
 
 /** Arc length of one flow texel at a given radius, in world units: the finest

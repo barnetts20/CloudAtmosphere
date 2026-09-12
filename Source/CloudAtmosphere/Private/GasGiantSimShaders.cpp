@@ -20,6 +20,7 @@ namespace GasGiantSimShader
 	{
 		OutEnvironment.SetDefine(TEXT("GG_SIM_THREADS_2D"), ThreadGroupSize2D);
 		OutEnvironment.SetDefine(TEXT("GG_SIM_THREADS_1D"), ThreadGroupSize1D);
+		OutEnvironment.SetDefine(TEXT("GG_SIM_THREADS_LAYERS"), ThreadGroupSizeLayers);
 
 		// The SOR sweep reads its own UAV, and the polar filter and the cubic
 		// interpolator both index far enough from the thread's own texel that

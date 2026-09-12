@@ -48,8 +48,8 @@
 /** x BandCount, y JetStrength, z EquatorialBoost, w Asymmetry. */
 float4 SimJetParams;
 
-/** xyz BandShape (Flatness, WidthBias, ReliefThinning). w unused here. */
-float4 SimBandShape;
+/** Offsets the jet profile so zones and belts need not be the same width. */
+float SimWidthBias;
 
 /** Per layer: x JetScale, y BoostScale, z ForcingScale, w DragScale.
  *
@@ -233,7 +233,7 @@ void MainInitZonalPotentialCS(uint3 Id : SV_DispatchThreadID)
     for (int J = 0; J <= Row; J++)
     {
         const float Mu = SimRowToMu((float) J);
-        const float R = GG_ZonalRate(Mu, BandCount, JetStrength, Boost, Asymmetry, SimBandShape.xyz);
+        const float R = GG_ZonalRate(Mu, BandCount, JetStrength, Boost, Asymmetry, SimWidthBias);
 
 		// Half weight on the row being written, so the accumulated value lands
 		// at the texel CENTRE rather than at its upper face. Getting this wrong
@@ -622,7 +622,7 @@ void MainForceCS(uint3 Id : SV_DispatchThreadID)
     float BandCount, JetStrength, Boost, Asymmetry;
     SimLayerJets(Layer, BandCount, JetStrength, Boost, Asymmetry);
 
-    const float Target = GG_ZonalVorticity(Mu, BandCount, JetStrength, Boost, Asymmetry, SimBandShape.xyz);
+    const float Target = GG_ZonalVorticity(Mu, BandCount, JetStrength, Boost, Asymmetry, SimWidthBias);
 
     Omega += SimNudgeRate * SimDeltaTime * (Target - ZonalMean);
 
@@ -1005,7 +1005,7 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
         float BandCount, JetStrength, Boost, Asymmetry;
         SimLayerJets(Layer, BandCount, JetStrength, Boost, Asymmetry);
 
-        const float Target = GG_ZonalVorticity(Mu, BandCount, JetStrength, Boost, Asymmetry, SimBandShape.xyz);
+        const float Target = GG_ZonalVorticity(Mu, BandCount, JetStrength, Boost, Asymmetry, SimWidthBias);
 
         Value = SimRowMeanSRV.Load(int3(C.y, Layer, 0)) - Target;
     }

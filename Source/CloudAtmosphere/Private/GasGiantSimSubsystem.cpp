@@ -279,9 +279,9 @@ void UGasGiantSimSubsystem::StartSimulation(UGasGiantSimConfig* InConfig)
 	ReportCourant();
 	ReportInertSettings();
 
-	// ResetSimulation owns the restore-or-seed decision, so starting and
-	// resetting cannot diverge. They did: reset used to only clear the field,
-	// which meant GasGiant.Reset reseeded even with a snapshot bound.
+	// ResetSimulation owns the restore-or-seed decision, so starting and resetting
+	// cannot diverge. PITFALL: a reset that only clears the field reseeds even
+	// with a snapshot bound.
 	ResetSimulation();
 }
 
@@ -510,7 +510,7 @@ bool UGasGiantSimSubsystem::QueueInitialState()
 	Now.JetStrength = Config->JetStrength;
 	Now.EquatorialBoost = Config->EquatorialBoost;
 	Now.Asymmetry = Config->Asymmetry;
-	Now.BandShape = Config->BandShape;
+	Now.WidthBias = Config->WidthBias;
 	Now.PlanetaryVorticity = Config->PlanetaryVorticity;
 
 	if (!Snapshot->Provenance.MatchesShape(Now))
@@ -630,7 +630,7 @@ bool UGasGiantSimSubsystem::SaveSnapshot(UGasGiantSnapshot* Target)
 	Target->Provenance.JetStrength = Config->JetStrength;
 	Target->Provenance.EquatorialBoost = Config->EquatorialBoost;
 	Target->Provenance.Asymmetry = Config->Asymmetry;
-	Target->Provenance.BandShape = Config->BandShape;
+	Target->Provenance.WidthBias = Config->WidthBias;
 	Target->Provenance.PlanetaryVorticity = Config->PlanetaryVorticity;
 	Target->SimulatedTime = SimulatedTime;
 	Target->StepsCompleted = StepsCompleted;
@@ -750,11 +750,7 @@ bool UGasGiantSimSubsystem::BuildParams(FGasGiantSimParams& Out) const
 		Config->EquatorialBoost,
 		Config->Asymmetry);
 
-	Out.BandShape = FVector4f(
-		(float)Config->BandShape.X,
-		(float)Config->BandShape.Y,
-		(float)Config->BandShape.Z,
-		0.0f);
+	Out.WidthBias = Config->WidthBias;
 
 	for (int32 i = 0; i < 8; ++i)
 	{

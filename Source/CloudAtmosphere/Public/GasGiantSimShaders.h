@@ -5,25 +5,18 @@
 #include "ShaderParameterStruct.h"
 #include "RenderGraphResources.h"
 
-/** ONE PARAMETER STRUCT FOR EVERY KERNEL IN THE SIM.
+/** ONE PARAMETER STRUCT FOR EVERY KERNEL IN THE SIM. The kernels are stages of
+ *  one pipeline over one set of resources, and their parameter lists overlap in
+ *  a way that CHANGES TOGETHER: adding a forcing term touches the forcing kernel
+ *  and the debug kernel that visualises it, and adding a grid parameter touches
+ *  every one. A struct each means one place to edit and the rest to forget, and
+ *  a forgotten one fails as an unbound-parameter warning that is easy to scroll
+ *  past.
  *
- *  Eleven kernels sharing a struct rather than eleven structs, and this is a
- *  deliberate trade rather than laziness.
- *
- *  The kernels are stages of one pipeline over one set of resources. Their
- *  parameter lists overlap almost completely and, more to the point, they
- *  overlap in a way that CHANGES TOGETHER: adding a forcing term touches the
- *  forcing kernel and the debug kernel that visualises it, and adding a grid
- *  parameter touches all eleven. Eleven separate structs means eleven places to
- *  edit and ten places to forget, and a forgotten one fails as an unbound
- *  parameter warning that is easy to scroll past -- which is precisely the
- *  silent-edit failure mode this codebase has already been bitten by.
- *
- *  The cost is that each pass declares resources it does not use.
- *  FComputeShaderUtils::AddPass calls ClearUnusedGraphResources, which strips
- *  those before the graph sees them, so RDG neither transitions nor lifetime-
- *  extends anything a pass does not actually touch. The cost is therefore a few
- *  bytes of uniform buffer per dispatch and nothing else.
+ *  The cost is that each pass declares resources it does not use, but
+ *  FComputeShaderUtils::AddPass calls ClearUnusedGraphResources, so RDG neither
+ *  transitions nor lifetime-extends anything a pass does not touch. What is left
+ *  is a few bytes of uniform buffer per dispatch.
  *
  *  Names must match the declarations in GasGiantSim.usf exactly. */
 BEGIN_SHADER_PARAMETER_STRUCT(FGasGiantSimParameters, )
@@ -34,7 +27,7 @@ SHADER_PARAMETER(FVector3f, SimInvGridSize)
 
 // -- Profile ------------------------------------------------------------
 SHADER_PARAMETER(FVector4f, SimJetParams)
-SHADER_PARAMETER(FVector4f, SimBandShape)
+SHADER_PARAMETER(float, SimWidthBias)
 SHADER_PARAMETER_ARRAY(FVector4f, SimLayerProfile, [8])
 
 // -- Time and rotation --------------------------------------------------
@@ -98,20 +91,27 @@ namespace GasGiantSimShader
 	CLOUDATMOSPHERE_API bool ShouldCompile(const FGlobalShaderPermutationParameters& Parameters);
 	CLOUDATMOSPHERE_API void ModifyEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
 
-	/** Thread group edge for the 2D kernels. 8x8 = 64, a full wave on AMD and
-	 *  two on NVIDIA. */
+	// THE SHADER TAKES ITS GROUP SIZES FROM THESE. ModifyEnvironment pushes all
+	// three as defines that GasGiantSim.usf's [numthreads] read, and
+	// GasGiantSimulation.cpp sizes every dispatch from the same constants, so a
+	// group size and its group count cannot disagree.
+
+	/** Thread group edge for the 2D kernels. 8x8 = 64, a full wave on AMD and two
+	 *  on NVIDIA. */
 	static constexpr int32 ThreadGroupSize2D = 8;
 
-	/** Thread group for the 1D per-row reductions. */
+	/** Thread group for the 1D per-row reductions, one thread per latitude row. */
 	static constexpr int32 ThreadGroupSize1D = 64;
+
+	/** Thread group for the per-layer reduction, one thread per layer. Small
+	 *  because the stack is a handful of layers deep. */
+	static constexpr int32 ThreadGroupSizeLayers = 8;
 }
 
-/** One class per entry point, all sharing FGasGiantSimParameters.
- *
- *  Written as a macro because the bodies are identical and a hand-written set
- *  of eleven would differ from each other eventually. If the macro ever trips
- *  over an engine change to SHADER_USE_PARAMETER_STRUCT, expanding it by hand
- *  is mechanical -- the contents are exactly what is written here. */
+/** One class per entry point, all sharing FGasGiantSimParameters. A macro
+ *  because the bodies are identical and a hand-written set would drift apart. If
+ *  it ever trips over an engine change to SHADER_USE_PARAMETER_STRUCT, expanding
+ *  it by hand is mechanical -- the contents are exactly what is written here. */
 #define GG_DECLARE_SIM_SHADER(ClassName)                                                    \
 	class ClassName : public FGlobalShader                                                  \
 	{                                                                                       \
