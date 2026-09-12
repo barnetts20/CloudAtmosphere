@@ -288,19 +288,20 @@ float SimLaplacian(Texture2DArray<float> Field, int2 C, uint Layer, out float Ou
 		OutDiagonal);
 }
 
-/** Rebuilds a 3D tangent velocity from its stored east/north components. The
+/** Rebuilds the 3D tangent velocity from the stored east/north components. The
  *  velocity texture stores TWO, not three, a tangent vector on a sphere having
- *  two degrees of freedom and the freed channel being worth more elsewhere, so
- *  every reader reconstructs and this is the one place that knows how.
+ *  two degrees of freedom and the freed channel being worth more elsewhere.
  *
  *  NO TRIG. With c = length(N.xy) the basis is east = (-N.y, N.x, 0)/c and
  *  north = (-N.z*N.x/c, -N.z*N.y/c, c), the vectors sincos(longitude) would
  *  give, obtained from N directly.
  *
- *  Identical to GG_FlowVelocity in the material, and they must agree: the sim
- *  advects along this and the material warps along it, so a mismatch puts the
- *  clouds on a different flow from the one that made them. */
-float3 SimTangentVelocity(float3 N, float2 Components)
+ *  BYTE-IDENTICAL TO GasGiantFlow.ush's copy, under the same name: the sim
+ *  advects along this and the material warps along it, so a mismatch would put
+ *  the clouds on a different flow from the one that made them. The two files are
+ *  never in one translation unit, so the shared name does not collide -- and if
+ *  that ever changes, the redefinition error is the signal to merge them. */
+float3 GG_TangentVelocity(float3 N, float2 Components)
 {
     const float C = max(length(N.xy), 1e-5f);
 

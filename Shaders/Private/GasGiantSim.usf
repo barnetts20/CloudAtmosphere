@@ -442,7 +442,7 @@ void MainAdvectCS(uint3 Id : SV_DispatchThreadID)
 	// diagnostic still reports plausible numbers.
     const float4 Flow = SimVelocitySRV.Load(int4(C.x, C.y, Layer, 0));
 
-    const float3 Velocity = SimTangentVelocity(N, Flow.xy);
+    const float3 Velocity = GG_TangentVelocity(N, Flow.xy);
 
     const float Speed = length(Velocity);
 

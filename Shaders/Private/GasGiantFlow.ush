@@ -306,6 +306,33 @@ GGFieldParams GG_BuildField(
     return F;
 }
 
+/** The call both consumers make, expanded from one definition beside the
+ *  signature it has to match.
+ *
+ *  PITFALL: 47 POSITIONAL FLOAT ARGUMENTS. A parameter inserted above but missed
+ *  at a call site still compiles, silently shifting every argument after it --
+ *  VortexThreshold arriving as StormTowerRelief and so on, with nothing to catch
+ *  it. Expanding from here makes that impossible: every name resolves in the
+ *  caller's own scope, so a missing material pin or bake uniform is an
+ *  undeclared identifier naming the symbol.
+ *
+ *  Requires a variable of each name in scope. The material Custom node's pins
+ *  and GasGiantShadowMap.usf's uniforms both carry exactly these names, which is
+ *  what lets one expansion serve both. */
+#define GG_BUILD_FIELD() GG_BuildField( \
+	PlanetRadius, HeightScale, Time, DeckTop, \
+	CeilingFalloff, GradientThickness, DeckBackstop, DensityCurve, \
+	BandSharpness, BandBias, HemisphereBlend, HemisphereVariance, \
+	BandRelief, PressureRelief, VortexThreshold, StormTowerRelief, \
+	ReliefThinning, RotationWeight, WarpTime, DeepShearRatio, \
+	TurbulenceFloor, CrossfadePeriod, EdgeBias, ErosionDepth, \
+	StructureNoiseWeights, StructureScale, StructureAspect, StructureRelief, \
+	StructureErosion, StructureFlowInherit, StructureShearInherit, StructureFadeNear, \
+	StructureFadeSpan, StructureBandMix, StructureCrossfade, DetailNoiseWeights, \
+	DetailScale, DetailAspect, DetailRelief, DetailErosion, \
+	DetailFlowInherit, DetailShearInherit, DetailFadeNear, DetailFadeSpan, \
+	DetailBandMix, DetailCrossfade, DeckSlope)
+
 /** What GG_Field returns. Two shapes rather than one, because the layers carve
  *  and erode by different amounts and fade on different schedules. Each is 1
  *  where its layer contributes nothing.
@@ -369,7 +396,7 @@ float GG_PerlinWorley(float Perlin, float WorleyF1)
  *
  *  Returns (u_east, u_north, psi_eddy, band):
  *    xy  Tangent velocity, radians per unit time; rebuild the 3D vector with
- *        GG_FlowVelocity.
+ *        GG_TangentVelocity.
  *    z   The eddy streamfunction, psi with its zonal mean removed: zero in
  *        undisturbed flow, positive for clockwise rotation seen from outside.
  *    w   Normalized vorticity, near [-1,1], positive counterclockwise. The band
@@ -481,18 +508,24 @@ float GG_FlowTexelArc(Texture2DArray FlowField, float Radius)
     return (2.0f * PI * Radius) / float(max(Width, 1u));
 }
 
-/** Rebuilds the 3D tangent velocity from the stored components. No trig: with
- *  c = length(N.xy) the basis is east = (-N.y, N.x, 0)/c and north =
+/** Rebuilds the 3D tangent velocity from the stored east/north components. No
+ *  trig: with c = length(N.xy) the basis is east = (-N.y, N.x, 0)/c and north =
  *  (-N.z*N.x/c, -N.z*N.y/c, c). Guarded at the poles, where c goes to zero and
- *  east is undefined -- no texel sits on a pole, but a shading point can. */
-float3 GG_FlowVelocity(float3 N, float4 Flow)
+ *  east is undefined -- no texel sits on a pole, but a shading point can.
+ *
+ *  BYTE-IDENTICAL TO GasGiantSimCommon.ush's copy, under the same name: the sim
+ *  advects along this and the material warps along it, so a mismatch would put
+ *  the clouds on a different flow from the one that made them. The two files are
+ *  never in one translation unit, so the shared name does not collide -- and if
+ *  that ever changes, the redefinition error is the signal to merge them. */
+float3 GG_TangentVelocity(float3 N, float2 Components)
 {
     const float C = max(length(N.xy), 1e-5f);
 
     const float3 East = float3(-N.y, N.x, 0.0f) / C;
     const float3 North = float3(-N.z * N.x / C, -N.z * N.y / C, C);
 
-    return East * Flow.x + North * Flow.y;
+    return East * Components.x + North * Components.y;
 }
 
 /** The shell's ceiling: 1 below the falloff band, 0 at the atmosphere top,
@@ -887,7 +920,7 @@ GGFieldSample GG_Field(
         const float4 Flow = (It == 0) ? Flow0
 			: GG_SampleFlow(FlowField, FlowSampler, Pos, GG_FLOW_LAYER);
 
-        const float3 Velocity = GG_FlowVelocity(Pos, Flow);
+        const float3 Velocity = GG_TangentVelocity(Pos, Flow.xy);
 
         if (It == 0)
         {
@@ -947,7 +980,7 @@ GGFieldSample GG_Field(
 
         const float4 DeepFlow = GG_SampleFlow(FlowField, FlowSampler, PShear, GG_DEEP_FLOW_LAYER);
 
-        DeepShear = GG_FlowVelocity(PShear, DeepFlow) * (F.DeepShearTime * Turbulence);
+        DeepShear = GG_TangentVelocity(PShear, DeepFlow.xy) * (F.DeepShearTime * Turbulence);
     }
 
 	// Each layer's displacement: its FlowInherit of the coarse warp plus its
