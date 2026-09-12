@@ -1,61 +1,37 @@
 #pragma once
 
-#include "/Plugin/CloudAtmosphere/Private/GasGiantConstants.ush"
-
-// ---------------------------------------------------------------------------
 // Grid, topology and operators for the gas giant flow sim.
 //
-// THE GRID IS A CYLINDER, NOT A TORUS.
+// THE GRID IS A CYLINDER, NOT A TORUS. Longitude wraps with period exactly
+// 2 pi; latitude does not. The top and bottom rows are adjacent to the POLES,
+// not to each other, and treating this as a torus joins the north pole to the
+// south so material advected out of the arctic arrives in the antarctic. Every
+// read here is an explicit Load through SimWrapCoord, because the pole is a
+// topological fold no address mode expresses -- but the OUTPUT texture the
+// material samples needs WRAP on U and CLAMP on V.
 //
-// Longitude wraps: column 0 and column N-1 are neighbours, period exactly 2 pi.
-// Latitude does NOT wrap. The top and bottom rows are adjacent to the POLES,
-// not to each other. Treating this as a torus joins the north pole to the south
-// pole, and material advected out of the arctic arrives in the antarctic.
+// THE LATITUDE COORDINATE IS MU = sin(latitude). The spherical Laplacian in
+// (lambda, mu) has two closed-form coefficients and no cross terms; cells are
+// equal AREA, so a zonal mean is a plain row mean and the global mean a plain
+// mean of those, the most-used reductions in the model; and the material's V
+// coordinate comes free as 0.5 + 0.5 * N.z with no asin.
 //
-// Sampler state must therefore be WRAP on U and CLAMP on V. Nothing in this
-// file uses a sampler -- every read is an explicit Load through SimWrapCoord,
-// because the pole is a topological fold that no address mode expresses -- but
-// the OUTPUT texture the material reads does use one, and it needs those modes.
+// TEXEL CENTRES SIT BETWEEN THE POLES, NOT ON THEM. Cell-centred, so mu runs
+// over [-1 + dmu/2, 1 - dmu/2] and the poles are cell FACES. The Laplacian's
+// latitude coefficient is (1 - mu^2) at the face, EXACTLY ZERO at a pole face,
+// so polar flux vanishes by construction and the operator needs no polar
+// boundary condition -- no ghost rows, no reflection, no solver special case. A
+// vertex-centred grid puts texels ON the poles, where 1/(1-mu^2) is infinite and
+// a whole row represents one physical point, and then spends a boundary
+// condition undoing the damage.
 //
-// THE LATITUDE COORDINATE IS MU = sin(latitude), NOT LATITUDE.
-//
-// Three separate things fall out of this and any one of them would justify it:
-//
-//   The metric collapses. The spherical Laplacian in (lambda, mu) is
-//   d/dmu[(1-mu^2) d/dmu] + 1/(1-mu^2) d2/dlambda2, with two closed-form
-//   coefficients and no cross terms. In latitude it carries 1/cos(phi) factors
-//   that have to be seen to cancel rather than being absent.
-//
-//   Cells are equal AREA. Every texel covers 2 pi dmu / N_lon of surface,
-//   identically, everywhere. So an area-weighted mean is a plain mean, a zonal
-//   mean is a plain row mean, and the global mean is a plain mean of row means.
-//   Those three reductions are the most-used quantities in the whole model.
-//
-//   The material's V coordinate is free: V = 0.5 + 0.5 * N.z, no asin. U still
-//   costs an atan2, and that is the only transcendental in the fetch.
-//
-// TEXEL CENTRES SIT BETWEEN THE POLES, NOT ON THEM.
-//
-// Cell-centred, so mu runs over [-1 + dmu/2, 1 - dmu/2] and the poles are cell
-// FACES. This is not a detail. The Laplacian's latitude coefficient is
-// (1 - mu^2) evaluated at the face, which is EXACTLY ZERO at the pole face, so
-// the flux through the pole vanishes by construction and the operator needs no
-// polar boundary condition at all -- no ghost rows, no lambda -> lambda + pi
-// reflection, no special case in the solver.
-//
-// A vertex-centred grid puts texels ON the poles, where 1/(1-mu^2) is infinite
-// and a whole row of texels represents one physical point. Every finite
-// difference code that does that then spends its polar boundary condition
-// undoing the damage. Half a texel of offset removes the problem instead.
-//
-// The fold survives in exactly one place: INTERPOLATION. A departure point can
-// legitimately land past the pole, and crossing it means lambda -> lambda + pi.
-// SimWrapCoord is the only function that knows this.
-// ---------------------------------------------------------------------------
+// The fold survives in one place: INTERPOLATION. A departure point can land past
+// the pole, and crossing it means lambda -> lambda + pi. SimWrapCoord is the
+// only function that knows this.
 
 /** Grid dimensions. x = longitude columns, y = latitude rows, z = layer count.
- *  Longitude should be even; the polar fold assumes N_lon/2 is an integer
- *  column offset, and an odd width lands the reflection half a texel off. */
+ *  Longitude must be even: the polar fold offsets by N_lon/2 columns, and an odd
+ *  width lands the reflection half a texel off. */
 int3 SimGridSize;
 
 /** float3(1/N_lon, 1/N_lat, unused). */
@@ -86,9 +62,9 @@ float SimFaceToMu(float J)
  *  axis, matching the material's planet-local space. */
 float3 SimDirection(float Lon, float Mu)
 {
-	// cos(latitude). Positive by construction since |mu| < 1 strictly on a
-	// cell-centred grid, so no max() guard is needed and none is written -- a
-	// guard here would hide a grid setup error rather than fix one.
+	// cos(latitude), positive by construction since |mu| < 1 strictly on a
+	// cell-centred grid. No guard: one here would hide a grid setup error rather
+	// than fix one.
     const float C = sqrt(1.0f - Mu * Mu);
 
     float SinL, CosL;
@@ -97,18 +73,9 @@ float3 SimDirection(float Lon, float Mu)
     return float3(C * CosL, C * SinL, Mu);
 }
 
-// NOTE: the trig-based tangent basis helpers that used to live here are gone.
-// SimTangentVelocity builds the same vectors from the direction with no trig,
-// and nothing else needed them once the velocity texture began storing east and
-// north COMPONENTS rather than a 3D vector. Leaving them would have been a
-// second way to build the same basis, which is the shape of mistake that put
-// the streamfunction into the advection in the first place.
-
 /** Continuous grid coordinates from a unit direction. The inverse of
- *  SimDirection, in texel-index space so that integer values land on centres.
- *
- *  This is the only atan2 in the sim, and it runs once per texel per advection
- *  step rather than per pixel. */
+ *  SimDirection, in texel-index space so integer values land on centres. The
+ *  sim's only atan2, run once per texel per advection step. */
 float2 SimDirectionToGrid(float3 N)
 {
     float Lon = atan2(N.y, N.x);
@@ -124,30 +91,23 @@ float2 SimDirectionToGrid(float3 N)
 
 // -- Topology ---------------------------------------------------------------
 
-/** Fold an arbitrary integer texel coordinate onto the grid.
+/** Fold an arbitrary integer texel coordinate onto the grid. THE ONE PLACE THE
+ *  SPHERE'S TOPOLOGY LIVES.
  *
- *  THE ONE PLACE THE SPHERE'S TOPOLOGY LIVES.
- *
- *  Longitude is a plain periodic wrap. Latitude is a MIRROR with a half-turn in
- *  longitude, because stepping north past the pole comes back down the far
- *  side: row -1 is row 0 at longitude + pi, row -2 is row 1 at longitude + pi,
- *  and so on. Written as a mirror rather than a clamp because a clamp would
- *  duplicate the polar row and give the interpolator a flat spot exactly where
- *  the flow crosses the pole, which reads as material piling up at the pole and
- *  is easy to mistake for a convergence artifact in the solver.
- *
- *  The half-turn is why N_lon must be even.
- *
- *  Applied AFTER the mirror for longitude, since the mirror changes it. */
+ *  Longitude is a plain periodic wrap, applied after the mirror since the mirror
+ *  changes it. Latitude is a MIRROR with a half-turn in longitude, because
+ *  stepping north past the pole comes back down the far side: row -1 is row 0 at
+ *  longitude + pi. A clamp instead would duplicate the polar row and give the
+ *  interpolator a flat spot exactly where the flow crosses the pole, reading as
+ *  material piling up there and easy to mistake for a solver artifact. The
+ *  half-turn is why N_lon must be even. */
 int2 SimWrapCoord(int2 C)
 {
     const int NLon = SimGridSize.x;
     const int NLat = SimGridSize.y;
 
-	// Latitude mirror across whichever pole was crossed. Written so that
-	// multiple crossings are impossible in practice -- a departure point cannot
-	// travel more than a fraction of the grid in one step -- but a single
-	// crossing is handled exactly.
+	// Handles ONE crossing exactly. A departure point cannot travel more than a
+	// fraction of the grid in a step, so a second crossing does not arise.
     if (C.y < 0)
     {
         C.y = -1 - C.y;
@@ -188,52 +148,36 @@ void SimCubicWeights(float F, out float W0, out float W1, out float W2, out floa
     W3 = 0.5f * (F3 - F2);
 }
 
-/** Bicubic (Catmull-Rom) interpolation at continuous grid coordinates.
+/** Bicubic (Catmull-Rom) interpolation at continuous grid coordinates. Sixteen
+ *  taps, all through SimWrapCoord, so it is correct across the longitude seam
+ *  and across the poles; hardware bilinear cannot be used because no address
+ *  mode expresses the polar fold.
  *
- *  BILINEAR HERE WOULD KILL THE INVERSE CASCADE, and it would do it in a way
- *  that looks like the physics failing rather than the interpolation failing.
+ *  PITFALL: BILINEAR HERE WOULD KILL THE INVERSE CASCADE, and would look like
+ *  the physics failing rather than the interpolation. Semi-Lagrangian advection
+ *  is not conservative, and its error is a numerical diffusion whose magnitude
+ *  the interpolator sets. Bilinear diffuses at about the grid scale per step,
+ *  and the inverse cascade is an inviscid property -- smear the small scales and
+ *  it has nothing to feed on, so eddies vanish, the field relaxes to pure zonal
+ *  flow within a couple hundred steps, and the planet has perfect bands and no
+ *  weather. That reads as "the seeding didn't take" or "the forcing is too
+ *  weak" and is neither.
  *
- *  Semi-Lagrangian advection is unconditionally stable and NOT conservative:
- *  its error is a numerical diffusion whose magnitude is set by the
- *  interpolator. Bilinear diffuses at roughly the grid scale per step, and the
- *  2D inverse cascade -- the entire mechanism that makes eddies grow into
- *  structure rather than dissipating -- is an inviscid property. Smear the
- *  small scales and the cascade has nothing to feed on, so eddies vanish, the
- *  field relaxes to pure zonal flow within a couple hundred steps, and the
- *  result is a planet with perfect bands and no weather.
- *
- *  That failure looks exactly like "the seeding didn't take" or "the forcing is
- *  too weak", so it is worth knowing that it is neither.
- *
- *  Sixteen taps, all through SimWrapCoord, so this is correct across the
- *  longitude seam and across the poles. Hardware bilinear cannot be used for
- *  the same reason: no address mode expresses the polar fold.
- *
- *  Catmull-Rom overshoots at sharp gradients, which for vorticity is
- *  acceptable and even desirable -- it is the anti-diffusion that keeps
- *  filaments sharp. It is NOT acceptable for a quantity that must stay
- *  positive; nothing advected here is. */
+ *  Catmull-Rom overshoots at sharp gradients, which for vorticity is the
+ *  anti-diffusion that keeps filaments sharp. It is NOT acceptable for a
+ *  quantity that must stay positive; nothing advected here is. */
 float SimSampleCubic(Texture2DArray<float> Field, float2 Grid, uint Layer)
 {
-	// INDEX SPACE, NOT UV SPACE. Texel centres sit on INTEGERS here, because
-	// that is what SimDirectionToGrid produces: column i maps to exactly i.
+	// INDEX SPACE, NOT UV SPACE: texel centres sit on INTEGERS here, because
+	// that is what SimDirectionToGrid produces.
 	//
-	// The half-integer form -- floor(G - 0.5) + 0.5 -- is the correct base for
-	// UV*Size coordinates, where centres sit at 0.5, 1.5, 2.5. Using it on
-	// index-space input samples at G - 0.5 instead of G, in BOTH axes, for
-	// every input value.
-	//
-	// That failure is worth naming because it does not look like an
-	// interpolation bug. A constant offset in the departure point is
-	// indistinguishable from a constant velocity added to the flow: the field
-	// drifts steadily in +longitude and +mu at half a texel per step regardless
-	// of what the fluid is doing. At 512x256 and a 0.02 step that is 0.31 rad
-	// per unit time zonally -- three times the jet speed -- and a poleward
-	// sweep that crosses the sphere in about ten time units.
-	//
-	// So it reads as "the sim has a mysterious current in it", and because the
-	// two axes drift by an equal number of TEXELS rather than an equal arc,
-	// it reads as a stronger current in latitude than in longitude.
+	// PITFALL: the half-integer form floor(G - 0.5) + 0.5 is correct for UV*Size
+	// coordinates, where centres sit at 0.5, 1.5, 2.5. Used on index-space input
+	// it samples at G - 0.5 in BOTH axes, and a constant offset in the departure
+	// point is indistinguishable from a constant velocity added to the flow. The
+	// field drifts half a texel per step in +longitude and +mu regardless of what
+	// the fluid is doing, which reads as a mysterious current rather than as an
+	// interpolation bug.
     const float2 Base = floor(Grid);
     const float2 F = Grid - Base;
 
@@ -268,27 +212,22 @@ float SimSampleCubic(Texture2DArray<float> Field, float2 Grid, uint Layer)
 
 // -- Operators --------------------------------------------------------------
 
-/** The five-point spherical Laplacian in (lambda, mu), FLUX FORM.
- *
- *  Flux form rather than expanded form, and this is the whole reason the polar
- *  boundary condition disappears. Writing
+/** The five-point spherical Laplacian in (lambda, mu), FLUX FORM, which is why
+ *  the polar boundary condition disappears. Writing
  *
  *      d/dmu[ (1-mu^2) dpsi/dmu ]  ~  [ A+ (psi_j+1 - psi_j) - A- (psi_j - psi_j-1) ] / dmu^2
  *
- *  with A+- evaluated at the cell FACES means the coefficient at the polar face
- *  is (1 - (+-1)^2) = 0 exactly, in floating point, with no epsilon. The flux
- *  through the pole is identically zero because the geometry says it is, and no
- *  ghost row is ever consulted. The expanded form -- (1-mu^2) psi'' - 2 mu psi'
- *  -- evaluates its coefficients at cell centres instead, where they are not
- *  zero, and then needs a polar condition invented to compensate.
+ *  with A+- at the cell FACES makes the coefficient at a polar face
+ *  (1 - (+-1)^2) = 0 exactly in floating point, no epsilon, so polar flux is
+ *  identically zero and no ghost row is consulted. The expanded form
+ *  (1-mu^2) psi'' - 2 mu psi' evaluates its coefficients at cell centres, where
+ *  they are not zero, and then needs a polar condition invented to compensate.
  *
- *  The longitude coefficient 1/(1-mu^2) does still grow toward the poles, which
- *  is the residual pole problem and is what the zonal filter in the forcing
- *  pass exists to bound. It is a conditioning problem, not a correctness one.
+ *  The longitude coefficient 1/(1-mu^2) still grows toward the poles, which the
+ *  zonal filter bounds. That is a conditioning problem, not a correctness one.
  *
- *  Returns the operator applied to Field at C, and also the DIAGONAL
- *  coefficient, because the solver needs both and recomputing the coefficients
- *  separately is how the two drift apart. */
+ *  Returns the operator and the DIAGONAL coefficient together: the solver needs
+ *  both, and computing them separately is how the two drift apart. */
 void SimLaplacianCoeffs(int Row, out float CLon, out float ALo, out float AHi)
 {
     const float DLon = (2.0f * PI) * SimInvGridSize.x;
@@ -296,33 +235,28 @@ void SimLaplacianCoeffs(int Row, out float CLon, out float ALo, out float AHi)
 
     const float Mu = SimRowToMu((float) Row);
 
-	// Faces bounding this row. At Row == 0 the lower face is mu = -1 exactly
-	// and at Row == N_lat-1 the upper face is mu = +1 exactly, so ALo or AHi is
-	// exactly zero there and the mirrored neighbour is multiplied out.
+	// Faces bounding this row. At Row 0 the lower face is mu = -1 exactly and at
+	// Row N_lat-1 the upper face is +1, so ALo or AHi is exactly zero there and
+	// the mirrored neighbour is multiplied out.
     const float MuLo = SimFaceToMu((float) Row);
     const float MuHi = SimFaceToMu((float) (Row + 1));
 
     ALo = (1.0f - MuLo * MuLo) / (DMu * DMu);
     AHi = (1.0f - MuHi * MuHi) / (DMu * DMu);
 
-	// 1/(1-mu^2) is finite on a cell-centred grid: the closest mu gets to +-1
-	// is one half texel away. At 256 rows that is a coefficient of about 1.6e4
-	// against an interior value of 1, which is stiff but bounded.
+	// 1/(1-mu^2) is finite on a cell-centred grid, mu coming no closer to +-1
+	// than half a texel. The polar row's coefficient exceeds the equator's by
+	// about N_lat/2 -- 128 at 256 rows -- which is stiff but bounded.
     CLon = 1.0f / ((1.0f - Mu * Mu) * DLon * DLon);
 }
 
-/** The operator, given its five taps.
- *
- *  Factored this way for one reason: the SOR sweep reads the streamfunction
- *  back through its own UAV rather than through an SRV, because red-black
- *  ordering means no thread reads a texel that another thread in the same
- *  dispatch writes, and binding the same resource twice to dodge that would be
- *  a hazard for no gain. HLSL has no way to write one function over both
- *  Texture2DArray and RWTexture2DArray, so the alternative was two copies of
- *  the coefficient math -- which is precisely the kind of duplicate that gets
- *  edited once and stays wrong in the other copy for weeks.
- *
- *  The taps differ between call sites. The operator does not. */
+/** The operator, given its five taps. THE TAPS DIFFER BETWEEN CALL SITES, THE
+ *  OPERATOR DOES NOT: the SOR sweep reads psi back through its own UAV rather
+ *  than an SRV, since red-black ordering means no thread reads a texel another
+ *  writes in the same dispatch. HLSL cannot write one function over both
+ *  Texture2DArray and RWTexture2DArray, so the alternative was two copies of the
+ *  coefficient math -- the kind of duplicate that gets edited once and stays
+ *  wrong in the other copy. */
 float SimLaplacianFromTaps(
 	int Row,
 	float Centre,
@@ -354,27 +288,20 @@ float SimLaplacian(Texture2DArray<float> Field, int2 C, uint Layer, out float Ou
 		OutDiagonal);
 }
 
-// NOTE: the velocity helper that used to live here has been removed rather than
-// left unused. MainVelocityCS now differences the POLAR-MASKED streamfunction,
-// and a second entry point that differenced the raw one would be an easy
-// mistake to make and a hard one to see -- it would work everywhere except
-// within a few degrees of the poles.
-
-/** Rebuilds a 3D tangent velocity from its stored east/north components.
- *
- *  The velocity texture stores TWO components, not three, because a tangent
- *  vector on a sphere has two degrees of freedom and the freed channel is worth
- *  more elsewhere. Anything reading that texture has to reconstruct, and this
- *  is the one place that knows how.
+/** Rebuilds the 3D tangent velocity from the stored east/north components. The
+ *  velocity texture stores TWO, not three, a tangent vector on a sphere having
+ *  two degrees of freedom and the freed channel being worth more elsewhere.
  *
  *  NO TRIG. With c = length(N.xy) the basis is east = (-N.y, N.x, 0)/c and
- *  north = (-N.z*N.x/c, -N.z*N.y/c, c), which are the vectors sincos(longitude)
- *  would give, obtained from N directly.
+ *  north = (-N.z*N.x/c, -N.z*N.y/c, c), the vectors sincos(longitude) would
+ *  give, obtained from N directly.
  *
- *  Identical to GG_FlowVelocity in the material. The two must agree, because
- *  the sim advects along this and the material warps along it -- a mismatch
- *  would put the clouds on a different flow from the one that made them. */
-float3 SimTangentVelocity(float3 N, float2 Components)
+ *  BYTE-IDENTICAL TO GasGiantFlow.ush's copy, under the same name: the sim
+ *  advects along this and the material warps along it, so a mismatch would put
+ *  the clouds on a different flow from the one that made them. The two files are
+ *  never in one translation unit, so the shared name does not collide -- and if
+ *  that ever changes, the redefinition error is the signal to merge them. */
+float3 GG_TangentVelocity(float3 N, float2 Components)
 {
     const float C = max(length(N.xy), 1e-5f);
 
@@ -386,32 +313,25 @@ float3 SimTangentVelocity(float3 N, float2 Components)
 
 /** Half-width, in texels, of the longitudinal box filter at this latitude.
  *
- *  THE POLE PROBLEM, AND WHY THIS IS A FILTER RATHER THAN A SEPARATE CAP GRID.
- *
- *  Physical longitudinal spacing is cos(phi) * dlambda, which goes to zero at
- *  the poles. Two consequences, both fatal if untreated: the advective CFL
- *  condition tightens without bound so the polar rows go unstable at a timestep
- *  the rest of the grid is comfortable with, and the Laplacian's 1/(1-mu^2)
- *  coefficient makes the Poisson operator stiff enough that the solver stops
+ *  THE POLE PROBLEM. Physical longitudinal spacing is cos(phi) * dlambda, which
+ *  goes to zero at the poles, and both consequences are fatal untreated: the
+ *  advective CFL condition tightens without bound, so polar rows go unstable at
+ *  a timestep the rest of the grid is comfortable with, and the Laplacian's
+ *  1/(1-mu^2) coefficient makes the operator stiff enough that the solver stops
  *  converging there.
  *
  *  A running mean over 1/cos(phi) texels removes exactly the longitudinal
- *  wavenumbers that are over-resolved -- the ones the grid carries but the
- *  physical spacing cannot support -- and leaves everything else. It restores a
- *  uniform effective resolution in physical distance, which is what a reduced
- *  grid does, without the bookkeeping of an actually reduced grid.
+ *  wavenumbers the grid carries but the physical spacing cannot support,
+ *  restoring uniform effective resolution without the bookkeeping of an actually
+ *  reduced grid. A separate polar cap grid was the alternative: a second solver
+ *  with a second metric and an overlap reconciled every step, whose error shows
+ *  as a persistent ring at a fixed latitude -- a structural artifact that looks
+ *  like a real atmospheric feature and is easy to ship by accident.
  *
- *  The alternative considered and rejected was a separate polar cap grid on its
- *  own projection. That is a second solver with a second metric and an overlap
- *  region reconciled every step, and reconciliation error at an overlap shows
- *  up as a persistent ring at a fixed latitude -- a structural artifact that
- *  looks like a real atmospheric feature and is therefore easy to ship by
- *  accident. This is twenty lines and its failure mode is visible blur.
- *
- *  What it costs is polar detail, and Jupiter's poles genuinely do have detail:
- *  Juno found cyclone clusters there. Those are discrete, long-lived, and would
- *  not emerge from a solve at this resolution regardless, so they belong on the
- *  authored-vortex path rather than being something the sim is asked for. */
+ *  What it costs is polar detail. Jupiter's polar cyclone clusters are discrete
+ *  and long-lived and would not emerge from a solve at this resolution anyway,
+ *  so they belong on an authored-vortex path rather than being asked of the
+ *  sim. */
 int SimFilterHalfWidth(float Mu, float FilterLatitude, int MaxHalfWidth)
 {
     const float CosPhi = sqrt(1.0f - Mu * Mu);

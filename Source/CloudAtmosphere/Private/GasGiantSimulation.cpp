@@ -63,7 +63,7 @@ namespace
 			1.0f / FMath::Max(Params.GridSize.Z, 1));
 
 		P.SimJetParams = Params.JetParams;
-		P.SimBandShape = Params.BandShape;
+		P.SimWidthBias = Params.WidthBias;
 
 		for (int32 i = 0; i < 8; ++i)
 		{
@@ -358,7 +358,7 @@ void FGasGiantSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FGasGiantS
 		1);
 
 	const FIntVector GroupsLayers(
-		FMath::DivideAndRoundUp(Params.GridSize.Z, 8),
+		FMath::DivideAndRoundUp(Params.GridSize.Z, ThreadGroupSizeLayers),
 		1,
 		1);
 

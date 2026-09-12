@@ -1,0 +1,624 @@
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/Common.ush"
+#include "/Plugin/CloudAtmosphere/Private/GasGiantShadow.ush"
+
+// Gas giant deck shadow map: a light-space bake of the deck's optical depth
+// toward the star, read per view sample by the march instead of a secondary ray.
+// One dispatch, one slice per cascade.
+//
+// A BAKE, NOT A SIMULATION. Nothing here survives the frame: it reads the flow
+// field the sim wrote, marches, and writes one texture. No ping-pong, no substep
+// budget, no state to keep consistent, which is why it is a separate dispatch
+// rather than another kernel in GasGiantSim.usf. Space is planet-local, spin
+// axis on Z, as the material path; spin is applied inside GG_FlowProbe and
+// GG_Density, so positions here are unspun.
+//
+// THE DEPTH COORDINATE. Positions on a texel's ray are Origin + Dir * t, with
+// Origin the analytic entry into the cull sphere and Dir the direction light
+// travels, so t is both ray parameter and depth from a surface the reader
+// reconstructs exactly. Written in ATMOSPHERE THICKNESSES: fp16 tops out at
+// 65504 and a planet radius in world units is far past it. The channels are the
+// deck entry and the crossings of GG_SHADOW_TAU0, TAU1 and TAU2;
+// GasGiantShadow.ush has the encoding and the reconstruction that reads it.
+//
+// THE MAP IS SQUARE. Cascade support is isotropic, so a non-square MapSize gives
+// non-square texels and the footprint below would be wrong on one axis.
+
+#ifndef GG_SHADOW_THREADS
+#define GG_SHADOW_THREADS 8
+#endif
+
+/** Radial advances per gradient depth. The step is sized against this and one
+ *  flow texel of arc, combined in quadrature since a step moves in height and
+ *  sideways at once. min would be continuous but not smooth, and its kink sits
+ *  at a fixed obliquity, which on a sphere is a ring. */
+#ifndef GG_SHADOW_STEPS_PER_GRADIENT
+#define GG_SHADOW_STEPS_PER_GRADIENT 16.0f
+#endif
+
+/** Most optical depth a single step may accumulate, at zero accumulated depth.
+ *  0.15 puts at least two steps below the first threshold at any density.
+ *
+ *  GEOMETRY ALONE DOES NOT BOUND THIS: a step sized to the gradient carries
+ *  whatever extinction the deck happens to have, so at a high authored optical
+ *  depth all four thresholds fall inside one step, their crossings collapse to
+ *  one interpolation across it, and the reconstruction inherits a lattice at the
+ *  step spacing. The symptom is blockiness appearing with density rather than
+ *  with distance, which reads as a resolution problem and is not. */
+#ifndef GG_SHADOW_MAX_DTAU
+#define GG_SHADOW_MAX_DTAU 0.15f
+#endif
+
+/** How fast the allowance opens up as optical depth accumulates. 0 is flat.
+ *
+ *  A CONSTANT ALLOWANCE RESOLVES THE DEEP MARCH FAR MORE FINELY THAN ITS NODES
+ *  NEED. The thresholds roughly quadruple each time (0.02, 0.25, 1.0, 3.0), so
+ *  flat Delta-tau spends most of the budget between the last two, where the
+ *  sample is already 63% extinguished before the segment starts. Opening in
+ *  proportion to accumulated depth keeps every node's RELATIVE accuracy about
+ *  equal, which is what the piecewise reconstruction cares about. The lattice is
+ *  unaffected: this changes the demand, and the demand only selects how far a
+ *  fixed cell is halved. */
+#ifndef GG_SHADOW_DTAU_GROWTH
+#define GG_SHADOW_DTAU_GROWTH 1.0f
+#endif
+
+/** How far a lattice cell may be halved. Six gives 64x refinement. */
+#ifndef GG_SHADOW_MAX_HALVINGS
+#define GG_SHADOW_MAX_HALVINGS 6
+#endif
+
+/** Iteration cap. A grazing chord is long and the cone trace only skips the air
+ *  above the deck, not the deck itself.
+ *
+ *  A COUNT AGAINST TWO LENGTHS. GG_SHADOW_MAX_DTAU shortens steps exactly where
+ *  the deck is densest, so this is what stops a dense column running out of
+ *  iterations before the last threshold, where the unreached nodes extrapolate
+ *  and the column reads darker than it is. Optical depth alone would clear 3.0
+ *  in about ten steps (tau follows 1.15^n - 1 at the defaults); geometry forces
+ *  more, and the rest is the approach. */
+#ifndef GG_SHADOW_MAX_STEPS
+#define GG_SHADOW_MAX_STEPS 256
+#endif
+
+/** Lateral samples per march step, 1 or 4.
+ *
+ *  BAND-LIMITING, NOT SMOOTHING. One ray per texel makes the map a point sample
+ *  of a field that varies within the texel, carrying texel-scale variance no
+ *  interpolation can remove. Blurring the stored nodes cannot fix it either:
+ *  reconstruction is nonlinear in them and GG_SHADOW_NO_DECK sits in the same
+ *  channels, so any kernel crossing the silhouette drags its neighbourhood
+ *  toward no-deck. Averaging extinction across the footprint makes each texel
+ *  represent its AREA rather than its centre, and four subsamples at half
+ *  resolution is the same fetch count as one at full. */
+#ifndef GG_SHADOW_SUBSAMPLES
+#define GG_SHADOW_SUBSAMPLES 4
+#endif
+
+/** How far the entry is backed off, in texel footprints. The cone trace runs on
+ *  the centre ray only, so neighbouring columns inside the texel can stand
+ *  higher and a march starting at the centre's entry would miss them. Starting
+ *  early costs steps through empty air, where density is zero. */
+#ifndef GG_SHADOW_ENTRY_BACKOFF
+#define GG_SHADOW_ENTRY_BACKOFF 1.5f
+#endif
+
+/** Rotated grid: one subsample per row and per column of the texel, which
+ *  resolves an edge at any orientation better than an axis-aligned quad. */
+static const float2 GGShadow_SubOffsets[4] =
+{
+    float2(-0.375f, -0.125f),
+    float2(-0.125f, 0.375f),
+    float2(0.125f, -0.375f),
+    float2(0.375f, 0.125f),
+};
+
+Texture2DArray FlowTarget;
+SamplerState FlowTargetSampler;
+
+Texture3D DetailVolume;
+SamplerState DetailVolumeSampler;
+
+Texture3D StructureVolume;
+SamplerState StructureVolumeSampler;
+
+RWTexture2DArray<float4> ShadowMapUAV;
+
+/** Each band's extinction: rgb tint, amount in a. The map stores one scalar
+ *  depth, so the bake weights density by the amounts and folds in the largest
+ *  tint channel; colour is applied from the receiver's band where the depth is
+ *  read, and albedo belongs to the scattering site. */
+float4 ExtinctionNegative;
+float4 ExtinctionPositive;
+float4 ExtinctionBase;
+float BandScale;
+
+/** Solved into the light ray's coefficient by GG_DeckBeta, as the material
+ *  solves it. */
+float DeckOpticalDepth;
+float LightExtinctionFraction;
+
+int2 ShadowMapSize;
+float2 ShadowInvMapSize;
+
+/** Planet-local, pointing TOWARD the light -- the same convention as
+ *  lightRayParams.lightDir, so sun elevation stays dot(up, lightDir). The basis
+ *  and the extent are derived from it and from the field, not passed: see
+ *  GasGiantShadow.ush. */
+float3 ShadowLightDir;
+
+/** Camera position, planet-local. The layer fades are a function of camera and
+ *  sample position, both of which this pass has, so they are evaluated per march
+ *  sample rather than pinned to full strength.
+ *
+ *  ONE CAMERA PER PLANET: the map reaches the march as a material parameter,
+ *  which has no view dimension, so a second viewport shares these fade
+ *  distances. An LOD mismatch in the secondary view, not a wrong shadow, and a
+ *  property of the delivery rather than of this pass. */
+float3 ShadowCameraLocal;
+
+// -- GG_BuildField's arguments, in its order -------------------------------
+//
+// The same values the material passes, under the same names, so there is one
+// derivation of the deck rather than two. Any addition to GG_BuildField's
+// signature has to appear here and in FGasGiantShadowParams.
+
+float PlanetRadius;
+float HeightScale;
+float Time;
+float DeckTop;
+float CeilingFalloff;
+float GradientThickness;
+float DeckBackstop;
+float DensityCurve;
+float BandSharpness;
+float BandBias;
+float HemisphereBlend;
+float HemisphereVariance;
+float BandRelief;
+float PressureRelief;
+float VortexThreshold;
+float StormTowerRelief;
+float ReliefThinning;
+float RotationWeight;
+float WarpTime;
+float DeepShearRatio;
+float TurbulenceFloor;
+float CrossfadePeriod;
+float EdgeBias;
+float ErosionDepth;
+float4 StructureNoiseWeights;
+float StructureScale;
+float StructureAspect;
+float StructureRelief;
+float StructureErosion;
+float StructureFlowInherit;
+float StructureShearInherit;
+float StructureFadeNear;
+float StructureFadeSpan;
+float StructureBandMix;
+float StructureCrossfade;
+float4 DetailNoiseWeights;
+float DetailScale;
+float DetailAspect;
+float DetailRelief;
+float DetailErosion;
+float DetailFlowInherit;
+float DetailShearInherit;
+float DetailFadeNear;
+float DetailFadeSpan;
+float DetailBandMix;
+float DetailCrossfade;
+float DeckSlope;
+
+GGFieldParams GGShadow_Field()
+{
+    return GG_BUILD_FIELD();
+}
+
+/** Per-layer level of detail at a point, from its distance to the camera, in
+ *  planet radii. MUST MATCH the view march's expression, or the deck the light
+ *  sees carries layers the eye has dropped -- lumpy shadows on a smooth surface,
+ *  which reads as dirt rather than as under-resolved noise. */
+void GGShadow_Fades(float3 LocalPos, GGFieldParams F, out float OutDetail, out float OutStructure)
+{
+    const float Distance =
+		length(LocalPos - ShadowCameraLocal) / max(F.PlanetRadius, 1e-4f);
+
+    OutDetail = 1.0f - smoothstep(F.DetailFadeNear, F.DetailFadeFar, Distance);
+    OutStructure = 1.0f - smoothstep(F.StructureFadeNear, F.StructureFadeFar, Distance);
+}
+
+/** Per-band extinction amount, blended by the signed band. Mirrors
+ *  GGAtmo_BandRamp and GGAtmo_BandTint on the a channel instead of rgb: sign
+ *  picks the family, the ramp runs from Base at zero to that family at full
+ *  magnitude, and a plain two-way lerp would blend the families through their
+ *  midpoint and lose the boundary between them.
+ *
+ *  PITFALL: the view ray applies tint and amount together, as
+ *  lerp(Base.rgb * Base.a, Hue.rgb * Hue.a, |T|), while the light path is this
+ *  amount times a separately ramped tint. Lerp of products against product of
+ *  lerps: equal at both ends, differing mid-ramp by a quarter of
+ *  (Base.rgb - Hue.rgb)(Base.a - Hue.a). That is the price of one scalar depth
+ *  channel, not a defect to fix here. */
+float GGShadow_BandAlpha(float Band)
+{
+    const float T = clamp(Band * BandScale, -1.0f, 1.0f);
+
+    const float Hue = (T < 0.0f) ? ExtinctionNegative.a : ExtinctionPositive.a;
+
+    return lerp(ExtinctionBase.a, Hue, abs(T));
+}
+
+/** Extinction at a point, averaged across the texel's footprint. Averaged as
+ *  SIGMA: averaging optical depths or whole sub-rays would push the nonlinear
+ *  part of the reconstruction through the mean and reintroduce the bias the map
+ *  exists to remove.
+ *
+ *  BOTH LAYERS, BOTH FADES. Detail is erosion -- GG_Density applies it as a
+ *  carve, lowering mean density rather than only adding variation -- so dropping
+ *  it would leave the shadow deck uniformly denser than the visible one. A layer
+ *  may only be dropped from the map if it moves the variance and not the mean.
+ *  The fades vary over planet radii, so they are evaluated once per step. */
+float GGShadow_Sigma(
+	float3 Pos,
+	float3 BasisU,
+	float3 BasisV,
+	float TexelWorld,
+	float StepHalfHeight,
+	float AbsMax,
+	GGFieldParams F)
+{
+    float FadeDetail, FadeStructure;
+    GGShadow_Fades(Pos, F, FadeDetail, FadeStructure);
+
+    F.DetailFade = FadeDetail;
+    F.StructureFade = FadeStructure;
+
+    float Density = 0.0f;
+
+    UNROLL
+
+    for (int Sub = 0; Sub < GG_SHADOW_SUBSAMPLES; Sub++)
+    {
+        const float2 Offset = (GG_SHADOW_SUBSAMPLES > 1)
+			? GGShadow_SubOffsets[Sub] * TexelWorld
+			: float2(0.0f, 0.0f);
+
+        const float3 SubPos = Pos + BasisU * Offset.x + BasisV * Offset.y;
+
+        const float4 Deck = GG_Density(
+			FlowTarget, FlowTargetSampler,
+			DetailVolume, DetailVolumeSampler,
+			StructureVolume, StructureVolumeSampler,
+			SubPos, StepHalfHeight, F);
+
+		// Band scales extinction, so a belt shadows more than a zone, and it
+		// arrives on the same fetch the density came from.
+        Density += Deck.x * GGShadow_BandAlpha(Deck.y);
+    }
+
+    return Density * AbsMax / float(GG_SHADOW_SUBSAMPLES);
+}
+
+/** How far into a step optical depth reaches Target, in step lengths.
+ *
+ *  SIGMA IS LINEAR ACROSS THE STEP, so optical depth is quadratic and the
+ *  crossing is a root rather than a ratio. Constant density instead makes the
+ *  crossing first-order, and the residual moves whenever the subdivision level
+ *  changes -- which it does at fixed radii from the sub-light point, obliquity
+ *  being radially symmetric there, so the result is concentric rings. Falls back
+ *  to the linear solve where the ends agree, which is also where the quadratic
+ *  form loses conditioning. */
+float GGShadow_Crossing(float Target, float Tau, float SigmaA, float SigmaB, float Step)
+{
+    const float Remaining = Target - Tau;
+    const float Curve = 0.5f * (SigmaB - SigmaA) / max(Step, 1e-6f);
+
+    if (abs(Curve) < 1e-8f)
+    {
+        return saturate(Remaining / max(SigmaA * Step, 1e-8f));
+    }
+
+    const float Disc = SigmaA * SigmaA + 4.0f * Curve * Remaining;
+
+    const float Root = (-SigmaA + sqrt(max(Disc, 0.0f))) / (2.0f * Curve);
+
+    return saturate(Root / max(Step, 1e-6f));
+}
+
+[numthreads(GG_SHADOW_THREADS, GG_SHADOW_THREADS, 1)]
+void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (any(DispatchThreadId.xy >= uint2(ShadowMapSize))
+		|| DispatchThreadId.z >= uint(GG_SHADOW_CASCADES))
+    {
+        return;
+    }
+
+	// One dispatch, one slice per cascade. Nothing about the level crosses from
+	// the CPU: extent and centre are derived here by the same functions the
+	// reconstruction calls, so the two cannot disagree about where a slice is.
+    const uint3 Texel = DispatchThreadId;
+
+    const int Level = int(DispatchThreadId.z);
+
+    GGFieldParams F = GGShadow_Field();
+
+	// The unconditional bound: the map is shared by every pixel, so the shell it
+	// covers cannot be narrowed by any one camera's fades.
+    float TopMin, TopMax;
+    GG_TopBounds(F, 1.0f, 1.0f, TopMin, TopMax);
+
+    const float CloudOuter = GG_ShadowCullRadius(F);
+
+    float3 ShadowBasisU, ShadowBasisV;
+    GG_ShadowBasis(ShadowLightDir, ShadowBasisU, ShadowBasisV);
+
+    const float ShadowExtent = GG_ShadowCascadeExtent(F, Level);
+
+	// A collapsed level -- a layer faded to nothing -- writes the sentinel and
+	// is skipped by the walk that reads it.
+    if (ShadowExtent <= 0.0f)
+    {
+        ShadowMapUAV[Texel] = GG_SHADOW_NO_DECK;
+        return;
+    }
+
+    const float2 ShadowCentre = GG_ShadowCascadeCentre(
+		Level, ShadowCameraLocal, ShadowBasisU, ShadowBasisV,
+		ShadowExtent, float2(ShadowMapSize));
+
+    const float2 UV = (float2(Texel.xy) + 0.5f) * ShadowInvMapSize;
+    const float2 Plane = ShadowCentre + (UV * 2.0f - 1.0f) * ShadowExtent;
+
+	// Still the ray's closest approach to the planet centre: the map plane moved
+	// but the shell did not, so the intersection below is unchanged.
+    const float3 Offset = ShadowBasisU * Plane.x + ShadowBasisV * Plane.y;
+
+    const float3 Dir = -ShadowLightDir;
+
+	// Offset is perpendicular to Dir by construction, so |Offset + Dir*d| is
+	// PerpSq + d*d and the shell crossing is a square root rather than a
+	// quadratic.
+    const float PerpSq = dot(Offset, Offset);
+    const float HalfChordSq = CloudOuter * CloudOuter - PerpSq;
+
+    BRANCH
+
+    if (HalfChordSq <= 0.0f)
+    {
+        ShadowMapUAV[Texel] = GG_SHADOW_NO_DECK;
+        return;
+    }
+
+	// Everything below is parameterised by distance from the shell entry, which
+	// IS the stored depth: Dir is the depth axis, so an advance along the ray is
+	// an advance in depth one for one.
+    const float HalfChord = sqrt(HalfChordSq);
+
+    const float3 Origin = Offset - Dir * HalfChord;
+    const float RayLength = 2.0f * HalfChord;
+
+    const float TexelWorld = 2.0f * ShadowExtent / float(max(ShadowMapSize.x, 1));
+
+    float TEntry =
+		GG_DeckEntry(FlowTarget, FlowTargetSampler, Origin, Dir, 0.0f, RayLength, TopMax, F);
+
+	// WHERE TO START MARCHING, NOT WHAT TO STORE. The traced entry is the centre
+	// column's deck top, a point sample that would snap by a texel as the deck
+	// advects; nothing is written from it, since the silhouette comes out of the
+	// accumulation as GG_SHADOW_TAU_ENTRY's crossing like the other three. So it
+	// only has to be EARLY ENOUGH: backing off by a texel footprint covers
+	// neighbouring columns standing higher than the centre, and starting in empty
+	// air costs steps and changes nothing. Converted from a lateral distance by
+	// the rate the ray descends, so it grows with obliquity -- which is where
+	// columns inside one texel differ most.
+    {
+        const float3 EntryPos = Origin + Dir * TEntry;
+        const float EntryRadius = max(length(EntryPos), 1e-4f);
+        const float EntryRate = abs(dot(Dir, EntryPos / EntryRadius));
+
+        TEntry = max(0.0f, TEntry - TexelWorld * GG_SHADOW_ENTRY_BACKOFF / max(EntryRate, 0.1f));
+    }
+
+	// MATCHES THE MATERIAL'S CONVERSION. GG_DeckBeta is per atmosphere thickness
+	// and AtmosphereSetup divides by that thickness before the march sees it.
+	// PITFALL: skipping the divide leaves every reconstructed optical depth too
+	// large by a whole thickness in world units, and the deck reads as opaque
+	// everywhere. THE FOLD CONSTANT is the light coefficient times the largest
+	// tint channel of any band, so the stored thresholds mean transmittance on the
+	// fastest channel anywhere; the march divides it back out.
+    const float AbsMax = GG_DeckBeta(F, DeckOpticalDepth) * LightExtinctionFraction / F.Thickness
+		* GG_ExtinctionTintRange(ExtinctionNegative.rgb, ExtinctionPositive.rgb, ExtinctionBase.rgb).y;
+
+	// The radial advance a step is allowed. The gradient is the only part of the
+	// profile that varies, so it is what the budget is spent on.
+    const float HeightStep =
+		F.GradientThickness * F.Thickness / max(GG_SHADOW_STEPS_PER_GRADIENT, 1.0f);
+
+	// The outer lattice: fixed multiples of this from t = 0. Constant along the
+	// ray, so a boundary is a property of the geometry alone and cannot move
+	// when the field changes.
+    const float CellSize = max(HeightStep, 1e-4f);
+
+    float Tau = 0.0f;
+    float LastSigma = 0.0f;
+
+	// Negative until crossed. Named rather than an array: a dynamically indexed
+	// local forces scratch memory for four values that unroll for free.
+    float NodeEntry = -1.0f;
+    float Node0 = -1.0f;
+    float Node1 = -1.0f;
+    float Node2 = -1.0f;
+
+	// ANCHORED AT THE SHELL ENTRY, NOT AT THE DECK'S. Snapping the start to the
+	// lattice means the sample positions do not slide when the cone trace flips
+	// from one column's top to the next -- which it does discontinuously as the
+	// deck advects, moving every crossing depth on that ray together.
+    float T = floor(TEntry / CellSize) * CellSize;
+
+	// Extinction at the march start. Each step samples only its FAR boundary and
+	// inherits the near one, so the boundary scheme costs the same one evaluation
+	// per step the midpoint scheme did, plus this seed. Its integration window
+	// carries the same obliquity factor as the loop's -- the first step's length
+	// is not known yet, so the cell stands in for it.
+    const float3 SeedPos = Origin + Dir * T;
+    const float SeedRate = abs(dot(Dir, SeedPos / max(length(SeedPos), 1e-4f)));
+
+    float SigmaPrev = GGShadow_Sigma(
+		SeedPos, ShadowBasisU, ShadowBasisV, TexelWorld,
+		SeedRate * 0.5f * CellSize / F.Thickness, AbsMax, F);
+
+    LOOP
+
+    for (int Iter = 0; Iter < GG_SHADOW_MAX_STEPS && T < RayLength; Iter++)
+    {
+        const float3 Pos = Origin + Dir * T;
+        const float Radius = max(length(Pos), 1e-4f);
+
+        const float RadialRate = abs(dot(Dir, Pos / Radius));
+        const float LateralRate = sqrt(max(1.0f - RadialRate * RadialRate, 0.0f));
+
+		// Progress toward each limit, per unit of path travelled.
+        const float HeightCost = RadialRate / max(HeightStep, 1e-6f);
+
+        const float LateralCost =
+			LateralRate / max(GG_FlowTexelArc(FlowTarget, Radius) * 0.5f, 1e-6f);
+
+        float Demand = rsqrt(max(HeightCost * HeightCost + LateralCost * LateralCost, 1e-12f));
+
+		// The extinction the last step found, the only estimate available before
+		// this one is taken. Self-correcting: a step overshooting into dense deck
+		// shortens the next, so the error is bounded by one step rather than
+		// carried.
+        if (LastSigma > 0.0f)
+        {
+            const float Allowance = GG_SHADOW_MAX_DTAU * (1.0f + GG_SHADOW_DTAU_GROWTH * Tau);
+
+            Demand = min(Demand, Allowance / LastSigma);
+        }
+
+		// DYADIC SUBDIVISION, NOT RESIZING. The demand halves the cell rather than
+		// setting the step directly, so a density change splits a boundary instead
+		// of shifting every boundary after it. Existing boundaries persisting is
+		// what makes the quadrature converge frame to frame rather than dance:
+		// crossings are interpolated inside a step, so a lattice that re-phases
+		// moves the silhouette even when the deck has barely moved.
+        float Step = CellSize;
+
+        UNROLL
+
+        for (int Halve = 0; Halve < GG_SHADOW_MAX_HALVINGS; Halve++)
+        {
+            if (Step <= Demand)
+            {
+                break;
+            }
+
+            Step *= 0.5f;
+        }
+
+		// REALIGNED WHEN THE STEP GROWS. A coarsening step taken from inside a
+		// finer cell lands off the coarse lattice and stays off it, which is the
+		// drift the dyadic scheme exists to prevent. Cutting the step at the next
+		// multiple of its own length restores alignment, and since the cell over
+		// the step is a power of two, that also lands on every cell boundary.
+        Step = min(Step, (floor(T / Step) + 1.0f) * Step - T);
+
+		// Trims the final partial step at the ray's end.
+        Step = min(Step, RayLength - T);
+
+		// NO JITTER. A stochastic offset is what a per-pixel march needs to hide
+		// its lattice under a blur; this lattice is in the map, shared by every
+		// pixel reading it, so jitter prints as fixed noise -- grain that sits
+		// still while the deck moves past.
+        const float3 Far = Origin + Dir * (T + Step);
+
+		// Half the step along the RADIUS, in atmosphere fractions, which is the
+		// axis the profile varies on.
+        const float StepHalfHeight = RadialRate * Step * 0.5f / F.Thickness;
+
+        const float SigmaNext = GGShadow_Sigma(
+			Far, ShadowBasisU, ShadowBasisV, TexelWorld, StepHalfHeight, AbsMax, F);
+
+		// TRAPEZOID, NOT MIDPOINT. Sampling the boundaries makes sigma linear
+		// across the step, which makes optical depth quadratic and the crossings
+		// below solvable to second order. Same number of density evaluations.
+        const float TauNext = Tau + 0.5f * (SigmaPrev + SigmaNext) * Step;
+
+        if (NodeEntry < 0.0f && TauNext >= GG_SHADOW_TAU_ENTRY)
+        {
+            NodeEntry = T + Step * GGShadow_Crossing(
+				GG_SHADOW_TAU_ENTRY, Tau, SigmaPrev, SigmaNext, Step);
+        }
+
+        if (Node0 < 0.0f && TauNext >= GG_SHADOW_TAU0)
+        {
+            Node0 = T + Step * GGShadow_Crossing(
+				GG_SHADOW_TAU0, Tau, SigmaPrev, SigmaNext, Step);
+        }
+
+        if (Node1 < 0.0f && TauNext >= GG_SHADOW_TAU1)
+        {
+            Node1 = T + Step * GGShadow_Crossing(
+				GG_SHADOW_TAU1, Tau, SigmaPrev, SigmaNext, Step);
+        }
+
+        if (Node2 < 0.0f && TauNext >= GG_SHADOW_TAU2)
+        {
+            Node2 = T + Step * GGShadow_Crossing(
+				GG_SHADOW_TAU2, Tau, SigmaPrev, SigmaNext, Step);
+        }
+
+        Tau = TauNext;
+
+		// The far boundary's extinction, which is exact at the next step's start
+		// rather than an average over the last one.
+        if (SigmaNext > 0.0f)
+        {
+            LastSigma = SigmaNext;
+        }
+
+        SigmaPrev = SigmaNext;
+
+        T += Step;
+
+        if (Node2 >= 0.0f)
+        {
+            break;
+        }
+    }
+
+	// Thresholds the ray never reached, extrapolated at the last extinction seen
+	// rather than flagged. The result lands past the shell exit and no view sample
+	// lives there, being outside the cull radius where the march does not run the
+	// deck path. A zero LastSigma sends it to the sentinel.
+    const float TailRate = 1.0f / max(LastSigma, 1e-6f);
+
+    if (NodeEntry < 0.0f)
+    {
+        NodeEntry = T + (GG_SHADOW_TAU_ENTRY - Tau) * TailRate;
+    }
+    if (Node0 < 0.0f)
+    {
+        Node0 = T + (GG_SHADOW_TAU0 - Tau) * TailRate;
+    }
+    if (Node1 < 0.0f)
+    {
+        Node1 = T + (GG_SHADOW_TAU1 - Tau) * TailRate;
+    }
+    if (Node2 < 0.0f)
+    {
+        Node2 = T + (GG_SHADOW_TAU2 - Tau) * TailRate;
+    }
+
+    float4 Out = float4(NodeEntry, Node0, Node1, Node2) / F.Thickness;
+
+	// NO DEBUG REMAP HERE. The march reads this map, so a define rescaling what
+	// is written rescales the lighting with it, and the symptom -- a fully
+	// shadowed planet with a lit sliver at the terminator -- reads as a
+	// reconstruction bug rather than a units mismatch. Scale in the visualisation
+	// material instead.
+    ShadowMapUAV[Texel] = min(Out, GG_SHADOW_NO_DECK);
+}

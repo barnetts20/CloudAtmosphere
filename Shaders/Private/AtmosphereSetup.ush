@@ -1,32 +1,35 @@
 #pragma once
 
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
-#include "/Plugin/CloudAtmosphere/Private/AtmosphereMarch.ush"
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereTransmittance.ush"
 
-// ---------------------------------------------------------------------------
 // Setup: everything between the material's pin values and a filled
 // CompositeParams.
 //
-// SEPARATE FROM THE MARCH BECAUSE IT IS THE PART THAT KNOWS ABOUT THE
-// MATERIAL. The march takes a struct and does not care where it came from;
-// this file does the unit conversions, the ray reconstruction and the depth
-// blending that only make sense in a post process material.
-//
-// Everything here was inline at the bottom of the Custom node.
-// ---------------------------------------------------------------------------
+// SEPARATE FROM THE MARCH BECAUSE IT IS THE PART THAT KNOWS ABOUT THE MATERIAL.
+// A march takes the struct and does not care where it came from; this file does
+// the unit conversions, the ray reconstruction and the depth blending that only
+// make sense inside a post process material. Nothing here is march-specific, so
+// both models build their params through it.
 
-/** Rebuilds the world ray direction for a DOWNSAMPLED render target.
+/** The size the march is actually being written at, for a DOWNSAMPLED target.
  *
- *  The march is rendered into the top-left quarter of the screen at rtSize, so
- *  the pixel coordinate cannot be divided by the view size -- it has to be
- *  divided by the size of the region actually being written, or the ray fans
- *  out over the whole screen while only a quarter of it is filled.
- *
- *  The 0.5 depth in clip space is arbitrary: any depth on the ray works, since
- *  the result is normalized. */
+ *  The march occupies the top-left region of the screen at rtSize, so a pixel
+ *  coordinate cannot be divided by the view size: it has to be divided by the
+ *  region being written, or the ray fans out over the whole screen while only
+ *  part of it is filled. Falls back to the view size below two pixels, which is
+ *  what rtSize reads where the pass producing it has not run -- the material
+ *  editor's preview -- giving a full-resolution ray. */
+float2 Atmo_MarchSize(float2 rtSize)
+{
+    return all(rtSize >= 2.0f) ? rtSize : View.ViewSizeAndInvSize.xy;
+}
+
+/** World ray direction through a pixel. The 0.5 clip depth is arbitrary: any
+ *  depth on the ray works, since the result is normalized. */
 float3 Atmo_RayDirection(float2 svPosition, float2 rtSize)
 {
-    float2 screenUV = svPosition / rtSize;
+    float2 screenUV = svPosition / Atmo_MarchSize(rtSize);
 
     float2 ClipXY = screenUV * float2(2, -2) + float2(-1, 1);
 
@@ -35,16 +38,12 @@ float3 Atmo_RayDirection(float2 svPosition, float2 rtSize)
     return normalize(WorldDir.xyz / WorldDir.w);
 }
 
-/** Blends between ignoring scene depth and using it.
- *
- *  Scene depth loses precision badly at planetary distances, so from outside
- *  the atmosphere it is unusable -- but from inside it is exactly what stops
- *  the march running through terrain. Blended on altitude: fully trusted at the
- *  cloud deck, fully ignored at the atmosphere's outer edge.
- *
- *  camDist * 2 rather than a huge number for the ignored case, so the value
- *  stays in a sane range and the lerp does not lose the near end to precision
- *  the moment the blend starts. */
+/** Blends between ignoring scene depth and using it. Scene depth loses
+ *  precision badly at planetary distances, so from outside the atmosphere it is
+ *  unusable, but from inside it is what stops the march running through terrain.
+ *  Blended on altitude: fully trusted at the cloud deck, fully ignored at the
+ *  atmosphere's outer edge. The ignored case is camDist * 2 rather than a huge
+ *  number, so the lerp does not lose its near end to precision as it starts. */
 float Atmo_CorrectedDepth(float camDist, float sceneDepth, float atmoRadius, float cloudOuterRadius)
 {
     float outerBlend = saturate((atmoRadius - camDist) / (atmoRadius - cloudOuterRadius));
@@ -52,19 +51,20 @@ float Atmo_CorrectedDepth(float camDist, float sceneDepth, float atmoRadius, flo
     return lerp(camDist * 2, sceneDepth, outerBlend);
 }
 
-/** Fills CompositeParams from the material's pin values.
+/** Fills CompositeParams from the material's pin values. The gas giant path
+ *  passes zero for every terrestrial cloud-shape argument, which it never reads.
  *
  *  SCALED BY ATMOSPHERE THICKNESS ON THE WAY IN. Every coefficient and scale
  *  height arrives as a fraction of the atmosphere's depth rather than in world
- *  units, so a planet can be resized without retuning its air. The division for
- *  the beta terms is because an extinction coefficient is a reciprocal length:
- *  a thicker atmosphere at the same total opacity has a smaller coefficient.
+ *  units, so a planet can be resized without retuning its air. The betas divide
+ *  because an extinction coefficient is a reciprocal length: a thicker
+ *  atmosphere at the same total opacity has a smaller coefficient.
  *
  *  CAMERA AT THE ORIGIN. The march runs camera-relative, which raises the
  *  precision floor enormously at planetary scale -- planet-relative positions
- *  are millions of units and float32 has about seven digits. The original
- *  camera position is carried separately for the one thing that needs world
- *  space, which is sampling the cloud noise. */
+ *  are millions of units and float32 has about seven digits. The original camera
+ *  position is carried separately for the one thing that needs world space,
+ *  which is sampling the cloud noise. */
 CompositeParams Atmo_BuildParams(
 	float2 svPosition,
 	float3 rayDir,
@@ -100,9 +100,6 @@ CompositeParams Atmo_BuildParams(
 	float4 animationWeights,
 	int mainAtmoSteps,
 	int mainCloudSteps,
-	int atmoLightSteps,
-	int cloudLightSteps,
-	float lightStepScale,
 	float stepScaleFactor)
 {
     const float atmoThickness = atmoRadius - planetRadius;
@@ -119,22 +116,27 @@ CompositeParams Atmo_BuildParams(
     params.planetParams.atmoRadius = atmoRadius;
     params.planetParams.cloudOuterRadius = cloudOuterRadius;
     params.planetParams.cloudInnerRadius = cloudInnerRadius;
-    params.planetParams.planetRadiusSq = planetRadius * planetRadius;
     params.planetParams.cloudOuterRadiusSq = cloudOuterRadius * cloudOuterRadius;
     params.planetParams.cloudInnerRadiusSq = cloudInnerRadius * cloudInnerRadius;
 
     params.scatteringParams.cosTheta = cosTheta;
-	// EACH BETA CARRIES ITS OWN SCALE HEIGHT IN a. The two are only authored
-	// together and mean nothing apart -- a coefficient without the profile it
-	// applies to is not a quantity. The two that divide are floored.
+
+	// EACH BETA CARRIES ITS OWN SCALE HEIGHT IN a: the two are only authored
+	// together and mean nothing apart, since a coefficient without the profile it
+	// applies to is not a quantity. AtmoT_Profile derives it, as it does for the
+	// transmittance bake.
     params.scatteringParams.rayBeta = rayleighBeta.rgb / atmoThickness;
     params.scatteringParams.mieBeta = mieBeta.rgb / atmoThickness;
     params.scatteringParams.absBeta = absorptionBeta.rgb / atmoThickness;
     params.scatteringParams.atmoAmbient = atmoAmbient;
-    params.scatteringParams.rayScaleH = atmoThickness * max(rayleighBeta.a, 1e-4);
-    params.scatteringParams.mieScaleH = atmoThickness * max(mieBeta.a, 1e-4);
-    params.scatteringParams.absHeight = atmoThickness * absorptionBeta.a;
-    params.scatteringParams.absFalloff = atmoThickness * absorptionFalloff;
+
+    const float4 airProfile = AtmoT_Profile(
+		rayleighBeta.a, mieBeta.a, absorptionBeta.a, absorptionFalloff) * atmoThickness;
+
+    params.scatteringParams.rayScaleH = airProfile.x;
+    params.scatteringParams.mieScaleH = airProfile.y;
+    params.scatteringParams.absHeight = airProfile.z;
+    params.scatteringParams.absFalloff = airProfile.w;
     params.scatteringParams.phaseR = Atmo_PhaseRayleigh(cosTheta);
     params.scatteringParams.phaseM = Atmo_PhaseHG(cosTheta, mieG);
 
@@ -165,12 +167,6 @@ CompositeParams Atmo_BuildParams(
     params.mainRayParams.stepScaleFactor = stepScaleFactor;
 
     params.lightRayParams.lightDir = lightDirection;
-    params.lightRayParams.atmoLightSteps = atmoLightSteps;
-    params.lightRayParams.cloudLightSteps = cloudLightSteps;
-    params.lightRayParams.stepScale = lightStepScale;
-
-	// Overwritten per sample by the main march, alongside the two step counts.
-    params.lightRayParams.budgetWeight = 1.0;
 
 	// Filled per step by the main march. Initialised so the struct is complete
 	// before it is passed, since HLSL will not warn about a member that is only

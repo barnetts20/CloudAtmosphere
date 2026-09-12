@@ -1,0 +1,76 @@
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/Common.ush"
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereTransmittance.ush"
+
+// Air transmittance table bake. One thread per texel: invert the mapping,
+// integrate the three densities to the atmosphere top, store.
+//
+// Static, not per frame -- the table depends only on the radii and the air
+// profile, and is rebaked when those change.
+
+#ifndef ATMO_TRANSMITTANCE_THREADS
+#define ATMO_TRANSMITTANCE_THREADS 8
+#endif
+
+/** Midpoint samples per texel ray. Priced against accuracy alone, since the bake
+ *  runs once per change. At 128 the worst case is the straight-up ray at the
+ *  shortest authored scale height, about 0.1% low; rays toward the horizon climb
+ *  in altitude so slowly near the start that they are exact to fp32. */
+#ifndef ATMO_TRANSMITTANCE_STEPS
+#define ATMO_TRANSMITTANCE_STEPS 128
+#endif
+
+float TransmittancePlanetRadius;
+float TransmittanceAtmosphereRadius;
+
+/** Authored pins, unconverted: (RayleighBeta.a, MieBeta.a, AbsorptionBeta.a,
+ *  AbsorptionFalloff). AtmoT_Profile converts them, as it does for the march. */
+float4 TransmittanceProfilePins;
+
+RWTexture2D<float4> TransmittanceUAV;
+
+[numthreads(ATMO_TRANSMITTANCE_THREADS, ATMO_TRANSMITTANCE_THREADS, 1)]
+void MainTransmittanceCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint2 Texel = DispatchThreadId.xy;
+
+    if (Texel.x >= ATMO_TRANSMITTANCE_WIDTH || Texel.y >= ATMO_TRANSMITTANCE_HEIGHT)
+    {
+        return;
+    }
+
+    const float2 Radii = AtmoT_Radii(TransmittancePlanetRadius, TransmittanceAtmosphereRadius);
+
+    const float4 Profile = AtmoT_Profile(
+		TransmittanceProfilePins.x, TransmittanceProfilePins.y,
+		TransmittanceProfilePins.z, TransmittanceProfilePins.w);
+
+	// Endpoint mapping, the inverse of AtmoT_UnitToUV: texel 0 is exactly 0 and
+	// the last texel exactly 1, so the lookup reads back what was baked.
+    const float XMu = float(Texel.x) / float(ATMO_TRANSMITTANCE_WIDTH - 1);
+    const float XR = float(Texel.y) / float(ATMO_TRANSMITTANCE_HEIGHT - 1);
+
+    float R, Mu;
+    AtmoT_RMu(XMu, XR, Radii.x, Radii.y, R, Mu);
+
+    const float Length = AtmoT_DistanceToTop(R, Mu, Radii.y);
+    const float Step = Length / float(ATMO_TRANSMITTANCE_STEPS);
+
+    float3 Sum = float3(0.0f, 0.0f, 0.0f);
+
+    [loop]
+    for (int i = 0; i < ATMO_TRANSMITTANCE_STEPS; i++)
+    {
+        const float T = (float(i) + 0.5f) * Step;
+
+		// Floored at the surface: a horizon ray touches it at one point, and
+		// rounding can put a sample a hair under, where exp(-h/H) grows.
+        const float SampleRadius = sqrt(max(R * R + T * T + 2.0f * R * Mu * T, 0.0f));
+        const float Height = max(SampleRadius - Radii.x, 0.0f);
+
+        Sum += Atmo_Density(Height, Profile.x, Profile.y, Profile.z, Profile.w);
+    }
+
+	// Alpha is unused; the lookup reads rgb.
+    TransmittanceUAV[Texel] = float4(Sum * Step, 0.0f);
+}

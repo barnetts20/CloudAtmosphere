@@ -6,17 +6,13 @@
 
 /** The profile a snapshot was captured under.
  *
- *  WHY PROVENANCE IS RECORDED RATHER THAN ASSUMED.
- *
- *  A snapshot's eddies sit on the jets that existed when it was taken. Restore
- *  it under a different BandCount or JetStrength and they are sitting on jets
- *  that are no longer there -- and because the nudge re-registers the zonal
- *  mean over a few hundred steps, the field will quietly correct itself while
- *  looking wrong in the meantime, then look subtly different from the state
- *  that was captured.
- *
- *  That failure is silent and slow, which is the worst combination. Recording
- *  what the state was baked under lets it be reported at load instead. */
+ *  PROVENANCE IS RECORDED RATHER THAN ASSUMED because a snapshot's eddies sit on
+ *  the jets that existed when it was taken. Restored under a different BandCount
+ *  or JetStrength they sit on jets that are not there, and since the nudge
+ *  re-registers the zonal mean over a few hundred steps the field quietly
+ *  corrects itself -- looking wrong in the meantime, then settling subtly
+ *  different from what was captured. Silent and slow is the worst combination,
+ *  so this is reported at load instead. */
 USTRUCT(BlueprintType)
 struct FGasGiantSnapshotProvenance
 {
@@ -35,19 +31,20 @@ struct FGasGiantSnapshotProvenance
 	float Asymmetry = 0.0f;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
-	FVector BandShape = FVector::ZeroVector;
+	float WidthBias = 0.0f;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
 	float PlanetaryVorticity = 0.0f;
 
 	/** True when this profile would draw the same jets at the same latitudes.
 	 *
-	 *  Only the shape parameters are compared. DragRate, NudgeRate and the
-	 *  forcing do not appear, because they change how the field EVOLVES rather
-	 *  than where its structure sits -- a snapshot restored under different
-	 *  dissipation is still registered correctly, it just relaxes to a
-	 *  different equilibrium from where it starts. That is a legitimate thing
-	 *  to do deliberately. */
+	 *  Only the parameters that place the jets are compared. PlanetaryVorticity is
+	 *  recorded but NOT compared, along with DragRate, NudgeRate and the forcing,
+	 *  which are not recorded: all of them change how the field EVOLVES rather
+	 *  than where its structure sits. A snapshot restored under different rotation
+	 *  or dissipation is still registered correctly on its jets, it just relaxes
+	 *  toward a different equilibrium -- a legitimate thing to do deliberately,
+	 *  and the recorded value is there to make it visible. */
 	bool MatchesShape(const FGasGiantSnapshotProvenance& Other) const
 	{
 		const float Tol = 1e-3f;
@@ -56,32 +53,25 @@ struct FGasGiantSnapshotProvenance
 			&& FMath::IsNearlyEqual(JetStrength, Other.JetStrength, Tol)
 			&& FMath::IsNearlyEqual(EquatorialBoost, Other.EquatorialBoost, Tol)
 			&& FMath::IsNearlyEqual(Asymmetry, Other.Asymmetry, Tol)
-			&& BandShape.Equals(Other.BandShape, Tol);
+			&& FMath::IsNearlyEqual(WidthBias, Other.WidthBias, Tol);
 	}
 };
 
 /** A captured simulation state: the whole thing, in two float arrays.
  *
- *  WHY RAW FLOATS AND NOT A TEXTURE ASSET.
+ *  RAW FLOATS AND NOT A TEXTURE ASSET. A UTexture2DArray carries compression
+ *  settings, an sRGB flag and mip generation, and any one applied to a physical
+ *  field destroys it -- block compression on a vorticity field presents as the
+ *  sim misbehaving rather than as an import setting, and nothing about a
+ *  wrong-looking flow points at a texture group. A float array round-trips
+ *  exactly, so the class of bug is unreachable rather than avoided. At 512x256x3
+ *  the pair is about 3 MB uncompressed, small enough to ship a library.
  *
- *  A UTexture2DArray carries compression settings, an sRGB flag and mip
- *  generation, and any one of them applied to a physical field destroys it.
- *  Block compression on a vorticity field would be catastrophic and would
- *  present as the sim misbehaving rather than as an import setting -- there is
- *  nothing about a wrong-looking flow that points at a texture group. A float
- *  array has none of that surface: it round-trips exactly, always, and the
- *  entire class of bug is unreachable rather than merely avoided.
- *
- *  It also serialises and compresses perfectly well. At 512x256x3 the pair is
- *  about 3 MB uncompressed, which is small enough to ship a library of them.
- *
- *  WHY BOTH FIELDS AND NOT JUST VORTICITY.
- *
- *  Vorticity alone is the complete state in principle -- psi is recoverable by
- *  inverting the Laplacian. But recovering it means running the cold-start
- *  Poisson solve at load, which is slow, keeps InitPoissonIterations alive as a
- *  runtime concern, and reproduces the captured psi only to solver tolerance
- *  rather than exactly. Doubling the file removes all three. */
+ *  BOTH FIELDS, NOT JUST VORTICITY. Psi is recoverable by inverting the
+ *  Laplacian, but recovering it means the cold-start Poisson solve at load:
+ *  slow, keeping InitPoissonIterations alive as a runtime concern, and
+ *  reproducing the captured psi only to solver tolerance. Doubling the file
+ *  removes all three. */
 UCLASS(BlueprintType)
 class CLOUDATMOSPHERE_API UGasGiantSnapshot : public UDataAsset
 {

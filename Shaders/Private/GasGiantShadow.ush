@@ -1,0 +1,390 @@
+#pragma once
+
+#include "/Plugin/CloudAtmosphere/Private/GasGiantFlow.ush"
+
+// Deck shadow map: the encoding, and the two sides that share it.
+//
+// INCLUDED BY BOTH THE BAKE AND THE MARCH. Basis, extent and the depth a sample
+// sits at are derived here from GGFieldParams and the light direction, which
+// both sides already have; a second derivation can disagree, and a map sampled
+// in a basis it was not written in fails silently, the shadows staying smooth
+// and plausible in the wrong place.
+//
+// THE ENCODING IS INVERTED -- depths at which fixed optical depths are crossed,
+// not optical depth at fixed depths. That places the nodes by transmittance, so
+// they concentrate where the deck is dense: the top of the density ramp, where
+// view transmittance is spent and where a slab fit anchored at the shell entry
+// is worst. A deck top with near-zero density breaks the classic form.
+//
+// DEPTHS ARE OFFSETS FROM THE ANALYTIC SHELL ENTRY, in atmosphere thicknesses,
+// so fp16 resolves a fraction of a gradient rather than of a planet radius, and
+// the entry is recomputed in full precision on each side. Optical depth is on
+// the FASTEST ABSORPTION CHANNEL, cloudAbsorptionBeta's largest component folded
+// in by the bake, so the thresholds mean transmittance directly.
+
+/** The four stored crossings, spaced by what transmittance does rather than
+ *  evenly: 0.25 is a 22% loss, 1.0 is 63%, 3.0 is 95%. The second is low on
+ *  purpose, resolving the soft top of the ramp -- what the eye reads and what a
+ *  linear fit gets worst. THE FIRST IS THE SILHOUETTE, a threshold rather than a
+ *  geometric entry: a cone-traced deck top is a point sample of one column, so
+ *  it cannot be averaged over the texel and snaps by a whole one as the deck
+ *  advects past the lattice. As a crossing of the same subsampled accumulation
+ *  as the others, it moves continuously. */
+#ifndef GG_SHADOW_TAU_ENTRY
+#define GG_SHADOW_TAU_ENTRY 0.02f
+#endif
+
+#ifndef GG_SHADOW_TAU0
+#define GG_SHADOW_TAU0 0.25f
+#endif
+
+#ifndef GG_SHADOW_TAU1
+#define GG_SHADOW_TAU1 1.0f
+#endif
+
+#ifndef GG_SHADOW_TAU2
+#define GG_SHADOW_TAU2 3.0f
+#endif
+
+/** Optical depth at which the tail extrapolation stops growing, on the most
+ *  transmissive term the caller will exponentiate. Under a percent at 5. A
+ *  CEILING, NOT A CUTOFF: past the last node the reconstruction continues at the
+ *  final segment's rate, unbounded on a dense column. Never use it to snap
+ *  transmittance to zero -- a hard threshold on a texel-interpolated field draws
+ *  an axis-aligned staircase.
+ *
+ *  PITFALL: the reader sees the map's depth scaled down, by each slower
+ *  channel's share of the fastest and by any multiple-scattering attenuation, so
+ *  a ceiling on the fastest channel leaves those glowing through saturated deck.
+ *  The caller divides this by the smallest such scale. */
+#ifndef GG_SHADOW_SATURATION
+#define GG_SHADOW_SATURATION 5.0f
+#endif
+
+/** Floor on that scale. A channel or octave the deck barely attenuates cannot be
+ *  made opaque by any finite ceiling; this caps the ceiling instead. */
+#ifndef GG_SHADOW_MIN_TAU_SCALE
+#define GG_SHADOW_MIN_TAU_SCALE 1e-3f
+#endif
+
+/** The smallest and largest channel across the three bands' extinction tints.
+ *
+ *  THE FOLD CONSTANT: the map stores optical depth scaled by the largest channel
+ *  any band can have, so its thresholds mean transmittance on the fastest
+ *  channel anywhere, and the reader divides it back out and applies the
+ *  receiving band's tint. The smallest channel sets the saturation ceiling. */
+float2 GG_ExtinctionTintRange(float3 TintNegative, float3 TintPositive, float3 TintBase)
+{
+    const float3 Lo = min(TintNegative, min(TintPositive, TintBase));
+    const float3 Hi = max(TintNegative, max(TintPositive, TintBase));
+
+    return float2(min(Lo.x, min(Lo.y, Lo.z)), max(Hi.x, max(Hi.y, Hi.z)));
+}
+
+/** Written where a threshold is never reached, and where the ray misses the
+ *  shell. Far past any real chord, so reconstruction reads zero rather than
+ *  needing a validity test. */
+#ifndef GG_SHADOW_NO_DECK
+#define GG_SHADOW_NO_DECK 1000.0f
+#endif
+
+/** How far the map reaches past the cull radius. The limb is where the encoded
+ *  depths vary fastest, and a map cut exactly at the shell puts that variation
+ *  against the clamp edge with nothing outside to blend toward. */
+#ifndef GG_SHADOW_EXTENT_MARGIN
+#define GG_SHADOW_EXTENT_MARGIN 1.02f
+#endif
+
+/** Lookup offset, in texels, applied per view sample. 1 is a full texel, larger
+ *  softens the shadow, 0 disables. The opposite case to the bake, where a
+ *  stochastic offset would print as fixed noise: here it is per pixel and per
+ *  sample, so one ray's samples average the texel neighbourhood. It earns its
+ *  place in the tangent case, where a view ray parallel to the light projects
+ *  every sample into nearly one texel and that texel's error reaches the screen
+ *  as a block. */
+#ifndef GG_SHADOW_LOOKUP_JITTER
+#define GG_SHADOW_LOOKUP_JITTER 1.0f
+#endif
+
+/** Cascade count. Level 0 covers the whole disc; each inner level matches the
+ *  radius a layer is drawn to, so shadow resolution steps up where the field
+ *  gains a layer. Adding one costs a slice and a case in the extent. */
+#ifndef GG_SHADOW_CASCADES
+#define GG_SHADOW_CASCADES 3
+#endif
+
+/** Where a cascade starts handing over to the one outside it, as a fraction of
+ *  its half-width. The outer band reconstructs both and blends.
+ *
+ *  THE SEAM IS NOT THE RESOLUTION CHANGE. Subsample offsets scale with texel
+ *  size, so the near map band-limits at a finer scale and reads slightly denser
+ *  over the same ground. A narrow band turns that into a ring. */
+#ifndef GG_SHADOW_NEAR_BLEND
+#define GG_SHADOW_NEAR_BLEND 0.75f
+#endif
+
+/** The map plane's axes for a planet-local light direction, orthonormal and
+ *  perpendicular to it. L must already be normalized.
+ *
+ *  ANCHORED TO THE SPIN AXIS rather than an arbitrary perpendicular, so the grid
+ *  does not rotate as the light moves: a rotating lattice re-phases the
+ *  reconstruction filter every frame and shimmers at the resolution limit even
+ *  when nothing has moved. The axis lands on V, putting the pole up the map.
+ *  (U, V, L) IS RIGHT-HANDED -- the other cross order mirrors the map, which is
+ *  invisible on a banded planet and surfaces later as shadows on the wrong side
+ *  of the lumps casting them. */
+void GG_ShadowBasis(float3 L, out float3 OutU, out float3 OutV)
+{
+    float3 V = float3(0.0f, 0.0f, 1.0f) - L * L.z;
+
+	// Light along the pole. Any perpendicular is as stable as any other there.
+    if (dot(V, V) < 1e-6f)
+    {
+        V = float3(1.0f, 0.0f, 0.0f) - L * L.x;
+    }
+
+    OutV = normalize(V);
+    OutU = cross(OutV, L);
+}
+
+/** The radius the map covers: the cull radius at UNFADED bounds.
+ *
+ *  PITFALL: not planetParams.cloudOuterRadius, which carries the camera's layer
+ *  fades and shrinks as the structure layer fades out. A map written against one
+ *  radius and read against another samples at the wrong scale, sliding the whole
+ *  shadow toward the limb. */
+float GG_ShadowCullRadius(GGFieldParams F)
+{
+    float TopMin, TopMax;
+    GG_TopBounds(F, 1.0f, 1.0f, TopMin, TopMax);
+
+    return F.PlanetRadius + F.Thickness * TopMax;
+}
+
+/** Half-width of a cascade. DERIVED FROM THE FADES, NOT AUTHORED SEPARATELY:
+ *  level 1 reaches as far as structure is drawn, level 2 as far as detail, so
+ *  inside a level both the map and the eye carry that layer and outside neither
+ *  does. Any other sizing makes the two LODs disagree somewhere.
+ *
+ *  STRICTLY ORDERED, because nothing makes the authored fades so: a detail range
+ *  wider than the structure range would put the coarse slice inside the fine
+ *  one, which reads as the fine slice not working. A zero extent collapses that
+ *  level and the walk skips it. */
+float GG_ShadowCascadeExtent(GGFieldParams F, int Level)
+{
+    const float Disc = GG_ShadowCullRadius(F) * GG_SHADOW_EXTENT_MARGIN;
+
+    if (Level <= 0)
+    {
+        return Disc;
+    }
+
+    const float Structure = min(F.PlanetRadius * max(F.StructureFadeFar, 0.0f), Disc);
+
+    if (Level == 1)
+    {
+        return Structure;
+    }
+
+    return min(F.PlanetRadius * max(F.DetailFadeFar, 0.0f), Structure);
+}
+
+/** Centre of a cascade in the map plane, snapped to its own texel grid. Level 0
+ *  is centred on the planet and never moves. SNAPPING IS LOAD-BEARING: the
+ *  centre follows the camera, so an unsnapped map slides its lattice under the
+ *  deck and every crossing depth moves with it -- the crawl an anchored march
+ *  lattice exists to prevent, by another route. Whole-texel jumps land on
+ *  boundaries that already exist. */
+float2 GG_ShadowCascadeCentre(
+	int Level, float3 CameraLocal, float3 U, float3 V, float Extent, float2 MapSize)
+{
+    if (Level <= 0)
+    {
+        return float2(0.0f, 0.0f);
+    }
+
+    const float2 Plane = float2(dot(CameraLocal, U), dot(CameraLocal, V));
+
+    const float2 TexelSize = 2.0f * Extent / max(MapSize, 1.0f);
+
+    return floor(Plane / TexelSize) * TexelSize;
+}
+
+/** Optical depth from one texel's nodes at a given depth. Piecewise linear
+ *  through the four nodes, monotone by construction since they are sorted by the
+ *  depth they were crossed at. CONTINUOUS AT BOTH ENDS: below the entry node the
+ *  first segment's rate runs backwards to zero rather than clamping, since the
+ *  node marks where optical depth reached GG_SHADOW_TAU_ENTRY and clamping steps
+ *  that whole threshold on at the silhouette -- 2% of brightness, along the edge
+ *  a god ray draws. Past the last node the final rate continues, capped by
+ *  Ceiling. */
+float GG_ShadowTauFromNodes(float4 Node, float Depth, float Ceiling)
+{
+    const float EntrySpan = max(Node.y - Node.x, 1e-4f);
+
+    if (Depth <= Node.x)
+    {
+        const float EntryRate = (GG_SHADOW_TAU0 - GG_SHADOW_TAU_ENTRY) / EntrySpan;
+
+        return max(GG_SHADOW_TAU_ENTRY - (Node.x - Depth) * EntryRate, 0.0f);
+    }
+
+    if (Depth <= Node.y)
+    {
+        return lerp(GG_SHADOW_TAU_ENTRY, GG_SHADOW_TAU0,
+			saturate((Depth - Node.x) / EntrySpan));
+    }
+
+    if (Depth <= Node.z)
+    {
+        return lerp(GG_SHADOW_TAU0, GG_SHADOW_TAU1,
+			saturate((Depth - Node.y) / max(Node.z - Node.y, 1e-4f)));
+    }
+
+    if (Depth <= Node.w)
+    {
+        return lerp(GG_SHADOW_TAU1, GG_SHADOW_TAU2,
+			saturate((Depth - Node.z) / max(Node.w - Node.z, 1e-4f)));
+    }
+
+    const float TailRate = (GG_SHADOW_TAU2 - GG_SHADOW_TAU1) / max(Node.w - Node.z, 1e-4f);
+
+    return min(GG_SHADOW_TAU2 + (Depth - Node.w) * TailRate, Ceiling);
+}
+
+/** Optical depth from one cascade slice, at a point already projected into the
+ *  map plane. SAMPLER STATE MUST BE CLAMP ON BOTH AXES: the four taps come from
+ *  a floored texel index, reaching one texel outside the map at either edge.
+ *  They land on exact centres, so a bilinear sampler returns each texel
+ *  unfiltered and the weights below are the only reconstruction applied.
+ *
+ *  FOUR TEXELS RECONSTRUCTED, THEN BLENDED -- not one reconstruction from
+ *  blended nodes. The node depths select which segment a sample falls in, so
+ *  interpolating first and branching after puts a slope discontinuity wherever a
+ *  segment boundary crosses a texel. Those creases sit on the lattice, looking
+ *  like resolution, but their width comes from the optical depth step across the
+ *  boundary and does not shrink when texels do. QUINTIC WEIGHTS for the blend,
+ *  since bilinear's slope jumps read as facets locked to the same lattice. */
+float GG_ShadowTauSlice(
+	Texture2DArray ShadowMap,
+	SamplerState ShadowSampler,
+	int Level,
+	float2 Plane,
+	float2 Centre,
+	float Extent,
+	float Depth,
+	float2 JitterTexels,
+	float2 MapSize,
+	float Ceiling)
+{
+    const float2 UV = (Plane - Centre) / Extent * 0.5f + 0.5f;
+
+    const float2 InvSize = 1.0f / MapSize;
+
+    const float2 Sample = UV * MapSize - 0.5f + JitterTexels * GG_SHADOW_LOOKUP_JITTER;
+    const float2 Base = floor(Sample);
+
+    float2 Frac = Sample - Base;
+    Frac = Frac * Frac * Frac * (Frac * (Frac * 6.0f - 15.0f) + 10.0f);
+
+    const float3 UV00 = float3((Base + 0.5f) * InvSize, float(Level));
+
+    const float4 N00 = ShadowMap.SampleLevel(ShadowSampler, UV00, 0.0f);
+    const float4 N10 = ShadowMap.SampleLevel(ShadowSampler, UV00 + float3(InvSize.x, 0.0f, 0.0f), 0.0f);
+    const float4 N01 = ShadowMap.SampleLevel(ShadowSampler, UV00 + float3(0.0f, InvSize.y, 0.0f), 0.0f);
+    const float4 N11 = ShadowMap.SampleLevel(ShadowSampler, UV00 + float3(InvSize, 0.0f), 0.0f);
+
+    const float T00 = GG_ShadowTauFromNodes(N00, Depth, Ceiling);
+    const float T10 = GG_ShadowTauFromNodes(N10, Depth, Ceiling);
+    const float T01 = GG_ShadowTauFromNodes(N01, Depth, Ceiling);
+    const float T11 = GG_ShadowTauFromNodes(N11, Depth, Ceiling);
+
+    return lerp(lerp(T00, T10, Frac.x), lerp(T01, T11, Frac.x), Frac.y);
+}
+
+/** Optical depth between a planet-local position and the light, on the fastest
+ *  absorption channel. LightLocal points toward the light. Ceiling bounds the
+ *  tail past the last node; see GG_SHADOW_SATURATION.
+ *
+ *  ONE PARAMETERISATION, SEVERAL SCALES: every cascade is the whole field at a
+ *  different extent, anchored to the same shell entry, so their depths are
+ *  directly comparable. Walked outermost inward, each finer level that contains
+ *  the sample replacing the result and blended across its own edge.
+ *
+ *  THE LEVELS DO NOT DECOMPOSE THE FIELD. GG_Density composes its layers as a
+ *  product, so optical depths do not add across layers, and the encoding is
+ *  depth-of-crossing, nonlinear in density -- even a sound linear split would
+ *  not survive it. Each slice carries the complete field. */
+float GG_ShadowTau(
+	Texture2DArray ShadowMap,
+	SamplerState ShadowSampler,
+	float3 LocalPos,
+	float3 LightLocal,
+	float3 CameraLocal,
+	float2 JitterTexels,
+	float Ceiling,
+	GGFieldParams F)
+{
+    const float3 L = normalize(LightLocal);
+
+    float3 U, V;
+    GG_ShadowBasis(L, U, V);
+
+    const float CullRadius = GG_ShadowCullRadius(F);
+
+    const float2 Plane = float2(dot(LocalPos, U), dot(LocalPos, V));
+
+	// (U, V, L) is orthonormal, so the in-plane offset IS the ray's closest
+	// approach to the centre and its length squared is the perpendicular term.
+    const float HalfChordSq = CullRadius * CullRadius - dot(Plane, Plane);
+
+    if (HalfChordSq <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+	// Depth from the shell entry, matching what the bake marched from. Shared by
+	// every cascade: a property of the geometry, not of any lattice.
+    const float Depth = (dot(LocalPos, -L) + sqrt(HalfChordSq)) / F.Thickness;
+
+    uint MapWidth, MapHeight, MapSlices;
+    ShadowMap.GetDimensions(MapWidth, MapHeight, MapSlices);
+
+    const float2 MapSize = float2(MapWidth, MapHeight);
+
+    float Tau = GG_ShadowTauSlice(
+		ShadowMap, ShadowSampler, 0, Plane, float2(0.0f, 0.0f),
+		GG_ShadowCascadeExtent(F, 0), Depth, JitterTexels, MapSize, Ceiling);
+
+    UNROLL
+
+    for (int Level = 1; Level < GG_SHADOW_CASCADES; Level++)
+    {
+        const float Extent = GG_ShadowCascadeExtent(F, Level);
+
+        if (Extent <= 0.0f)
+        {
+            continue;
+        }
+
+        const float2 Centre = GG_ShadowCascadeCentre(
+			Level, CameraLocal, U, V, Extent, MapSize);
+
+		// Square support, so the edge measure is the larger axis.
+        const float2 Relative = (Plane - Centre) / Extent;
+        const float Edge = max(abs(Relative.x), abs(Relative.y));
+
+        if (Edge >= 1.0f)
+        {
+            continue;
+        }
+
+        const float Finer = GG_ShadowTauSlice(
+			ShadowMap, ShadowSampler, Level, Plane, Centre, Extent, Depth,
+			JitterTexels, MapSize, Ceiling);
+
+        Tau = lerp(Finer, Tau, smoothstep(GG_SHADOW_NEAR_BLEND, 1.0f, Edge));
+    }
+
+    return Tau;
+}
