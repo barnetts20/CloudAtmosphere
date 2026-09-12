@@ -72,6 +72,7 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 	float DensityCurve = 0.0f;
 	float BandSharpness = 0.0f;
 	float BandBias = 0.0f;
+	float HemisphereBlend = 0.0f;
 	float BandRelief = 0.0f;
 	float PressureRelief = 0.0f;
 	float VortexThreshold = 0.0f;
@@ -172,6 +173,7 @@ SHADER_PARAMETER(float, DeckBackstop)
 SHADER_PARAMETER(float, DensityCurve)
 SHADER_PARAMETER(float, BandSharpness)
 SHADER_PARAMETER(float, BandBias)
+SHADER_PARAMETER(float, HemisphereBlend)
 SHADER_PARAMETER(float, BandRelief)
 SHADER_PARAMETER(float, PressureRelief)
 SHADER_PARAMETER(float, VortexThreshold)

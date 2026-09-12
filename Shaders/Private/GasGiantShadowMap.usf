@@ -173,6 +173,7 @@ float DeckBackstop;
 float DensityCurve;
 float BandSharpness;
 float BandBias;
+float HemisphereBlend;
 float BandRelief;
 float PressureRelief;
 float VortexThreshold;
@@ -222,6 +223,7 @@ GGFieldParams GGShadow_Field()
 		DensityCurve,
 		BandSharpness,
 		BandBias,
+		HemisphereBlend,
 		BandRelief,
 		PressureRelief,
 		VortexThreshold,

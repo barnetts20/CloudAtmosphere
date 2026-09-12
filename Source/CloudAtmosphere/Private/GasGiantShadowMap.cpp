@@ -64,6 +64,7 @@ namespace GasGiantShadow
 		P->DensityCurve = Params.DensityCurve;
 		P->BandSharpness = Params.BandSharpness;
 		P->BandBias = Params.BandBias;
+		P->HemisphereBlend = Params.HemisphereBlend;
 		P->BandRelief = Params.BandRelief;
 		P->PressureRelief = Params.PressureRelief;
 		P->VortexThreshold = Params.VortexThreshold;

@@ -494,6 +494,14 @@ struct CLOUDATMOSPHERE_API FGasGiantFlowParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float BandBias = 0.3f;
 
+	/** Half-width of the equatorial blend, in DEGREES of latitude. The sim's
+	 *  channels are rotation senses, and which sense is cyclonic flips at the
+	 *  equator, so a band either side of it has no clear sense at all and the
+	 *  band and pressure relief wash out across it. This is how wide that band
+	 *  reads. Cannot be zero: a hard switch seams along the equator. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.05", ClampMax = "45.0"))
+	float HemisphereBlend = 3.0f;
+
 	/** Height of zones above belts, a fraction of GradientThickness: each moves
 	 *  half of it from DeckTop, zones up and belts down, meeting at DeckTop on the
 	 *  band boundaries. Positive lifts the anticyclonic zones. Bands are geometry

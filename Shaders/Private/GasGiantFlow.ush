@@ -55,13 +55,6 @@
 #define GG_DETAIL_RELIEF_CENTRED 1
 #endif
 
-/** How sharply the hemisphere factor switches sign at the equator: the argument
- *  of tanh against sin(latitude). 20 reaches three quarters of full strength
- *  three degrees from the equator. */
-#ifndef GG_HEMISPHERE_SHARPNESS
-#define GG_HEMISPHERE_SHARPNESS 20.0f
-#endif
-
 /** Fraction of the cone-trace advance actually taken. Under 1 because DeckSlope
  *  is authored, and an under-declared slope is the one way the entry search
  *  steps over the surface. */
@@ -148,6 +141,11 @@ struct GGFieldParams
 	/** The deep flow layer's step length: WarpTime * DeepShearRatio. */
     float DeepShearTime;
 
+	/** tanh argument per unit sin(latitude): the reciprocal of HemisphereBlend's
+	 *  sine, so the blend reaches about three quarters of full strength at that
+	 *  latitude. */
+    float HemisphereSharpness;
+
     float SpinAngle;
 
 	/** Elapsed time in crossfade periods. Only its fraction is read, so the two
@@ -190,6 +188,7 @@ GGFieldParams GG_BuildField(
 	float DensityCurve,
 	float BandSharpness,
 	float BandBias,
+	float HemisphereBlend,
 	float BandRelief,
 	float PressureRelief,
 	float VortexThreshold,
@@ -277,6 +276,10 @@ GGFieldParams GG_BuildField(
 
     F.DeepShearTime = WarpTime * DeepShearRatio;
     F.SpinAngle = -RotationWeight * Time;
+
+	// Floored against a zero width, which would make GG_Hemisphere a sign() and
+	// seam along the equator.
+    F.HemisphereSharpness = 1.0f / max(sin(radians(HemisphereBlend)), 1e-4f);
 
 	// Time and period are both simulated seconds: Time is the sim's clock, which
 	// already runs TimeScale times faster than real time, so the crossfade keeps
@@ -428,17 +431,17 @@ float4 GG_SampleFlow(Texture2DArray FlowField, SamplerState FlowSampler, float3 
  *  are rotation senses, and the Coriolis parameter that turns one into cyclone
  *  or anticyclone changes sign at the equator. Smooth rather than sign(): a hard
  *  switch seams there, and within a few degrees rotation stops organizing the
- *  weather anyway. */
-float GG_Hemisphere(float3 N)
+ *  weather anyway. HemisphereBlend sets how wide that band is. */
+float GG_Hemisphere(float3 N, GGFieldParams F)
 {
-    return tanh(GG_HEMISPHERE_SHARPNESS * N.z);
+    return tanh(F.HemisphereSharpness * N.z);
 }
 
 /** Pressure from a flow sample: the eddy streamfunction times the hemisphere.
  *  Positive in anticyclones (high pressure) in both hemispheres. */
-float GG_PressureFromFlow(float4 Flow, float3 N)
+float GG_PressureFromFlow(float4 Flow, float3 N, GGFieldParams F)
 {
-    return Flow.z * GG_Hemisphere(N);
+    return Flow.z * GG_Hemisphere(N, F);
 }
 
 /** The band value from a flow sample: vorticity made anticyclonic-positive in
@@ -446,7 +449,7 @@ float GG_PressureFromFlow(float4 Flow, float3 N)
  *  zero a boundary -- the same in the north as in the south. */
 float GG_BandFromFlow(float4 Flow, float3 N, GGFieldParams F)
 {
-    return (-Flow.w * GG_Hemisphere(N) + F.BandBias) * F.BandSharpness;
+    return (-Flow.w * GG_Hemisphere(N, F) + F.BandBias) * F.BandSharpness;
 }
 
 /** Arc length of one flow texel at a given radius, in world units: the finest
@@ -681,7 +684,7 @@ GGFlowProbe GG_ProbeFromFlow(float4 Flow, float3 N, GGFieldParams F)
     GGFlowProbe Probe;
 
     Probe.Band = GG_BandFromFlow(Flow, N, F);
-    Probe.Pressure = GG_PressureFromFlow(Flow, N);
+    Probe.Pressure = GG_PressureFromFlow(Flow, N, F);
 
     const float D = F.GradientThickness;
 
