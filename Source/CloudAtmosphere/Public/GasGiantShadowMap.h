@@ -7,6 +7,22 @@
 
 class FRDGBuilder;
 
+namespace GasGiantShadow
+{
+	/** Thread group edge. 8x8 = 64, matching the sim's 2D kernels. Pushed to the
+	 *  shader as GG_SHADOW_THREADS. */
+	static constexpr int32 ThreadGroupSize = 8;
+
+	/** Cascade count, sizing both the dispatch and the render target's slice
+	 *  count. The shader decides what each level covers.
+	 *
+	 *  PITFALL: MUST MATCH GG_SHADOW_CASCADES in GasGiantShadow.ush, and is NOT
+	 *  pushed as a define. The material reads that header too and never passes
+	 *  through ModifyCompilationEnvironment, so a define set here would move the
+	 *  bake without moving the march that reads it. Edit the pair together. */
+	static constexpr int32 CascadeCount = 3;
+}
+
 /** Everything the shadow bake reads, flattened for the render thread.
  *
  *  Copied into a render command, so it holds no UObject -- the same split
@@ -21,6 +37,9 @@ class FRDGBuilder;
 struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 {
 	// -- Map ----------------------------------------------------------------
+	//
+	// SQUARE. Cascade support is isotropic, so non-square texels would put the
+	// bake's footprint and its entry back-off on the wrong scale along one axis.
 
 	FIntPoint MapSize = FIntPoint(512, 512);
 
@@ -114,8 +133,9 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 	FTextureRHIRef DetailTexture;
 	FTextureRHIRef StructureTexture;
 
-	/** The bake's destination: one slice per cascade, pushed to the march as a
-	 *  single array parameter. */
+	/** The bake's destination: GasGiantShadow::CascadeCount slices, pushed to the
+	 *  march as a single array parameter. Fewer slices leaves the inner cascades
+	 *  unwritten and the march reads whatever the target held. */
 	FTextureRHIRef MapTexture;
 
 	/** Whether the bake has everything it needs. Checked before the render
@@ -126,7 +146,7 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 		return FlowTexture.IsValid()
 			&& MapTexture.IsValid()
 			&& MapSize.X > 0
-			&& MapSize.Y > 0
+			&& MapSize.X == MapSize.Y
 			&& PlanetRadius > 0.0f;
 	}
 };
@@ -223,15 +243,8 @@ public:
 
 namespace GasGiantShadow
 {
-	/** Thread group edge. 8x8 = 64, matching the sim's 2D kernels. */
-	static constexpr int32 ThreadGroupSize = 8;
-
-	/** Cascade count. MUST MATCH GG_SHADOW_CASCADES in GasGiantShadow.ush: it
-	 *  sizes both the dispatch and the render target's slice count, while the
-	 *  shader decides what each level covers. */
-	static constexpr int32 CascadeCount = 3;
-
-	/** Adds the bake to the graph. The caller has already validated Params. */
+	/** Adds the bake to the graph, or does nothing when Params is unusable.
+	 *  Render thread. */
 	CLOUDATMOSPHERE_API void AddBakePass_RenderThread(
 		FRDGBuilder& GraphBuilder, const FGasGiantShadowParams& Params);
 }

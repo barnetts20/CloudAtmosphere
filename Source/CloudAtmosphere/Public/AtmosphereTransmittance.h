@@ -68,9 +68,13 @@ public:
 
 namespace AtmosphereTransmittance
 {
-	/** Table size. MUST MATCH ATMO_TRANSMITTANCE_WIDTH and _HEIGHT in
-	 *  AtmosphereTransmittance.ush, which the lookup's texel-centre remap reads.
-	 *  Width is the cosine axis, height the altitude axis. */
+	/** Table size. Width is the cosine axis, height the altitude axis.
+	 *
+	 *  PITFALL: MUST MATCH ATMO_TRANSMITTANCE_WIDTH and _HEIGHT in
+	 *  AtmosphereTransmittance.ush. ModifyCompilationEnvironment pushes these to
+	 *  the BAKE only -- the material reads that header too and never passes
+	 *  through it, so changing one here moves the bake without moving the lookup
+	 *  that reads it. Edit the pair together. */
 	static constexpr int32 Width = 256;
 	static constexpr int32 Height = 64;
 

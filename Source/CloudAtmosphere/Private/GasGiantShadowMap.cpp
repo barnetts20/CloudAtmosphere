@@ -137,6 +137,9 @@ namespace GasGiantShadow
 		P->StructureVolumeSampler =
 			TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
 
+		// One slice per cascade on Z. The shader derives each level's extent and
+		// centre from its own slice index, so nothing about a level crosses from
+		// here and the bake cannot disagree with the march about where a slice sits.
 		const FIntVector Groups(
 			FMath::DivideAndRoundUp(Params.MapSize.X, ThreadGroupSize),
 			FMath::DivideAndRoundUp(Params.MapSize.Y, ThreadGroupSize),

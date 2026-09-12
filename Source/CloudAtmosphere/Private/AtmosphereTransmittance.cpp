@@ -16,8 +16,9 @@ bool FAtmosphereTransmittanceCS::ShouldCompilePermutation(const FGlobalShaderPer
 void FAtmosphereTransmittanceCS::ModifyCompilationEnvironment(
 	const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
 {
-	// The bake takes its size from here. The material's lookup takes it from
-	// the .ush defaults, which is why the two must match.
+	// The bake takes its size from here; the material's lookup takes it from the
+	// .ush defaults, which is why the two must match. See the note on
+	// AtmosphereTransmittance::Width.
 	OutEnvironment.SetDefine(TEXT("ATMO_TRANSMITTANCE_THREADS"), AtmosphereTransmittance::ThreadGroupSize);
 	OutEnvironment.SetDefine(TEXT("ATMO_TRANSMITTANCE_WIDTH"), AtmosphereTransmittance::Width);
 	OutEnvironment.SetDefine(TEXT("ATMO_TRANSMITTANCE_HEIGHT"), AtmosphereTransmittance::Height);
