@@ -21,7 +21,6 @@
 // relocated asset is a data edit rather than a code one.
 // --------------------------------------------------------------------------
 
-static const TCHAR* MatPath_Preprocess = TEXT("/CloudAtmosphere/Material/MT_UCA_Preprocess_Inst.MT_UCA_Preprocess_Inst");
 static const TCHAR* MatPath_Terrestrial = TEXT("/CloudAtmosphere/Material/MT_UCA_Default_Inst.MT_UCA_Default_Inst");
 static const TCHAR* MatPath_GasGiant = TEXT("/CloudAtmosphere/Material/MT_UGA_Default_Inst.MT_UGA_Default_Inst");
 static const TCHAR* MatPath_Postprocess = TEXT("/CloudAtmosphere/Material/MT_UCA_Postprocess_Inst.MT_UCA_Postprocess_Inst");
@@ -181,7 +180,6 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     // The geometry struct's own default is the terrestrial shell.
     GasGiantGeometry.HeightScale = 1.0f;
 
-    PreprocessMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(MatPath_Preprocess));
     TerrestrialMarchMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(MatPath_Terrestrial));
     GasGiantMarchMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(MatPath_GasGiant));
     PostprocessMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(MatPath_Postprocess));
@@ -518,7 +516,6 @@ void APlanetAtmosphereActor::DestroyChildActors()
         SunLight->Destroy();
         SunLight = nullptr;
     }
-    MID_Preprocess = nullptr;
     MID_Atmosphere = nullptr;
     MID_Postprocess = nullptr;
 }
@@ -554,29 +551,26 @@ void APlanetAtmosphereActor::CreateMaterialInstances()
     // other model's material, which would do nothing and log nothing.
     const bool bGasGiant = (PlanetType == EPlanetAtmosphereType::GasGiant);
 
-    UMaterialInterface* BasePre = LoadMaterialAsset(PreprocessMaterial, TEXT("Preprocess"));
     UMaterialInterface* BaseAtmo = bGasGiant
         ? LoadMaterialAsset(GasGiantMarchMaterial, TEXT("Gas giant march"))
         : LoadMaterialAsset(TerrestrialMarchMaterial, TEXT("Terrestrial march"));
     UMaterialInterface* BasePost = LoadMaterialAsset(PostprocessMaterial, TEXT("Postprocess"));
 
-    if (!BasePre || !BaseAtmo || !BasePost)
+    if (!BaseAtmo || !BasePost)
     {
         return;
     }
 
-    MID_Preprocess = UMaterialInstanceDynamic::Create(BasePre, this, TEXT("MID_Preprocess"));
     MID_Atmosphere = UMaterialInstanceDynamic::Create(BaseAtmo, this, TEXT("MID_Atmosphere"));
     MID_Postprocess = UMaterialInstanceDynamic::Create(BasePost, this, TEXT("MID_Postprocess"));
 
     BuiltType = PlanetType;
 
-    // Order is the pipeline order: preprocess, march, composite. Rebuilt rather
+    // Order is the pipeline order: march, composite. Rebuilt rather
     // than assigned by index, so a stale instance cannot survive a swap and
     // write the same UserSceneTexture as its replacement.
     FPostProcessSettings& Settings = PostProcessVolume->Settings;
     Settings.WeightedBlendables.Array.Empty();
-    Settings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, MID_Preprocess));
     Settings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, MID_Atmosphere));
     Settings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, MID_Postprocess));
 }
@@ -610,7 +604,7 @@ void APlanetAtmosphereActor::UpdateMaterialParameters()
         ApplyTerrestrialParams(Common);
     }
 
-    // --- Postprocess (slot 2) ---
+    // --- Postprocess (slot 1) ---
     //
     // One material for both models, so every blur parameter comes from
     // Environment and none of it is per-model.

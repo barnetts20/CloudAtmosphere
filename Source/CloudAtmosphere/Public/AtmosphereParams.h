@@ -1,4 +1,4 @@
-// The parameter sets the three-stage atmosphere post process is driven by, and
+// The parameter sets the two-stage atmosphere post process is driven by, and
 // the derivations that keep them consistent.
 //
 // TIERS, SPLIT BY WHAT OWNS THE VALUE. ENVIRONMENT is what the planet does not

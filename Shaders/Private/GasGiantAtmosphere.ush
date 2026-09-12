@@ -189,17 +189,17 @@ struct GGAtmoParams
     float ViewStepPixels;
 };
 
-/** Angular width of one march pixel, from the ray directions either side of it.
- *  MEASURED RATHER THAN DERIVED FROM THE PROJECTION: both directions are unit
- *  vectors, so the chord between them is the angle to well within what this is
- *  used for, and it stays correct under any projection the ray builder handles
- *  rather than duplicating its assumptions. */
-float GGAtmo_PixelAngle(float2 svxy, float2 rtSize)
+/** Angular width of one march pixel: the chord between this pixel's ray and
+ *  its neighbour's, taken from the screen-space derivative. MEASURED, NOT
+ *  DERIVED FROM THE PROJECTION OR A RESOLUTION: the derivative steps by one
+ *  pixel of whatever the pass is rendering at, so it needs no size and stays
+ *  correct under any projection the ray builder handles.
+ *
+ *  PITFALL: must be called from the shader's main flow, not inside a branch or
+ *  loop, since a derivative needs the whole quad to have evaluated its ray. */
+float GGAtmo_PixelAngle(float3 rayDir)
 {
-    const float3 D0 = Atmo_RayDirection(svxy, rtSize);
-    const float3 D1 = Atmo_RayDirection(svxy + float2(1.0f, 0.0f), rtSize);
-
-    return length(D1 - D0);
+    return length(ddx(rayDir));
 }
 
 /** The three band sets blended by the signed band. Same sign-and-magnitude shape
@@ -738,7 +738,12 @@ float4 GGAtmo_MainMarch(
 		min(P.Scatter.ExtinctionPositive.rgb * P.Scatter.ExtinctionPositive.a,
 			P.Scatter.ExtinctionBase.rgb * P.Scatter.ExtinctionBase.a));
 
-    const float BetaMin = P.Atmo.cloudParams.cloudScatBeta.x * min(BandLow.x, min(BandLow.y, BandLow.z));
+	// PER ATMOSPHERE THICKNESS, to match BoundMin and DeckBackstop. cloudScatBeta
+	// is per WORLD unit, having been divided by thickness in Atmo_BuildParams, so
+	// the depth below would otherwise be a world length subtracted from a fraction
+	// -- at planetary scale always hugely negative, and the clip never fires.
+    const float BetaMin = P.Atmo.cloudParams.cloudScatBeta.x
+		* min(BandLow.x, min(BandLow.y, BandLow.z)) * P.Field.Thickness;
 
 	// COUNTED DOWN FROM WHERE EVERY COLUMN IS SATURATED, which is the backstop
 	// or the lowest a column top can fall, whichever is lower. Relief is free to
@@ -970,7 +975,15 @@ float4 GGAtmo_MainMarch(
             CurrentStep = min(CurrentStep, SegEnd - Pos);
 
             const float StepSeed = Atmo_StepJitter(P.Atmo.mainRayParams.svxy, StepIndex);
-            const float Offset = (StepSeed - 0.5f) * CurrentStep * ATMO_STEP_JITTER;
+
+			// ONE-SIDED ON THE STEP THAT ENDS AT THE TERMINUS. A deck sample stands
+			// for a slab half a step either side of it, so jittered past the
+			// midpoint of a step cut by scene depth the slab reaches behind the
+			// mesh the ray stopped at and integrates deck the mesh is standing in.
+			// No-op on every other step, where the terminus is further than half
+			// a step away.
+            const float Offset = min((StepSeed - 0.5f) * CurrentStep * ATMO_STEP_JITTER,
+				MaxDist - (Pos + CurrentStep));
 
             const float3 SamplePos = RayOrigin + RayDir * (Pos + CurrentStep * 0.5f + Offset);
 

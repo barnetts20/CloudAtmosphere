@@ -2,6 +2,7 @@
 
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTransmittance.ush"
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereDepth.ush"
 
 // Setup: everything between the material's pin values and a filled
 // CompositeParams.
@@ -12,47 +13,46 @@
 // make sense inside a post process material. Nothing here is march-specific, so
 // both models build their params through it.
 
-/** The size the march is actually being written at, for a DOWNSAMPLED target.
+// THE MARCH PIXEL'S VIEWPORT UV COMES FROM THE ENGINE: GetViewportUV(Parameters)
+// in the custom node, passed to everything below. PITFALL: it cannot be derived
+// from SvPosition or View.ViewSizeAndInvSize. A user scene texture pass renders
+// at OUTPUT resolution while View describes the INTERNAL one, and the editor
+// lowers the internal resolution on large viewports, so a UV built from either
+// is off by the screen percentage -- the planet draws scaled toward the
+// top-left corner of the screen by that factor, with its depth cut moving with
+// it, so the occlusion looks right while the whole image is misplaced.
+
+/** World ray direction through a viewport UV, from two points on the ray.
  *
- *  The march occupies the top-left region of the screen at rtSize, so a pixel
- *  coordinate cannot be divided by the view size: it has to be divided by the
- *  region being written, or the ray fans out over the whole screen while only
- *  part of it is filled. Falls back to the view size below two pixels, which is
- *  what rtSize reads where the pass producing it has not run -- the material
- *  editor's preview -- giving a full-resolution ray. */
-float2 Atmo_MarchSize(float2 rtSize)
+ *  PITFALL: one unprojected point is a POSITION, and normalizing it is only a
+ *  direction if the camera sits at the translated-world origin. The point is a
+ *  couple of near-plane distances out, so any offset there is a large angle, and
+ *  an offset along the view axis reads as a FOV change: the planet draws a few
+ *  percent off in size with its centre in the right place. Differencing two
+ *  points assumes nothing about where the camera is. The depths are arbitrary;
+ *  the sign is taken from the view forward so either Z convention works. */
+float3 Atmo_RayDirection(float2 viewportUV)
 {
-    return all(rtSize >= 2.0f) ? rtSize : View.ViewSizeAndInvSize.xy;
-}
+    float2 ClipXY = viewportUV * float2(2, -2) + float2(-1, 1);
 
-/** World ray direction through a pixel. The 0.5 clip depth is arbitrary: any
- *  depth on the ray works, since the result is normalized. */
-float3 Atmo_RayDirection(float2 svPosition, float2 rtSize)
-{
-    float2 screenUV = svPosition / Atmo_MarchSize(rtSize);
+    float4 A = mul(float4(ClipXY, 0.5, 1.0), View.ClipToTranslatedWorld);
+    float4 B = mul(float4(ClipXY, 0.25, 1.0), View.ClipToTranslatedWorld);
 
-    float2 ClipXY = screenUV * float2(2, -2) + float2(-1, 1);
+    float3 dir = normalize(B.xyz / B.w - A.xyz / A.w);
 
-    float4 WorldDir = mul(float4(ClipXY, 0.5, 1.0), View.ClipToTranslatedWorld);
-
-    return normalize(WorldDir.xyz / WorldDir.w);
-}
-
-/** Blends between ignoring scene depth and using it. Scene depth loses
- *  precision badly at planetary distances, so from outside the atmosphere it is
- *  unusable, but from inside it is what stops the march running through terrain.
- *  Blended on altitude: fully trusted at the cloud deck, fully ignored at the
- *  atmosphere's outer edge. The ignored case is camDist * 2 rather than a huge
- *  number, so the lerp does not lose its near end to precision as it starts. */
-float Atmo_CorrectedDepth(float camDist, float sceneDepth, float atmoRadius, float cloudOuterRadius)
-{
-    float outerBlend = saturate((atmoRadius - camDist) / (atmoRadius - cloudOuterRadius));
-
-    return lerp(camDist * 2, sceneDepth, outerBlend);
+    return dir * (dot(dir, View.ViewForward) < 0.0f ? -1.0f : 1.0f);
 }
 
 /** Fills CompositeParams from the material's pin values. The gas giant path
  *  passes zero for every terrestrial cloud-shape argument, which it never reads.
+ *
+ *  PITFALL: sceneDepth is a TRUE RAY DISTANCE, from Atmo_SceneRayDistance. The
+ *  march spends it as a bound on the ray parameter, so it has to be measured
+ *  along the ray rather than along the view axis, and it has to be exact at
+ *  range: the SceneDepth node is view-axis and saturates toward 1,000 km, and a
+ *  depth routed through a user scene texture loses precision proportional to
+ *  the distance. Both read as geometry sinking into the deck as the camera
+ *  recedes.
  *
  *  SCALED BY ATMOSPHERE THICKNESS ON THE WAY IN. Every coefficient and scale
  *  height arrives as a fraction of the atmosphere's depth rather than in world
@@ -105,7 +105,6 @@ CompositeParams Atmo_BuildParams(
     const float atmoThickness = atmoRadius - planetRadius;
 
     const float3 crPlanetPos = atmoPos - cameraPos;
-    const float camDist = length(crPlanetPos);
 
     const float cosTheta = dot(rayDir, lightDirection);
 
@@ -161,7 +160,7 @@ CompositeParams Atmo_BuildParams(
     params.mainRayParams.originalCameraPos = cameraPos;
     params.mainRayParams.cameraDir = rayDir;
     params.mainRayParams.lightCol = lightColor;
-    params.mainRayParams.sceneDepth = Atmo_CorrectedDepth(camDist, sceneDepth, atmoRadius, cloudOuterRadius);
+    params.mainRayParams.sceneDepth = sceneDepth;
     params.mainRayParams.atmoSteps = mainAtmoSteps;
     params.mainRayParams.cloudSteps = mainCloudSteps;
     params.mainRayParams.stepScaleFactor = stepScaleFactor;

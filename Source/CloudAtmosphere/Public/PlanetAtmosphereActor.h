@@ -1,4 +1,4 @@
-﻿// Manages a post-process volume with three blendable material instances and a
+﻿// Manages a post-process volume with two blendable material instances and a
 // directional light, rendering a volumetric atmosphere and cloud layer around a
 // planet.
 //
@@ -12,9 +12,15 @@
 // max(OceanRadius, PlanetRadius), the visible surface floor.
 //
 // TWO CLOUD MODELS SHARE ONE MARCH. PlanetType selects which material fills slot
-// 1 -- a terrestrial cloud band, or a gas giant deck driven by the flow sim --
-// and slots 0 and 2 are shared. Each model owns its own parameter groups, with
-// only the composite and the sim shared between them; see AtmosphereParams.h.
+// 0 -- a terrestrial cloud band, or a gas giant deck driven by the flow sim --
+// and slot 1, the composite, is shared. Each model owns its own parameter
+// groups, with only the composite and the sim shared between them; see
+// AtmosphereParams.h.
+//
+// PITFALL: THE MARCH READS SCENE DEPTH ITSELF. There is no pass ahead of it
+// producing depth or a target size; both were traps -- a depth routed through
+// a user scene texture is quantised by distance, and a size taken from the
+// pass reports the internal resolution, not the pixel's viewport fraction.
 
 #pragma once
 
@@ -34,7 +40,7 @@ class UTextureRenderTarget2DArray;
 
 /** Renders a volumetric atmosphere and cloud layer via post-process materials.
  *  Spawns two child actors (APostProcessVolume and ADirectionalLight) and
- *  creates three dynamic material instances assigned as blendables on the
+ *  creates two dynamic material instances assigned as blendables on the
  *  volume. Every parameter is pushed each tick by UpdateMaterialParameters, and
  *  the light's rotation and colour are synced from the actor's rotation and
  *  LightColor. When planet-owned, location and scale are locked and rotation
@@ -63,21 +69,18 @@ public:
     // Soft material references rather than hardcoded paths: a stale path logs a
     // warning and otherwise just looks like a broken material.
 
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Materials")
-    TSoftObjectPtr<UMaterialInterface> PreprocessMaterial;
-
-    /** Slot 1 for PlanetType::Terrestrial. */
+    /** Slot 0 for PlanetType::Terrestrial. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Materials")
     TSoftObjectPtr<UMaterialInterface> TerrestrialMarchMaterial;
 
-    /** Slot 1 for PlanetType::GasGiant. */
+    /** Slot 0 for PlanetType::GasGiant. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Materials")
     TSoftObjectPtr<UMaterialInterface> GasGiantMarchMaterial;
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Materials")
     TSoftObjectPtr<UMaterialInterface> PostprocessMaterial;
 
-    /** Recreates slot 1 against the current PlanetType and repopulates every
+    /** Recreates slot 0 against the current PlanetType and repopulates every
      *  slot. Call after changing PlanetType or either march material.
      *
      *  ALSO THE PARAMETER-CHECK RETRIGGER: every push is verified against the
@@ -134,7 +137,7 @@ public:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Atmosphere")
     bool bIsPlanetOwned = false;
 
-    /** Which cloud model slot 1 renders. Changing this at runtime requires
+    /** Which cloud model slot 0 renders. Changing this at runtime requires
      *  RebuildMaterialInstances -- the material is chosen once, at creation. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Atmosphere")
     EPlanetAtmosphereType PlanetType = EPlanetAtmosphereType::Terrestrial;
@@ -275,15 +278,11 @@ private:
 
     // --- Dynamic Material Instances (created from plugin base materials) ---
 
-    /** Pass 0: preprocess (depth/setup). */
-    UPROPERTY()
-    TObjectPtr<UMaterialInstanceDynamic> MID_Preprocess = nullptr;
-
-    /** Pass 1: atmosphere + cloud ray marching. Parent depends on PlanetType. */
+    /** Pass 0: atmosphere + cloud ray marching. Parent depends on PlanetType. */
     UPROPERTY()
     TObjectPtr<UMaterialInstanceDynamic> MID_Atmosphere = nullptr;
 
-    /** Pass 2: distance-based blur compositing. */
+    /** Pass 1: distance-based blur compositing. */
     UPROPERTY()
     TObjectPtr<UMaterialInstanceDynamic> MID_Postprocess = nullptr;
 
@@ -330,8 +329,8 @@ private:
     /** Destroys the post-process volume and directional light, nulls the MID pointers. */
     void DestroyChildActors();
 
-    /** Creates the three dynamic material instances and assigns them as
-     *  blendables. Slot 1's parent is chosen from PlanetType here and recorded
+    /** Creates the two dynamic material instances and assigns them as
+     *  blendables. Slot 0's parent is chosen from PlanetType here and recorded
      *  in BuiltType. */
     void CreateMaterialInstances();
 

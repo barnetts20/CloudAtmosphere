@@ -1,6 +1,8 @@
 #pragma once
 
-// Composite: the third pass. Upscales and blurs the reduced-resolution march
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereDepth.ush"
+
+// Composite: the second pass. Upsamples and blurs the reduced-resolution march
 // back over the scene, and it is doing two jobs rather than one.
 //
 // The obvious job is upsampling. The other is hiding the march's sampling noise,
@@ -14,9 +16,9 @@
 // same pattern. Atmo_StepJitter is where that is fixed, not here.
 
 /** Depth-aware blur of the atmosphere buffer, composited over the scene. Radius
- *  is in SOURCE pixels, so at half-per-axis a radius of 6 reaches twelve
- *  full-resolution pixels. BlurWeight lerps back toward the untouched centre,
- *  making the blur an authored amount rather than all or nothing.
+ *  is in MARCH pixels, so at half-per-axis a radius of 6 reaches twelve screen
+ *  pixels. BlurWeight lerps back toward the untouched centre, making the blur
+ *  an authored amount rather than all or nothing.
  *
  *  CIRCULAR, NOT SQUARE: the loop is bounded by a (2r+1) square and only the 79%
  *  of taps inside the inscribed disc are taken. A square support reaches
@@ -29,10 +31,20 @@
  *  leave the edge weights near 1, which is a box blur, and a box response has
  *  side lobes on the axes -- hatching for the same reason the square does.
  *
- *  DepthTapScale is full-resolution pixels per source pixel: the colour tap
- *  moves in source texels while the depth tap moves in screen UV, so without it
- *  a tap's depth weight is read from the right direction at the wrong distance
- *  and the silhouette protection is quietly weaker than it reads.
+ *  DepthTapScale is screen pixels per march pixel, 2 at half-per-axis. The
+ *  colour tap moves in march texels while the depth tap moves in screen UV, so
+ *  a mismatch reads a tap's depth weight from the right direction at the wrong
+ *  distance.
+ *
+ *  DEPTH IS READ HERE, FOR THE CENTRE AND THE TAPS ALIKE, through
+ *  Atmo_SceneDepthAt. screenUV is the pixel's VIEWPORT UV, from GetViewportUV,
+ *  and is mapped to the depth buffer per read, as the march maps its own.
+ *  PITFALL: the tolerance is relative, so it needs a depth
+ *  that keeps growing with distance. CalcSceneDepth saturates toward 1,000 km,
+ *  where a mesh and the sky behind it read within a fraction of a percent of
+ *  each other and the weight lets the deck bleed across the silhouette -- the
+ *  mesh washes out under blurred deck colour as the camera recedes, and fastest
+ *  at the screen centre, where the view-axis depth is longest for the distance.
  *
  *  PITFALL: the parameters and the texture id have to be passed in.
  *  SceneTextureFetch is a MACRO expanding to SceneTextureFetchFunc(Parameters,
@@ -44,7 +56,6 @@ float4 Atmo_Composite(
 	FMaterialPixelParameters Parameters,
 	int SceneTextureId,
 	float4 center,
-	float centerDepth,
 	float3 sceneColor,
 	float2 screenUV,
 	float falloff,
@@ -71,6 +82,8 @@ float4 Atmo_Composite(
 
     const float2 depthTexel = View.ViewSizeAndInvSize.zw * max(depthTapScale, 1.0);
 
+    const float centerDepth = Atmo_SceneDepthAt(ViewportUVToBufferUV(screenUV));
+
     for (int x = -radius; x <= radius; x++)
     {
         for (int y = -radius; y <= radius; y++)
@@ -92,7 +105,7 @@ float4 Atmo_Composite(
 			// absolute threshold would be far too tight at planetary distance
 			// and far too loose up close.
             float2 sampleUV = screenUV + offset * depthTexel;
-            float sampleDepth = CalcSceneDepth(sampleUV);
+            float sampleDepth = Atmo_SceneDepthAt(ViewportUVToBufferUV(sampleUV));
             float depthDiff = abs(centerDepth - sampleDepth) / max(centerDepth, 1.0);
             float depthW = exp(-depthDiff * depthDiff * depthSharpness);
 

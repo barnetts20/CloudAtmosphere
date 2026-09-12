@@ -1,0 +1,63 @@
+#pragma once
+
+// Scene depth for the atmosphere passes, read from the depth buffer directly.
+//
+// NOT THE SceneDepth NODE, AND NOT CalcSceneDepth. The engine's device-Z to
+// depth conversion carries an epsilon that keeps a cleared sky from dividing by
+// zero, and that epsilon is a saturation term: it returns z / (1 + 1e-8 z), so
+// depth reads 1% short at 10 km, 50% short at 1,000 km, and never exceeds
+// 1,000 km however far the geometry is. Reconstructing from the raw device Z
+// and the projection has no such term and is exact to float32.
+//
+// NOT A HALF-FLOAT ROUND TRIP EITHER. A depth written to a user scene texture
+// survives with eleven mantissa bits, an absolute error of a quarter of a
+// percent of the distance, which at planetary range is kilometres -- enough to
+// bury a mesh's exposed top under the deck by moving its terminus below it.
+
+/** Ray distance returned where the depth buffer holds no geometry. Finite so it
+ *  survives the segment math, which only takes minima against it. */
+#ifndef ATMO_NO_OCCLUDER_DISTANCE
+#define ATMO_NO_OCCLUDER_DISTANCE 1e30f
+#endif
+
+/** View-axis depth from a raw device Z, inverting the projection in place.
+ *  Perspective is deviceZ = A + B / z; orthographic is deviceZ = z * A + B.
+ *  Reverse Z with an infinite far plane has A = 0 and clears the sky to 0, which
+ *  the perspective branch reports as no occluder. */
+float Atmo_DeviceZToDepth(float deviceZ)
+{
+    const float A = View.ViewToClip[2][2];
+    const float B = View.ViewToClip[3][2];
+
+    if (View.ViewToClip[3][3] >= 1.0f)
+    {
+        return (deviceZ - B) / A;
+    }
+
+    const float denom = deviceZ - A;
+
+    return denom > 0.0f ? B / denom : ATMO_NO_OCCLUDER_DISTANCE;
+}
+
+/** Exact view-axis scene depth at a buffer UV.
+ *
+ *  PITFALL: LookupDeviceZ returns 0 when the material has not bound the scene
+ *  textures, which reads here as no occluder everywhere -- a plausible image
+ *  with no occlusion in it. A material that only reads user scene textures may
+ *  not bind them; a SceneTexture:SceneDepth node wired into the custom node,
+ *  even unused, does. */
+float Atmo_SceneDepthAt(float2 bufferUV)
+{
+    return Atmo_DeviceZToDepth(LookupDeviceZ(bufferUV));
+}
+
+/** Scene depth as a TRUE RAY DISTANCE through a viewport UV, the form the march
+ *  spends as a bound on its ray parameter. View-axis depth divided by the ray's
+ *  cosine to the view axis; rayDir is the world direction through the same UV,
+ *  so the depth and the ray it bounds come from one pixel by construction. */
+float Atmo_SceneRayDistance(float2 viewportUV, float3 rayDir)
+{
+    const float depth = Atmo_SceneDepthAt(ViewportUVToBufferUV(viewportUV));
+
+    return depth / max(dot(rayDir, View.ViewForward), 1e-3f);
+}
