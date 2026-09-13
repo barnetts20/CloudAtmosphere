@@ -103,31 +103,6 @@
  *  threshold asserts opacity, so returning the residual that tripped it leaves a
  *  leak carried only by rays that stopped early -- and since it fires on one
  *  channel while the others are still short, that leak is coloured. */
-/** PROTOTYPE. Replaces the planner's radial budget, and everything downstream
- *  that compensates for it, with a geometric division of each class's own chord.
- *  The step COUNTS then mean what they say -- cloudSteps samples across the
- *  cloud the ray actually crosses, atmoSteps across the air -- instead of naming
- *  a radial budget that obliquity, distance growth and the footprint floor each
- *  stretch by their own factor.
- *
- *  POOLED PER CLASS, NOT PER SEGMENT, so a ray that crosses the band twice costs
- *  the same as one that crosses it once, and the distribution does not restart
- *  at a boundary. ATMO_MAX_ITER stays a guard and should stop being reachable.
- *
- *  APPROXIMATE AT SEGMENT ENDS, the prototype's one cheat: the last step of a
- *  segment is not trimmed to the boundary, so the realised count runs a little
- *  over. Counts may want raising against the current lattice regardless -- a
- *  grazing ray was being handed far more samples than cloudSteps ever named. */
-#ifndef ATMO_CHORD_STEPS
-#define ATMO_CHORD_STEPS 0
-#endif
-
-/** Last step over first, within a class. 1 is uniform; raising it front-loads
- *  the budget toward the camera. */
-#ifndef ATMO_CHORD_SPREAD
-#define ATMO_CHORD_SPREAD 8.0f
-#endif
-
 #ifndef ATMO_OPAQUE_TRANSMITTANCE
 #define ATMO_OPAQUE_TRANSMITTANCE 0.001f
 #endif
@@ -141,30 +116,7 @@ struct AtmoMarchParams
     FieldParams Field;
     FieldMaterialParams Scatter;
     float3x3 WorldToLocal;
-
-	/** Angular width of one march pixel, radians. Times the distance to a
-	 *  sample, it is how much of the deck that sample stands for. */
-    float PixelAngle;
-
-	/** March pixels a view step is allowed to span. The step budget sizes the
-	 *  march against the DECK; this sizes it against the SCREEN, and the screen
-	 *  is what decides whether the extra samples are visible. */
-    float ViewStepPixels;
 };
-
-/** Angular width of one march pixel: the chord between this pixel's ray and
- *  its neighbour's, taken from the screen-space derivative. MEASURED, NOT
- *  DERIVED FROM THE PROJECTION OR A RESOLUTION: the derivative steps by one
- *  pixel of whatever the pass is rendering at, so it needs no size and stays
- *  correct under any projection the ray builder handles.
- *
- *  PITFALL: must be called from the shader's main flow, not inside a branch or
- *  loop, since a derivative needs the whole quad to have evaluated its ray. */
-float Atmo_PixelAngle(float3 rayDir)
-{
-    return length(ddx(rayDir));
-}
-
 
 /** World-to-planet-local rotation from the planet's orientation quaternion. Each
  *  row is a local axis in world space, rotated from the unit axis the way
@@ -190,8 +142,6 @@ float3 Atmo_ToLocal(float3 WorldPos, AtmoMarchParams P)
 {
     return mul(P.WorldToLocal, WorldPos - P.Atmo.planetParams.planetPos);
 }
-
-
 
 
 
@@ -443,10 +393,6 @@ float4 Atmo_MainMarch(
 	// folding air depth in here would kill the limb glow that should be there.
     float CloudDepthAhead = 0.0f;
 
-    const float RayStart = Segments[0].x;
-    const float ReferenceLength = max(
-		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f);
-
 	// Per-octave constants, fixed per pixel since the view and the light are:
 	// phase times contribution, the optical-depth factor, and how much of the
 	// lobe shadow the octave keeps. Octave 0 is exactly single scattering -- the
@@ -481,7 +427,6 @@ float4 Atmo_MainMarch(
     }
 
 
-#if ATMO_CHORD_STEPS
 	// The chord each class actually holds, summed before anything is marched:
 	// the distribution has to know the whole length to place its first step.
     float CloudChord = 0.0f;
@@ -504,14 +449,13 @@ float4 Atmo_MainMarch(
     float CloudFirst, CloudGrow, AirFirst, AirGrow;
 
     Atmo_ChordSteps(CloudChord, float(P.Atmo.mainRayParams.cloudSteps),
-		ATMO_CHORD_SPREAD, CloudFirst, CloudGrow);
+		P.Atmo.mainRayParams.chordSpread, CloudFirst, CloudGrow);
 
     Atmo_ChordSteps(AirChord, float(P.Atmo.mainRayParams.atmoSteps),
-		ATMO_CHORD_SPREAD, AirFirst, AirGrow);
+		P.Atmo.mainRayParams.chordSpread, AirFirst, AirGrow);
 
     float CloudUsed = 0.0f;
     float AirUsed = 0.0f;
-#endif
 
     int StepIndex = 0;
 
@@ -519,7 +463,6 @@ float4 Atmo_MainMarch(
     {
         const float SegStart = Segments[s].x;
         const float SegEnd = Segments[s].y;
-        const float BaseStepSize = Segments[s].z;
 
         const bool IsCloud = Field_SegmentIsCloud(
 			RayOrigin, RayDir, Segments[s], P.Atmo.planetParams);
@@ -530,7 +473,7 @@ float4 Atmo_MainMarch(
         while (Pos < SegEnd && Iter < ATMO_MAX_ITER)
         {
             Iter++;
-#if ATMO_CHORD_STEPS
+
 			// AFFINE IN CONSUMED CHORD: first step plus growth times how much of
 			// this class the ray has already spent. Nothing else sizes the step --
 			// no obliquity correction, no footprint floor, no feature cap, because
@@ -540,6 +483,17 @@ float4 Atmo_MainMarch(
 				? CloudFirst + CloudGrow * CloudUsed
 				: AirFirst + AirGrow * AirUsed, 1e-4f);
 
+            CurrentStep = min(CurrentStep, SegEnd - Pos);
+
+			// THE TRIMMED SIZE, NOT THE ONE ASKED FOR. A step clipped at a
+			// segment boundary covers less chord than the distribution planned,
+			// and crediting the full size runs the progression ahead so the ray
+			// spends fewer steps than its count names.
+			//
+			// The pair of partial steps a boundary produces is one step more
+			// than an uninterrupted run would have taken, which is left alone:
+			// paying it back would shorten the next step to recover an exact
+			// integer, and the smooth progression is what the eye reads.
             if (IsCloud)
             {
                 CloudUsed += CurrentStep;
@@ -548,79 +502,6 @@ float4 Atmo_MainMarch(
             {
                 AirUsed += CurrentStep;
             }
-#else
-
-			// SCREEN-FOOTPRINT BOUND. The plan sizes steps against the DECK and
-			// knows nothing about the camera, so the march resolves the same detail
-			// at fifty radii as at two, where a dozen samples land inside one
-			// pixel. IT RAISES THE FLOOR, IT DOES NOT SET THE STEP: close in the
-			// footprint is smaller than the planned step and this does nothing.
-			//
-			// CAPPED SO A STEP CANNOT SWALLOW THE FEATURE IT IS INTEGRATING -- an
-			// unresolved gradient is wrong everywhere, not just where it is too
-			// small to see. The cap is the gradient against the RAYLEIGH scale
-			// height; at the panel defaults the gradient is the smaller and binds
-			// alone. Mie's profile is finer than either and deliberately not capped
-			// against, since it would shorten every far-field step to resolve a
-			// halo a pixel or two wide. If that halo ever looks noisy from orbit,
-			// this is the line.
-            const float FootprintStep = Pos * P.PixelAngle * P.ViewStepPixels;
-
-            const float FeatureCap = min(
-				Field_FeatureSize(P.Field), P.Atmo.scatteringParams.rayScaleH);
-
-            float CurrentStep = Atmo_AdaptiveStepSize(BaseStepSize, Pos, RayStart,
-				ReferenceLength, P.Atmo.mainRayParams.stepScaleFactor);
-
-			// OBLIQUITY. THE PLANNED STEP IS A HEIGHT BUDGET WEARING A LENGTH'S
-			// CLOTHES: Atmo_Plan divides the band's RADIAL thickness by
-			// cloudSteps, so the step it hands down is how far a straight-down ray
-			// should climb per sample, and it is then spent as a distance along
-			// whatever direction the ray has. A radial ray converts one for one; a
-			// grazing one climbs a fraction of its path length, so it takes many
-			// more steps to cross the same gradient and resolves a density barely
-			// changing between them -- the longest chords in the scene marched at
-			// the finest rate, each step spawning a shadow ray, for a field the ray
-			// runs parallel to. Dividing by the radial rate spends the budget on
-			// HEIGHT, the axis the profile varies on, and leaves the radial case
-			// untouched.
-			//
-			// THE LATERAL BOUND IS WHAT STOPS IT AT TANGENCY, where the radial
-			// rate goes to zero and the height argument says the step may be
-			// infinite. Sideways the ray still crosses columns and the deck top
-			// varies at the flow grid's scale, so one texel of arc is the other
-			// limit -- the same bound the shadow ray uses.
-			//
-			// COMBINED IN QUADRATURE, NOT BY min. The two are components of one
-			// motion, each carrying the ray a fraction of the way to its own
-			// limit, which is the footprint sum a mip level is chosen by. PITFALL:
-			// min is continuous but its derivative is not, and the kink sits at a
-			// fixed obliquity -- on a sphere, a circle about the limb. Sampling
-			// quality changes character across it and the seam prints.
-            BRANCH
-
-            if (IsCloud)
-            {
-                const float3 ToCentre = RayOrigin + RayDir * Pos - P.Atmo.planetParams.planetPos;
-                const float StepRadius = max(length(ToCentre), 1e-4f);
-
-                const float RadialRate = abs(dot(RayDir, ToCentre / StepRadius));
-                const float LateralRate = sqrt(max(1.0f - RadialRate * RadialRate, 0.0f));
-
-				// Progress toward each limit, per unit of path travelled.
-                const float HeightCost = RadialRate / max(CurrentStep, 1e-6f);
-
-                const float LateralCost = LateralRate
-					/ max(Field_LateralArc(FlowField, StepRadius) * 0.5f, 1e-6f);
-
-                CurrentStep = rsqrt(max(
-					HeightCost * HeightCost + LateralCost * LateralCost, 1e-12f));
-            }
-
-            CurrentStep = max(CurrentStep, min(FootprintStep, FeatureCap));
-#endif
-
-            CurrentStep = min(CurrentStep, SegEnd - Pos);
 
             const float StepSeed = Atmo_StepJitter(P.Atmo.mainRayParams.svxy, StepIndex);
 

@@ -259,7 +259,6 @@ void Field_PlanSegments(
 	// the band fine below, and pays in steps instead of in missing cloud.
     if (bMissed)
     {
-        //return;
         Segments[Band] = float4(SegStart, SegEnd, CoarseStep, 0.0f);
         return;
     }
@@ -396,7 +395,7 @@ CompositeParams TR_BuildAtmo(
 	float CloudAmbientFloor,
 	float AtmosphereSteps,
 	float CloudSteps,
-	float StepScaleFactor,
+	float ChordSpread,
 	float4 SurfaceShadow,
 	TRFieldParams F)
 {
@@ -461,7 +460,7 @@ CompositeParams TR_BuildAtmo(
 		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
 		0.0f, 0.0f, float4(0.0f, 0.0f, 0.0f, 0.0f),
 		(int) AtmosphereSteps, (int) CloudSteps,
-		StepScaleFactor);
+		ChordSpread);
 
 	// ONE PIN FOR FOUR RELATED SCALARS, matching how the band tints and the
 	// cloud phase already travel. FAtmosphereSurfaceShadowParams::Pack writes
@@ -569,24 +568,6 @@ float3 Field_LightTint(
 float3 Field_NeutralTint(FieldMaterialParams S)
 {
     return S.ExtinctionBase.rgb;
-}
-
-/** Finest RADIAL feature in the field, in world units: what caps how far the
- *  screen-footprint bound may lengthen a step. THE FINER OF THE TWO RAMPS, since
- *  a cap sized on the top's alone lets the footprint step over a sharper base --
- *  which shows as the underside thinning with distance while the top holds. */
-float Field_FeatureSize(FieldParams F)
-{
-    return min(F.SpanTop, F.SpanBase) * F.Thickness;
-}
-
-/** Finest lateral feature size at a radius, in world units: what bounds a step
- *  taken sideways. The deck top varies at the flow grid's scale, so a ray
- *  stepping further than this samples one column out of the several it crossed
- *  and the jitter picks which -- a choice, not an estimate with noise on it. */
-float Field_LateralArc(Texture2DArray FlowField, float Radius)
-{
-    return Flow_TexelArc(FlowField, Radius);
 }
 
 /** The map's geometry for this field. */

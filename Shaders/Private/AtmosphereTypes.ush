@@ -79,7 +79,7 @@ struct MainRayParams
     float sceneDepth; // ray length limit
     int atmoSteps;
     int cloudSteps;
-    float stepScaleFactor; // growthRate for Atmo_AdaptiveStepSize
+    float chordSpread; // last step over first, within a class
 };
 
 /** Light-ray state, filled per view step by the march. */
@@ -87,7 +87,6 @@ struct LightRayParams
 {
     float3 samplePos;
     float3 lightDir;
-    float stepSizeMult; // parent step's growth, carried into the terrestrial light march
     int parentStepIndex; // salts the light ray's jitter
 };
 
@@ -203,18 +202,6 @@ float3 Atmo_Density(float height, float rayScaleH, float mieScaleH, float absHei
     return float3(rayDensity, mieDensity, absDensity);
 }
 
-/** Step size at pos: baseStep, growing linearly to baseStep * (1 + growthRate)
- *  over referenceLength of travel from rayStart, then held.
- *
- *  Pitfall: referenceLength must be the same for every ray (the atmosphere
- *  thickness). A per-ray length makes the step at a point depend on the ray that
- *  reached it, and the transition prints as a curve on screen. */
-float Atmo_AdaptiveStepSize(float baseStep, float pos, float rayStart, float referenceLength, float growthRate)
-{
-    const float t = saturate((pos - rayStart) / referenceLength);
-
-    return baseStep * (1.0 + t * growthRate);
-}
 
 /** White-noise value in [0,1) from a pixel and a salt, for light rays: at a
  *  handful of steps a structured sequence prints as a grid. Callers salt by step

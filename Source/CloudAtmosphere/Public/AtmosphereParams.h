@@ -1103,18 +1103,20 @@ struct CLOUDATMOSPHERE_API FAtmosphereRaymarchParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0"))
 	float AtmosphereSteps = 64.0f;
 
-	/** Steps across the deck band. */
+	/** Steps across the cloud a ray actually crosses, shared across every cloud
+	 *  segment on it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0"))
 	float CloudSteps = 128.0f;
 
-	/** Step growth with distance from the ray start. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float StepScaleFactor = 2.0f;
-
-	/** March pixels a view step may span. The step counts size the march against
-	 *  the deck, this against the screen, and it only ever lengthens the step.
-	 *  Above about 2 the deck bands along the step lattice at distance. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.25", ClampMax = "4.0"))
-	float ViewStepPixels = 2.0f;
+	/** How much longer a class's last step is than its first, the counts above
+	 *  being spread geometrically across the chord that class actually occupies.
+	 *  1 is uniform; raising it moves samples toward the NEAR END OF THE CLOUD,
+	 *  which is the face the camera sees from either side of the band.
+	 *
+	 *  THE COUNTS ARE EXACT, so this redistributes rather than adds: a ray costs
+	 *  what the two counts name however it is angled, and the only variance left
+	 *  is a step per segment boundary and rays that end early on transmittance. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0", ClampMax = "64.0"))
+	float ChordSpread = 8.0f;
 
 };

@@ -100,7 +100,7 @@ CompositeParams Atmo_BuildParams(
 	float4 animationWeights,
 	int mainAtmoSteps,
 	int mainCloudSteps,
-	float stepScaleFactor)
+	float chordSpread)
 {
     const float atmoThickness = atmoRadius - planetRadius;
 
@@ -163,7 +163,7 @@ CompositeParams Atmo_BuildParams(
     params.mainRayParams.sceneDepth = sceneDepth;
     params.mainRayParams.atmoSteps = mainAtmoSteps;
     params.mainRayParams.cloudSteps = mainCloudSteps;
-    params.mainRayParams.stepScaleFactor = stepScaleFactor;
+    params.mainRayParams.chordSpread = chordSpread;
 
     params.lightRayParams.lightDir = lightDirection;
 
@@ -171,7 +171,6 @@ CompositeParams Atmo_BuildParams(
 	// before it is passed, since HLSL will not warn about a member that is only
 	// written on some paths.
     params.lightRayParams.samplePos = float3(0, 0, 0);
-    params.lightRayParams.stepSizeMult = 1.0;
     params.lightRayParams.parentStepIndex = 0;
 
 	// OFF UNLESS A MODEL TURNS IT ON. Surface shadows are read from a shadow

@@ -831,8 +831,7 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
 
     SetScalarChecked(MID_Atmosphere, TEXT("AtmosphereSteps"), Raymarch.AtmosphereSteps);
     SetScalarChecked(MID_Atmosphere, TEXT("CloudSteps"), Raymarch.CloudSteps);
-    SetScalarChecked(MID_Atmosphere, TEXT("StepScaleFactor"), Raymarch.StepScaleFactor);
-    SetScalarChecked(MID_Atmosphere, TEXT("ViewStepPixels"), Raymarch.ViewStepPixels);
+    SetScalarChecked(MID_Atmosphere, TEXT("ChordSpread"), Raymarch.ChordSpread);
 
     // -- Surface Shadows ----------------------------------------------------------
     //
