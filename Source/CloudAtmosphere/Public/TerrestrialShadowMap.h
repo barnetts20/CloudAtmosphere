@@ -54,13 +54,13 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	float PlanetRadius = 0.0f;
 	float HeightScale = 0.0f;
 	float Time = 0.0f;
-	float DeckTop = 0.0f;
+	float CloudBase = 0.0f;
+	float CloudThickness = 0.0f;
 	float CeilingFalloff = 0.0f;
-	float GradientThickness = 0.0f;
-	float DensityCurve = 0.0f;
-	float DeckBase = 0.0f;
-	float BaseThickness = 0.0f;
-	float BaseCurve = 0.0f;
+	float TopSoftness = 0.0f;
+	float BottomSoftness = 0.0f;
+	float TopCurve = 0.0f;
+	float BottomCurve = 0.0f;
 	float BaseRelief = 0.0f;
 	float BaseStormDrop = 0.0f;
 	float BandSharpness = 0.0f;
@@ -101,7 +101,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	float DetailFadeSpan = 0.0f;
 	float DetailBandMix = 0.0f;
 	float DetailCrossfade = 0.0f;
-	float DeckSlope = 0.0f;
+	float CloudSlope = 0.0f;
 
 	// -- Extinction ---------------------------------------------------------
 	//
@@ -113,7 +113,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	FVector4f ExtinctionPositive = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
 	FVector4f ExtinctionBase = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
 	float BandScale = 1.0f;
-	float DeckOpticalDepth = 0.0f;
+	float CloudOpticalDepth = 0.0f;
 	float LightExtinctionFraction = 0.0f;
 
 	// -- Resources ----------------------------------------------------------
@@ -187,13 +187,13 @@ SHADER_PARAMETER(FVector3f, ShadowCameraLocal)
 SHADER_PARAMETER(float, PlanetRadius)
 SHADER_PARAMETER(float, HeightScale)
 SHADER_PARAMETER(float, Time)
-SHADER_PARAMETER(float, DeckTop)
+SHADER_PARAMETER(float, CloudBase)
+SHADER_PARAMETER(float, CloudThickness)
 SHADER_PARAMETER(float, CeilingFalloff)
-SHADER_PARAMETER(float, GradientThickness)
-SHADER_PARAMETER(float, DensityCurve)
-SHADER_PARAMETER(float, DeckBase)
-SHADER_PARAMETER(float, BaseThickness)
-SHADER_PARAMETER(float, BaseCurve)
+SHADER_PARAMETER(float, TopSoftness)
+SHADER_PARAMETER(float, BottomSoftness)
+SHADER_PARAMETER(float, TopCurve)
+SHADER_PARAMETER(float, BottomCurve)
 SHADER_PARAMETER(float, BaseRelief)
 SHADER_PARAMETER(float, BaseStormDrop)
 SHADER_PARAMETER(float, BandSharpness)
@@ -234,13 +234,13 @@ SHADER_PARAMETER(float, DetailFadeNear)
 SHADER_PARAMETER(float, DetailFadeSpan)
 SHADER_PARAMETER(float, DetailBandMix)
 SHADER_PARAMETER(float, DetailCrossfade)
-SHADER_PARAMETER(float, DeckSlope)
+SHADER_PARAMETER(float, CloudSlope)
 
 SHADER_PARAMETER(FVector4f, ExtinctionNegative)
 SHADER_PARAMETER(FVector4f, ExtinctionPositive)
 SHADER_PARAMETER(FVector4f, ExtinctionBase)
 SHADER_PARAMETER(float, BandScale)
-SHADER_PARAMETER(float, DeckOpticalDepth)
+SHADER_PARAMETER(float, CloudOpticalDepth)
 SHADER_PARAMETER(float, LightExtinctionFraction)
 
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, ShadowMapUAV)

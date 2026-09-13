@@ -392,97 +392,112 @@ struct CLOUDATMOSPHERE_API FAtmosphereGeometryParams
 // gas giant's are twinned; everything shared is one instance on the actor,
 // since a planet is one model at a time.
 
-/** The terrestrial band's vertical profile: a slab between two flow-driven
- *  surfaces. Both are shaped by the same relief and the same noise, the base at
- *  BaseRelief of the top's displacement, so the two move together except where
- *  BaseStormDrop separates them. Outside the slab there is no density at all.
+/** The terrestrial band's vertical profile: a slab of authored DEPTH sitting at
+ *  an authored ALTITUDE, with the top derived from the two. Both surfaces are
+ *  shaped by the same relief and the same noise, the base at BaseRelief of the
+ *  band's displacement, so they move together except where BaseStormDrop
+ *  separates them. Outside the slab there is no density at all.
  *
- *  THE CLOUD SITS LOW IN THE SHELL, unlike the gas giant deck, because the air
- *  above it is the part a surface dweller looks through. Every value here is a
- *  fraction of a shell a tenth the gas giant's, so none of them transfers. */
+ *  CLOUD THICKNESS IS THE UNIT. Every relief amount on this model, and
+ *  BaseStormDrop with them, is a multiple of it; the two softnesses are shares
+ *  of it. Nothing here is authored against the shell except the two absolutes,
+ *  so deepening the band scales its features rather than detuning them. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 {
 	GENERATED_BODY()
 
-	/** Where an unrelieved column's top sits, as a fraction of atmosphere
-	 *  thickness. Relief shapes the field around it and never moves it as a whole,
-	 *  so every relief control is independent of cloud altitude. PITFALL: keep it
-	 *  below 1 - CeilingFalloff, since a typical top inside the ceiling band thins
-	 *  the whole field and DeckOpticalDepth stops being exact. */
+	/** Altitude of an unrelieved column's underside, as a fraction of atmosphere
+	 *  thickness. THE ANCHOR: relief moves the band about this rather than about
+	 *  its top, so raising it lifts the whole cloud without reshaping it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float DeckTop = 0.12f;
+	float CloudBase = 0.10f;
+
+	/** Depth of an unrelieved column, as a fraction of atmosphere thickness, and
+	 *  the unit every relief amount is a multiple of. THE GRAIN HANDLE: widen it
+	 *  and the band spreads over more march steps, and its relief grows with it --
+	 *  the cloud getting deeper, not a side effect. PITFALL: keep CloudBase plus
+	 *  this below 1 - CeilingFalloff, or the ceiling thins the whole column and
+	 *  CloudOpticalDepth stops being exact. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", ClampMax = "1.0"))
+	float CloudThickness = 0.08f;
+
+	/** Share of the depth the TOP ramp occupies, 0 a hard surface and 1 a band
+	 *  that ramps the whole way down with no core. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float TopSoftness = 0.5f;
+
+	/** Share of the depth the BOTTOM ramp occupies. Cloud bases are sharper than
+	 *  cloud tops, so this is normally well under TopSoftness -- and it also sets
+	 *  the bake's step, which is taken against the finer of the two.
+	 *
+	 *  THE TWO SHARES ARE FITTED, NOT CLAMPED. Asking for more than the depth
+	 *  scales both down together and keeps their ratio, so the ramps can never
+	 *  overlap and peak density always reaches exactly 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float BottomSoftness = 0.15f;
+
+	/** Shape of the top ramp. PITFALL: below 0.5 the onset loses its C1 join and
+	 *  the surface hardens into an edge -- a legitimate look, not clamped. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001"))
+	float TopCurve = 1.0f;
+
+	/** Shape of the bottom ramp, as TopCurve is for the top. Above 1 flattens the
+	 *  base, which is what a cumulus field wants. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001"))
+	float BottomCurve = 1.5f;
+
+	/** How much of the band's displacement the base takes. 0 holds the base flat
+	 *  while the top moves, so every feature is depth; 1 translates the band
+	 *  rigidly and the depth is uniform; negative opens the band where the top
+	 *  rises, which thickens tall columns fastest. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-1.0", ClampMax = "1.0"))
+	float BaseRelief = 0.25f;
+
+	/** How far a vortex sinks the base, as a multiple of CloudThickness, on the
+	 *  same gate that lifts a storm tower. THE ONLY TERM THAT SEPARATES THE TWO
+	 *  SURFACES: everything else moves them together, so this is what makes a
+	 *  storm a deep column rather than a raised one.
+	 *
+	 *  PITFALL: it reaches the base WHOLE while shared relief reaches it at
+	 *  BaseRelief, so it is usually what makes the base the steeper surface. Raise
+	 *  CloudSlope with it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float BaseStormDrop = 0.5f;
 
 	/** Width of the band under the shell top across which density fades to zero,
 	 *  as a fraction of atmosphere thickness. WHAT LETS RARE FEATURES REACH THE
 	 *  SHELL: a storm tower that would cross it flattens into a soft cap instead
-	 *  of being cut, so the field never sits lower to make room for its tallest
-	 *  outlier. Wider gives rounder domes, narrower flatter caps. */
+	 *  of being cut, so the band never sits lower to make room for its tallest
+	 *  outlier. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "0.5"))
 	float CeilingFalloff = 0.05f;
 
-	/** How far the density ramp reaches below a column's own top, and the unit
-	 *  every relief amount is a fraction of. THE GRAIN HANDLE: widen it and the
-	 *  top spreads over more march steps. Relief scales with it, so widening also
-	 *  raises the bands -- the cloud getting deeper, not a side effect. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", ClampMax = "1.0"))
-	float GradientThickness = 0.04f;
-
-	/** Where an unrelieved column's base sits, as a fraction of atmosphere
-	 *  thickness. PITFALL: keep DeckTop - DeckBase above GradientThickness +
-	 *  BaseThickness. Closer than that the two ramps overlap, peak density falls
-	 *  below 1 and DeckOpticalDepth stops being exact. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float DeckBase = 0.04f;
-
-	/** How far the density ramp reaches above a column's own base, as a fraction
-	 *  of atmosphere thickness. Cloud bases are sharper than cloud tops, so this
-	 *  is normally well under GradientThickness -- but it also sets the bake's
-	 *  step size, which is taken against the finer of the two ramps. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", ClampMax = "1.0"))
-	float BaseThickness = 0.012f;
-
-	/** Shape of the base ramp, as DensityCurve is for the top. Above 1 holds the
-	 *  base flat and hardens it; PITFALL: below 0.5 the onset loses its C1 join
-	 *  and the base reads as a cut sheet edge-on. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001"))
-	float BaseCurve = 1.5f;
-
-	/** How much of the top's displacement the base takes. 0 holds the base flat
-	 *  while the top moves, so slab depth carries every feature; 1 translates the
-	 *  slab rigidly and the depth is uniform; negative opens the slab where the
-	 *  top rises, which thickens tall columns fastest. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-1.0", ClampMax = "1.0"))
-	float BaseRelief = 0.25f;
-
-	/** How far a vortex sinks the base, as a fraction of GradientThickness, on
-	 *  the same gate that lifts a storm tower. THE ONLY TERM THAT SEPARATES THE
-	 *  TWO SURFACES: everything else moves them together, so this is what makes a
-	 *  storm a deep column rather than a raised one. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float BaseStormDrop = 0.5f;
-
-	/** Bound on either surface's slope, in gradient depths per radian: the cone
-	 *  angle for the entry search. Under-declaring it is the one way that search
-	 *  steps over a surface, so raise it first if tangent-angle slicing appears.
-	 *  ONE BOUND FOR BOTH SURFACES, taken against the rougher of the two, since
-	 *  the base is the flatter and a larger bound only costs iterations. */
+	/** Bound on either surface's slope, in cloud depths per radian: the cone angle
+	 *  for the entry search. Under-declaring it is the one way that search steps
+	 *  over a surface, and the symptom is cloud missing on grazing rays rather
+	 *  than anything that looks like a slope problem. Raise it first. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
-	float DeckSlope = 8.0f;
+	float CloudSlope = 16.0f;
 
-	/** READOUT, not authored: the highest every relief term together could reach,
-	 *  before the ceiling. Above 1 - CeilingFalloff the tallest features are being
-	 *  capped by the band, past 1 by the excess shown. */
-	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly)
-	float SolvedTopMax = 0.0f;
-
-	/** Total optical depth through an unrelieved column, top to base, at any pair
+	/** Total optical depth through an unrelieved column, base to top, at any pair
 	 *  of curves. Below about 8 the sky shows through; far above a few hundred the
 	 *  cloud has no bright edge left at any sun angle. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
-	float DeckOpticalDepth = 120.0f;
-};
+	float CloudOpticalDepth = 40.0f;
 
+	/** READOUT, not authored: the highest a column top could reach, before the
+	 *  ceiling. Above 1 - CeilingFalloff the tallest features are being capped. */
+	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly)
+	float SolvedTopMax = 0.0f;
+
+	/** READOUT, not authored: the lowest a column base could fall, which is where
+	 *  the marched band ends. The span between this and SolvedTopMax is what
+	 *  CloudSteps divides, so a wide gap here is a coarse march for a thin
+	 *  cloud. */
+	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly)
+	float SolvedBaseMin = 0.0f;
+};
 /** How the terrestrial field reads the flow into shape. A CLONE, and the group
  *  most likely to be replaced outright: a band coordinate means something else
  *  on a planet without zones and belts. */

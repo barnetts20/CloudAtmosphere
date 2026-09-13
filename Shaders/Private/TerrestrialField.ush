@@ -259,6 +259,7 @@ void Field_PlanSegments(
 	// the band fine below, and pays in steps instead of in missing cloud.
     if (bMissed)
     {
+        //return;
         Segments[Band] = float4(SegStart, SegEnd, CoarseStep, 0.0f);
         return;
     }
@@ -364,8 +365,8 @@ TRScatterParams TR_BuildScatter(
  *  exactly the span that can hold cloud, so no fine step is spent under it and
  *  nothing below it is marched as cloud.
  *
- *  THE EXTINCTION IS SOLVED, NOT PASSED. TR_DeckBeta turns DeckOpticalDepth into
- *  a grey coefficient from the field's own anchors. PITFALL: the two cloud betas
+ *  THE EXTINCTION IS SOLVED, NOT PASSED. TR_CloudBeta turns CloudOpticalDepth
+ *  into a grey coefficient from the field's own anchors. PITFALL: the two cloud betas
  *  are not a scattering/absorption split despite their names -- cloudScatBeta is
  *  that full solved coefficient, which the VIEW ray extinguishes with, and
  *  cloudAbsBeta is LightExtinctionFraction of it, which the LIGHT ray uses. Band
@@ -389,7 +390,7 @@ CompositeParams TR_BuildAtmo(
 	float AbsorptionFalloff,
 	float3 AtmosphereAmbient,
 	float AtmosphereAmbientFloor,
-	float DeckOpticalDepth,
+	float CloudOpticalDepth,
 	float LightExtinctionFraction,
 	float3 CloudAmbient,
 	float CloudAmbientFloor,
@@ -428,7 +429,7 @@ CompositeParams TR_BuildAtmo(
 	//
 	// GEOMETRIC, NOT OPTICAL. Where the cloud goes opaque is a property of the
 	// extinction, and deriving a radius from it would make retuning
-	// DeckOpticalDepth move the step size -- a coupling with no visible cause.
+	// CloudOpticalDepth move the step size -- a coupling with no visible cause.
 	// The lowest a base can fall says it better and says it exactly: no density
 	// reaches below it at all.
 	//
@@ -441,7 +442,7 @@ CompositeParams TR_BuildAtmo(
 
 	// Grey: each band's tint and amount are applied per sample from
 	// TRScatterParams, on the view ray and at the light ray's receiver.
-    const float3 CloudScatterBeta = TR_DeckBeta(F, DeckOpticalDepth).xxx;
+    const float3 CloudScatterBeta = TR_CloudBeta(F, CloudOpticalDepth).xxx;
 
     CompositeParams Params = Atmo_BuildParams(
 		SvPosition, RayDir, CameraPosition, PlanetCenter,
@@ -576,7 +577,7 @@ float3 Field_NeutralTint(FieldMaterialParams S)
  *  which shows as the underside thinning with distance while the top holds. */
 float Field_FeatureSize(FieldParams F)
 {
-    return min(F.GradientThickness, F.BaseThickness) * F.Thickness;
+    return min(F.SpanTop, F.SpanBase) * F.Thickness;
 }
 
 /** Finest lateral feature size at a radius, in world units: what bounds a step

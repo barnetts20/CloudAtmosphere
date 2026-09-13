@@ -57,13 +57,13 @@ namespace TerrestrialShadow
 		P->PlanetRadius = Params.PlanetRadius;
 		P->HeightScale = Params.HeightScale;
 		P->Time = Params.Time;
-		P->DeckTop = Params.DeckTop;
+		P->CloudBase = Params.CloudBase;
+		P->CloudThickness = Params.CloudThickness;
 		P->CeilingFalloff = Params.CeilingFalloff;
-		P->GradientThickness = Params.GradientThickness;
-		P->DensityCurve = Params.DensityCurve;
-		P->DeckBase = Params.DeckBase;
-		P->BaseThickness = Params.BaseThickness;
-		P->BaseCurve = Params.BaseCurve;
+		P->TopSoftness = Params.TopSoftness;
+		P->BottomSoftness = Params.BottomSoftness;
+		P->TopCurve = Params.TopCurve;
+		P->BottomCurve = Params.BottomCurve;
 		P->BaseRelief = Params.BaseRelief;
 		P->BaseStormDrop = Params.BaseStormDrop;
 		P->BandSharpness = Params.BandSharpness;
@@ -104,13 +104,13 @@ namespace TerrestrialShadow
 		P->DetailFadeSpan = Params.DetailFadeSpan;
 		P->DetailBandMix = Params.DetailBandMix;
 		P->DetailCrossfade = Params.DetailCrossfade;
-		P->DeckSlope = Params.DeckSlope;
+		P->CloudSlope = Params.CloudSlope;
 
 		P->ExtinctionNegative = Params.ExtinctionNegative;
 		P->ExtinctionPositive = Params.ExtinctionPositive;
 		P->ExtinctionBase = Params.ExtinctionBase;
 		P->BandScale = Params.BandScale;
-		P->DeckOpticalDepth = Params.DeckOpticalDepth;
+		P->CloudOpticalDepth = Params.CloudOpticalDepth;
 		P->LightExtinctionFraction = Params.LightExtinctionFraction;
 
 		P->ShadowMapUAV = GraphBuilder.CreateUAV(Map);

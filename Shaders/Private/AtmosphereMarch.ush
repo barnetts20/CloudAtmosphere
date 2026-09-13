@@ -93,7 +93,7 @@
 /** Multiplies the scalar readouts, 7 to 10. Raise until the range of interest
  *  fills the screen. */
 #ifndef ATMO_DEBUG_SCALE
-#define ATMO_DEBUG_SCALE 0.0f
+#define ATMO_DEBUG_SCALE 1.0f
 #endif
 
 
@@ -362,6 +362,7 @@ float4 Atmo_MainMarch(
     int SegmentCount = Atmo_Plan(
 		RayOrigin, RayDir, MaxDist, P.Atmo.planetParams,
 		P.Atmo.mainRayParams.atmoSteps, P.Atmo.mainRayParams.cloudSteps,
+		P.Atmo.mainRayParams.stepScaleFactor, P.PixelAngle, P.ViewStepPixels,
 		Segments);
 
     if (SegmentCount == 0)

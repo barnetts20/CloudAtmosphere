@@ -13,7 +13,7 @@
 // the bottom of the file.
 //
 // THE FIELD THE LIGHT SEES MUST BE THE FIELD THE EYE SEES. Every derived
-// quantity here comes from TR_BuildField, TR_Density and TR_DeckBeta, the same
+// quantity here comes from TR_BuildField, TR_Density and TR_CloudBeta, the same
 // functions the material calls from the same authored values. A second
 // derivation on either side fails silently: the shadows stay smooth and
 // plausible and land in the wrong place.
@@ -37,9 +37,9 @@ float4 ExtinctionPositive;
 float4 ExtinctionBase;
 float BandScale;
 
-/** Solved into the light ray's coefficient by TR_DeckBeta, as the material
+/** Solved into the light ray's coefficient by TR_CloudBeta, as the material
  *  solves it. */
-float DeckOpticalDepth;
+float CloudOpticalDepth;
 float LightExtinctionFraction;
 
 // -- TR_BuildField's arguments, in its order -------------------------------
@@ -51,13 +51,13 @@ float LightExtinctionFraction;
 float PlanetRadius;
 float HeightScale;
 float Time;
-float DeckTop;
+float CloudBase;
+float CloudThickness;
 float CeilingFalloff;
-float GradientThickness;
-float DensityCurve;
-float DeckBase;
-float BaseThickness;
-float BaseCurve;
+float TopSoftness;
+float BottomSoftness;
+float TopCurve;
+float BottomCurve;
 float BaseRelief;
 float BaseStormDrop;
 float BandSharpness;
@@ -98,7 +98,7 @@ float DetailFadeNear;
 float DetailFadeSpan;
 float DetailBandMix;
 float DetailCrossfade;
-float DeckSlope;
+float CloudSlope;
 
 TRFieldParams TRShadow_Field()
 {
@@ -244,7 +244,7 @@ float BakeField_Entry(float3 Origin, float3 Dir, float RayLength, float TopMax,
  *  holds a hard edge the march resolves softly. */
 float BakeField_HeightStep(BakeFieldParams F)
 {
-    return min(F.GradientThickness, F.BaseThickness) * F.Thickness
+    return min(F.SpanTop, F.SpanBase) * F.Thickness
 		/ max(ATMO_BAKE_STEPS_PER_GRADIENT, 1.0f);
 }
 
@@ -259,7 +259,7 @@ float BakeField_LateralArc(float Radius)
  *  Field_FoldConstant divides the same product back out on the read side. */
 float BakeField_FoldConstant(BakeFieldParams F)
 {
-    return TR_DeckBeta(F, DeckOpticalDepth) * LightExtinctionFraction / F.Thickness
+    return TR_CloudBeta(F, CloudOpticalDepth) * LightExtinctionFraction / F.Thickness
 		* TR_ExtinctionTintRange(
 			ExtinctionNegative.rgb, ExtinctionPositive.rgb, ExtinctionBase.rgb).y;
 }
