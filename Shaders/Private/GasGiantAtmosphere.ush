@@ -4,59 +4,48 @@
 #include "/Plugin/CloudAtmosphere/Private/AtmospherePlan.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereSetup.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTransmittance.ush"
-#include "/Plugin/CloudAtmosphere/Private/GasGiantShadow.ush"
+#include "/Plugin/CloudAtmosphere/Private/GasGiantField.ush"
 
-// Gas giant cloud deck marched through the atmosphere's scattering model. The
-// planner, the air densities, the phase functions and every parameter struct
-// come from the shared files; only the march loop is the deck's own.
+// The march: a ray through the atmosphere and whatever cloud field the model
+// supplies, gathering light toward the camera.
 //
-// WHAT Atmo_Plan DOES FOR A DECK. With cloudOuterRadius at the highest the deck
-// can reach and cloudInnerRadius at the backstop, the planner emits the three
-// regions the deck has: coarse air above the highest column, FINE across the
-// band the gradients live in, and coarse below the backstop where every column
-// is saturated. cloudSteps therefore means steps across the GRADIENT, not
-// across the whole deck.
+// WHAT IT KNOWS ABOUT THE FIELD IS THE INTERFACE IN GasGiantField.ush and
+// nothing else -- the Field_ functions, the FieldParams and ScatterParams names,
+// and the two texture macros. The plan, the step bounds, the octaves, the air,
+// the shadow read and the alpha collapse do not depend on what fills the shell.
 //
-// THE BACKSTOP IS A SAFE PLACE TO CHANGE STEP SIZE, which a fixed radius
-// normally is not: every column whose top clears it is saturated either side,
-// so the change lands where the field is constant. The exception is a trough
-// pushed below the backstop by relief, whose gradient is stepped coarsely. The
-// handoff at cloudOuterRadius has no such guarantee and is the one acknowledged
-// fault here.
+// WHAT Atmo_Plan DOES. With cloudOuterRadius at the highest the field can reach
+// and cloudInnerRadius at the depth it has certainly gone opaque, the planner
+// emits three regions: coarse air above, FINE across the band the gradients live
+// in, and coarse below where the field no longer varies. cloudSteps therefore
+// means steps across the GRADIENT, not across the whole field.
 //
-// SEGMENTS[].w IS THE FINE-STEP FLAG, NOT A DECK FLAG: the solid region below
+// SEGMENTS[].w IS THE FINE-STEP FLAG, NOT A CLOUD FLAG: the solid region below
 // the band carries no flag and still owes extinction, and the split above the
-// deck entry carries the band's radius and owes nothing. GGAtmo_SegmentIsDeck is
-// the only place that decision is made.
+// entry carries the band's radius and owes nothing. Field_SegmentIsCloud is the
+// only place that decision is made.
 //
 // LIGHT TOWARD THE STAR IS READ, NOT MARCHED: the air's share from the
-// transmittance table, the deck's from the shadow map. A view sample's light
+// transmittance table, the cloud's from the shadow map. A view sample's light
 // costs the same at any depth and there is no light step budget.
 //
 // UNITS. Atmo_BuildParams scales coefficients and scale heights by atmosphere
-// thickness and leaves the RADII in world units, so GGFieldParams.PlanetRadius
-// is the PlanetRadius pin and Thickness sits beside it. The deck has no shell of
-// its own: DeckTop and DeckBackstop place it inside the air as fractions of that
-// thickness, and relief is a fraction of GradientThickness. The march runs
-// camera-relative and world-oriented while the field is planet-local with the
-// spin axis on Z; WorldToLocal carries that rotation.
-
-// LEVEL OF DETAIL. Both noise layers are high frequency, and past some distance
-// one march sample stands for many features at once -- undersampling the FIELD
-// rather than the ray, so raising step counts does not quiet it. The fades are
-// the answer: they remove a layer once it stops resolving and drop three of the
-// seven fetches with it. Detail is micro variance and tiles aggressively, which
-// is affordable only because it is gone within a fraction of a planet radius;
-// structure is mid-level shaping, reads from any distance, and fades an order of
-// magnitude later. The ranges live on GGFieldParams, a fade distance being a
-// property of the noise rather than of the march.
+// thickness and leaves the RADII in world units. The march runs camera-relative
+// and world-oriented while a field is planet-local with the spin axis on Z;
+// WorldToLocal carries that rotation.
 //
-// DISTANCE, NOT FOOTPRINT. A footprint-derived mip is the principled form and
-// does not work here: it blurs along the shell, erasing the vertical structure a
-// high aspect ratio builds, so a layered deck flattens back to one shell at
-// exactly the distances the layering was for. The trade is resolution
-// independence -- if 4K and 1080p visibly disagree, scale the fade ranges
-// against the march target's pixel count.
+// LEVEL OF DETAIL IS THE FIELD'S, NOT THE MARCH'S. Both noise layers are high
+// frequency, and past some distance one sample stands for many features at once
+// -- undersampling the FIELD rather than the ray, so raising step counts does
+// not quiet it. The march measures the distance and sets the two fades; what
+// they remove is the field's business.
+//
+// DISTANCE, NOT FOOTPRINT, for those fades. A footprint-derived mip is the
+// principled form and does not work here: it blurs along the shell, erasing the
+// vertical structure a high aspect ratio builds, so a layered field flattens
+// back to one shell at exactly the distances the layering was for. The trade is
+// resolution independence -- if 4K and 1080p visibly disagree, scale the fade
+// ranges against the march target's pixel count.
 
 /** Isolates one lighting term so a stray glow can be attributed rather than
  *  guessed at. Every mode returns that term alone with transmittance untouched,
@@ -81,16 +70,6 @@
 #define GG_DEBUG_TERM 0
 #endif
 
-/** Optical depths below the deck floor at which the VIEW ray is provably
- *  opaque and the march can be clipped.
- *
- *  TWICE WHAT OPACITY NEEDS, because the per-band ScatterX.a multipliers are
- *  not visible where this is used and a band below 1 saturates slower. Erring
- *  deep costs a step; erring shallow blacks out cloud that should still be
- *  visible, at a fixed radius, which is a ring. */
-#ifndef GG_VIEW_OPAQUE_DEPTH
-#define GG_VIEW_OPAQUE_DEPTH 14.0f
-#endif
 
 /** Transmittance below which a ray is opaque and stops.
  *
@@ -102,81 +81,14 @@
 #define GG_OPAQUE_TRANSMITTANCE 0.001f
 #endif
 
-/** The deck's material and how it is lit. Three band sets rather than one,
- *  because zones and belts are different material and not the same material at
- *  different brightness:
- *
- *  Scatter     Single-scattering albedo: what fraction of extinction is
- *              scattered rather than absorbed, per channel.
- *  Extinction  rgb tint, amount in a: a MULTIPLIER on the deck's solved
- *              extinction, 1 neutral. A multiplier because the base is
- *              thickness-relative, so a resize changes the deck's opacity no
- *              more than the air's.
- *
- *  BandScale sets where the ramp saturates, matching GG_BandColour's Scale. */
-struct GGScatterParams
-{
-    float3 ScatterNegative;
-    float3 ScatterPositive;
-    float3 ScatterBase;
 
-    float4 ExtinctionNegative;
-    float4 ExtinctionPositive;
-    float4 ExtinctionBase;
-
-	/** GG_ExtinctionTintRange of the three tints: (smallest, largest). */
-    float2 TintRange;
-
-    float BandScale;
-
-	/** Dual-lobe phase: forward g, backward g magnitude, forward share. */
-    float ForwardG;
-    float BackwardG;
-    float ForwardWeight;
-
-	/** Octave i sees the deck's optical depth toward the light scaled by
-	 *  OctaveAttenuation^i, weighs OctaveContribution^i, and uses the phase
-	 *  with both lobes' g scaled by OctaveEccentricity^i. Octave 0 is single
-	 *  scattering. OctaveCount is whole and in [1, GG_MS_MAX_OCTAVES]. */
-    float OctaveCount;
-    float OctaveAttenuation;
-    float OctaveContribution;
-    float OctaveEccentricity;
-
-	/** Width of the planet-shadow falloff, as a fraction of atmosphere
-	 *  thickness. What shapes the terminator: the geometric shadow of a sphere
-	 *  has a hard boundary and a real terminator does not. */
-    float TerminatorSoftness;
-
-	/** Width of the ambient terminator, in cosine of sun elevation. Both
-	 *  ambient terms stand in for light that bounced, and behind an opaque
-	 *  planet there is none to bounce. */
-    float AmbientTerminator;
-
-	/** How fast the Mie forward lobe dies behind deck: optical depths for an
-	 *  e-fold, inverted. Light that crossed a dense medium has lost its
-	 *  direction, so the sharp forward peak washes out. */
-    float MieLobeDecay;
-
-	/** Exponent on the planet shadow for the ANISOTROPIC terms only. The lobe
-	 *  arrives along one path and is genuinely hard-shadowed. A power on the
-	 *  same smoothstep rather than a narrower one, so no new endpoint appears
-	 *  -- the curve stays C1 where it already was and only its tail is
-	 *  crushed. */
-    float LobeShadowPower;
-};
-
-/** Most octaves GGAtmo_BuildScatter accepts. The per-octave constants are
- *  packed in float4s, so this cannot exceed 4. */
-#define GG_MS_MAX_OCTAVES 4
-
-/** Everything the gas giant march reads. CompositeParams carries the planet,
- *  the air and the ray; GGFieldParams carries the deck. */
+/** Everything the march reads. CompositeParams carries the planet, the air and
+ *  the ray; the other two are the model's, named through the interface. */
 struct GGAtmoParams
 {
     CompositeParams Atmo;
-    GGFieldParams Field;
-    GGScatterParams Scatter;
+    FieldParams Field;
+    ScatterParams Scatter;
     float3x3 WorldToLocal;
 
 	/** Angular width of one march pixel, radians. Times the distance to a
@@ -202,45 +114,6 @@ float GGAtmo_PixelAngle(float3 rayDir)
     return length(ddx(rayDir));
 }
 
-/** The three band sets blended by the signed band. Same sign-and-magnitude shape
- *  as GG_BandColour, so the material and the debug view agree about which band
- *  is which: the SIGN picks the set and the ramp runs from Base at zero to it at
- *  full magnitude. A plain two-way lerp would blend the families through their
- *  midpoint and lose the boundary between them. */
-float GGAtmo_BandRamp(float Band, GGScatterParams S)
-{
-    return clamp(Band * S.BandScale, -1.0f, 1.0f);
-}
-
-/** Albedo at a band. */
-float3 GGAtmo_BandScatter(float Band, GGScatterParams S)
-{
-    const float T = GGAtmo_BandRamp(Band, S);
-
-    return lerp(S.ScatterBase, (T < 0.0f) ? S.ScatterNegative : S.ScatterPositive, abs(T));
-}
-
-/** Extinction multiplier at a band, tint times amount: what the view ray
- *  applies to the deck's solved coefficient. */
-float3 GGAtmo_BandExtinction(float Band, GGScatterParams S)
-{
-    const float T = GGAtmo_BandRamp(Band, S);
-
-    const float4 Hue = (T < 0.0f) ? S.ExtinctionNegative : S.ExtinctionPositive;
-
-    return lerp(S.ExtinctionBase.rgb * S.ExtinctionBase.a, Hue.rgb * Hue.a, abs(T));
-}
-
-/** Extinction tint alone at a band. The light ray's AMOUNTS are already in the
- *  shadow map's depth; its colour is applied where the depth is read. */
-float3 GGAtmo_BandTint(float Band, GGScatterParams S)
-{
-    const float T = GGAtmo_BandRamp(Band, S);
-
-    const float4 Hue = (T < 0.0f) ? S.ExtinctionNegative : S.ExtinctionPositive;
-
-    return lerp(S.ExtinctionBase.rgb, Hue.rgb, abs(T));
-}
 
 /** World-to-planet-local rotation from the planet's orientation quaternion. Each
  *  row is a local axis in world space, rotated from the unit axis the way
@@ -267,295 +140,16 @@ float3 GGAtmo_ToLocal(float3 WorldPos, GGAtmoParams P)
     return mul(P.WorldToLocal, WorldPos - P.Atmo.planetParams.planetPos);
 }
 
-/** Whether a planned segment carries deck: the fine band, or anything below the
- *  inner radius.
- *
- *  TWO CONDITIONS, NOT ONE RADIUS. The fine flag alone misses the saturated
- *  region, which is coarsely stepped and still extinguishes. A radius alone is
- *  wrong the other way: GGAtmo_SplitDeckSegment leaves a coarse segment INSIDE
- *  the band and above every column top, and marching that as deck spends seven
- *  fetches a step and the deck's lateral step bound on provably empty air --
- *  which on a grazing ray is the longest span on the ray. A band demoted to
- *  coarse because the ray never reached the deck is not deck either. */
-bool GGAtmo_SegmentIsDeck(float3 Origin, float3 Dir, float4 Segment, GGAtmoParams P)
-{
-    if (Segment.w > 0.5f)
-    {
-        return true;
-    }
 
-    const float3 Mid = Origin + Dir * ((Segment.x + Segment.y) * 0.5f);
 
-    return length(Mid - P.Atmo.planetParams.planetPos)
-		< P.Atmo.planetParams.cloudInnerRadius;
-}
 
-/** Splits the fine segment at the cone-traced entry.
- *
- *  IN THE PLAN, NOT IN THE LOOP. The region between the cull radius and the deck
- *  top is empty of cloud but not of air, so a skip inside the march would drop
- *  the Rayleigh and Mie the ray is entitled to along it. Splitting keeps that
- *  scattering at the coarse step it deserves and spends the fine steps on the
- *  deck. It also keeps a threshold out of the loop, where every threshold is a
- *  locus and one decided against a jittered position is a dithered locus.
- *
- *  THE FIRST FINE SEGMENT, AND INSERTED IN ORDER. A ray that crosses the band,
- *  passes below the floor and crosses it again produces two fine segments with a
- *  coarse one between them, and the march walks the array in order, so appending
- *  would put the deck behind the region under it. Only the near crossing is
- *  worth splitting; the far one lies behind saturated deck. */
-void GGAtmo_SplitDeckSegment(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	float3 LocalOrigin,
-	float3 LocalDir,
-	float TopMax,
-	float CoarseStep,
-	GGFieldParams F,
-	inout float4 Segments[ATMO_MAX_SEGMENTS],
-	inout int SegmentCount)
-{
-    if (SegmentCount <= 0 || SegmentCount >= ATMO_MAX_SEGMENTS)
-    {
-        return;
-    }
-
-    int Band = -1;
-
-	[loop]
-    for (int i = 0; i < SegmentCount; i++)
-    {
-        if (Segments[i].w > 0.5f)
-        {
-            Band = i;
-            break;
-        }
-    }
-
-    if (Band < 0)
-    {
-        return;
-    }
-
-    const float SegStart = Segments[Band].x;
-    const float SegEnd = Segments[Band].y;
-    const float FineStep = Segments[Band].z;
-
-    const float Entry = GG_DeckEntry(
-		FlowField, FlowSampler, LocalOrigin, LocalDir, SegStart, SegEnd, TopMax, F);
-
-	// Nothing worth splitting off: the ray was already at the deck.
-    if (Entry <= SegStart + 1e-5f)
-    {
-        return;
-    }
-
-	// The ray never reached the deck within this segment. Demote it to coarse
-	// rather than dropping it, so the air along it still scatters.
-    if (Entry >= SegEnd - 1e-5f)
-    {
-        Segments[Band] = float4(SegStart, SegEnd, CoarseStep, 0.0f);
-        return;
-    }
-
-	// Open a slot after the band, walking backwards so nothing is overwritten
-	// before it has been copied.
-	[loop]
-    for (int k = SegmentCount; k > Band + 1; k--)
-    {
-        Segments[k] = Segments[k - 1];
-    }
-
-	// The deck keeps the fine step the planner assigned; only the empty half
-	// above it drops to coarse.
-    Segments[Band] = float4(SegStart, Entry, CoarseStep, 0.0f);
-    Segments[Band + 1] = float4(Entry, SegEnd, FineStep, 1.0f);
-
-    SegmentCount++;
-}
-
-/** Fills GGScatterParams from the Bands, Phase, Multiple Scattering and
- *  Terminator groups, in panel order. Set all three bands equal for a
- *  single-material deck. */
-GGScatterParams GGAtmo_BuildScatter(
-	float3 ScatterNegative,
-	float4 ExtinctionNegative,
-	float3 ScatterPositive,
-	float4 ExtinctionPositive,
-	float3 ScatterBase,
-	float4 ExtinctionBase,
-	float BandScale,
-	float ForwardG,
-	float BackwardG,
-	float ForwardWeight,
-	float OctaveCount,
-	float OctaveAttenuation,
-	float OctaveContribution,
-	float OctaveEccentricity,
-	float TerminatorSoftness,
-	float AmbientTerminator,
-	float MieLobeDecay,
-	float LobeShadowPower)
-{
-    GGScatterParams S;
-
-    S.ScatterNegative = ScatterNegative;
-    S.ScatterPositive = ScatterPositive;
-    S.ScatterBase = ScatterBase;
-
-    S.ExtinctionNegative = ExtinctionNegative;
-    S.ExtinctionPositive = ExtinctionPositive;
-    S.ExtinctionBase = ExtinctionBase;
-    S.TintRange = GG_ExtinctionTintRange(ExtinctionNegative.rgb, ExtinctionPositive.rgb, ExtinctionBase.rgb);
-
-    S.BandScale = BandScale;
-
-    S.ForwardG = ForwardG;
-    S.BackwardG = BackwardG;
-    S.ForwardWeight = ForwardWeight;
-
-    S.OctaveCount = clamp(round(OctaveCount), 1.0f, float(GG_MS_MAX_OCTAVES));
-    S.OctaveAttenuation = saturate(OctaveAttenuation);
-    S.OctaveContribution = saturate(OctaveContribution);
-    S.OctaveEccentricity = saturate(OctaveEccentricity);
-
-	// Floored where zero is degenerate: the softness divides a smoothstep's
-	// width, and a zero-width one is a step along the light's tangent cone.
-    S.TerminatorSoftness = max(TerminatorSoftness, 1e-4f);
-    S.AmbientTerminator = max(AmbientTerminator, 1e-4f);
-    S.MieLobeDecay = max(MieLobeDecay, 0.0f);
-    S.LobeShadowPower = max(LobeShadowPower, 0.0f);
-
-    return S;
-}
-
-/** Fills CompositeParams for a gas giant, deriving the cloud shell from the
- *  field rather than taking it as two more pins. Air colours arrive as rgb with
- *  their profile terms as scalars and are packed here into the float4s
- *  Atmo_BuildParams takes; the terrestrial cloud SHAPE arguments go in as zero,
- *  none of them being sampled on this path, and the phase with them since the
- *  deck reads its own from GGScatterParams.
- *
- *  THE CLOUD RADII ARE NOT AUTHORED. cloudOuterRadius comes from the highest the
- *  deck can reach; cloudInnerRadius from the depth at which it has certainly
- *  gone opaque -- optical, not geometric. The planet surface would make the
- *  deck's bottom a property of the sphere, and on a gas giant that surface is an
- *  arbitrary radius sitting just under the deck. Derived optically the span ends
- *  where the ray stopped seeing, and is free to end BELOW the surface so a thin
- *  deck is not clipped by a sphere with no physical meaning here.
- *
- *  THE EXTINCTION IS SOLVED, NOT PASSED. GG_DeckBeta turns DeckOpticalDepth into
- *  a grey coefficient from the field's own anchors. PITFALL: the two cloud betas
- *  are not a scattering/absorption split despite their names -- cloudScatBeta is
- *  that full solved coefficient, which the VIEW ray extinguishes with, and
- *  cloudAbsBeta is LightExtinctionFraction of it, which the LIGHT ray uses. Band
- *  colours are applied per sample, and the bake solves the same way from the
- *  same values. */
-CompositeParams GGAtmo_BuildAtmo(
-	float2 SvPosition,
-	float3 RayDir,
-	float3 CameraPosition,
-	float SceneDepth,
-	float3 PlanetCenter,
-	float3 LightDirection,
-	float3 LightColor,
-	float3 RayleighBeta,
-	float RayleighScaleHeight,
-	float3 MieBeta,
-	float MieScaleHeight,
-	float MieG,
-	float3 AbsorptionBeta,
-	float AbsorptionAltitude,
-	float AbsorptionFalloff,
-	float3 AtmosphereAmbient,
-	float AtmosphereAmbientFloor,
-	float DeckOpticalDepth,
-	float LightExtinctionFraction,
-	float3 CloudAmbient,
-	float CloudAmbientFloor,
-	float AtmosphereSteps,
-	float CloudSteps,
-	float StepScaleFactor,
-	float4 SurfaceShadow,
-	GGFieldParams F)
-{
-	// BOUNDS, WITH THE LAYERS' FADES FOLDED IN. The outer bound sets the marched
-	// band and the band over cloudSteps is the step size, so a bound reserving
-	// room for a faded-out layer coarsens the march wherever that layer is absent
-	// and a shape control ends up moving the lighting.
-	//
-	// THE NEAREST THE RAY CAN COME, not where it hits. The fade only falls with
-	// distance, so the fade at the nearest possible approach is at least the fade
-	// at every sample along the ray, which is what keeps the bound a bound. Taken
-	// against the UNFADED outer radius, larger and so putting that approach nearer
-	// still -- conservative twice over, and free of the circularity of needing the
-	// radius to compute itself.
-    float TopMin, TopMax;
-    GG_TopBounds(F, 1.0f, 1.0f, TopMin, TopMax);
-
-    const float NearestApproach = max(
-		length(CameraPosition - PlanetCenter) - (F.PlanetRadius + F.Thickness * TopMax),
-		0.0f) / max(F.PlanetRadius, 1e-4f);
-
-    GG_TopBounds(
-		F,
-		1.0f - smoothstep(F.DetailFadeNear, F.DetailFadeFar, NearestApproach),
-		1.0f - smoothstep(F.StructureFadeNear, F.StructureFadeFar, NearestApproach),
-		TopMin, TopMax);
-
-    const float CloudOuter = F.PlanetRadius + F.Thickness * TopMax;
-
-	// -- The band is the gradient -------------------------------------------
-	//
-	// NOT AN OPTICAL CULL. Where the deck goes opaque is a property of the
-	// extinction, and deriving a radius from it makes retuning DeckOpticalDepth
-	// move the step size -- a coupling with no visible cause. The backstop is a
-	// geometric anchor and says the same thing better: no gradient reaches below
-	// it unless relief pushed the whole column under, so a coarse step
-	// integrates what is left and transmittance ends the ray within a couple of
-	// them.
-    const float CloudInner = max(F.PlanetRadius + F.Thickness * F.DeckBackstop, 1e-4f);
-
-	// Grey: each band's tint and amount are applied per sample from
-	// GGScatterParams, on the view ray and at the light ray's receiver.
-    const float3 CloudScatterBeta = GG_DeckBeta(F, DeckOpticalDepth).xxx;
-
-    CompositeParams Params = Atmo_BuildParams(
-		SvPosition, RayDir, CameraPosition, PlanetCenter,
-		F.PlanetRadius, F.PlanetRadius + F.Thickness, CloudOuter, CloudInner,
-		SceneDepth, LightDirection, LightColor,
-		float4(RayleighBeta, RayleighScaleHeight),
-		float4(MieBeta, MieScaleHeight),
-		float4(AbsorptionBeta, AbsorptionAltitude),
-		AbsorptionFalloff,
-		float4(AtmosphereAmbient, AtmosphereAmbientFloor), MieG,
-		CloudScatterBeta, CloudScatterBeta * LightExtinctionFraction,
-		float4(CloudAmbient, CloudAmbientFloor),
-		float4(0.0f, 0.0f, 0.0f, 0.0f),
-		0.0f, float2(0.0f, 0.0f), 0.0f, 0.0f,
-		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
-		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
-		0.0f, 0.0f, float4(0.0f, 0.0f, 0.0f, 0.0f),
-		(int) AtmosphereSteps, (int) CloudSteps,
-		StepScaleFactor);
-
-	// ONE PIN FOR FOUR RELATED SCALARS, matching how the band tints and the
-	// cloud phase already travel. FAtmosphereSurfaceShadowParams::Pack writes
-	// this layout and nothing checks that the two still agree.
-    Params.surfaceShadowParams.enabled = SurfaceShadow.x;
-    Params.surfaceShadowParams.directFraction = saturate(SurfaceShadow.y);
-    Params.surfaceShadowParams.receiverBias = max(SurfaceShadow.z, 0.0f);
-    Params.surfaceShadowParams.strength = max(SurfaceShadow.w, 0.0f);
-
-    return Params;
-}
 
 /** Light reaching a sample, as the air's transmittance with the planet shadow
  *  folded in, plus the deck's band-weighted depth toward the light separately.
  *
  *  THE DECK TERM COMES BACK UNEXPONENTIATED, because the multiple-scattering
  *  octaves each attenuate it by their own factor. Single scattering is
- *  AirTransmittance * exp(-cloudAbsBeta * Tint * OutDeckOptDepth), with Tint the
+ *  AirTransmittance * exp(-cloudAbsBeta * Tint * OutCloudOptDepth), with Tint the
  *  receiving band's extinction tint, so a belt absorbs more than a zone. It
  *  resolves through cloudAbsBeta rather than cloudScatBeta: light scattered out
  *  of this ray is gone either way, but light scattered INTO it is what the
@@ -569,10 +163,10 @@ float3 GGAtmo_LightMarch(
 	SamplerState TransmittanceSampler,
 	GGAtmoParams P,
 	out float OutLobeShadow,
-	out float OutDeckOptDepth)
+	out float OutCloudOptDepth)
 {
     OutLobeShadow = 0.0f;
-    OutDeckOptDepth = 0.0f;
+    OutCloudOptDepth = 0.0f;
 
     const float3 LightDir = P.Atmo.lightRayParams.lightDir;
     const float3 Start = P.Atmo.lightRayParams.samplePos;
@@ -639,10 +233,11 @@ float3 GGAtmo_LightMarch(
 	// per-pixel error to tighten.
 	//
 	// THE FOLD CONSTANT IS DIVIDED BACK OUT. The bake scales its accumulation by
-	// the light coefficient times the largest tint channel of any band, so its
-	// thresholds mean transmittance; undoing it leaves the band-weighted depth,
-	// which the caller multiplies by cloudAbsBeta and the receiving band's tint.
-    const float AbsMax = P.Atmo.cloudParams.cloudAbsBeta.x * P.Scatter.TintRange.y;
+	// what Field_FoldConstant reports, so its thresholds mean transmittance;
+	// undoing it leaves the material-weighted depth, which the caller multiplies
+	// by cloudAbsBeta and the receiver's own tint. The second channel is the
+	// ceiling scale, set on the most transmissive term the caller exponentiates.
+    const float2 Fold = Field_FoldConstant(P.Atmo, P.Scatter);
 
 	// Salted by the pixel AND by the parent step, so neither successive samples
 	// along one ray nor neighbouring pixels read the map in phase. Both axes
@@ -657,22 +252,21 @@ float3 GGAtmo_LightMarch(
 	// THE CEILING IS SET ON THE MOST TRANSMISSIVE TERM. The caller exponentiates
 	// this depth per channel at the receiving band's tint over the largest tint,
 	// and each octave at Attenuation^i of that, so saturated deck is only dark
-	// if the smallest of those products is. See GG_SHADOW_SATURATION.
+	// if the smallest of those products is. See ATMO_SHADOW_SATURATION.
     const float DeepestOctave =
 		pow(max(P.Scatter.OctaveAttenuation, 1e-4f), P.Scatter.OctaveCount - 1.0f);
-    const float TauScale = max(
-		P.Scatter.TintRange.x / max(P.Scatter.TintRange.y, 1e-8f) * DeepestOctave,
-		GG_SHADOW_MIN_TAU_SCALE);
 
-    const float ShadowTau =
-		GG_ShadowTau(ShadowMap, ShadowSampler, LocalOrigin, LocalDir,
-			ShadowCameraLocal, ShadowJitter, GG_SHADOW_SATURATION / TauScale, P.Field);
+    const float TauScale = max(Fold.y * DeepestOctave, ATMO_SHADOW_MIN_TAU_SCALE);
+
+    const float ShadowTau = AtmoShadow_Tau(
+		ShadowMap, ShadowSampler, LocalOrigin, LocalDir, ShadowCameraLocal,
+		ShadowJitter, ATMO_SHADOW_SATURATION / TauScale, Field_ShadowFrame(P.Field));
 
 	// PITFALL: no saturation snap. The depth is read, not accumulated, so a
 	// threshold here would only turn a smooth field into a hard contour, and
 	// that contour lands on the map's lattice as an axis-aligned staircase along
-	// the shadow edge. The deep end is handled by GG_ShadowTau's ceiling.
-    OutDeckOptDepth = ShadowTau / max(AbsMax, 1e-8f);
+	// the shadow edge. The deep end is handled by AtmoShadow_Tau's ceiling.
+    OutCloudOptDepth = ShadowTau / max(Fold.x, 1e-8f);
 
 	// THE AIR. Density integrals from the table, in thickness units, scaled back
 	// to world units so the betas apply exactly as they do to a marched depth.
@@ -701,12 +295,7 @@ float3 GGAtmo_LightMarch(
  *  Returns float4(accumulated light, transmittance), matching Atmo_MainMarch so
  *  the composite stage is unchanged. */
 float4 GGAtmo_MainMarch(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	Texture3D DetailVolume,
-	SamplerState DetailSampler,
-	Texture3D StructureVolume,
-	SamplerState StructureSampler,
+	FIELD_TEXTURE_DECL,
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
 	float3 ShadowCameraLocal,
@@ -717,73 +306,14 @@ float4 GGAtmo_MainMarch(
     const float3 RayOrigin = P.Atmo.mainRayParams.cameraPos;
     const float3 RayDir = P.Atmo.mainRayParams.cameraDir;
 
-	// SCENE DEPTH ONLY. THE PLANET DOES NOT STOP THE VIEW RAY. A gas giant has no
-	// surface and the field knows it: below the deck floor density is 1, and
-	// inside the planet the height goes negative and the profile saturates, so a
-	// ray that continues meets opaque deck and the transmittance early-out ends
-	// it.
-	//
-	// PITFALL: clipping there is not free even when the ray is already opaque,
-	// because MaxDist reaches Atmo_Plan -- it bounds the segments and decides
-	// whether the inner shell is crossed, so the SEGMENT STRUCTURE changes across
-	// the silhouette even where the shading would not. A different step lattice is
-	// what the eye picks up, and the terminus reads as a march disparity rather
-	// than as a shell. The light ray still respects the planet; an occluder for
-	// light and a terminus for the view are different jobs.
-    float MaxDist = P.Atmo.mainRayParams.sceneDepth;
+	// WHERE THE RAY STOPS IS THE FIELD'S ANSWER. A deck with no surface clips on
+	// a provable opacity; a field with a floor would clip on the floor. Either way
+	// MaxDist reaches Atmo_Plan, so this decides the SEGMENT STRUCTURE and not
+	// only the shading.
+    float MaxDist;
+    bool bClippedOpaque;
 
-	// INNER TERMINUS, WHERE THE DECK IS PROVABLY OPAQUE. With no planet clip the
-	// interior chord would be marched until transmittance happens to die: fine at
-	// a deep optical depth, a cliff at a shallow one, with nothing structural
-	// bounding the loop.
-	//
-	// A RADIUS, NOT A STEP. Collapsing the region to one long step gets extinction
-	// exactly right, being homogeneous, but spawns a single light march at the
-	// midpoint of a saturated slab, which is fully shadowed -- so the
-	// in-scattering belonging to the first optical depth below the floor vanishes
-	// at a fixed radius, which is a ring. Clipping changes nothing about how the
-	// region above is sampled, and unlike the planet clip it sits where every ray
-	// reaching it is already opaque, so the segment structure changing there
-	// cannot show.
-    const float3 BandLow = min(P.Scatter.ExtinctionNegative.rgb * P.Scatter.ExtinctionNegative.a,
-		min(P.Scatter.ExtinctionPositive.rgb * P.Scatter.ExtinctionPositive.a,
-			P.Scatter.ExtinctionBase.rgb * P.Scatter.ExtinctionBase.a));
-
-	// PER ATMOSPHERE THICKNESS, to match BoundMin and DeckBackstop. cloudScatBeta
-	// is per WORLD unit, having been divided by thickness in Atmo_BuildParams, so
-	// the depth below would otherwise be a world length subtracted from a fraction
-	// -- at planetary scale always hugely negative, and the clip never fires.
-    const float BetaMin = P.Atmo.cloudParams.cloudScatBeta.x
-		* min(BandLow.x, min(BandLow.y, BandLow.z)) * P.Field.Thickness;
-
-	// COUNTED DOWN FROM WHERE EVERY COLUMN IS SATURATED, which is the backstop
-	// or the lowest a column top can fall, whichever is lower. Relief is free to
-	// push a top under the backstop, and above such a top the ray is still
-	// crossing clear air -- counting from the backstop alone would put the
-	// terminus inside cloud that had not gone opaque yet.
-    float BoundMin, BoundMax;
-    GG_TopBounds(P.Field, 1.0f, 1.0f, BoundMin, BoundMax);
-
-	// Against the slowest channel of the slowest band, which the band ramp
-	// never goes below. Erring deep costs a step; erring shallow blacks out
-	// cloud that should still be visible.
-    const float OpaqueFraction = min(P.Field.DeckBackstop, BoundMin)
-		- GG_VIEW_OPAQUE_DEPTH / max(BetaMin, 1e-6f);
-
-    bool bClippedOpaque = false;
-
-    if (OpaqueFraction > 0.0f)
-    {
-        const float2 OpaqueHit = Atmo_RaySphere(
-			RayOrigin, RayDir, P.Atmo.planetParams.planetPos,
-			P.Field.PlanetRadius + P.Field.Thickness * OpaqueFraction);
-
-        if (OpaqueHit.x > 0.0f && OpaqueHit.x < MaxDist)
-        {
-            MaxDist = OpaqueHit.x;
-            bClippedOpaque = true;
-        }
-    }
+    Field_Terminus(RayOrigin, RayDir, P.Atmo, P.Field, P.Scatter, MaxDist, bClippedOpaque);
 
     const float2 AtmoHit = Atmo_RaySphere(
 		RayOrigin, RayDir, P.Atmo.planetParams.planetPos, P.Atmo.planetParams.atmoRadius);
@@ -791,7 +321,7 @@ float4 GGAtmo_MainMarch(
 	// MIE IS CONSUMED BY DECK IN FRONT OF IT, NOT BY PATH LENGTH. The forward lobe
 	// is the brightest term in the image facing the light and has to be
 	// extinguished by the cloud between sample and camera -- see MieLobeDecay.
-	// DeckDepthAhead accumulates separately from the base transmittance below,
+	// CloudDepthAhead accumulates separately from the base transmittance below,
 	// because the lobe dies faster than the light does.
 	//
 	// PITFALL: two forms that do not work. Gating on (MaxDist < AtmoHit.y)
@@ -834,7 +364,7 @@ float4 GGAtmo_MainMarch(
 
     const float CoarseStep = AtmoThickness / float(max(P.Atmo.mainRayParams.atmoSteps, 1));
 
-    GGAtmo_SplitDeckSegment(
+    Field_PlanSegments(
 		FlowField, FlowSampler, LocalOrigin, LocalDir, TopMax, CoarseStep,
 		P.Field, Segments, SegmentCount);
 
@@ -849,14 +379,14 @@ float4 GGAtmo_MainMarch(
 	// Only the first deck sample is wanted: the rest of the ray is behind it,
 	// and reading a scalar at every step would average a shadow the camera
 	// never sees through.
-	bool bDebugFirstDeck = true;
+	bool bDebugFirstCloud = true;
 #endif
 
 	// Deck optical depth between the camera and the current sample, tracked
 	// apart from Transmittance because only the Mie lobe reads it. Air does not
 	// contribute: haze in front of the planet is genuinely in front of it, and
 	// folding air depth in here would kill the limb glow that should be there.
-    float DeckDepthAhead = 0.0f;
+    float CloudDepthAhead = 0.0f;
 
     const float RayStart = Segments[0].x;
     const float ReferenceLength = max(
@@ -904,7 +434,8 @@ float4 GGAtmo_MainMarch(
         const float SegEnd = Segments[s].y;
         const float BaseStepSize = Segments[s].z;
 
-        const bool IsDeck = GGAtmo_SegmentIsDeck(RayOrigin, RayDir, Segments[s], P);
+        const bool IsCloud = Field_SegmentIsCloud(
+			RayOrigin, RayDir, Segments[s], P.Atmo.planetParams);
 
         float Pos = SegStart;
 
@@ -963,7 +494,7 @@ float4 GGAtmo_MainMarch(
 			// quality changes character across it and the seam prints.
             BRANCH
 
-            if (IsDeck)
+            if (IsCloud)
             {
                 const float3 ToCentre = RayOrigin + RayDir * Pos - P.Atmo.planetParams.planetPos;
                 const float StepRadius = max(length(ToCentre), 1e-4f);
@@ -974,8 +505,8 @@ float4 GGAtmo_MainMarch(
 				// Progress toward each limit, per unit of path travelled.
                 const float HeightCost = RadialRate / max(CurrentStep, 1e-6f);
 
-                const float LateralCost =
-					LateralRate / max(Flow_TexelArc(FlowField, StepRadius) * .5, 1e-6f);
+                const float LateralCost = LateralRate
+					/ max(Field_LateralArc(FlowField, StepRadius) * 0.5f, 1e-6f);
 
                 CurrentStep = rsqrt(max(
 					HeightCost * HeightCost + LateralCost * LateralCost, 1e-12f));
@@ -1008,7 +539,7 @@ float4 GGAtmo_MainMarch(
 			// and a camera descending through the deck comes out into vacuum. The
 			// air is bounded by it, though: Atmo_Density is exp(-h/H), so a
 			// negative height grows without bound instead of falling off.
-            if (Height > 0.0f || IsDeck)
+            if (Height > 0.0f || IsCloud)
             {
 				// Local sun elevation, for the ambient terms. Sampled from the
 				// sample's own up vector rather than the planet's, so the
@@ -1022,7 +553,7 @@ float4 GGAtmo_MainMarch(
                 const float AirAmbientFactor = Atmo_AmbientFactor(SunElevation,
 					P.Scatter.AmbientTerminator, P.Atmo.scatteringParams.atmoAmbient.a);
 
-                const float DeckAmbientFactor = Atmo_AmbientFactor(SunElevation,
+                const float CloudAmbientFactor = Atmo_AmbientFactor(SunElevation,
 					P.Scatter.AmbientTerminator, P.Atmo.cloudParams.cloudAmb.a);
 
                 P.Atmo.lightRayParams.samplePos = SamplePos;
@@ -1049,30 +580,29 @@ float4 GGAtmo_MainMarch(
 					P.Field.StructureFadeNear, P.Field.StructureFadeFar, SampleDistance);
 
                 float LobeShadow;
-                float DeckOptDepth;
+                float CloudOptDepth;
                 const float3 AirTransmittance = GGAtmo_LightMarch(
 					ShadowMap, ShadowSampler, ShadowCameraLocal,
-					TransmittanceTable, TransmittanceSampler, P, LobeShadow, DeckOptDepth);
+					TransmittanceTable, TransmittanceSampler, P, LobeShadow, CloudOptDepth);
 
 				// THE RECEIVER'S BAND COLOURS THE DECK IT WAS SHADOWED BY. The map
 				// holds one depth, not the colours of the bands the light crossed,
 				// and bands are far wider than the deck is deep so the path mostly
 				// stays in the receiver's band. Off near band edges at low sun. One
 				// coarse tap, only where the deck shadows at all.
-                float3 LightTint = P.Scatter.ExtinctionBase.rgb;
+                float3 LightTint = Field_NeutralTint(P.Scatter);
 
                 BRANCH
 
-                if (DeckOptDepth > 0.0f)
+                if (CloudOptDepth > 0.0f)
                 {
-                    LightTint = GGAtmo_BandTint(
-						GG_BandCoarse(FlowField, FlowSampler, GGAtmo_ToLocal(SamplePos, P), P.Field),
-						P.Scatter);
+                    LightTint = Field_LightTint(FlowField, FlowSampler,
+						GGAtmo_ToLocal(SamplePos, P), P.Field, P.Scatter);
                 }
 
                 const float3 LightBeta = P.Atmo.cloudParams.cloudAbsBeta * LightTint;
 
-                const float3 SunTransmittance = AirTransmittance * exp(-LightBeta * DeckOptDepth);
+                const float3 SunTransmittance = AirTransmittance * exp(-LightBeta * CloudOptDepth);
 
                 const float3 AtmoDens = (Height > 0.0f)
 					? Atmo_Density(Height,
@@ -1086,7 +616,7 @@ float4 GGAtmo_MainMarch(
 				// Evaluated against the deck already crossed, before this step
 				// adds its own -- the lobe is attenuated by what is in FRONT of
 				// the sample, not by the sample itself.
-                const float MieLobe = exp(-DeckDepthAhead * P.Scatter.MieLobeDecay);
+                const float MieLobe = exp(-CloudDepthAhead * P.Scatter.MieLobeDecay);
 
                 const float3 MieScatter = P.Atmo.scatteringParams.mieBeta
 					* P.Atmo.scatteringParams.phaseM * AtmoDens.y * MieLobe * LobeShadow;
@@ -1119,7 +649,7 @@ float4 GGAtmo_MainMarch(
                 AccumLight += Transmittance * Inscattered;
                 Transmittance *= exp(-Extinction);
 
-                if (IsDeck)
+                if (IsCloud)
                 {
                     const float3 LocalPos = GGAtmo_ToLocal(SamplePos, P);
                     const float3 LocalUp = LocalPos / max(DistFromCentre, 1e-4f);
@@ -1127,18 +657,16 @@ float4 GGAtmo_MainMarch(
                     const float RadialRate = abs(dot(LocalDir, LocalUp));
                     const float StepHalfHeight = RadialRate * CurrentStep * 0.5f / P.Field.Thickness;
 
-                    const float4 Deck = GG_Density(
-						FlowField, FlowSampler, DetailVolume, DetailSampler,
-						StructureVolume, StructureSampler,
-						LocalPos, StepHalfHeight, P.Field);
+                    const float4 Sample = Field_Sample(
+						FIELD_TEXTURE_ARGS, LocalPos, StepHalfHeight, P.Field);
 
-                    if (Deck.x > 0.0f)
+                    if (Sample.x > 0.0f)
                     {
 						// THE BAND IS READ AT THE SCATTERING SITE. It says what
 						// the material is, so it belongs here rather than in
 						// density: a belt is a different albedo and a different
 						// extinction, not less cloud.
-                        const float3 Albedo = GGAtmo_BandScatter(Deck.y, P.Scatter);
+                        const float3 Albedo = Field_Albedo(Sample.y, P.Scatter);
 
 						// Single scattering and the octaves above it. Each later
 						// octave sees less of the deck toward the light and a
@@ -1161,52 +689,52 @@ float4 GGAtmo_MainMarch(
                                 OctaveLight += OctaveWeight[o]
 									* lerp(1.0f, LobeShadow, OctaveEcc[o])
 									* AirTransmittance
-									* exp(-LightBeta * DeckOptDepth * OctaveAtten[o]);
+									* exp(-LightBeta * CloudOptDepth * OctaveAtten[o]);
                             }
                         }
 
-                        const float3 DeckLight = P.Atmo.mainRayParams.lightCol * OctaveLight
+                        const float3 CloudLight = P.Atmo.mainRayParams.lightCol * OctaveLight
 							+ P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb.rgb
-								* DeckAmbientFactor;
+								* CloudAmbientFactor;
 
 						// Band scales the shared base rather than replacing it,
 						// so the deck stays on the same thickness-relative
 						// footing as the air around it.
-                        const float3 DeckExtinction = Deck.x * GGAtmo_BandExtinction(Deck.y, P.Scatter)
+                        const float3 CloudExtinction = Sample.x * Field_Extinction(Sample.y, P.Scatter)
 							* P.Atmo.cloudParams.cloudScatBeta * CurrentStep;
 
-                        const float3 DeckStepTransmittance = exp(-DeckExtinction);
+                        const float3 CloudStepTransmittance = exp(-CloudExtinction);
 
 						// Energy-conserving: what the step scatters IN is what
 						// it takes OUT, scaled by albedo, so the deck cannot
 						// emit more than it receives however dense it gets.
-                        const float3 DeckStepLight =
-							DeckLight * Albedo * (1.0f - DeckStepTransmittance);
+                        const float3 CloudStepLight =
+							CloudLight * Albedo * (1.0f - CloudStepTransmittance);
 
 #if GG_DEBUG_TERM == 3
 						DebugAccum += Transmittance
 							* (P.Atmo.mainRayParams.lightCol * OctaveLight)
-							* Albedo * (1.0f - DeckStepTransmittance);
+							* Albedo * (1.0f - CloudStepTransmittance);
 #elif GG_DEBUG_TERM == 4
 						DebugAccum += Transmittance
 							* (P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb.rgb
-								* DeckAmbientFactor)
-							* Albedo * (1.0f - DeckStepTransmittance);
+								* CloudAmbientFactor)
+							* Albedo * (1.0f - CloudStepTransmittance);
 #elif GG_DEBUG_TERM == 5
-						if (bDebugFirstDeck)
+						if (bDebugFirstCloud)
 						{
 							DebugAccum = SunTransmittance;
-							bDebugFirstDeck = false;
+							bDebugFirstCloud = false;
 						}
 #endif
 
-                        AccumLight += Transmittance * DeckStepLight;
-                        Transmittance *= DeckStepTransmittance;
+                        AccumLight += Transmittance * CloudStepLight;
+                        Transmittance *= CloudStepTransmittance;
 
 						// Mean of the three channels: the lobe is a single
 						// scalar weight, and a per-channel decay would tint the
 						// glow as it faded rather than just dimming it.
-                        DeckDepthAhead += dot(DeckExtinction, (1.0f / 3.0f).xxx);
+                        CloudDepthAhead += dot(CloudExtinction, (1.0f / 3.0f).xxx);
                     }
                 }
             }
@@ -1267,17 +795,16 @@ float4 GGAtmo_MainMarch(
 
 		// The fold constant and the ceiling scale as the light march builds
 		// them, minus the octave term: a surface receives single scattering.
-        const float AbsMax = P.Atmo.cloudParams.cloudAbsBeta.x * P.Scatter.TintRange.y;
+        const float2 Fold = Field_FoldConstant(P.Atmo, P.Scatter);
 
-        const float TauScale = max(
-			P.Scatter.TintRange.x / max(P.Scatter.TintRange.y, 1e-8f),
-			GG_SHADOW_MIN_TAU_SCALE);
+        const float TauScale = max(Fold.y, ATMO_SHADOW_MIN_TAU_SCALE);
 
 		// NO LOOKUP JITTER: see AtmoShadow_SurfaceOptDepth.
-        const float SurfaceOptDepth = GG_ShadowSurfaceOptDepth(
+        const float SurfaceOptDepth = AtmoShadow_SurfaceOptDepth(
 			ShadowMap, ShadowSampler, SurfaceLocal, LightLocal, ShadowCameraLocal,
-			float2(0.0f, 0.0f), GG_SHADOW_SATURATION / TauScale, AbsMax,
-			P.Atmo.surfaceShadowParams.receiverBias, P.Field)
+			float2(0.0f, 0.0f), ATMO_SHADOW_SATURATION / TauScale,
+			Field_ShadowFrame(P.Field), Fold.x,
+			P.Atmo.surfaceShadowParams.receiverBias)
 			* P.Atmo.surfaceShadowParams.strength;
 
 		// THE RECEIVER'S BAND COLOURS THE DECK IT WAS SHADOWED BY, the rule the
@@ -1289,14 +816,14 @@ float4 GGAtmo_MainMarch(
 		// can sit much further below the deck than a deck sample does, which
 		// makes that path longer and the approximation weaker -- worst at low
 		// sun near a band edge.
-        float3 LightTint = P.Scatter.ExtinctionBase.rgb;
+        float3 LightTint = Field_NeutralTint(P.Scatter);
 
         BRANCH
 
         if (SurfaceOptDepth > 0.0f)
         {
-            LightTint = GGAtmo_BandTint(
-				GG_BandCoarse(FlowField, FlowSampler, SurfaceLocal, P.Field), P.Scatter);
+            LightTint = Field_LightTint(
+				FlowField, FlowSampler, SurfaceLocal, P.Field, P.Scatter);
         }
 
 		// LERPED AGAINST THE DIRECT SHARE, NOT FOLDED INTO THE EXPONENT. Only
