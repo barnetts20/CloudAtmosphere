@@ -1,6 +1,8 @@
 #pragma once
 
-// Grid, topology and operators for the gas giant flow sim.
+#include "/Plugin/CloudAtmosphere/Private/FlowField.ush"
+
+// Grid, topology and operators for the flow sim.
 //
 // THE GRID IS A CYLINDER, NOT A TORUS. Longitude wraps with period exactly
 // 2 pi; latitude does not. The top and bottom rows are adjacent to the POLES,
@@ -286,29 +288,6 @@ float SimLaplacian(Texture2DArray<float> Field, int2 C, uint Layer, out float Ou
 		SimLoad(Field, C + int2(0, -1), Layer),
 		SimLoad(Field, C + int2(0, 1), Layer),
 		OutDiagonal);
-}
-
-/** Rebuilds the 3D tangent velocity from the stored east/north components. The
- *  velocity texture stores TWO, not three, a tangent vector on a sphere having
- *  two degrees of freedom and the freed channel being worth more elsewhere.
- *
- *  NO TRIG. With c = length(N.xy) the basis is east = (-N.y, N.x, 0)/c and
- *  north = (-N.z*N.x/c, -N.z*N.y/c, c), the vectors sincos(longitude) would
- *  give, obtained from N directly.
- *
- *  BYTE-IDENTICAL TO GasGiantFlow.ush's copy, under the same name: the sim
- *  advects along this and the material warps along it, so a mismatch would put
- *  the clouds on a different flow from the one that made them. The two files are
- *  never in one translation unit, so the shared name does not collide -- and if
- *  that ever changes, the redefinition error is the signal to merge them. */
-float3 GG_TangentVelocity(float3 N, float2 Components)
-{
-    const float C = max(length(N.xy), 1e-5f);
-
-    const float3 East = float3(-N.y, N.x, 0.0f) / C;
-    const float3 North = float3(-N.z * N.x / C, -N.z * N.y / C, C);
-
-    return East * Components.x + North * Components.y;
 }
 
 /** Half-width, in texels, of the longitudinal box filter at this latitude.

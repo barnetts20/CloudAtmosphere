@@ -1,5 +1,9 @@
 #pragma once
 
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereNoise.ush"
+#include "/Plugin/CloudAtmosphere/Private/FlowField.ush"
+
 // Gas giant cloud deck: the field the march samples.
 //
 // A COLUMNAR HEIGHTFIELD WITH A DENSITY RAMP HANGING OFF IT. Every column has a
@@ -9,6 +13,9 @@
 // variation, and Band drives ALTITUDE: a zone is a raised deck of fresh ammonia
 // ice, a belt is where the line of sight reaches warmer material. Band itself
 // reaches the march untouched, to be spent on extinction and scattering colour.
+//
+// HOW THE FLOW IS READ IS NOT HERE. FlowField.ush owns the sample and what its
+// channels mean; this file owns what the deck makes of them.
 //
 // UNITS. Three absolutes, all atmosphere fractions: DeckTop, DeckBackstop and
 // GradientThickness. Every relief amount, both carves, ErosionDepth and
@@ -94,8 +101,12 @@ struct GGFieldParams
     float DeckBackstop;
     float DensityCurve;
 
-    float BandSharpness;
-    float BandBias;
+	/** What FlowField.ush's interpreters read: the hemisphere width and the
+	 *  band's offset and gain. Held as the shared struct rather than as loose
+	 *  members, so a second field feeding those functions cannot describe the
+	 *  same four values differently, and a derived half-width has one home. */
+    FlowReadParams FlowRead;
+
     float BandRelief;
     float PressureRelief;
     float VortexThreshold;
@@ -143,10 +154,6 @@ struct GGFieldParams
 
 	/** HemisphereBlend as a half-width in sin(latitude). The blend reaches about
 	 *  three quarters of full strength at that distance from the equator. */
-    float HemisphereHalfWidth;
-
-	/** How far vorticity widens that half-width, from HemisphereVariance. */
-    float HemisphereVariance;
 
     float SpinAngle;
 
@@ -236,8 +243,8 @@ GGFieldParams GG_BuildField(
     F.DeckBackstop = DeckBackstop;
     F.DensityCurve = DensityCurve;
 
-    F.BandSharpness = BandSharpness;
-    F.BandBias = BandBias;
+    F.FlowRead.BandSharpness = BandSharpness;
+    F.FlowRead.BandBias = BandBias;
     F.BandRelief = BandRelief;
     F.PressureRelief = PressureRelief;
     F.VortexThreshold = VortexThreshold;
@@ -280,10 +287,10 @@ GGFieldParams GG_BuildField(
     F.DeepShearTime = WarpTime * DeepShearRatio;
     F.SpinAngle = -RotationWeight * Time;
 
-	// Floored against a zero width, which would make GG_Hemisphere a sign() and
-	// seam along the equator.
-    F.HemisphereHalfWidth = max(sin(radians(HemisphereBlend)), 1e-4f);
-    F.HemisphereVariance = max(HemisphereVariance, 0.0f);
+	// Floored against a zero width, which would make Flow_Hemisphere a sign()
+	// and seam along the equator.
+    F.FlowRead.HemisphereHalfWidth = max(sin(radians(HemisphereBlend)), 1e-4f);
+    F.FlowRead.HemisphereVariance = max(HemisphereVariance, 0.0f);
 
 	// Time and period are both simulated seconds: Time is the sim's clock, which
 	// already runs TimeScale times faster than real time, so the crossfade keeps
@@ -349,184 +356,12 @@ struct GGFieldSample
     float ShapeStructure;
 };
 
-float3 GG_RotateZ(float3 P, float Angle)
-{
-    float SinA, CosA;
-    sincos(Angle, SinA, CosA);
 
-    return float3(
-		P.x * CosA - P.y * SinA,
-		P.x * SinA + P.y * CosA,
-		P.z);
-}
 
-/** Flow field reconstruction: 0 hardware bilinear, one tap, C0; 1 cubic
- *  B-spline, four taps, C2. A performance handle, three taps wide. Nothing
- *  between them is worth carrying, and neither adds information: if blocks
- *  survive at 1 the band edge is a genuine step in the sim data, and the answer
- *  is sim resolution or a softer BandSharpness. */
-#ifndef GG_FLOW_FILTER
-#define GG_FLOW_FILTER 1
-#endif
 
-/** Collapses the Worley rungs to one value about the median. NORMALIZED BY THE
- *  WEIGHTS' LENGTH, NOT THEIR SUM: the rungs are independent fields, so their
- *  variances add rather than their amplitudes. Dividing by the sum leaves three
- *  equal rungs at 0.58 of one rung's contrast, flattening toward grey as more is
- *  switched on; length holds contrast constant however the balance is set. */
-float GG_WorleyLadder(float3 Octaves, float3 Weights)
-{
-    const float Norm = max(length(Weights), 1e-4f);
 
-    return saturate(0.5f + dot(Octaves - 0.5f, Weights) / Norm);
-}
 
-/** Remaps the Perlin base against the Worley floor: the Perlin says where
- *  material is, the cells erode it. */
-float GG_PerlinWorley(float Perlin, float WorleyF1)
-{
-    const float Low = -WorleyF1;
 
-    return saturate((Perlin - Low) / max(1.0f - Low, 1e-3f));
-}
-
-/** Samples the simulated flow field by direction. The grid is longitude by
- *  sin(latitude), so both coordinates are cheap from a unit vector. Sampler
- *  state must be wrap on U and clamp on V.
- *
- *  Returns (u_east, u_north, psi_eddy, band):
- *    xy  Tangent velocity, radians per unit time; rebuild the 3D vector with
- *        GG_TangentVelocity.
- *    z   The eddy streamfunction, psi with its zonal mean removed: zero in
- *        undisturbed flow, positive for clockwise rotation seen from outside.
- *    w   Normalized vorticity, near [-1,1], positive counterclockwise. The band
- *        signal, arriving already meandering and wrapped around vortices, since
- *        the sim transports vorticity.
- *
- *  PITFALL: z and w are rotation senses, not cyclone or anticyclone -- which one
- *  a sense is flips at the equator. Read them through GG_PressureFromFlow and
- *  GG_BandFromFlow, never raw. */
-float4 GG_SampleFlow(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
-{
-    const float U = frac(atan2(N.y, N.x) * (0.5f / PI));
-    const float V = 0.5f + 0.5f * N.z;
-
-#if GG_FLOW_FILTER == 0
-
-    return FlowField.SampleLevel(FlowSampler, float3(U, V, Layer), 0.0f);
-
-#else
-
-	// Bilinear is continuous in value but not in gradient, and the deck top is a
-	// direct function of this field while shading responds to its slope, so the
-	// slope jumps surface as faceting along the lat/lon grid. The cubic is
-	// approximating rather than interpolating: it does not pass through the
-	// texel values, so a one-texel step in the field stops being one in the
-	// surface. Four bilinear taps, each placed at the offset that reproduces a
-	// pair's weights.
-    uint Width, Height, Slices, Levels;
-    FlowField.GetDimensions(0, Width, Height, Slices, Levels);
-
-    const float2 Size = float2(Width, Height);
-    const float2 InvSize = 1.0f / Size;
-
-    const float2 Texel = float2(U, V) * Size - 0.5f;
-    const float2 Corner = floor(Texel);
-    const float2 Frac = Texel - Corner;
-
-    const float2 F2 = Frac * Frac;
-    const float2 F3 = F2 * Frac;
-
-    const float2 W0 = (-F3 + 3.0f * F2 - 3.0f * Frac + 1.0f) / 6.0f;
-    const float2 W1 = (3.0f * F3 - 6.0f * F2 + 4.0f) / 6.0f;
-    const float2 W2 = (-3.0f * F3 + 3.0f * F2 + 3.0f * Frac + 1.0f) / 6.0f;
-    const float2 W3 = F3 / 6.0f;
-
-    const float2 S0 = W0 + W1;
-    const float2 S1 = W2 + W3;
-
-    const float2 UV0 = (Corner + 0.5f + (W1 / S0 - 1.0f)) * InvSize;
-    const float2 UV1 = (Corner + 0.5f + (W3 / S1 + 1.0f)) * InvSize;
-
-    return
-		  S0.x * S0.y * FlowField.SampleLevel(FlowSampler, float3(UV0.x, UV0.y, Layer), 0.0f)
-		+ S1.x * S0.y * FlowField.SampleLevel(FlowSampler, float3(UV1.x, UV0.y, Layer), 0.0f)
-		+ S0.x * S1.y * FlowField.SampleLevel(FlowSampler, float3(UV0.x, UV1.y, Layer), 0.0f)
-		+ S1.x * S1.y * FlowField.SampleLevel(FlowSampler, float3(UV1.x, UV1.y, Layer), 0.0f);
-
-#endif
-}
-
-/** +1 in the northern hemisphere, -1 in the southern, smoothly through zero at
- *  the equator. N is a unit direction in the field's frame, Flow its sample.
- *
- *  THE SIGN FLIP IS EXACTLY A LATITUDE CIRCLE and carries no variance: the
- *  Coriolis parameter is 2 omega sin(latitude), with no longitude term, so which
- *  rotation sense is cyclonic really does change at latitude zero everywhere.
- *  What varies is the WIDTH of the indifferent band either side, because what
- *  the eye reads is where rotation stops organizing the weather -- roughly where
- *  local vorticity rivals the planetary term. HemisphereBlend sets the quiet-air
- *  width and HemisphereVariance widens it with |zeta|.
- *
- *  PITFALL: a constant width makes the band a perfect annulus, and a vortex
- *  straddling the equator is then bisected along a fixed latitude however strong
- *  it is. Widening with the flow lets a strong feature carry its own neutral
- *  band across and survive as one feature. */
-float GG_Hemisphere(float4 Flow, float3 N, GGFieldParams F)
-{
-    const float HalfWidth = F.HemisphereHalfWidth * (1.0f + F.HemisphereVariance * abs(Flow.w));
-
-    return tanh(N.z / HalfWidth);
-}
-
-/** Pressure from a flow sample: the eddy streamfunction times the hemisphere.
- *  Positive in anticyclones (high pressure) in both hemispheres. */
-float GG_PressureFromFlow(float4 Flow, float3 N, GGFieldParams F)
-{
-    return Flow.z * GG_Hemisphere(Flow, N, F);
-}
-
-/** The band value from a flow sample: vorticity made anticyclonic-positive in
- *  both hemispheres, biased and sharpened. Positive is a zone, negative a belt,
- *  zero a boundary -- the same in the north as in the south. */
-float GG_BandFromFlow(float4 Flow, float3 N, GGFieldParams F)
-{
-    return (-Flow.w * GG_Hemisphere(Flow, N, F) + F.BandBias) * F.BandSharpness;
-}
-
-/** Arc length of one flow texel at a given radius, in world units: the finest
- *  thing the deck top can vary over. A ray stepping further than this in one go
- *  samples one column out of the several it crossed, and the jitter picks which
- *  -- not an estimate with noise on it but a choice. It is why a shadow ray
- *  needs a step bounded by a length rather than a budget divided into a span.
- *  Longitude is the tighter axis, so the width alone bounds it. */
-float GG_FlowTexelArc(Texture2DArray FlowField, float Radius)
-{
-    uint Width, Height, Slices, Levels;
-    FlowField.GetDimensions(0, Width, Height, Slices, Levels);
-
-    return (2.0f * PI * Radius) / float(max(Width, 1u));
-}
-
-/** Rebuilds the 3D tangent velocity from the stored east/north components. No
- *  trig: with c = length(N.xy) the basis is east = (-N.y, N.x, 0)/c and north =
- *  (-N.z*N.x/c, -N.z*N.y/c, c). Guarded at the poles, where c goes to zero and
- *  east is undefined -- no texel sits on a pole, but a shading point can.
- *
- *  BYTE-IDENTICAL TO GasGiantSimCommon.ush's copy, under the same name: the sim
- *  advects along this and the material warps along it, so a mismatch would put
- *  the clouds on a different flow from the one that made them. The two files are
- *  never in one translation unit, so the shared name does not collide -- and if
- *  that ever changes, the redefinition error is the signal to merge them. */
-float3 GG_TangentVelocity(float3 N, float2 Components)
-{
-    const float C = max(length(N.xy), 1e-5f);
-
-    const float3 East = float3(-N.y, N.x, 0.0f) / C;
-    const float3 North = float3(-N.z * N.x / C, -N.z * N.y / C, C);
-
-    return East * Components.x + North * Components.y;
-}
 
 /** The shell's ceiling: 1 below the falloff band, 0 at the atmosphere top,
  *  smoothstep between. Multiplies every density the deck returns, so a tower
@@ -629,12 +464,13 @@ void GG_CarveReach(GGFieldParams F, float DetailFade, float StructureFade, out f
  *  rather than a feature's: the colour of extinction a light ray crossed. */
 float GG_BandCoarse(Texture2DArray FlowField, SamplerState FlowSampler, float3 LocalPos, GGFieldParams F)
 {
-    const float3 N = normalize(GG_RotateZ(normalize(LocalPos), F.SpinAngle));
+    const float3 N = normalize(Atmo_RotateZ(normalize(LocalPos), F.SpinAngle));
 
     const float U = frac(atan2(N.y, N.x) * (0.5f / PI));
     const float V = 0.5f + 0.5f * N.z;
 
-    return GG_BandFromFlow(FlowField.SampleLevel(FlowSampler, float3(U, V, GG_FLOW_LAYER), 0.0f), N, F);
+    return Flow_Band(
+		FlowField.SampleLevel(FlowSampler, float3(U, V, GG_FLOW_LAYER), 0.0f), N, F.FlowRead);
 }
 
 /** Signed band height from the band value: zones (positive, anticyclonic) toward
@@ -731,8 +567,8 @@ GGFlowProbe GG_ProbeFromFlow(float4 Flow, float3 N, GGFieldParams F)
 {
     GGFlowProbe Probe;
 
-    Probe.Band = GG_BandFromFlow(Flow, N, F);
-    Probe.Pressure = GG_PressureFromFlow(Flow, N, F);
+    Probe.Band = Flow_Band(Flow, N, F.FlowRead);
+    Probe.Pressure = Flow_Pressure(Flow, N, F.FlowRead);
 
     const float D = F.GradientThickness;
 
@@ -770,9 +606,9 @@ GGFlowProbe GG_FlowProbe(
 	float3 P,
 	GGFieldParams F)
 {
-    const float3 N = normalize(GG_RotateZ(P, F.SpinAngle));
+    const float3 N = normalize(Atmo_RotateZ(P, F.SpinAngle));
 
-    return GG_ProbeFromFlow(GG_SampleFlow(FlowField, FlowSampler, N, GG_FLOW_LAYER), N, F);
+    return GG_ProbeFromFlow(Flow_Sample(FlowField, FlowSampler, N, GG_FLOW_LAYER), N, F);
 }
 
 /** Conservative upper bound on the deck top, for the entry search: the probe's
@@ -918,9 +754,9 @@ GGFieldSample GG_Field(
     for (int It = 0; It < GG_WARP_ITERATIONS; It++)
     {
         const float4 Flow = (It == 0) ? Flow0
-			: GG_SampleFlow(FlowField, FlowSampler, Pos, GG_FLOW_LAYER);
+			: Flow_Sample(FlowField, FlowSampler, Pos, GG_FLOW_LAYER);
 
-        const float3 Velocity = GG_TangentVelocity(Pos, Flow.xy);
+        const float3 Velocity = Flow_TangentVelocity(Pos, Flow.xy);
 
         if (It == 0)
         {
@@ -978,9 +814,9 @@ GGFieldSample GG_Field(
     {
         const float3 PShear = normalize(N + FlowWarp * F.DetailFlowInherit);
 
-        const float4 DeepFlow = GG_SampleFlow(FlowField, FlowSampler, PShear, GG_DEEP_FLOW_LAYER);
+        const float4 DeepFlow = Flow_Sample(FlowField, FlowSampler, PShear, GG_DEEP_FLOW_LAYER);
 
-        DeepShear = GG_TangentVelocity(PShear, DeepFlow.xy) * (F.DeepShearTime * Turbulence);
+        DeepShear = Flow_TangentVelocity(PShear, DeepFlow.xy) * (F.DeepShearTime * Turbulence);
     }
 
 	// Each layer's displacement: its FlowInherit of the coarse warp plus its
@@ -1030,9 +866,9 @@ GGFieldSample GG_Field(
 				DetailSampler, normalize(N + DetailWarp) * UVWScale, 0.0f);
         }
 
-        Ridge = GG_PerlinWorley(
+        Ridge = AtmoNoise_PerlinWorley(
 			DetailSample.r,
-			GG_WorleyLadder(DetailSample.gba, F.DetailNoiseWeights.xyz));
+			AtmoNoise_WorleyLadder(DetailSample.gba, F.DetailNoiseWeights.xyz));
     }
 
 	// Green is the storm-tower gate and 1 is its neutral value, since the tower
@@ -1089,9 +925,9 @@ GGFieldSample GG_Field(
 	// it ravels the band edges, where a real gas giant's billows live.
     const float Edge = lerp(F.EdgeBias, 1.0f, Boundary);
 
-    const float StructureMix = GG_PerlinWorley(
+    const float StructureMix = AtmoNoise_PerlinWorley(
 		Structure.r,
-		GG_WorleyLadder(Structure.gba, F.StructureNoiseWeights.xyz));
+		AtmoNoise_WorleyLadder(Structure.gba, F.StructureNoiseWeights.xyz));
 
 	// Fade enters here rather than at the consumption sites, so it scales the
 	// noise's effect and leaves its scale alone -- structure stays the same size
@@ -1191,9 +1027,9 @@ float4 GG_Density(
 
     const float HalfStep = max(StepHalfLength, 0.0f);
 
-    const float3 N = normalize(GG_RotateZ(Direction, F.SpinAngle));
+    const float3 N = normalize(Atmo_RotateZ(Direction, F.SpinAngle));
 
-    const float4 Flow0 = GG_SampleFlow(FlowField, FlowSampler, N, GG_FLOW_LAYER);
+    const float4 Flow0 = Flow_Sample(FlowField, FlowSampler, N, GG_FLOW_LAYER);
 
     const GGFlowProbe Probe = GG_ProbeFromFlow(Flow0, N, F);
 

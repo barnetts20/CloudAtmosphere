@@ -1,0 +1,26 @@
+#pragma once
+
+// Combining noise octaves into one field. No sampling and no parameters -- these
+// take values a caller already fetched, so a field chooses its own volumes,
+// frequencies and channel layout and still shapes them the same way.
+
+/** Collapses the Worley rungs to one value about the median. NORMALIZED BY THE
+ *  WEIGHTS' LENGTH, NOT THEIR SUM: the rungs are independent fields, so their
+ *  variances add rather than their amplitudes. Dividing by the sum leaves three
+ *  equal rungs at 0.58 of one rung's contrast, flattening toward grey as more is
+ *  switched on; length holds contrast constant however the balance is set. */
+float AtmoNoise_WorleyLadder(float3 Octaves, float3 Weights)
+{
+    const float Norm = max(length(Weights), 1e-4f);
+
+    return saturate(0.5f + dot(Octaves - 0.5f, Weights) / Norm);
+}
+
+/** Remaps the Perlin base against the Worley floor: the Perlin says where
+ *  material is, the cells erode it. */
+float AtmoNoise_PerlinWorley(float Perlin, float WorleyF1)
+{
+    const float Low = -WorleyF1;
+
+    return saturate((Perlin - Low) / max(1.0f - Low, 1e-3f));
+}

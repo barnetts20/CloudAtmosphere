@@ -71,7 +71,8 @@ public:
     // Soft material references rather than hardcoded paths: a stale path logs a
     // warning and otherwise just looks like a broken material.
 
-    /** Slot 0 for PlanetType::Terrestrial. */
+    /** Slot 0 for PlanetType::Terrestrial. Points at the old march material,
+     *  which no longer compiles; it is the slot the branched copy lands in. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Materials")
     TSoftObjectPtr<UMaterialInterface> TerrestrialMarchMaterial;
 
@@ -154,9 +155,13 @@ public:
     bool bIsPlanetOwned = false;
 
     /** Which cloud model slot 0 renders. Changing this at runtime requires
-     *  RebuildMaterialInstances -- the material is chosen once, at creation. */
+     *  RebuildMaterialInstances -- the material is chosen once, at creation.
+     *
+     *  TERRESTRIAL HAS NO MARCH. Its shaders and parameter groups were removed
+     *  ahead of being cut from the gas giant path, so the enum case exists and
+     *  selects nothing. Defaults to GasGiant for that reason. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Atmosphere")
-    EPlanetAtmosphereType PlanetType = EPlanetAtmosphereType::Terrestrial;
+    EPlanetAtmosphereType PlanetType = EPlanetAtmosphereType::GasGiant;
 
     // A GROUP OF ONE GETS NO WRAPPER: a substruct buys a fold-out, worth a click
     // only when there is more than one thing behind it.
@@ -187,29 +192,12 @@ public:
     // category of their own so they display in declaration order.
     //
     // PITFALL: EditConditionHides does not survive the inlining. The condition
-    // lives on the property row and there is no row left, so both models' groups
-    // are visible at once, distinguished only by their parent category.
+    // lives on the property row and there is no row left, so once a second
+    // model's groups exist both are visible at once, distinguished only by their
+    // parent category.
 
-    // Terrestrial: the shared Common structs plus the cloud band.
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Terrestrial Geometry", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereGeometryParams TerrestrialGeometry;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Terrestrial Atmosphere Scattering", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereAirScatteringParams TerrestrialAtmosphereScattering;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Terrestrial Cloud Scattering", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereCloudScatteringParams TerrestrialCloudScattering;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Terrestrial Raymarch", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereRaymarchParams TerrestrialRaymarch;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Terrestrial Cloud", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialCloudParams Terrestrial;
-
-    // Gas giant: the authoritative layout. ApplyGasGiantParams pushes these
-    // directly, under their members' own names; none of it goes through
-    // GetCommonParams, which serves the terrestrial path alone.
+    // Gas giant: the authoritative layout, and currently the only one.
+    // ApplyGasGiantParams pushes these directly, under their members' own names.
 
     // THE MASTER SCALE, first under Gas Giant: every deck height is a fraction
     // of the shell it sets. The shared geometry struct, whose one member is the
@@ -355,25 +343,6 @@ private:
      *  BuiltType, not PlanetType. */
     void UpdateMaterialParameters();
 
-    /** The terrestrial model's Common groups, as ApplyCommonParams takes them.
-     *  The gas giant pushes its own groups directly. */
-    FAtmosphereCommonView GetCommonParams() const
-    {
-        return FAtmosphereCommonView{
-            TerrestrialGeometry,
-            TerrestrialAtmosphereScattering,
-            TerrestrialCloudScattering,
-            TerrestrialRaymarch };
-    }
-
-    /** Geometry, light, air scattering, cloud lighting, raymarching, under the
-     *  terrestrial material's parameter names. */
-    void ApplyCommonParams(const FAtmosphereCommonView& Common, float PlanetRadius,
-        const FVector& PlanetCenter, const FVector& LightDir);
-
-    /** Cloud shell, noise and extinction. Terrestrial material only. */
-    void ApplyTerrestrialParams(const FAtmosphereCommonView& Common);
-
     /** Every gas giant group under its members' own names, plus the planet, the
      *  light, the clock and the local frame. AUTHORED VALUES ONLY: everything
      *  derived is computed in the shader, once, from these, and a value derived
@@ -398,6 +367,9 @@ private:
     /** Suppresses the per-tick repeat of the shadow target complaint. Cleared
      *  when a usable target appears, so a fixed asset logs its recovery. */
     bool bWarnedShadowTarget = false;
+
+    /** Warned once that PlanetType is Terrestrial and no march runs. */
+    bool bWarnedTerrestrialPath = false;
 
     // --- Occluder captures ---
     //

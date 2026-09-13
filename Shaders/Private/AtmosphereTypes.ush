@@ -139,6 +139,20 @@ float2 Atmo_RaySphere(float3 origin, float3 dir, float3 center, float radius)
     return float2(-b - sq, -b + sq);
 }
 
+/** Rotates about Z, the spin axis. The planet's own rotation is applied to a
+ *  sample position rather than to the field, so the field stays fixed in its own
+ *  frame and nothing it derives has to be re-derived per frame. */
+float3 Atmo_RotateZ(float3 P, float Angle)
+{
+    float SinA, CosA;
+    sincos(Angle, SinA, CosA);
+
+    return float3(
+		P.x * CosA - P.y * SinA,
+		P.x * SinA + P.y * CosA,
+		P.z);
+}
+
 /** Rayleigh phase, per steradian. */
 float Atmo_PhaseRayleigh(float cosTheta)
 {

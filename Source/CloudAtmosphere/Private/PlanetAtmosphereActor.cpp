@@ -193,21 +193,10 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     GasGiantMarchMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(MatPath_GasGiant));
     PostprocessMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(MatPath_Postprocess));
 
-    // Default source assets, so both models display something in the details
-    // panel and a fresh actor renders. A deck with no volumes is not a subtle
-    // failure -- the carves and the erosion both go to their neutral values and
-    // the deck comes out as a smooth shell.
-    static ConstructorHelpers::FObjectFinder<UVolumeTexture> DefaultCloudTexture(
-        TEXT("/VoxelPlugin/VolumeTextures/Textures/VT_PerlinWorley_Balanced"));
-    if (DefaultCloudTexture.Succeeded())
-    {
-        Terrestrial.CloudVolumeTexture = DefaultCloudTexture.Object;
-    }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("PlanetAtmosphereActor: Failed to load default cloud volume texture"));
-    }
-
+    // Default source assets, so the details panel shows something and a fresh
+    // actor renders. A deck with no volumes is not a subtle failure -- the
+    // carves and the erosion both go to their neutral values and the deck comes
+    // out as a smooth shell.
     static ConstructorHelpers::FObjectFinder<UVolumeTexture> DefaultDetailVolume(
         TEXT("/CloudAtmosphere/Noise/VT_PerlinWorley_S8_128"));
     if (DefaultDetailVolume.Succeeded())
@@ -601,18 +590,24 @@ void APlanetAtmosphereActor::UpdateMaterialParameters()
     // regardless of parent rotation. The user/gizmo sets relative rotation directly.
     const FVector LightDir = GetRootComponent()->GetRelativeRotation().Vector();
 
+    // ONE MODEL. The terrestrial march and its parameter groups were removed
+    // ahead of being cut from the gas giant path, so that case pushes nothing
+    // and slot 0 draws whatever its material happens to be. Warned once rather
+    // than left silent, since the symptom is a blank atmosphere with no cause.
     if (BuiltType == EPlanetAtmosphereType::GasGiant)
     {
         ApplyGasGiantParams(PlanetRadius, PlanetCenter, LightDir);
         RequestGasGiantShadowBake(PlanetRadius, PlanetCenter, LightDir);
         UpdateTransmittanceTable(PlanetRadius);
     }
-    else
+    else if (!bWarnedTerrestrialPath)
     {
-        const FAtmosphereCommonView Common = GetCommonParams();
+        bWarnedTerrestrialPath = true;
 
-        ApplyCommonParams(Common, PlanetRadius, PlanetCenter, LightDir);
-        ApplyTerrestrialParams(Common);
+        UE_LOG(LogTemp, Warning,
+            TEXT("%s: PlanetType is Terrestrial and that model has no march yet. ")
+            TEXT("Set it to GasGiant and press Rebuild Material Instances."),
+            *GetName());
     }
 
     // --- Postprocess (slot 1) ---
@@ -629,66 +624,6 @@ void APlanetAtmosphereActor::UpdateMaterialParameters()
     SetScalarChecked(MID_Postprocess, TEXT("Depth Sharpness"), Composite.DepthSharpness);
     SetScalarChecked(MID_Postprocess, TEXT("Depth Tap Scale"), Composite.DepthTapScale);
     SetScalarChecked(MID_Postprocess, TEXT("Blur Weight"), Composite.BlurWeight);
-}
-
-void APlanetAtmosphereActor::ApplyCommonParams(const FAtmosphereCommonView& Common, float PlanetRadius,
-    const FVector& PlanetCenter, const FVector& LightDir)
-{
-    SetVectorChecked(MID_Atmosphere, TEXT("Planet Center"),
-        FLinearColor(PlanetCenter.X, PlanetCenter.Y, PlanetCenter.Z, 0.0f));
-    SetScalarChecked(MID_Atmosphere, TEXT("Planet Radius"), PlanetRadius);
-    SetScalarChecked(MID_Atmosphere, TEXT("Atmosphere Height Scale"), Common.Geometry.HeightScale);
-
-    SetVectorChecked(MID_Atmosphere, TEXT("Light Direction"),
-        FLinearColor(LightDir.X, LightDir.Y, LightDir.Z, 0.0f));
-    SetVectorChecked(MID_Atmosphere, TEXT("Light Color"), LightColor);
-
-    SetVectorChecked(MID_Atmosphere, TEXT("Rayleigh Beta"), Common.AirScattering.RayleighBeta);
-
-    SetVectorChecked(MID_Atmosphere, TEXT("Mie Beta"), Common.AirScattering.MieBeta);
-
-    SetScalarChecked(MID_Atmosphere, TEXT("Mie G"), Common.AirScattering.MieG);
-    SetVectorChecked(MID_Atmosphere, TEXT("Atmosphere Absorption Beta"), Common.AirScattering.AbsorptionBeta);
-
-    SetScalarChecked(MID_Atmosphere, TEXT("Atmosphere Absorption Falloff"), Common.AirScattering.AbsorptionFalloff);
-    SetVectorChecked(MID_Atmosphere, TEXT("Atmosphere Ambient"), Common.AirScattering.Ambient);
-
-    SetVectorChecked(MID_Atmosphere, TEXT("Cloud Ambient"), Common.CloudScattering.Ambient);
-    SetVectorChecked(MID_Atmosphere, TEXT("Cloud Phase Params"), Common.CloudScattering.PhaseParams);
-
-    SetScalarChecked(MID_Atmosphere, TEXT("Atmosphere Steps"), Common.Raymarch.AtmosphereSteps);
-    SetScalarChecked(MID_Atmosphere, TEXT("Step Scale Factor"), Common.Raymarch.StepScaleFactor);
-    SetScalarChecked(MID_Atmosphere, TEXT("Cloud Steps"), Common.Raymarch.CloudSteps);
-    SetScalarChecked(MID_Atmosphere, TEXT("View Step Pixels"), Common.Raymarch.ViewStepPixels);
-}
-
-void APlanetAtmosphereActor::ApplyTerrestrialParams(const FAtmosphereCommonView& Common)
-{
-    SetScalarChecked(MID_Atmosphere, TEXT("Cloud Outer Height Scale"),
-        Terrestrial.GetOuterHeightScale(Common.Geometry.HeightScale));
-    SetScalarChecked(MID_Atmosphere, TEXT("Cloud Inner Height Scale"),
-        Terrestrial.GetInnerHeightScale(Common.Geometry.HeightScale));
-
-    if (Terrestrial.CloudVolumeTexture)
-    {
-        SetTextureChecked(MID_Atmosphere, TEXT("Cloud Volume Texture"), Terrestrial.CloudVolumeTexture);
-    }
-
-    SetVectorChecked(MID_Atmosphere, TEXT("Animation Weights"), Terrestrial.AnimationWeights);
-    SetScalarChecked(MID_Atmosphere, TEXT("Cloud Coverage"), Terrestrial.CloudCoverage);
-    SetScalarChecked(MID_Atmosphere, TEXT("Cloud Density Multiplier"), Terrestrial.CloudDensityMultiplier);
-    SetScalarChecked(MID_Atmosphere, TEXT("Cloud Height Curve Min"), Terrestrial.CloudHeightCurveMin);
-    SetScalarChecked(MID_Atmosphere, TEXT("Cloud Height Curve Max"), Terrestrial.CloudHeightCurveMax);
-    SetScalarChecked(MID_Atmosphere, TEXT("Cloud Noise Frequency"), Terrestrial.CloudNoiseFrequency);
-    SetVectorChecked(MID_Atmosphere, TEXT("Cloud Noise Weights"), Terrestrial.CloudNoiseWeights);
-    SetVectorChecked(MID_Atmosphere, TEXT("Cloud Noise Invert"), Terrestrial.CloudNoiseInvert);
-    SetScalarChecked(MID_Atmosphere, TEXT("Detail Noise Frequency"), Terrestrial.GetDetailNoiseFrequency());
-    SetVectorChecked(MID_Atmosphere, TEXT("Detail Noise Weights"), Terrestrial.DetailNoiseWeights);
-    SetVectorChecked(MID_Atmosphere, TEXT("Detail Noise Invert"), Terrestrial.DetailNoiseInvert);
-    SetScalarChecked(MID_Atmosphere, TEXT("Detail Erode Strength"), Terrestrial.DetailErodeStrength);
-
-    SetVectorChecked(MID_Atmosphere, TEXT("Cloud Beta"), Terrestrial.CloudBeta);
-    SetVectorChecked(MID_Atmosphere, TEXT("Cloud Absorption Beta"), Terrestrial.CloudAbsorptionBeta);
 }
 
 // READOUT ONLY, NEVER PUSHED. Mirrors GG_TopBounds' upper bound before its

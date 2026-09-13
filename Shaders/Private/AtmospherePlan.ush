@@ -2,11 +2,10 @@
 
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
 
-// Ray planning: the segment list both marches walk, and the bounds on it.
+// Ray planning: the segment list a march walks, and the bounds on it.
 //
-// Shared by the terrestrial march and the gas giant one, which are otherwise
-// separate models. Anything below this line is common; AtmosphereMarch.ush above
-// it is the terrestrial model alone.
+// MODEL-INDEPENDENT. It cuts a ray at the shell boundaries and sizes each piece;
+// nothing here knows what fills them.
 
 /** Slots in the segment array. Six boundaries give at most five spans: atmo
  *  entry, cloud outer near, cloud inner near, cloud inner far, cloud outer far,
@@ -50,7 +49,8 @@ int Atmo_Plan(
 {
     int segmentCount = 0;
 
-	UNROLL
+    UNROLL
+
     for (int Clear = 0; Clear < ATMO_MAX_SEGMENTS; Clear++)
     {
         segments[Clear] = 0.0;

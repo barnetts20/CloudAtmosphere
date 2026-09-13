@@ -975,7 +975,7 @@ float4 GGAtmo_MainMarch(
                 const float HeightCost = RadialRate / max(CurrentStep, 1e-6f);
 
                 const float LateralCost =
-					LateralRate / max(GG_FlowTexelArc(FlowField, StepRadius) * .5, 1e-6f);
+					LateralRate / max(Flow_TexelArc(FlowField, StepRadius) * .5, 1e-6f);
 
                 CurrentStep = rsqrt(max(
 					HeightCost * HeightCost + LateralCost * LateralCost, 1e-12f));

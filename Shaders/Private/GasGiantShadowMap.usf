@@ -595,7 +595,7 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         const float HeightCost = RadialRate / max(HeightStep, 1e-6f);
 
         const float LateralCost =
-			LateralRate / max(GG_FlowTexelArc(FlowTarget, Radius) * 0.5f, 1e-6f);
+			LateralRate / max(Flow_TexelArc(FlowTarget, Radius) * 0.5f, 1e-6f);
 
         float Demand = rsqrt(max(HeightCost * HeightCost + LateralCost * LateralCost, 1e-12f));
 

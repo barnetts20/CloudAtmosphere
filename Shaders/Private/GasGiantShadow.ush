@@ -1,6 +1,6 @@
 #pragma once
 
-#include "/Plugin/CloudAtmosphere/Private/GasGiantFlow.ush"
+#include "/Plugin/CloudAtmosphere/Private/GasGiantDeck.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereShadowMap.ush"
 
 // The gas giant's side of the shadow map: what the deck contributes to a frame,
