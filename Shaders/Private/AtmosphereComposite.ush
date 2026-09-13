@@ -32,9 +32,12 @@
  *  side lobes on the axes -- hatching for the same reason the square does.
  *
  *  DepthTapScale is screen pixels per march pixel, 2 at half-per-axis. The
- *  colour tap moves in march texels while the depth tap moves in screen UV, so
- *  a mismatch reads a tap's depth weight from the right direction at the wrong
- *  distance.
+ *  colour tap moves in march texels and the depth tap in screen pixels, so a
+ *  mismatch reads a tap's depth from the right direction at the wrong distance
+ *  -- and puts the gradient prediction the same factor off.
+ *
+ *  BOTH COLOUR AND TRANSMITTANCE ARE FILTERED, under one set of weights, and
+ *  the depth weight is what holds the silhouette for both.
  *
  *  DEPTH IS READ HERE, FOR THE CENTRE AND THE TAPS ALIKE, through
  *  Atmo_SceneDepthAt. screenUV is the pixel's VIEWPORT UV, from GetViewportUV,
@@ -64,13 +67,11 @@ float4 Atmo_Composite(
 	float depthTapScale,
 	float blurWeight)
 {
-	// COLOUR AND TRANSMITTANCE, UNDER ONE SET OF WEIGHTS. Occlusion must not
-	// bleed across a silhouette, but the depth weight below is what prevents
-	// that and it guards both terms identically -- so leaving transmittance
-	// unfiltered does not protect the silhouette, it only sends the march's
-	// opacity noise to the screen raw. That noise hides against sky, where it
-	// modulates something near-uniform, and does not against a lit surface a few
-	// metres behind the deck.
+	// COLOUR AND TRANSMITTANCE, UNDER ONE SET OF WEIGHTS. The depth weight below
+	// is what holds the silhouette and it guards both identically, so leaving
+	// transmittance unfiltered protects nothing and sends the march's opacity
+	// noise to the screen raw -- invisible against sky, not against a lit
+	// surface just behind the deck.
     float3 sum = center.rgb;
     float alphaSum = center.a;
     float totalWeight = 1.0;
@@ -84,26 +85,23 @@ float4 Atmo_Composite(
 
     const float radiusSq = radiusF * radiusF;
 
-	// MEASURED FROM screenUV ITSELF, not from View.ViewSizeAndInvSize. A user
-	// scene texture pass renders at OUTPUT resolution while View describes the
-	// INTERNAL one, so below 100% screen percentage a texel taken from View is
-	// short by that factor and every depth tap is read nearer than its colour
-	// tap. The derivative steps by one pixel of whatever this pass is actually
-	// rendering at.
+	// MEASURED, NOT FROM View.ViewSizeAndInvSize. A user scene texture pass
+	// renders at OUTPUT resolution while View describes the INTERNAL one, so
+	// below 100% screen percentage every depth tap is read nearer than its
+	// colour tap. The derivative steps by one pixel of this pass's own size.
     const float2 depthTexel =
 		float2(abs(ddx(screenUV.x)), abs(ddy(screenUV.y))) * max(depthTapScale, 1.0);
 
     const float centerDepth = Atmo_SceneDepthAt(ViewportUVToBufferUV(screenUV));
 
-	// THE WEIGHT BELOW MUST REJECT A DISCONTINUITY AND ADMIT A GRADIENT, and
-	// comparing raw depths cannot separate them: a surface seen at a shallow
-	// angle changes depth by tens of percent across the kernel with nothing
-	// discontinuous in it, so every tap fails, the blur collapses to the centre
-	// pixel and the march's dither reaches the screen unfiltered. Predicting a
-	// tap's depth from the local gradient makes a smooth slope read as no
-	// difference at any obliquity.
+	// THE WEIGHT MUST REJECT A DISCONTINUITY AND ADMIT A GRADIENT, which raw
+	// depths cannot separate: a surface at a shallow angle changes depth by tens
+	// of percent across the kernel with nothing discontinuous in it, so every
+	// tap fails, the blur collapses to the centre pixel and the march's dither
+	// reaches the screen unfiltered. A gradient prediction makes a smooth slope
+	// read as no difference at any obliquity.
 	//
-	// PITFALL: derivatives need the whole quad, so this cannot move inside the
+	// PITFALL: derivatives need the whole quad, so this cannot move into the
 	// loop or under a branch.
     const float2 depthGradient = float2(ddx(centerDepth), ddy(centerDepth));
 
@@ -127,25 +125,21 @@ float4 Atmo_Composite(
             float2 screenOffset = offset * depthTexel;
             float sampleDepth = Atmo_SceneDepthAt(ViewportUVToBufferUV(screenUV + screenOffset));
 
-			// THE SMALLER OF THE TWO DIFFERENCES, so the plane fit can only ever
-			// admit a tap the flat test rejected. On level ground the gradient
-			// is zero and the two agree; on a slope the fit wins; where the fit
-			// runs away -- across a silhouette, where the gradient is one
-			// pixel's worth of a cliff -- the flat difference is still there to
-			// reject on, so this cannot be worse than not fitting at all.
-			//
-			// PITFALL: a steep slope whose gradient happens to extrapolate onto
-			// a background object at the edge of the kernel is a false accept,
-			// and colour bleeds across that silhouette. Narrow, and the standard
-			// trade for the fit.
-			// IN PIXELS, the unit ddx returns a rate in -- offset is in march
+			// IN PIXELS, the unit ddx returns a rate in: offset is in march
 			// texels and depthTapScale converts.
             float predicted = centerDepth
 				+ dot(offset * max(depthTapScale, 1.0), depthGradient);
 
-			// Normalized by the centre depth so the tolerance is relative: an
-			// absolute threshold would be far too tight at planetary distance
-			// and far too loose up close.
+			// THE SMALLER OF THE TWO, so the fit can only admit a tap the flat
+			// test rejected and this cannot be worse than not fitting: where the
+			// gradient runs away across a silhouette, the flat difference is
+			// still there to reject on. Relative to the centre depth, since an
+			// absolute tolerance is far too tight at planetary distance and far
+			// too loose up close.
+			//
+			// PITFALL: a slope whose gradient extrapolates onto a background
+			// object at the kernel's edge is a false accept, and colour bleeds
+			// across that silhouette. The standard trade for the fit.
             float depthDiff = min(
 				abs(centerDepth - sampleDepth),
 				abs(predicted - sampleDepth)) / max(centerDepth, 1.0);

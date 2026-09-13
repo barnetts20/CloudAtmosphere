@@ -851,7 +851,7 @@ void APlanetAtmosphereActor::ApplyGasGiantParams(float PlanetRadius, const FVect
     // PACKED, unlike everything above: four related scalars on one Custom node
     // pin, the way the band tints and the cloud phase already travel. Pack()
     // owns the layout and GGAtmo_BuildAtmo unpacks it.
-    SetVectorChecked(MID_Atmosphere, TEXT("SurfaceShadow"), SurfaceShadows.Pack());
+    SetVectorChecked(MID_Atmosphere, TEXT("SurfaceShadow"), SurfaceShadow.Pack());
 }
 
 void APlanetAtmosphereActor::ApplyGasGiantLayer(const TCHAR* Prefix, const FGasGiantNoiseLayerParams& Layer)
@@ -906,7 +906,7 @@ bool APlanetAtmosphereActor::PrepareGasGiantShadowTarget()
     // what stops them paying for it, and the allocation is the only place the
     // decision lives.
     const int32 DesiredSlices =
-        GasGiantShadow::SlicesFor(GasGiantOccluderShadows.bEnabled);
+        GasGiantShadow::SlicesFor(GasGiantOccluderShadows.IsEnabled());
 
     const bool bMismatch =
         Target->SizeX != Edge ||
@@ -1036,7 +1036,7 @@ static void ConfigureOccluderCapture(
 
 bool APlanetAtmosphereActor::PrepareGasGiantOccluderCaptures()
 {
-    if (BuiltType != EPlanetAtmosphereType::GasGiant || !GasGiantOccluderShadows.bEnabled)
+    if (BuiltType != EPlanetAtmosphereType::GasGiant || !GasGiantOccluderShadows.IsEnabled())
     {
         DestroyGasGiantOccluderCaptures();
 
@@ -1346,95 +1346,6 @@ void APlanetAtmosphereActor::DestroyGasGiantOccluderCaptures()
     {
         OccluderFrames[Level] = FGasGiantOccluderFrame();
         FramesSinceCapture[Level] = MAX_int32;
-    }
-}
-
-void APlanetAtmosphereActor::LogGasGiantOccluderCaptures()
-{
-    for (int32 Level = 0; Level < GasGiantShadow::CascadeCount; ++Level)
-    {
-        const FGasGiantOccluderFrame& Frame = OccluderFrames[Level];
-
-        UTextureRenderTarget2D* Target = OccluderDepthTargets.IsValidIndex(Level)
-            ? OccluderDepthTargets[Level].Get()
-            : nullptr;
-
-        if (!Target)
-        {
-            UE_LOG(LogTemp, Log, TEXT("%s occluder %d: no target (level off or feature disabled)."),
-                *GetName(), Level);
-
-            continue;
-        }
-
-        FTextureRenderTargetResource* Res = Target->GameThread_GetRenderTargetResource();
-
-        TArray<FLinearColor> Pixels;
-
-        if (!Res || !Res->ReadLinearColorPixels(Pixels) || Pixels.Num() == 0)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("%s occluder %d: target could not be read back."),
-                *GetName(), Level);
-
-            continue;
-        }
-
-        // Three populations, and which one dominates is the answer. Zero is a
-        // texel the capture never wrote. At or past Far is background. Between
-        // them is geometry, and its absence is the whole failure.
-        int32 Cleared = 0;
-        int32 Background = 0;
-        int32 Geometry = 0;
-
-        float NearestZ = TNumericLimits<float>::Max();
-        float FarthestZ = 0.0f;
-
-        for (const FLinearColor& Pixel : Pixels)
-        {
-            const float Z = Pixel.R;
-
-            if (Z <= 0.0f)
-            {
-                ++Cleared;
-            }
-            else if (Z >= Frame.Far)
-            {
-                ++Background;
-            }
-            else
-            {
-                ++Geometry;
-
-                NearestZ = FMath::Min(NearestZ, Z);
-                FarthestZ = FMath::Max(FarthestZ, Z);
-            }
-        }
-
-        const int32 CentreIndex =
-            FMath::Clamp((Target->SizeY / 2) * Target->SizeX + Target->SizeX / 2, 0, Pixels.Num() - 1);
-
-        UE_LOG(LogTemp, Log,
-            TEXT("%s occluder %d: valid=%d extent=%.0f planeDist=%.0f far=%.0f | ")
-            TEXT("geometry=%.2f%% background=%.2f%% cleared=%.2f%% | centre=%.0f"),
-            *GetName(), Level, Frame.IsUsable() ? 1 : 0,
-            Frame.Extent, Frame.PlaneDist, Frame.Far,
-            100.0f * Geometry / Pixels.Num(),
-            100.0f * Background / Pixels.Num(),
-            100.0f * Cleared / Pixels.Num(),
-            Pixels[CentreIndex].R);
-
-        if (Geometry > 0)
-        {
-            // PlaneDist - Z is the surface's distance from the planet centre
-            // along the light, which is the number to check a placed test mesh
-            // against. Negative means it is on the far side of the centre.
-            UE_LOG(LogTemp, Log,
-                TEXT("%s occluder %d: nearest surface %.0f from planet centre along the light, ")
-                TEXT("farthest %.0f."),
-                *GetName(), Level,
-                Frame.PlaneDist - NearestZ,
-                Frame.PlaneDist - FarthestZ);
-        }
     }
 }
 

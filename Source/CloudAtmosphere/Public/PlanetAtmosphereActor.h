@@ -97,18 +97,6 @@ public:
     UFUNCTION(BlueprintCallable, CallInEditor, Category = "CloudAtmosphere")
     void RebuildMaterialInstances();
 
-    /** Reads each occluder capture back and logs what is actually in it: how
-     *  much of the level is geometry rather than background, the nearest and
-     *  farthest surface, and where the nearest one sits along the light.
-     *
-     *  THE DEPTH TARGETS CANNOT BE READ BY EYE. Every real depth at planetary
-     *  scale is far above 1 and displays saturated, so a capture holding only
-     *  background and a capture holding an occluder look the same.
-     *
-     *  Stalls on the GPU. A diagnostic, not something to call per frame. */
-    UFUNCTION(BlueprintCallable, CallInEditor, Category = "CloudAtmosphere")
-    void LogGasGiantOccluderCaptures();
-
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline")
     FAtmosphereCompositeParams Composite;
 
@@ -142,18 +130,19 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ClampMin = "128", ClampMax = "4096"))
     int32 GasGiantShadowResolution = 1024;
 
-    /** Opaque geometry casting into the deck shadow map. NOT INLINED with
-     *  ShowOnlyInnerProperties, unlike the model groups below: the edit
-     *  condition is what hides it on a terrestrial planet, and that condition
-     *  does not survive inlining. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides))
+    /** Opaque geometry casting into the deck shadow map. PARKED, so it carries
+     *  no edit specifier and reaches neither the details panel nor Blueprint;
+     *  FGasGiantOccluderShadowParams::IsEnabled answers false whatever a saved
+     *  instance holds. Kept as a plain UPROPERTY so existing levels deserialize
+     *  their authored values rather than losing them. */
+    UPROPERTY()
     FGasGiantOccluderShadowParams GasGiantOccluderShadows;
 
     /** Cloud shadows cast onto opaque geometry. Reads the same map the deck
      *  does and adds no pass; the edit condition is gas giant only because that
      *  is the model with a map to read. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides))
-    FAtmosphereSurfaceShadowParams SurfaceShadows;
+    FAtmosphereSurfaceShadowParams SurfaceShadow;
 
     // --- Atmosphere ---
     //

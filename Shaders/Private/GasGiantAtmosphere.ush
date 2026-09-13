@@ -1273,12 +1273,7 @@ float4 GGAtmo_MainMarch(
 			P.Scatter.TintRange.x / max(P.Scatter.TintRange.y, 1e-8f),
 			GG_SHADOW_MIN_TAU_SCALE);
 
-		// NO LOOKUP JITTER. A light ray's samples jitter because there are many
-		// of them along one ray to average the texel neighbourhood; this is one
-		// tap, so an offset is not an average but a per-pixel dither -- and it
-		// lands in TRANSMITTANCE, which the composite does not filter as heavily
-		// as colour. The quintic reconstruction is already continuous, so
-		// reading it unjittered costs nothing.
+		// NO LOOKUP JITTER: see AtmoShadow_SurfaceOptDepth.
         const float SurfaceOptDepth = GG_ShadowSurfaceOptDepth(
 			ShadowMap, ShadowSampler, SurfaceLocal, LightLocal, ShadowCameraLocal,
 			float2(0.0f, 0.0f), GG_SHADOW_SATURATION / TauScale, AbsMax,

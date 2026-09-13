@@ -124,6 +124,11 @@ struct CLOUDATMOSPHERE_API FAtmosphereSimulationParams
  *  each sized and centred on that cascade, feeding the bake one occluder depth
  *  per texel ray.
  *
+ *  PARKED. IsEnabled answers false whatever is authored, and the group is no
+ *  longer exposed on the actor. Restoring the feature means returning bEnabled
+ *  from IsEnabled and putting the EditAnywhere specifier back on
+ *  APlanetAtmosphereActor::GasGiantOccluderShadows; nothing else was removed.
+ *
  *  COST IS THE SCENE, NOT THE BAKE. Each enabled level runs the scene's depth
  *  pass for its own view every time it captures, while the bake gets CHEAPER on
  *  occluded rays because the march stops at the occluder. The cadences and the
@@ -263,6 +268,14 @@ struct CLOUDATMOSPHERE_API FGasGiantOccluderShadowParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled"))
 	TArray<TObjectPtr<AActor>> HiddenActors;
 
+	/** Whether the feature runs at all. THE ONLY GATE: the capture components and
+	 *  the shadow target's slice count both hang off it, so a false here leaves
+	 *  the bake and the reader exactly as they are without the feature. */
+	bool IsEnabled() const
+	{
+		return false;
+	}
+
 	/** Frames between captures for a cascade index, 0 being the disc. */
 	int32 GetIntervalFrames(int32 Level) const
 	{
@@ -277,7 +290,7 @@ struct CLOUDATMOSPHERE_API FGasGiantOccluderShadowParams
 	/** Whether a cascade index captures at all. */
 	bool IsLevelEnabled(int32 Level) const
 	{
-		if (!bEnabled)
+		if (!IsEnabled())
 		{
 			return false;
 		}
@@ -294,20 +307,18 @@ struct CLOUDATMOSPHERE_API FGasGiantOccluderShadowParams
 /** Cloud and deck shadows falling on whatever opaque geometry the depth buffer
  *  holds: terrain, meshes, a mesh inner surface, other actors.
  *
- *  A READ-SIDE FEATURE ENTIRELY. The shadow map already answers the question --
- *  its optical depth is valid anywhere inside the shell, so a point on terrain
- *  below the deck reads the whole column above it exactly as a deck sample reads
- *  the column above itself. Nothing here changes the bake, and the march
- *  evaluates it once, where the view ray stopped.
+ *  A READ-SIDE FEATURE ENTIRELY. The map's optical depth is valid anywhere
+ *  inside the shell, so a point on terrain reads the whole column above it as a
+ *  deck sample reads its own. Nothing here changes the bake and no pass is
+ *  added; the march evaluates it once, where the view ray stopped.
  *
- *  COMMON, NOT PER MODEL, because both marches reach the map through the same
- *  reader. Only a model that HAS a map can honour it; a march without one leaves
- *  the group at its disabled default.
+ *  COMMON, NOT PER MODEL: both marches reach the map through one reader. A model
+ *  without a map leaves the group at its disabled default.
  *
- *  OUT OF SCOPE: translucent receivers, which do not write depth and so are
- *  unshadowed, and the engine's lighting as opposed to its output -- this
- *  multiplies the lit result, so specular and indirect darken with direct sun.
- *  A light function is the tool when that distinction matters. */
+ *  OUT OF SCOPE: translucent receivers, which write no depth, and the engine's
+ *  lighting as opposed to its output -- this multiplies the lit result, so
+ *  specular and indirect darken with direct sun. Reach for a light function when
+ *  that distinction matters. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FAtmosphereSurfaceShadowParams
 {
@@ -315,7 +326,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereSurfaceShadowParams
 
 	/** Off multiplies by one and costs one scalar branch. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	bool bEnabled = false;
+	bool bEnabled = true;
 
 	/** How much of a surface's brightness comes from the sun rather than from
 	 *  sky and bounce. The shadow scales only that share, so a shadowed surface
@@ -330,17 +341,16 @@ struct CLOUDATMOSPHERE_API FAtmosphereSurfaceShadowParams
 	/** Distance along the light the receiver is lifted before the map is
 	 *  sampled, in ATMOSPHERE THICKNESSES.
 	 *
-	 *  FOR THE OCCLUDER BAND ONLY. A surface captured into the occluder slices
-	 *  holds its own depth there, so an unbiased receiver reads the occluder's
-	 *  full peak and every captured surface shadows itself everywhere. The
-	 *  deck's own crossings sit above the receiver and need none, so with
-	 *  captures off this can be zero.
+	 *  FOR THE OCCLUDER BAND ONLY. A captured surface holds its own depth in the
+	 *  occluder slices, so an unbiased receiver reads the occluder's full peak
+	 *  and shadows itself everywhere. The deck's crossings sit above the receiver
+	 *  and need none, so with captures off this can be zero.
 	 *
 	 *  PITFALL: it must clear the occluder lattice's depth quantisation across
-	 *  one texel, which on a slope is the texel width times the slope -- a few
-	 *  kilometres on the disc cascade, so this is not a small number. Too much
-	 *  detaches shadows from the ground near the terminator, where a lift along
-	 *  a grazing light travels a long way laterally. Tune there, not at noon. */
+	 *  one texel -- texel width times slope, kilometres on the disc cascade, so
+	 *  not a small number. Too much detaches shadows from the ground at the
+	 *  terminator, where a lift along a grazing light travels far laterally.
+	 *  Tune there, not at noon. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0"))
 	float ReceiverBias = 0.0f;
 

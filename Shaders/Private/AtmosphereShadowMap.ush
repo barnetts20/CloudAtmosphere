@@ -517,7 +517,13 @@ float AtmoShadow_Tau(
  *  one texel, which on a slope is texel width times slope -- kilometres on the
  *  disc cascade. Too much detaches shadows from the ground near the terminator,
  *  where a step along a grazing light travels a long way laterally. Tune there,
- *  not at noon. */
+ *  not at noon.
+ *
+ *  JitterTexels IS NORMALLY ZERO HERE. A light ray offsets its lookups because
+ *  it has many samples along one ray to average the texel neighbourhood with;
+ *  one tap per pixel has nothing to average, so an offset is a dither rather
+ *  than a filter, and it lands in transmittance. The quintic reconstruction is
+ *  continuous on its own. */
 float AtmoShadow_SurfaceOptDepth(
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
