@@ -10,9 +10,9 @@
 // allowed to ask it.
 //
 // THE MARCH KNOWS NOTHING BELOW THIS LINE. It calls the Field_ functions, the
-// FieldParams and ScatterParams names, and the two texture macros; every one of
-// them is defined here, and a second model defines the same set over its own
-// field. That is the whole interface, and it is small because the march's real
+// FieldParams and FieldMaterialParams names, and the two texture macros; every
+// one of them is defined here, and a second model defines the same set over its
+// own field. That is the whole interface, and it is small because the march's real
 // content -- the plan, the step bounds, the octaves, the shadow read -- does not
 // depend on what fills the shell.
 //
@@ -26,9 +26,19 @@
 // trace an entry because there is a surface to find. A field with holes answers
 // all three differently.
 
-/** The concrete types the march refers to by these names. */
+/** Claims the march's one model slot. A second field defines this too, so
+ *  whichever header the material included is the one that answers. */
+#define ATMO_FIELD_INCLUDED 1
+
+/** The concrete types the march refers to by these names: the field's shape and
+ *  its material.
+ *
+ *  PITFALL: neither alias may shadow a type the shared headers already declare.
+ *  A macro over an existing struct name compiles wherever that struct was
+ *  declared first and fails somewhere else, which is the worst shape a name
+ *  collision can take. */
 #define FieldParams GGFieldParams
-#define ScatterParams GGScatterParams
+#define FieldMaterialParams GGScatterParams
 
 /** The field's own textures, as a declaration and as a forwarding list.
  *
@@ -59,11 +69,6 @@
 #ifndef GG_VIEW_OPAQUE_DEPTH
 #define GG_VIEW_OPAQUE_DEPTH 14.0f
 #endif
-
-/** Most octaves GGAtmo_BuildScatter accepts. The per-octave constants are
- *  packed in float4s, so this cannot exceed 4. Declared here because the struct
- *  below clamps against it and this header is included first. */
-#define GG_MS_MAX_OCTAVES 4
 
 /** The deck's material and how it is lit. Three band sets rather than one,
  *  because zones and belts are different material and not the same material at
@@ -100,7 +105,7 @@ struct GGScatterParams
 	/** Octave i sees the deck's optical depth toward the light scaled by
 	 *  OctaveAttenuation^i, weighs OctaveContribution^i, and uses the phase
 	 *  with both lobes' g scaled by OctaveEccentricity^i. Octave 0 is single
-	 *  scattering. OctaveCount is whole and in [1, GG_MS_MAX_OCTAVES]. */
+	 *  scattering. OctaveCount is whole and in [1, ATMO_MS_MAX_OCTAVES]. */
     float OctaveCount;
     float OctaveAttenuation;
     float OctaveContribution;
@@ -134,24 +139,24 @@ struct GGScatterParams
  *  is which: the SIGN picks the set and the ramp runs from Base at zero to it at
  *  full magnitude. A plain two-way lerp would blend the families through their
  *  midpoint and lose the boundary between them. */
-float GGAtmo_BandRamp(float Band, GGScatterParams S)
+float GG_BandRamp(float Band, GGScatterParams S)
 {
     return clamp(Band * S.BandScale, -1.0f, 1.0f);
 }
 
 /** Albedo at a band. */
-float3 GGAtmo_BandScatter(float Band, GGScatterParams S)
+float3 GG_BandScatter(float Band, GGScatterParams S)
 {
-    const float T = GGAtmo_BandRamp(Band, S);
+    const float T = GG_BandRamp(Band, S);
 
     return lerp(S.ScatterBase, (T < 0.0f) ? S.ScatterNegative : S.ScatterPositive, abs(T));
 }
 
 /** Extinction multiplier at a band, tint times amount: what the view ray
  *  applies to the deck's solved coefficient. */
-float3 GGAtmo_BandExtinction(float Band, GGScatterParams S)
+float3 GG_BandExtinction(float Band, GGScatterParams S)
 {
-    const float T = GGAtmo_BandRamp(Band, S);
+    const float T = GG_BandRamp(Band, S);
 
     const float4 Hue = (T < 0.0f) ? S.ExtinctionNegative : S.ExtinctionPositive;
 
@@ -160,9 +165,9 @@ float3 GGAtmo_BandExtinction(float Band, GGScatterParams S)
 
 /** Extinction tint alone at a band. The light ray's AMOUNTS are already in the
  *  shadow map's depth; its colour is applied where the depth is read. */
-float3 GGAtmo_BandTint(float Band, GGScatterParams S)
+float3 GG_BandTint(float Band, GGScatterParams S)
 {
-    const float T = GGAtmo_BandRamp(Band, S);
+    const float T = GG_BandRamp(Band, S);
 
     const float4 Hue = (T < 0.0f) ? S.ExtinctionNegative : S.ExtinctionPositive;
 
@@ -278,7 +283,7 @@ void Field_PlanSegments(
 /** Fills GGScatterParams from the Bands, Phase, Multiple Scattering and
  *  Terminator groups, in panel order. Set all three bands equal for a
  *  single-material deck. */
-GGScatterParams GGAtmo_BuildScatter(
+GGScatterParams GG_BuildScatter(
 	float3 ScatterNegative,
 	float4 ExtinctionNegative,
 	float3 ScatterPositive,
@@ -315,7 +320,7 @@ GGScatterParams GGAtmo_BuildScatter(
     S.BackwardG = BackwardG;
     S.ForwardWeight = ForwardWeight;
 
-    S.OctaveCount = clamp(round(OctaveCount), 1.0f, float(GG_MS_MAX_OCTAVES));
+    S.OctaveCount = clamp(round(OctaveCount), 1.0f, float(ATMO_MS_MAX_OCTAVES));
     S.OctaveAttenuation = saturate(OctaveAttenuation);
     S.OctaveContribution = saturate(OctaveContribution);
     S.OctaveEccentricity = saturate(OctaveEccentricity);
@@ -352,7 +357,7 @@ GGScatterParams GGAtmo_BuildScatter(
  *  cloudAbsBeta is LightExtinctionFraction of it, which the LIGHT ray uses. Band
  *  colours are applied per sample, and the bake solves the same way from the
  *  same values. */
-CompositeParams GGAtmo_BuildAtmo(
+CompositeParams GG_BuildAtmo(
 	float2 SvPosition,
 	float3 RayDir,
 	float3 CameraPosition,
@@ -487,7 +492,7 @@ void Field_Terminus(
 	float3 Dir,
 	CompositeParams Atmo,
 	FieldParams F,
-	ScatterParams S,
+	FieldMaterialParams S,
 	out float OutMaxDist,
 	out bool OutOpaque)
 {
@@ -553,15 +558,15 @@ float4 Field_Sample(
 }
 
 /** Single-scattering albedo at a sample's material coordinate. */
-float3 Field_Albedo(float Material, ScatterParams S)
+float3 Field_Albedo(float Material, FieldMaterialParams S)
 {
-    return GGAtmo_BandScatter(Material, S);
+    return GG_BandScatter(Material, S);
 }
 
 /** Extinction multiplier the VIEW ray applies, tint times amount. */
-float3 Field_Extinction(float Material, ScatterParams S)
+float3 Field_Extinction(float Material, FieldMaterialParams S)
 {
-    return GGAtmo_BandExtinction(Material, S);
+    return GG_BandExtinction(Material, S);
 }
 
 /** Extinction TINT at a receiver, the light ray's amounts already being in the
@@ -576,14 +581,14 @@ float3 Field_LightTint(
 	SamplerState FlowSampler,
 	float3 LocalPos,
 	FieldParams F,
-	ScatterParams S)
+	FieldMaterialParams S)
 {
-    return GGAtmo_BandTint(GG_BandCoarse(FlowField, FlowSampler, LocalPos, F), S);
+    return GG_BandTint(GG_BandCoarse(FlowField, FlowSampler, LocalPos, F), S);
 }
 
 /** The tint to fall back on where nothing shadowed the receiver, so the branch
  *  above is skipped rather than taken with a null result. */
-float3 Field_NeutralTint(ScatterParams S)
+float3 Field_NeutralTint(FieldMaterialParams S)
 {
     return S.ExtinctionBase.rgb;
 }
@@ -609,7 +614,7 @@ AtmoShadowFrame Field_ShadowFrame(FieldParams F)
  *  AND THE SMALLEST, as the second channel. The caller exponentiates the depth
  *  at the receiving band's tint over the largest, so the ceiling has to be set
  *  against the most transmissive term or saturated deck glows through it. */
-float2 Field_FoldConstant(CompositeParams Atmo, ScatterParams S)
+float2 Field_FoldConstant(CompositeParams Atmo, FieldMaterialParams S)
 {
     return float2(Atmo.cloudParams.cloudAbsBeta.x * S.TintRange.y,
 		S.TintRange.x / max(S.TintRange.y, 1e-8f));

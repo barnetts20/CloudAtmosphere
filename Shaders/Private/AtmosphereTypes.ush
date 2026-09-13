@@ -14,6 +14,12 @@
 #define ATMO_STEP_JITTER 1.0
 #endif
 
+/** Most multiple-scattering octaves a march runs. The per-octave constants are
+ *  packed in float4s, so this cannot exceed 4. */
+#ifndef ATMO_MS_MAX_OCTAVES
+#define ATMO_MS_MAX_OCTAVES 4
+#endif
+
 /** Cloud state. The gas giant path reads only cloudScatBeta, cloudAbsBeta and
  *  cloudAmb; the rest serve the terrestrial density. */
 struct CloudParams

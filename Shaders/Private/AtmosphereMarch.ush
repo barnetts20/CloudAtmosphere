@@ -4,14 +4,21 @@
 #include "/Plugin/CloudAtmosphere/Private/AtmospherePlan.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereSetup.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTransmittance.ush"
+
+// THE FIELD, WHICHEVER IT IS. A model header defines ATMO_FIELD_INCLUDED, so a
+// caller that included one already keeps it and this default is skipped. It is a
+// guard rather than a macro-valued include path, which not every shader
+// preprocessor accepts.
+#ifndef ATMO_FIELD_INCLUDED
 #include "/Plugin/CloudAtmosphere/Private/GasGiantField.ush"
+#endif
 
 // The march: a ray through the atmosphere and whatever cloud field the model
 // supplies, gathering light toward the camera.
 //
-// WHAT IT KNOWS ABOUT THE FIELD IS THE INTERFACE IN GasGiantField.ush and
-// nothing else -- the Field_ functions, the FieldParams and ScatterParams names,
-// and the two texture macros. The plan, the step bounds, the octaves, the air,
+// WHAT IT KNOWS ABOUT THE FIELD IS ONE INTERFACE -- the Field_ functions, the
+// FieldParams and FieldMaterialParams names, and the two texture macros, all
+// supplied by a model header. The plan, the step bounds, the octaves, the air,
 // the shadow read and the alpha collapse do not depend on what fills the shell.
 //
 // WHAT Atmo_Plan DOES. With cloudOuterRadius at the highest the field can reach
@@ -66,8 +73,8 @@
  *  composite rather than in anything this file produced. 5 and 6 read a scalar
  *  instead of a term and between them cover the two shadow paths, which is where
  *  a terminator that looks wrong usually comes from. */
-#ifndef GG_DEBUG_TERM
-#define GG_DEBUG_TERM 0
+#ifndef ATMO_DEBUG_TERM
+#define ATMO_DEBUG_TERM 0
 #endif
 
 
@@ -77,18 +84,18 @@
  *  threshold asserts opacity, so returning the residual that tripped it leaves a
  *  leak carried only by rays that stopped early -- and since it fires on one
  *  channel while the others are still short, that leak is coloured. */
-#ifndef GG_OPAQUE_TRANSMITTANCE
-#define GG_OPAQUE_TRANSMITTANCE 0.001f
+#ifndef ATMO_OPAQUE_TRANSMITTANCE
+#define ATMO_OPAQUE_TRANSMITTANCE 0.001f
 #endif
 
 
 /** Everything the march reads. CompositeParams carries the planet, the air and
  *  the ray; the other two are the model's, named through the interface. */
-struct GGAtmoParams
+struct AtmoMarchParams
 {
     CompositeParams Atmo;
     FieldParams Field;
-    ScatterParams Scatter;
+    FieldMaterialParams Scatter;
     float3x3 WorldToLocal;
 
 	/** Angular width of one march pixel, radians. Times the distance to a
@@ -109,7 +116,7 @@ struct GGAtmoParams
  *
  *  PITFALL: must be called from the shader's main flow, not inside a branch or
  *  loop, since a derivative needs the whole quad to have evaluated its ray. */
-float GGAtmo_PixelAngle(float3 rayDir)
+float Atmo_PixelAngle(float3 rayDir)
 {
     return length(ddx(rayDir));
 }
@@ -119,7 +126,7 @@ float GGAtmo_PixelAngle(float3 rayDir)
  *  row is a local axis in world space, rotated from the unit axis the way
  *  FQuat::RotateVector does it, so the matrix is the one the actor's forward,
  *  right and up vectors would give. Called once per pixel. */
-float3x3 GGAtmo_WorldToLocal(float4 PlanetRotation)
+float3x3 Atmo_WorldToLocal(float4 PlanetRotation)
 {
     const float3 Q = PlanetRotation.xyz;
     const float W = PlanetRotation.w;
@@ -135,7 +142,7 @@ float3x3 GGAtmo_WorldToLocal(float4 PlanetRotation)
 }
 
 /** Camera-relative world position to planet-local, in the field's own frame. */
-float3 GGAtmo_ToLocal(float3 WorldPos, GGAtmoParams P)
+float3 Atmo_ToLocal(float3 WorldPos, AtmoMarchParams P)
 {
     return mul(P.WorldToLocal, WorldPos - P.Atmo.planetParams.planetPos);
 }
@@ -155,13 +162,13 @@ float3 GGAtmo_ToLocal(float3 WorldPos, GGAtmoParams P)
  *  of this ray is gone either way, but light scattered INTO it is what the
  *  octaves stand in for, and the larger coefficient would count that loss
  *  twice. */
-float3 GGAtmo_LightMarch(
+float3 Atmo_LightMarch(
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
 	float3 ShadowCameraLocal,
 	Texture2D TransmittanceTable,
 	SamplerState TransmittanceSampler,
-	GGAtmoParams P,
+	AtmoMarchParams P,
 	out float OutLobeShadow,
 	out float OutCloudOptDepth)
 {
@@ -222,7 +229,7 @@ float3 GGAtmo_LightMarch(
 	// crushed, so no new endpoint appears at either end.
     OutLobeShadow = pow(PlanetShadow, P.Scatter.LobeShadowPower);
 
-    const float3 LocalOrigin = GGAtmo_ToLocal(Start, P);
+    const float3 LocalOrigin = Atmo_ToLocal(Start, P);
     const float3 LocalDir = mul(P.WorldToLocal, LightDir);
 
 	// THE DECK, AS ONE TEXTURE READ. Looked up rather than estimated, and the
@@ -294,14 +301,14 @@ float3 GGAtmo_LightMarch(
  *
  *  Returns float4(accumulated light, transmittance), matching Atmo_MainMarch so
  *  the composite stage is unchanged. */
-float4 GGAtmo_MainMarch(
+float4 Atmo_MainMarch(
 	FIELD_TEXTURE_DECL,
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
 	float3 ShadowCameraLocal,
 	Texture2D TransmittanceTable,
 	SamplerState TransmittanceSampler,
-	GGAtmoParams P)
+	AtmoMarchParams P)
 {
     const float3 RayOrigin = P.Atmo.mainRayParams.cameraPos;
     const float3 RayDir = P.Atmo.mainRayParams.cameraDir;
@@ -349,7 +356,7 @@ float4 GGAtmo_MainMarch(
     const float TopMax =
 		(P.Atmo.planetParams.cloudOuterRadius - P.Field.PlanetRadius) / P.Field.Thickness;
 
-    const float3 LocalOrigin = GGAtmo_ToLocal(RayOrigin, P);
+    const float3 LocalOrigin = Atmo_ToLocal(RayOrigin, P);
     const float3 LocalDir = mul(P.WorldToLocal, RayDir);
 
     const float AtmoThickness = max(
@@ -371,11 +378,11 @@ float4 GGAtmo_MainMarch(
     float3 AccumLight = float3(0.0f, 0.0f, 0.0f);
     float3 Transmittance = float3(1.0f, 1.0f, 1.0f);
 
-#if GG_DEBUG_TERM
+#if ATMO_DEBUG_TERM
 	float3 DebugAccum = float3(0.0f, 0.0f, 0.0f);
 #endif
 
-#if GG_DEBUG_TERM == 5
+#if ATMO_DEBUG_TERM == 5
 	// Only the first deck sample is wanted: the rest of the ray is behind it,
 	// and reading a scalar at every step would average a shadow the camera
 	// never sees through.
@@ -407,7 +414,7 @@ float4 GGAtmo_MainMarch(
 
         UNROLL
 
-        for (int o = 0; o < GG_MS_MAX_OCTAVES; o++)
+        for (int o = 0; o < ATMO_MS_MAX_OCTAVES; o++)
         {
             if (float(o) < P.Scatter.OctaveCount)
             {
@@ -581,7 +588,7 @@ float4 GGAtmo_MainMarch(
 
                 float LobeShadow;
                 float CloudOptDepth;
-                const float3 AirTransmittance = GGAtmo_LightMarch(
+                const float3 AirTransmittance = Atmo_LightMarch(
 					ShadowMap, ShadowSampler, ShadowCameraLocal,
 					TransmittanceTable, TransmittanceSampler, P, LobeShadow, CloudOptDepth);
 
@@ -597,7 +604,7 @@ float4 GGAtmo_MainMarch(
                 if (CloudOptDepth > 0.0f)
                 {
                     LightTint = Field_LightTint(FlowField, FlowSampler,
-						GGAtmo_ToLocal(SamplePos, P), P.Field, P.Scatter);
+						Atmo_ToLocal(SamplePos, P), P.Field, P.Scatter);
                 }
 
                 const float3 LightBeta = P.Atmo.cloudParams.cloudAbsBeta * LightTint;
@@ -636,13 +643,13 @@ float4 GGAtmo_MainMarch(
 				// Light added BEFORE transmittance is updated, so this step's
 				// contribution is weighted by the transmittance in front of it
 				// rather than including its own extinction.
-#if GG_DEBUG_TERM == 1
+#if ATMO_DEBUG_TERM == 1
 				DebugAccum += Transmittance * RayleighScatter
 					* SunTransmittance * P.Atmo.mainRayParams.lightCol * CurrentStep;
-#elif GG_DEBUG_TERM == 2
+#elif ATMO_DEBUG_TERM == 2
 				DebugAccum += Transmittance * MieScatter
 					* SunTransmittance * P.Atmo.mainRayParams.lightCol * CurrentStep;
-#elif GG_DEBUG_TERM == 6
+#elif ATMO_DEBUG_TERM == 6
 				DebugAccum = float3(MieLobe, MieLobe, MieLobe);
 #endif
 
@@ -651,7 +658,7 @@ float4 GGAtmo_MainMarch(
 
                 if (IsCloud)
                 {
-                    const float3 LocalPos = GGAtmo_ToLocal(SamplePos, P);
+                    const float3 LocalPos = Atmo_ToLocal(SamplePos, P);
                     const float3 LocalUp = LocalPos / max(DistFromCentre, 1e-4f);
 
                     const float RadialRate = abs(dot(LocalDir, LocalUp));
@@ -682,7 +689,7 @@ float4 GGAtmo_MainMarch(
 
                         UNROLL
 
-                        for (int o = 0; o < GG_MS_MAX_OCTAVES; o++)
+                        for (int o = 0; o < ATMO_MS_MAX_OCTAVES; o++)
                         {
                             if (OctaveWeight[o] > 0.0f)
                             {
@@ -711,16 +718,16 @@ float4 GGAtmo_MainMarch(
                         const float3 CloudStepLight =
 							CloudLight * Albedo * (1.0f - CloudStepTransmittance);
 
-#if GG_DEBUG_TERM == 3
+#if ATMO_DEBUG_TERM == 3
 						DebugAccum += Transmittance
 							* (P.Atmo.mainRayParams.lightCol * OctaveLight)
 							* Albedo * (1.0f - CloudStepTransmittance);
-#elif GG_DEBUG_TERM == 4
+#elif ATMO_DEBUG_TERM == 4
 						DebugAccum += Transmittance
 							* (P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb.rgb
 								* CloudAmbientFactor)
 							* Albedo * (1.0f - CloudStepTransmittance);
-#elif GG_DEBUG_TERM == 5
+#elif ATMO_DEBUG_TERM == 5
 						if (bDebugFirstCloud)
 						{
 							DebugAccum = SunTransmittance;
@@ -740,7 +747,7 @@ float4 GGAtmo_MainMarch(
             }
 
             if (max(Transmittance.x, max(Transmittance.y, Transmittance.z))
-				< GG_OPAQUE_TRANSMITTANCE)
+				< ATMO_OPAQUE_TRANSMITTANCE)
             {
                 Transmittance = float3(0.0f, 0.0f, 0.0f);
                 break;
@@ -751,7 +758,7 @@ float4 GGAtmo_MainMarch(
         }
 
         if (max(Transmittance.x, max(Transmittance.y, Transmittance.z))
-			< GG_OPAQUE_TRANSMITTANCE)
+			< ATMO_OPAQUE_TRANSMITTANCE)
         {
             Transmittance = float3(0.0f, 0.0f, 0.0f);
             break;
@@ -759,7 +766,7 @@ float4 GGAtmo_MainMarch(
     }
 
 	// A ray that reached the terminus crossed the whole deck to get there, so it
-	// is opaque by construction. Saying so is the same push GG_OPAQUE_TRANSMITTANCE
+	// is opaque by construction. Saying so is the same push ATMO_OPAQUE_TRANSMITTANCE
 	// needs: without it the clip leaks whatever the march had left, and only
 	// clipped rays carry that leak.
     if (bClippedOpaque)
@@ -842,7 +849,7 @@ float4 GGAtmo_MainMarch(
 	// becomes that channel, the same compromise the air's own extinction makes.
     const float MinTrans = min(Transmittance.x, min(Transmittance.y, Transmittance.z));
 
-#if GG_DEBUG_TERM
+#if ATMO_DEBUG_TERM
 	return float4(DebugAccum, MinTrans);
 #else
     return float4(AccumLight, MinTrans);

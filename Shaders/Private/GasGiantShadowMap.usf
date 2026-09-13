@@ -265,7 +265,7 @@ void GGShadow_Fades(float3 LocalPos, GGFieldParams F, out float OutDetail, out f
 }
 
 /** Per-band extinction amount, blended by the signed band. Mirrors
- *  GGAtmo_BandRamp and GGAtmo_BandTint on the a channel instead of rgb: sign
+ *  GG_BandRamp and GG_BandTint on the a channel instead of rgb: sign
  *  picks the family, the ramp runs from Base at zero to that family at full
  *  magnitude, and a plain two-way lerp would blend the families through their
  *  midpoint and lose the boundary between them.

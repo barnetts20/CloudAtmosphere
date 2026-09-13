@@ -120,7 +120,7 @@ float GG_ShadowTau(
 
 /** Band-weighted deck depth above a point on opaque geometry, fold constant
  *  removed. The caller multiplies by cloudAbsBeta and the receiving band's tint,
- *  exactly as it does for GGAtmo_LightMarch's deck depth. See
+ *  exactly as it does for Atmo_LightMarch's deck depth. See
  *  AtmoShadow_SurfaceOptDepth. */
 float GG_ShadowSurfaceOptDepth(
 	Texture2DArray ShadowMap,
