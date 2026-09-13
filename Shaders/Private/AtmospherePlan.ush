@@ -23,6 +23,35 @@
 #define ATMO_MAX_ITER 256
 #endif
 
+/** Geometric step distribution over a class's total chord: the first step and
+ *  the growth per unit of chord already consumed, so step(x) = First + Growth*x.
+ *
+ *  AFFINE IN CONSUMED LENGTH, WHICH IS WHY THERE IS NO STEP INDEX. Step k is
+ *  d0*r^k and the sum to k is x, so r^k = 1 + x(r-1)/d0 and the size collapses
+ *  to d0 + (r-1)x. One accumulator per class then carries the distribution
+ *  across every segment of that class on the ray, continuous over the
+ *  boundaries between them.
+ *
+ *  Spread is the LAST step over the FIRST, which is the authored handle: 1 is
+ *  uniform, and raising it front-loads the budget. */
+void Atmo_ChordSteps(float Length, float Count, float Spread, out float First, out float Growth)
+{
+    const float N = max(Count, 2.0f);
+
+    if (Spread <= 1.0f + 1e-4f)
+    {
+        First = Length / N;
+        Growth = 0.0f;
+
+        return;
+    }
+
+    const float R = pow(Spread, 1.0f / (N - 1.0f));
+
+    First = Length * (R - 1.0f) / max(pow(R, N) - 1.0f, 1e-6f);
+    Growth = R - 1.0f;
+}
+
 /** Builds the segment list for a ray. Returns the count; each segment is
  *  (start, end, stepSize, isCloudBand).
  *
@@ -32,62 +61,20 @@
  *  coarser ones to compensate. Sized from the chord instead, a limb ray through
  *  a thin band gets steps longer by 2*sqrt(2*R*d)/d -- two orders of magnitude
  *  at planetary scale -- at exactly the angle where its path through cloud is
- *  longest and the integral hardest.
+ *  longest and the integral hardest. The step size a segment carries is read
+ *  only when ATMO_CHORD_STEPS is off; with it on the march divides each class's
+ *  own chord and the sizes here are ignored.
  *
  *  The boundary list is built in ORDER and never sorted, which works only
  *  because the guards enforce the ordering as they go: each candidate is
  *  admitted only if it lies beyond the previous one. A sort would be more
  *  obviously correct and would cost more than the guards do.
  *
- *  A CROSSING SHORTER THAN THE STEP TAKEN AT IT IS NOT TAKEN AT ALL. Near
- *  tangency the chord a shell carves shrinks to nothing, and whether it exists
- *  comes down to the sign of a discriminant computed from a difference of two
- *  numbers the size of the planet. That sign flips between neighbouring pixels,
- *  and since the boundaries anchor the step lattice, the whole ray resamples
- *  when it does -- grain at a fixed angle that no step count or field tuning
- *  will move.
- *
- *  AGAINST THE LOCAL STEP, NOT THE BASE ONE. The base step is what a radial ray
- *  gets at the shell; by the time the march reaches a tangential crossing
- *  hundreds of kilometres out, distance growth and obliquity have stretched it
- *  by one to two orders of magnitude. Compared against the base, a crossing the
- *  march will swallow whole in a single sample passes the test easily, and the
- *  guard never fires where it is needed.
- *
- *  DELIBERATELY OVERESTIMATED. The obliquity factor is taken raw rather than
- *  blended against a lateral bound as the march blends it, so near tangency this
- *  suppresses hard. Suppressing a crossing the march would have resolved costs a
- *  boundary and a little classification accuracy; letting one through costs the
- *  grain this exists to remove. */
-
-/** Upper estimate of the step the march will take at a distance along the ray,
- *  from the same growth and obliquity the march applies -- see the step sizing
- *  in AtmosphereMarch.ush, which this has to track. */
-float Atmo_StepAt(
-	float3 origin,
-	float3 dir,
-	float3 centre,
-	float dist,
-	float baseStep,
-	float rayStart,
-	float referenceLength,
-	float growthRate,
-	float pixelAngle,
-	float viewStepPixels)
-{
-    const float3 pos = origin + dir * dist;
-    const float3 up = normalize(pos - centre);
-
-	// Floored well below any angle the march resolves: at true tangency the
-	// obliquity factor is unbounded, and the floor is what keeps the estimate a
-	// number rather than the reason the guard fires everywhere.
-    const float radialRate = max(abs(dot(dir, up)), 1e-3f);
-
-    const float grown =
-		Atmo_AdaptiveStepSize(baseStep, dist, rayStart, referenceLength, growthRate);
-
-    return max(grown / radialRate, dist * pixelAngle * max(viewStepPixels, 0.0f));
-}
+ *  PITFALL: THE OUTER SHELL DECIDES WHETHER THERE IS CLOUD AT ALL. Failing to
+ *  find it returns one coarse segment for the whole ray, so any test added to
+ *  that crossing suppresses the cloud rather than a boundary -- a thin bright
+ *  line at the limb, where a tangential chord is most easily mistaken for a
+ *  degenerate one. */
 int Atmo_Plan(
 	float3 origin,
 	float3 dir,
@@ -95,9 +82,6 @@ int Atmo_Plan(
 	PlanetParams planet,
 	int atmoSteps,
 	int cloudSteps,
-	float stepScaleFactor,
-	float pixelAngle,
-	float viewStepPixels,
 	out float4 segments[ATMO_MAX_SEGMENTS])
 {
     int segmentCount = 0;
@@ -134,22 +118,8 @@ int Atmo_Plan(
     float2 cloudOHit = Atmo_RaySphere(origin, dir, planet.planetPos, planet.cloudOuterRadius);
     float2 cloudIHit = Atmo_RaySphere(origin, dir, planet.planetPos, planet.cloudInnerRadius);
 
-	// The chord each shell actually carves, measured from where the ray enters
-	// it rather than from a crossing behind the camera.
-    const float outerNear = max(cloudOHit.x, 0.0);
-    const float innerNear = max(cloudIHit.x, 0.0);
-
-    const float referenceLength = max(planet.atmoRadius - planet.planetRadius, 1e-4f);
-
-    bool hasCloudOuter = cloudOHit.y > 0.0 && cloudOHit.x < maxDist
-		&& cloudOHit.y - outerNear > Atmo_StepAt(
-			origin, dir, planet.planetPos, outerNear, fineStep, atmoStart,
-			referenceLength, stepScaleFactor, pixelAngle, viewStepPixels);
-
-    bool hasCloudInner = cloudIHit.y > 0.0 && cloudIHit.x < maxDist
-		&& cloudIHit.y - innerNear > Atmo_StepAt(
-			origin, dir, planet.planetPos, innerNear, fineStep, atmoStart,
-			referenceLength, stepScaleFactor, pixelAngle, viewStepPixels);
+    bool hasCloudOuter = cloudOHit.y > 0.0 && cloudOHit.x < maxDist;
+    bool hasCloudInner = cloudIHit.y > 0.0 && cloudIHit.x < maxDist;
 
 	// No cloud band on this ray: one segment, whole atmosphere, coarse.
     if (!hasCloudOuter)

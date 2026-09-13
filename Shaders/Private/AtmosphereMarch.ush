@@ -103,6 +103,31 @@
  *  threshold asserts opacity, so returning the residual that tripped it leaves a
  *  leak carried only by rays that stopped early -- and since it fires on one
  *  channel while the others are still short, that leak is coloured. */
+/** PROTOTYPE. Replaces the planner's radial budget, and everything downstream
+ *  that compensates for it, with a geometric division of each class's own chord.
+ *  The step COUNTS then mean what they say -- cloudSteps samples across the
+ *  cloud the ray actually crosses, atmoSteps across the air -- instead of naming
+ *  a radial budget that obliquity, distance growth and the footprint floor each
+ *  stretch by their own factor.
+ *
+ *  POOLED PER CLASS, NOT PER SEGMENT, so a ray that crosses the band twice costs
+ *  the same as one that crosses it once, and the distribution does not restart
+ *  at a boundary. ATMO_MAX_ITER stays a guard and should stop being reachable.
+ *
+ *  APPROXIMATE AT SEGMENT ENDS, the prototype's one cheat: the last step of a
+ *  segment is not trimmed to the boundary, so the realised count runs a little
+ *  over. Counts may want raising against the current lattice regardless -- a
+ *  grazing ray was being handed far more samples than cloudSteps ever named. */
+#ifndef ATMO_CHORD_STEPS
+#define ATMO_CHORD_STEPS 0
+#endif
+
+/** Last step over first, within a class. 1 is uniform; raising it front-loads
+ *  the budget toward the camera. */
+#ifndef ATMO_CHORD_SPREAD
+#define ATMO_CHORD_SPREAD 8.0f
+#endif
+
 #ifndef ATMO_OPAQUE_TRANSMITTANCE
 #define ATMO_OPAQUE_TRANSMITTANCE 0.001f
 #endif
@@ -362,7 +387,6 @@ float4 Atmo_MainMarch(
     int SegmentCount = Atmo_Plan(
 		RayOrigin, RayDir, MaxDist, P.Atmo.planetParams,
 		P.Atmo.mainRayParams.atmoSteps, P.Atmo.mainRayParams.cloudSteps,
-		P.Atmo.mainRayParams.stepScaleFactor, P.PixelAngle, P.ViewStepPixels,
 		Segments);
 
     if (SegmentCount == 0)
@@ -457,6 +481,38 @@ float4 Atmo_MainMarch(
     }
 
 
+#if ATMO_CHORD_STEPS
+	// The chord each class actually holds, summed before anything is marched:
+	// the distribution has to know the whole length to place its first step.
+    float CloudChord = 0.0f;
+    float AirChord = 0.0f;
+
+    for (int c = 0; c < SegmentCount; c++)
+    {
+        const float ChordLen = max(Segments[c].y - Segments[c].x, 0.0f);
+
+        if (Field_SegmentIsCloud(RayOrigin, RayDir, Segments[c], P.Atmo.planetParams))
+        {
+            CloudChord += ChordLen;
+        }
+        else
+        {
+            AirChord += ChordLen;
+        }
+    }
+
+    float CloudFirst, CloudGrow, AirFirst, AirGrow;
+
+    Atmo_ChordSteps(CloudChord, float(P.Atmo.mainRayParams.cloudSteps),
+		ATMO_CHORD_SPREAD, CloudFirst, CloudGrow);
+
+    Atmo_ChordSteps(AirChord, float(P.Atmo.mainRayParams.atmoSteps),
+		ATMO_CHORD_SPREAD, AirFirst, AirGrow);
+
+    float CloudUsed = 0.0f;
+    float AirUsed = 0.0f;
+#endif
+
     int StepIndex = 0;
 
     for (int s = 0; s < SegmentCount; s++)
@@ -474,6 +530,25 @@ float4 Atmo_MainMarch(
         while (Pos < SegEnd && Iter < ATMO_MAX_ITER)
         {
             Iter++;
+#if ATMO_CHORD_STEPS
+			// AFFINE IN CONSUMED CHORD: first step plus growth times how much of
+			// this class the ray has already spent. Nothing else sizes the step --
+			// no obliquity correction, no footprint floor, no feature cap, because
+			// the budget is already a length along the ray rather than a radial
+			// depth being spent as one.
+            float CurrentStep = max(IsCloud
+				? CloudFirst + CloudGrow * CloudUsed
+				: AirFirst + AirGrow * AirUsed, 1e-4f);
+
+            if (IsCloud)
+            {
+                CloudUsed += CurrentStep;
+            }
+            else
+            {
+                AirUsed += CurrentStep;
+            }
+#else
 
 			// SCREEN-FOOTPRINT BOUND. The plan sizes steps against the DECK and
 			// knows nothing about the camera, so the march resolves the same detail
@@ -543,6 +618,7 @@ float4 Atmo_MainMarch(
             }
 
             CurrentStep = max(CurrentStep, min(FootprintStep, FeatureCap));
+#endif
 
             CurrentStep = min(CurrentStep, SegEnd - Pos);
 
