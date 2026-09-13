@@ -23,6 +23,21 @@ namespace GasGiantShadow
 	 *  bake without moving the march that reads it. Edit the pair together. */
 	static constexpr int32 CascadeCount = 3;
 
+	/** Slices the target carries when geometry occlusion is on: the deck's
+	 *  crossing depths, then one occluder term per cascade.
+	 *
+	 *  THE SLICE COUNT IS THE FEATURE SWITCH. Both the bake and the reader gate
+	 *  on the target's own depth, so a target sized to CascadeCount skips the
+	 *  occluder write and the reader's blur taps -- which triple its fetch count
+	 *  and run once per light sample -- with nothing else to keep in step. */
+	static constexpr int32 SliceCount = CascadeCount * 2;
+
+	/** Slices a target needs for the current setting. */
+	inline int32 SlicesFor(bool bOccluders)
+	{
+		return bOccluders ? SliceCount : CascadeCount;
+	}
+
 	/** How far a depth capture reaches past the disc, as a multiple of the
 	 *  planet's outer shell. ONLY A LOWER BOUND: the capture has to be at least
 	 *  as wide as the shader's GG_SHADOW_EXTENT_MARGIN slice, and wider costs
@@ -209,6 +224,24 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 	 *  with no shadows. */
 	TStaticArray<FGasGiantOccluderFrame, GasGiantShadow::CascadeCount> Occluders;
 
+	/** Footprint radius in capture texels. Under about 0.5 the taps stay inside
+	 *  one texel and the edge is as hard as the lattice allows; above that it is
+	 *  a penumbra width. */
+	float OccluderSoftness = 0.5f;
+
+	/** Coverage below this contributes nothing, pulling the shadow's edge inward
+	 *  against the outward spread of the footprint and the two filters after
+	 *  it. */
+	float OccluderInset = 0.5f;
+
+	/** Optical depth a fully covered texel adds, on the fastest-channel scale
+	 *  the map's thresholds already use. */
+	float OccluderStrength = 10.0f;
+
+	/** How far behind a blocker that decays to nothing, in atmosphere
+	 *  thicknesses. Zero never decays. */
+	float OccluderFalloff = 0.0f;
+
 	/** Whether the bake has everything it needs. Checked before the render
 	 *  command is enqueued, since a params struct is cheaper to reject on the
 	 *  game thread than a dispatch is to unwind on the render thread. */
@@ -308,6 +341,11 @@ SHADER_PARAMETER_TEXTURE(Texture2D, OccluderDepth1)
 SHADER_PARAMETER_TEXTURE(Texture2D, OccluderDepth2)
 
 SHADER_PARAMETER_SAMPLER(SamplerState, OccluderDepthSampler)
+
+SHADER_PARAMETER(float, OccluderSoftness)
+SHADER_PARAMETER(float, OccluderInset)
+SHADER_PARAMETER(float, OccluderStrength)
+SHADER_PARAMETER(float, OccluderFalloff)
 
 END_SHADER_PARAMETER_STRUCT()
 

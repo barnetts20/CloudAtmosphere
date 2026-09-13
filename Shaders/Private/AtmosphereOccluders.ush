@@ -18,24 +18,33 @@
  *  and world-unit clamps as an ordinary number. */
 #define ATMO_OCC_NO_HIT 3.402823e+38f
 
-/** Lateral taps per ray, across the capture's own texel.
- *
- *  CONSERVATIVE, NOT SMOOTH. The minimum is taken, dilating an occluder by at
- *  most 3/8 of a capture texel so a silhouette clipping the texel still shadows.
- *  The format stores WHERE a threshold is crossed, not how much of a texel is
- *  covered, so there is no coverage to average. */
+/** Lateral taps per ray. Sets how many steps the soft edge has: the boundary
+ *  texels report a fraction of this, and the reader's quintic blend smooths
+ *  between them. Eight is enough for a footprint of a texel or two; a wider one
+ *  bands without more. */
 #ifndef ATMO_OCC_SUBSAMPLES
-#define ATMO_OCC_SUBSAMPLES 4
+#define ATMO_OCC_SUBSAMPLES 8
 #endif
 
-/** Rotated grid, in texels: one tap per row and per column, which resolves an
- *  edge at any orientation better than an axis-aligned quad. */
-static const float2 AtmoOcc_SubOffsets[4] =
+/** Unit-disc offsets, scaled to texels by the caller's footprint radius. A
+ *  SPIRAL RATHER THAN A GRID because the footprint is a disc at any radius past
+ *  one texel, where a grid's rows print as bands along the edge.
+ *
+ *  COVERAGE, NOT A MINIMUM. The fraction of taps that hit is how far the node
+ *  clamp is applied, so a silhouette crossing the footprint gives a graded edge.
+ *  Taking the minimum instead would dilate the occluder and leave the edge as
+ *  hard as it was, only bigger. The nearest hit still sets the DEPTH, which
+ *  keeps the umbra where the blocker is. */
+static const float2 AtmoOcc_SubOffsets[8] =
 {
-    float2(-0.375f, -0.125f),
-    float2(-0.125f, 0.375f),
-    float2(0.125f, -0.375f),
-    float2(0.375f, 0.125f),
+    float2(0.2500f, 0.0000f),
+    float2(-0.3193f, 0.2925f),
+    float2(0.0490f, -0.5568f),
+    float2(0.4026f, 0.5248f),
+    float2(-0.7386f, -0.1307f),
+    float2(0.6993f, -0.4455f),
+    float2(-0.2334f, 0.8708f),
+    float2(-0.4458f, -0.8595f),
 };
 
 /** One capture's placement, planet-local, in world units.
@@ -112,24 +121,107 @@ float AtmoOcc_RayDepth(float Z, AtmoOccluderFrame Frame, float HalfChord)
     return Z - Frame.PlaneDist + HalfChord;
 }
 
-/** Nearest occluder on one ray from one level, in the bake's ray parameter.
- *  Returns whether the level COVERS the ray, separately from whether it found
- *  anything, so a caller walking finest to coarsest stops at the first level
- *  that owns the point.
+// -- Encoding -------------------------------------------------------------
+//
+// AN OCCLUDER IS ITS OWN TERM, NOT A CHANGE TO THE DECK'S. Clamping the deck's
+// crossing depths can only say "every remaining threshold is crossed here",
+// which is all-or-nothing: once the nodes sit above the receiver the
+// reconstruction saturates, so a half-covered texel reads exactly like a fully
+// covered one and there is no soft edge to be had. Optical depth from geometry
+// is therefore stored separately and ADDED at read time, where coverage and
+// distance are both linear and both do what they look like they do.
+//
+// THREE TERMS, EVALUATED AS A LINE. Depth of the blocker, optical depth at the
+// blocker, and the rate that decays behind it. Everything authored folds in
+// here, so the reader takes no parameters and the material needs none.
+
+/** Pulls the shadow's edge inward by discarding coverage below Inset and
+ *  rescaling what is left.
  *
- *  PITFALL: stopping there means an occluder culled from that level -- by its
- *  view distance cap or its cadence -- is not recovered from a coarser level
- *  that did capture it. A min across all levels instead lets a coarse texel's
- *  half-texel bleed override the fine level wherever the two overlap. */
+ *  EVERY STAGE SPREADS OUTWARD. The footprint is centred on the texel, so half
+ *  of it reaches past the true silhouette; the texel is then reconstructed
+ *  across its neighbours, and the occluder term is filtered again on the way
+ *  out. Together they put a rim of shadow outside the blocker, which shows as a
+ *  halo when the view looks down the light and the shadow is otherwise hidden
+ *  behind the object casting it.
+ *
+ *  THE TRADE IS DETACHMENT. Inset far enough and the shadow separates from its
+ *  object where they meet -- the same bargain a depth bias makes against shadow
+ *  acne. Half the footprint is about where the two are balanced.
+ *
+ *  PITFALL: coverage is quantised to 1/ATMO_OCC_SUBSAMPLES, and the inset
+ *  rescales what remains, so a high inset leaves few steps across the penumbra.
+ *  Wanting both a deep inset and a smooth edge means more taps. */
+float AtmoOcc_InsetCoverage(float Coverage, float Inset)
+{
+    return saturate((Coverage - Inset) / max(1.0f - Inset, 1e-3f));
+}
+
+/** Packs an occluder for one texel ray. Depth and Falloff are in the same units
+ *  the reader's Depth arrives in. Coverage is the fraction of the footprint the
+ *  blocker fills; zero writes a texel that contributes nothing, which is also
+ *  what a cleared target reads as. Falloff of zero never decays. */
+float4 AtmoOcc_Encode(float Depth, float Coverage, float Inset, float Strength, float Falloff)
+{
+    const float Covered = AtmoOcc_InsetCoverage(Coverage, Inset);
+
+    if (Covered <= 0.0f)
+    {
+        return (float4) 0.0f;
+    }
+
+    const float Peak = Covered * Strength;
+
+    return float4(Depth, Peak, (Falloff > 0.0f) ? (Peak / Falloff) : 0.0f, 0.0f);
+}
+
+/** Optical depth a stored occluder adds at a given depth. Zero in front of the
+ *  blocker, its peak at the blocker, decaying linearly behind it.
+ *
+ *  THE DECAY IS A PATH LENGTH THROUGH THE MEDIUM: distance past the blocker is
+ *  the light path between it and the receiver, so this reads as scattered light
+ *  filling the shadow back in -- darkest directly under an object and gone once
+ *  the deck is far enough below.
+ *
+ *  LINEAR IN ALL THREE TERMS, so unlike the deck's nodes this may be
+ *  interpolated before it is evaluated, and one bilinear tap serves where the
+ *  nodes need four. */
+float AtmoOcc_Tau(float4 Encoded, float Depth)
+{
+    const float Past = Depth - Encoded.x;
+
+    return (Past >= 0.0f) ? max(Encoded.y - Encoded.z * Past, 0.0f) : 0.0f;
+}
+
+/** Nearest occluder on one ray from one level, in the bake's ray parameter, and
+ *  what fraction of the footprint it covers. Returns whether the level COVERS
+ *  the ray, separately from whether it found anything, so a caller walking
+ *  finest to coarsest stops at the first level that owns the point.
+ *
+ *  FootprintWorld is the radius of the disc sampled, IN WORLD UNITS, not texels.
+ *  A texel spans an order of magnitude more ground on the coarse cascade than
+ *  the fine one, so a footprint in texels erodes an order of magnitude more
+ *  there and each cascade ends up with a differently sized shadow -- a step
+ *  outward at every boundary the walk crosses. Floored at half a texel so the
+ *  taps still spread when the radius falls below what the level can resolve.
+ *
+ *  PITFALL: stopping at the first covering level means an occluder culled from
+ *  that level -- by its view distance cap or its cadence -- is not recovered
+ *  from a coarser level that did capture it. A min across all levels instead
+ *  lets a coarse texel's half-texel bleed override the fine level wherever the
+ *  two overlap. */
 bool AtmoOcc_QueryLevel(
 	Texture2D DepthTexture,
 	SamplerState DepthSampler,
 	AtmoOccluderFrame Frame,
 	float3 LocalPos,
 	float HalfChord,
-	out float OutRayDepth)
+	float FootprintWorld,
+	out float OutRayDepth,
+	out float OutCoverage)
 {
     OutRayDepth = ATMO_OCC_NO_HIT;
+    OutCoverage = 0.0f;
 
     float2 UV;
 
@@ -145,15 +237,17 @@ bool AtmoOcc_QueryLevel(
 
     const float2 TexelUV = 1.0f / float2(max(Width, 1u), max(Height, 1u));
 
+    const float2 Radius = max(
+		FootprintWorld / max(2.0f * Frame.Extent, 1e-4f), 0.5f * TexelUV);
+
     float Nearest = ATMO_OCC_NO_HIT;
+    float Hits = 0.0f;
 
     UNROLL
 
     for (int Sub = 0; Sub < ATMO_OCC_SUBSAMPLES; Sub++)
     {
-        const float2 Offset = (ATMO_OCC_SUBSAMPLES > 1)
-			? AtmoOcc_SubOffsets[Sub] * TexelUV
-			: float2(0.0f, 0.0f);
+        const float2 Offset = AtmoOcc_SubOffsets[Sub] * Radius;
 
         const float Z = DepthTexture.SampleLevel(DepthSampler, UV + Offset, 0.0f).r;
 
@@ -162,13 +256,15 @@ bool AtmoOcc_QueryLevel(
 		// At or past the far clip is background.
         if (Z > 0.0f && Z < Frame.Far)
         {
+            Hits += 1.0f;
             Nearest = min(Nearest, Z);
         }
     }
 
-    if (Nearest < ATMO_OCC_NO_HIT)
+    if (Hits > 0.0f)
     {
         OutRayDepth = AtmoOcc_RayDepth(Nearest, Frame, HalfChord);
+        OutCoverage = Hits / float(ATMO_OCC_SUBSAMPLES);
     }
 
     return true;

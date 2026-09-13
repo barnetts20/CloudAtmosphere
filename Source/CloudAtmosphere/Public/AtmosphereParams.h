@@ -192,6 +192,64 @@ struct CLOUDATMOSPHERE_API FGasGiantOccluderShadowParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "1.1"))
 	float CaptureDistanceScale = 4.0f;
 
+	/** Radius of the footprint each ray samples the capture over, in ATMOSPHERE
+	 *  THICKNESSES. This is what EdgeInset erodes against, and it must match
+	 *  GG_SHADOW_OCCLUDER_BLUR in GasGiantShadow.ush, which pushes the edge back
+	 *  out by the same distance on the read side. Eroding and blurring by one
+	 *  width leaves the edge where it was and only softens it.
+	 *
+	 *  A DISTANCE, NOT TEXELS. A texel spans an order of magnitude more ground
+	 *  on the disc slice than on the detail slice, so a width in texels gives
+	 *  each cascade a differently sized shadow and the walk between them steps
+	 *  outward at every boundary.
+	 *
+	 *  PITFALL: the lattice is still the floor. Asking for less than a cascade
+	 *  can resolve leaves that cascade at its own texel width, so the coarse
+	 *  slices stay slightly wider however this is set. Closing that gap means
+	 *  bringing the fade radii, which size the cascades, closer together. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0", ClampMax = "0.5"))
+	float EdgeWidth = 0.002f;
+
+	/** How much of the footprint must be covered before a texel shadows at all,
+	 *  which pulls the edge inward.
+	 *
+	 *  EVERY STAGE SPREADS OUTWARD: the footprint is centred on the texel, the
+	 *  texel is reconstructed across its neighbours, and the occluder term is
+	 *  filtered again on the way out. Left uncorrected they leave a rim of
+	 *  shadow outside the object, which reads as a halo when the view looks down
+	 *  the light and the rest of the shadow hides behind the object.
+	 *
+	 *  HALF IS NEUTRAL, NOT INWARD. The footprint is centred on the texel, so
+	 *  requiring half of it reproduces the true silhouette; below that the edge
+	 *  dilates. Inward bias starts above 0.5 and is total at 1, where only a
+	 *  fully covered texel shadows.
+	 *
+	 *  The trade is detachment where object meets surface -- the same bargain a
+	 *  depth bias makes against shadow acne. Raise it until the halo goes, not
+	 *  further. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0", ClampMax = "0.95"))
+	float EdgeInset = 0.85f;
+
+	/** Optical depth a fully covered texel adds, on the same scale the deck's
+	 *  own thresholds use: 1 is 63% extinction, 3 is 95%, 5 is what saturated
+	 *  cloud reads as. Higher goes darker than any cloud can, which is what
+	 *  makes a solid object read solid rather than merely thick. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0", ClampMax = "50.0"))
+	float Strength = 10.0f;
+
+	/** How far behind a blocker its shadow decays to nothing, in atmosphere
+	 *  thicknesses. Zero never decays.
+	 *
+	 *  The distance from blocker to receiver IS the light path between them, so
+	 *  this reads as scattered light filling the shadow back in: darkest
+	 *  directly under an object, gone once the deck is far enough below.
+	 *
+	 *  PITFALL: it grades along the LIGHT RAY, not from the object in space. At
+	 *  the terminator a shadow stretched toward the night side fades along its
+	 *  length while the object has not moved. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0"))
+	float FalloffDistance = 0.0f;
+
 	/** View distance cap per capture, as a fraction of its FAR PLANE rather than
 	 *  of its width: the plane sits well off the planet, so a cap measured
 	 *  against a narrow level's own extent would cull the deck itself. 1 culls

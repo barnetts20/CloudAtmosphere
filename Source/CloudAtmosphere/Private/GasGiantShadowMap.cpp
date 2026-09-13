@@ -167,6 +167,11 @@ namespace GasGiantShadow
 			P->OccluderPlane[Level] = Frame.PackPlane();
 		}
 
+		P->OccluderSoftness = Params.OccluderSoftness;
+		P->OccluderInset = Params.OccluderInset;
+		P->OccluderStrength = Params.OccluderStrength;
+		P->OccluderFalloff = Params.OccluderFalloff;
+
 		P->OccluderDepth0 = DepthOrBlack(Params.Occluders[0]);
 		P->OccluderDepth1 = DepthOrBlack(Params.Occluders[1]);
 		P->OccluderDepth2 = DepthOrBlack(Params.Occluders[2]);

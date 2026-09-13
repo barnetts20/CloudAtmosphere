@@ -893,10 +893,18 @@ bool APlanetAtmosphereActor::PrepareGasGiantShadowTarget()
     // bCanCreateUAV must be set BEFORE the resource is created, or the texture
     // comes back without UAV support and every dispatch that writes it silently
     // does nothing -- a black target with no warning anywhere.
+    // ONE BAND, OR TWO WITH GEOMETRY OCCLUSION. The second band carries the
+    // occluder term the march adds to the deck's optical depth, and the bake and
+    // the reader both gate on this count -- so turning the feature off here is
+    // what stops them paying for it, and the allocation is the only place the
+    // decision lives.
+    const int32 DesiredSlices =
+        GasGiantShadow::SlicesFor(GasGiantOccluderShadows.bEnabled);
+
     const bool bMismatch =
         Target->SizeX != Edge ||
         Target->SizeY != Edge ||
-        Target->Slices != GasGiantShadow::CascadeCount ||
+        Target->Slices != DesiredSlices ||
         Target->OverrideFormat != PF_FloatRGBA ||
         !Target->bCanCreateUAV;
 
@@ -910,11 +918,11 @@ bool APlanetAtmosphereActor::PrepareGasGiantShadowTarget()
         // and reach the no-deck sentinel at 1000. A float format has no sRGB
         // variant so nothing clamps them here -- but the material's Texture
         // Object must still be set to Linear Color, which no flag can enforce.
-        Target->Init(Edge, Edge, GasGiantShadow::CascadeCount, PF_FloatRGBA);
+        Target->Init(Edge, Edge, DesiredSlices, PF_FloatRGBA);
         Target->UpdateResourceImmediate(true);
 
         UE_LOG(LogTemp, Log, TEXT("%s: Gas Giant Shadow Target set to %dx%d x %d RGBA16F."),
-            *GetName(), Edge, Edge, GasGiantShadow::CascadeCount);
+            *GetName(), Edge, Edge, DesiredSlices);
     }
 
     bWarnedShadowTarget = false;
@@ -1679,6 +1687,11 @@ void APlanetAtmosphereActor::RequestGasGiantShadowBake(
     // from the subsystem's tick afterwards, so a capture taken this frame is
     // already in flight when the bake reads it. Nothing depends on that: the
     // frame travels with the image, so a stale capture is placed correctly.
+    Params.OccluderSoftness = GasGiantOccluderShadows.EdgeWidth;
+    Params.OccluderInset = GasGiantOccluderShadows.EdgeInset;
+    Params.OccluderStrength = GasGiantOccluderShadows.Strength;
+    Params.OccluderFalloff = GasGiantOccluderShadows.FalloffDistance;
+
     UpdateGasGiantOccluderCaptures(
         PlanetRadius, PlanetCenter, Params.LightDir, Params.CameraLocal, Params);
 

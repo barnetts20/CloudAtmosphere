@@ -1,0 +1,491 @@
+#pragma once
+
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereOccluders.ush"
+
+// The shadow map: its encoding, and the two sides that share it.
+//
+// MODEL-INDEPENDENT. Everything the map's geometry needs travels in
+// AtmoShadowFrame -- a shell radius, a depth unit and the cascade half-widths --
+// so a model contributes three numbers and inherits the format, the
+// reconstruction, the cascade walk and the occluder composite unchanged. The
+// alternative, a reader per model, is four copies of a nonlinear reconstruction
+// drifting apart from the day they are written.
+//
+// INCLUDED BY BOTH THE BAKE AND THE MARCH. Basis, extent and the depth a sample
+// sits at are derived here from the frame, which both sides already have; a
+// second derivation can disagree, and a map sampled in a basis it was not
+// written in fails silently, the shadows staying smooth and plausible in the
+// wrong place.
+//
+// THE ENCODING IS INVERTED -- depths at which fixed optical depths are crossed,
+// not optical depth at fixed depths. That places the nodes by transmittance, so
+// they concentrate where the medium is dense: the top of the density ramp, where
+// view transmittance is spent and where a slab fit anchored at the shell entry
+// is worst. A deck top with near-zero density breaks the classic form.
+//
+// TWO BANDS OF SLICES. The first ATMO_SHADOW_CASCADES hold the medium's crossing
+// depths; the second hold geometry occlusion, one texel-aligned slice per
+// cascade, added to the optical depth at read time. Kept apart because the
+// crossing encoding cannot express partial occlusion -- see
+// AtmosphereOccluders.ush -- and because a blocker is not a medium.
+//
+// DEPTHS ARE OFFSETS FROM THE ANALYTIC SHELL ENTRY, in thicknesses, so fp16
+// resolves a fraction of a gradient rather than of a planet radius, and the
+// entry is recomputed in full precision on each side. Optical depth is on the
+// FASTEST ABSORPTION CHANNEL, the largest extinction tint folded in by the bake,
+// so the thresholds mean transmittance directly.
+
+/** The four stored crossings, spaced by what transmittance does rather than
+ *  evenly: 0.25 is a 22% loss, 1.0 is 63%, 3.0 is 95%. The second is low on
+ *  purpose, resolving the soft top of the ramp -- what the eye reads and what a
+ *  linear fit gets worst. THE FIRST IS THE SILHOUETTE, a threshold rather than a
+ *  geometric entry: a cone-traced deck top is a point sample of one column, so
+ *  it cannot be averaged over the texel and snaps by a whole one as the medium
+ *  advects past the lattice. As a crossing of the same subsampled accumulation
+ *  as the others, it moves continuously. */
+#ifndef ATMO_SHADOW_TAU_ENTRY
+#define ATMO_SHADOW_TAU_ENTRY 0.02f
+#endif
+
+#ifndef ATMO_SHADOW_TAU0
+#define ATMO_SHADOW_TAU0 0.25f
+#endif
+
+#ifndef ATMO_SHADOW_TAU1
+#define ATMO_SHADOW_TAU1 1.0f
+#endif
+
+#ifndef ATMO_SHADOW_TAU2
+#define ATMO_SHADOW_TAU2 3.0f
+#endif
+
+/** Optical depth at which the tail extrapolation stops growing, on the most
+ *  transmissive term the caller will exponentiate. Under a percent at 5. A
+ *  CEILING, NOT A CUTOFF: past the last node the reconstruction continues at the
+ *  final segment's rate, unbounded on a dense column. Never use it to snap
+ *  transmittance to zero -- a hard threshold on a texel-interpolated field draws
+ *  an axis-aligned staircase.
+ *
+ *  PITFALL: the reader sees the map's depth scaled down, by each slower
+ *  channel's share of the fastest and by any multiple-scattering attenuation, so
+ *  a ceiling on the fastest channel leaves those glowing through saturated
+ *  medium. The caller divides this by the smallest such scale. */
+#ifndef ATMO_SHADOW_SATURATION
+#define ATMO_SHADOW_SATURATION 5.0f
+#endif
+
+/** Floor on that scale. A channel or octave the medium barely attenuates cannot
+ *  be made opaque by any finite ceiling; this caps the ceiling instead. */
+#ifndef ATMO_SHADOW_MIN_TAU_SCALE
+#define ATMO_SHADOW_MIN_TAU_SCALE 1e-3f
+#endif
+
+/** Written where a threshold is never reached, and where the ray misses the
+ *  shell. Far past any real chord, so reconstruction reads zero rather than
+ *  needing a validity test. */
+#ifndef ATMO_SHADOW_NO_DECK
+#define ATMO_SHADOW_NO_DECK 1000.0f
+#endif
+
+/** How far the map reaches past the cull radius. The limb is where the encoded
+ *  depths vary fastest, and a map cut exactly at the shell puts that variation
+ *  against the clamp edge with nothing outside to blend toward. Applied by
+ *  whichever model builds the frame, not here. */
+#ifndef ATMO_SHADOW_EXTENT_MARGIN
+#define ATMO_SHADOW_EXTENT_MARGIN 1.02f
+#endif
+
+/** Lookup offset, in texels, applied per view sample. 1 is a full texel, larger
+ *  softens the shadow, 0 disables. The opposite case to the bake, where a
+ *  stochastic offset would print as fixed noise: here it is per pixel and per
+ *  sample, so one ray's samples average the texel neighbourhood. It earns its
+ *  place in the tangent case, where a view ray parallel to the light projects
+ *  every sample into nearly one texel and that texel's error reaches the screen
+ *  as a block. */
+#ifndef ATMO_SHADOW_LOOKUP_JITTER
+#define ATMO_SHADOW_LOOKUP_JITTER 1.0f
+#endif
+
+/** Cascade count. Level 0 covers the whole disc; each inner level is sized by
+ *  the model to match the radius a layer is drawn to, so shadow resolution steps
+ *  up where the field gains a layer. Adding one costs a slice and a case in
+ *  whatever builds the frame. */
+#ifndef ATMO_SHADOW_CASCADES
+#define ATMO_SHADOW_CASCADES 3
+#endif
+
+/** Where a cascade starts handing over to the one outside it, as a fraction of
+ *  its half-width. The outer band reconstructs both and blends.
+ *
+ *  THE SEAM IS NOT THE RESOLUTION CHANGE. Subsample offsets scale with texel
+ *  size, so the near map band-limits at a finer scale and reads slightly denser
+ *  over the same ground. A narrow band turns that into a ring. */
+#ifndef ATMO_SHADOW_NEAR_BLEND
+#define ATMO_SHADOW_NEAR_BLEND 0.75f
+#endif
+
+/** Slice a cascade's occluder term lives in, and the slice count that means a
+ *  target has them at all.
+ *
+ *  THE TARGET'S OWN DEPTH IS THE SWITCH. A target sized to one band has no
+ *  occluders, and reading one anyway clamps to the last medium slice and turns
+ *  crossing depths into a planet-wide shadow of whatever the medium held. Gating
+ *  on the slice count rather than on a define or a parameter means the condition
+ *  that makes the read safe is the same condition that enables it, and there is
+ *  no second place to keep in step. */
+#define AtmoShadow_OccluderSlice(Level) (float(ATMO_SHADOW_CASCADES) + float(Level))
+
+#define ATMO_SHADOW_SLICES_WITH_OCCLUDERS (2 * ATMO_SHADOW_CASCADES)
+
+/** Occluder blur radius IN THICKNESSES, and how many taps it is spent over.
+ *
+ *  NOT IN TEXELS. A texel spans an order of magnitude more ground on the disc
+ *  slice than on the detail slice, so a width in texels makes every cascade
+ *  produce a differently sized shadow, and the walk crossfading between them
+ *  steps outward at each boundary. In world units they agree, down to the point
+ *  where a level's own lattice is coarser than the width asked for.
+ *
+ *  PAIR IT WITH THE BAKE'S FOOTPRINT, the same quantity in the same units on the
+ *  capture side: the bake erodes by it and this pushes back out by it, so the
+ *  two soften the edge without moving it. Blurring an uneroded edge grows a halo.
+ *
+ *  FILTERED HERE, NOT IN THE BAKE. Coverage in the bake is a fraction of its tap
+ *  count, so widening it there quantises the edge into as many steps as it has
+ *  taps. These taps are bilinear and land anywhere, so the result is continuous.
+ *
+ *  Taps cost a fetch each, per cascade, per light sample. At most 8, since that
+ *  is what the offset table holds. */
+#ifndef ATMO_SHADOW_OCCLUDER_BLUR
+#define ATMO_SHADOW_OCCLUDER_BLUR 0.002f
+#endif
+
+#ifndef ATMO_SHADOW_OCCLUDER_TAPS
+#define ATMO_SHADOW_OCCLUDER_TAPS 8
+#endif
+
+/** Everything about a map's geometry that is not in the map.
+ *
+ *  THE MODEL'S ONLY CONTRIBUTION. A shell radius, the depth unit every stored
+ *  depth is expressed in, and the cascade half-widths. Both sides build one from
+ *  their own field and nothing below this line knows which model it came from. */
+struct AtmoShadowFrame
+{
+	/** Radius of the shell the map covers, BEFORE the extent margin. The chord
+	 *  the depth axis is anchored to, so both sides must use the same one. */
+    float CullRadius;
+
+	/** Depth unit. Stored and reconstructed depths are multiples of it. */
+    float Thickness;
+
+	/** Half-width per cascade, outermost first. Must be non-increasing: a fine
+	 *  level wider than a coarse one puts the coarse slice inside it, which
+	 *  reads as the fine slice not working. Zero collapses a level and the walk
+	 *  skips it. */
+    float Extents[ATMO_SHADOW_CASCADES];
+};
+
+/** The smallest and largest channel across the bands' extinction tints.
+ *
+ *  THE FOLD CONSTANT: the map stores optical depth scaled by the largest channel
+ *  any band can have, so its thresholds mean transmittance on the fastest
+ *  channel anywhere, and the reader divides it back out and applies the
+ *  receiving band's tint. The smallest channel sets the saturation ceiling. */
+float2 AtmoShadow_ExtinctionTintRange(float3 TintNegative, float3 TintPositive, float3 TintBase)
+{
+    const float3 Lo = min(TintNegative, min(TintPositive, TintBase));
+    const float3 Hi = max(TintNegative, max(TintPositive, TintBase));
+
+    return float2(min(Lo.x, min(Lo.y, Lo.z)), max(Hi.x, max(Hi.y, Hi.z)));
+}
+
+/** The map plane's axes for a planet-local light direction, orthonormal and
+ *  perpendicular to it. L must already be normalized.
+ *
+ *  ANCHORED TO THE SPIN AXIS rather than an arbitrary perpendicular, so the grid
+ *  does not rotate as the light moves: a rotating lattice re-phases the
+ *  reconstruction filter every frame and shimmers at the resolution limit even
+ *  when nothing has moved. The axis lands on V, putting the pole up the map.
+ *  (U, V, L) IS RIGHT-HANDED -- the other cross order mirrors the map, which is
+ *  invisible on a banded planet and surfaces later as shadows on the wrong side
+ *  of the lumps casting them. */
+void AtmoShadow_Basis(float3 L, out float3 OutU, out float3 OutV)
+{
+    float3 V = float3(0.0f, 0.0f, 1.0f) - L * L.z;
+
+	// Light along the pole. Any perpendicular is as stable as any other there.
+    if (dot(V, V) < 1e-6f)
+    {
+        V = float3(1.0f, 0.0f, 0.0f) - L * L.x;
+    }
+
+    OutV = normalize(V);
+    OutU = cross(OutV, L);
+}
+
+/** Centre of a cascade in the map plane, snapped to its own texel grid. Level 0
+ *  is centred on the planet and never moves. SNAPPING IS LOAD-BEARING: the
+ *  centre follows the camera, so an unsnapped map slides its lattice under the
+ *  medium and every crossing depth moves with it -- the crawl an anchored march
+ *  lattice exists to prevent, by another route. Whole-texel jumps land on
+ *  boundaries that already exist. */
+float2 AtmoShadow_CascadeCentre(
+	int Level, float3 CameraLocal, float3 U, float3 V, float Extent, float2 MapSize)
+{
+    if (Level <= 0)
+    {
+        return float2(0.0f, 0.0f);
+    }
+
+    const float2 Plane = float2(dot(CameraLocal, U), dot(CameraLocal, V));
+
+    const float2 TexelSize = 2.0f * Extent / max(MapSize, 1.0f);
+
+    return floor(Plane / TexelSize) * TexelSize;
+}
+
+/** Optical depth from one texel's nodes at a given depth. Piecewise linear
+ *  through the four nodes, monotone by construction since they are sorted by the
+ *  depth they were crossed at. CONTINUOUS AT BOTH ENDS: below the entry node the
+ *  first segment's rate runs backwards to zero rather than clamping, since the
+ *  node marks where optical depth reached ATMO_SHADOW_TAU_ENTRY and clamping
+ *  steps that whole threshold on at the silhouette -- 2% of brightness, along
+ *  the edge a god ray draws. Past the last node the final rate continues, capped
+ *  by Ceiling. */
+float AtmoShadow_TauFromNodes(float4 Node, float Depth, float Ceiling)
+{
+    const float EntrySpan = max(Node.y - Node.x, 1e-4f);
+
+    if (Depth <= Node.x)
+    {
+        const float EntryRate = (ATMO_SHADOW_TAU0 - ATMO_SHADOW_TAU_ENTRY) / EntrySpan;
+
+        return max(ATMO_SHADOW_TAU_ENTRY - (Node.x - Depth) * EntryRate, 0.0f);
+    }
+
+    if (Depth <= Node.y)
+    {
+        return lerp(ATMO_SHADOW_TAU_ENTRY, ATMO_SHADOW_TAU0,
+			saturate((Depth - Node.x) / EntrySpan));
+    }
+
+    if (Depth <= Node.z)
+    {
+        return lerp(ATMO_SHADOW_TAU0, ATMO_SHADOW_TAU1,
+			saturate((Depth - Node.y) / max(Node.z - Node.y, 1e-4f)));
+    }
+
+    if (Depth <= Node.w)
+    {
+        return lerp(ATMO_SHADOW_TAU1, ATMO_SHADOW_TAU2,
+			saturate((Depth - Node.z) / max(Node.w - Node.z, 1e-4f)));
+    }
+
+    const float TailRate =
+		(ATMO_SHADOW_TAU2 - ATMO_SHADOW_TAU1) / max(Node.w - Node.z, 1e-4f);
+
+    return min(ATMO_SHADOW_TAU2 + (Depth - Node.w) * TailRate, Ceiling);
+}
+
+/** Optical depth geometry adds at a point, filtered across the blur footprint.
+ *  Evaluated per tap rather than averaging the stored terms first, so the test
+ *  against each tap's own blocker depth survives the filter. */
+float AtmoShadow_OccluderTau(
+	Texture2DArray ShadowMap,
+	SamplerState ShadowSampler,
+	int Level,
+	float2 UV,
+	float Radius,
+	float Depth)
+{
+    const float Slice = AtmoShadow_OccluderSlice(Level);
+
+    float Sum = 0.0f;
+
+    UNROLL
+
+    for (int Tap = 0; Tap < ATMO_SHADOW_OCCLUDER_TAPS; Tap++)
+    {
+        const float4 Occluder = ShadowMap.SampleLevel(
+			ShadowSampler, float3(UV + AtmoOcc_SubOffsets[Tap] * Radius, Slice), 0.0f);
+
+        Sum += AtmoOcc_Tau(Occluder, Depth);
+    }
+
+    return Sum / float(ATMO_SHADOW_OCCLUDER_TAPS);
+}
+
+/** Optical depth from one cascade slice, at a point already projected into the
+ *  map plane. SAMPLER STATE MUST BE CLAMP ON BOTH AXES: the four taps come from
+ *  a floored texel index, reaching one texel outside the map at either edge.
+ *  They land on exact centres, so a bilinear sampler returns each texel
+ *  unfiltered and the weights below are the only reconstruction applied.
+ *
+ *  FOUR TEXELS RECONSTRUCTED, THEN BLENDED -- not one reconstruction from
+ *  blended nodes. The node depths select which segment a sample falls in, so
+ *  interpolating first and branching after puts a slope discontinuity wherever a
+ *  segment boundary crosses a texel. Those creases sit on the lattice, looking
+ *  like resolution, but their width comes from the optical depth step across the
+ *  boundary and does not shrink when texels do. QUINTIC WEIGHTS for the blend,
+ *  since bilinear's slope jumps read as facets locked to the same lattice. */
+float AtmoShadow_TauSlice(
+	Texture2DArray ShadowMap,
+	SamplerState ShadowSampler,
+	int Level,
+	float2 Plane,
+	float2 Centre,
+	float Extent,
+	float Depth,
+	float2 JitterTexels,
+	float2 MapSize,
+	float Ceiling,
+	float BlurWorld,
+	bool bHasOccluders)
+{
+    const float2 UV = (Plane - Centre) / Extent * 0.5f + 0.5f;
+
+    const float2 InvSize = 1.0f / MapSize;
+
+    const float2 Sample = UV * MapSize - 0.5f + JitterTexels * ATMO_SHADOW_LOOKUP_JITTER;
+    const float2 Base = floor(Sample);
+
+    float2 Frac = Sample - Base;
+    Frac = Frac * Frac * Frac * (Frac * (Frac * 6.0f - 15.0f) + 10.0f);
+
+    const float3 UV00 = float3((Base + 0.5f) * InvSize, float(Level));
+
+    const float4 N00 = ShadowMap.SampleLevel(ShadowSampler, UV00, 0.0f);
+    const float4 N10 = ShadowMap.SampleLevel(ShadowSampler, UV00 + float3(InvSize.x, 0.0f, 0.0f), 0.0f);
+    const float4 N01 = ShadowMap.SampleLevel(ShadowSampler, UV00 + float3(0.0f, InvSize.y, 0.0f), 0.0f);
+    const float4 N11 = ShadowMap.SampleLevel(ShadowSampler, UV00 + float3(InvSize, 0.0f), 0.0f);
+
+    const float T00 = AtmoShadow_TauFromNodes(N00, Depth, Ceiling);
+    const float T10 = AtmoShadow_TauFromNodes(N10, Depth, Ceiling);
+    const float T01 = AtmoShadow_TauFromNodes(N01, Depth, Ceiling);
+    const float T11 = AtmoShadow_TauFromNodes(N11, Depth, Ceiling);
+
+    const float Medium = lerp(lerp(T00, T10, Frac.x), lerp(T01, T11, Frac.x), Frac.y);
+
+	// A UNIFORM BRANCH, so it costs a scalar test and skips the taps entirely on
+	// a target with no occluder band. Those taps triple this function's fetch
+	// count, and it runs once per light sample, so a map that never carries an
+	// occluder must not pay for them.
+    BRANCH
+
+    if (!bHasOccluders)
+    {
+        return Medium;
+    }
+
+	// BILINEAR TAPS AT THE TRUE UV, not the four texel centres the nodes need.
+	// The occluder term is linear in what it stores, so the filter may run before
+	// the evaluation; the nodes cannot, since the depth selects which segment
+	// applies to them.
+	//
+	// The blur width is a distance, so it becomes a UV radius against this
+	// level's own half-width. Floored at half a texel: below that the taps land
+	// inside one texel and the bilinear ramp is the only edge there is anyway.
+    const float OccluderRadius = max(
+		BlurWorld / max(2.0f * Extent, 1e-4f), 0.5f * InvSize.x);
+
+	// ADDED, NOT CAPPED BY Ceiling. The ceiling bounds an extrapolated tail so a
+	// slow channel cannot glow through saturated medium; a blocker is opaque on
+	// every channel, and letting it past is what makes solid objects read solid.
+    return Medium + AtmoShadow_OccluderTau(
+		ShadowMap, ShadowSampler, Level, UV, OccluderRadius, Depth);
+}
+
+/** Optical depth between a planet-local position and the light, on the fastest
+ *  absorption channel. LightLocal points toward the light. Ceiling bounds the
+ *  tail past the last node; see ATMO_SHADOW_SATURATION.
+ *
+ *  ONE PARAMETERISATION, SEVERAL SCALES: every cascade is the whole field at a
+ *  different extent, anchored to the same shell entry, so their depths are
+ *  directly comparable. Walked outermost inward, each finer level that contains
+ *  the sample replacing the result and blended across its own edge.
+ *
+ *  THE LEVELS DO NOT DECOMPOSE THE FIELD. Layered density composes as a product,
+ *  so optical depths do not add across layers, and the encoding is
+ *  depth-of-crossing, nonlinear in density -- even a sound linear split would not
+ *  survive it. Each slice carries the complete field.
+ *
+ *  VALID ANYWHERE INSIDE THE SHELL, not only where the medium is. A point on a
+ *  surface below the deck reads the whole column above it, which is what makes
+ *  this the same call for shadows cast onto geometry. */
+float AtmoShadow_Tau(
+	Texture2DArray ShadowMap,
+	SamplerState ShadowSampler,
+	float3 LocalPos,
+	float3 LightLocal,
+	float3 CameraLocal,
+	float2 JitterTexels,
+	float Ceiling,
+	AtmoShadowFrame Frame)
+{
+    const float3 L = normalize(LightLocal);
+
+    float3 U, V;
+    AtmoShadow_Basis(L, U, V);
+
+    const float2 Plane = float2(dot(LocalPos, U), dot(LocalPos, V));
+
+	// (U, V, L) is orthonormal, so the in-plane offset IS the ray's closest
+	// approach to the centre and its length squared is the perpendicular term.
+    const float HalfChordSq = Frame.CullRadius * Frame.CullRadius - dot(Plane, Plane);
+
+    if (HalfChordSq <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+	// Depth from the shell entry, matching what the bake marched from. Shared by
+	// every cascade: a property of the geometry, not of any lattice.
+    const float Depth = (dot(LocalPos, -L) + sqrt(HalfChordSq)) / Frame.Thickness;
+
+    uint MapWidth, MapHeight, MapSlices;
+    ShadowMap.GetDimensions(MapWidth, MapHeight, MapSlices);
+
+    const float2 MapSize = float2(MapWidth, MapHeight);
+
+    const bool bHasOccluders = MapSlices >= uint(ATMO_SHADOW_SLICES_WITH_OCCLUDERS);
+
+	// One width for every cascade, so the shadow is the same size in each and the
+	// blend between them has nothing to reveal.
+    const float BlurWorld = ATMO_SHADOW_OCCLUDER_BLUR * Frame.Thickness;
+
+    float Tau = AtmoShadow_TauSlice(
+		ShadowMap, ShadowSampler, 0, Plane, float2(0.0f, 0.0f),
+		Frame.Extents[0], Depth, JitterTexels, MapSize, Ceiling, BlurWorld,
+		bHasOccluders);
+
+    UNROLL
+
+    for (int Level = 1; Level < ATMO_SHADOW_CASCADES; Level++)
+    {
+        const float Extent = Frame.Extents[Level];
+
+        if (Extent <= 0.0f)
+        {
+            continue;
+        }
+
+        const float2 Centre = AtmoShadow_CascadeCentre(
+			Level, CameraLocal, U, V, Extent, MapSize);
+
+		// Square support, so the edge measure is the larger axis.
+        const float2 Relative = (Plane - Centre) / Extent;
+        const float Edge = max(abs(Relative.x), abs(Relative.y));
+
+        if (Edge >= 1.0f)
+        {
+            continue;
+        }
+
+        const float Finer = AtmoShadow_TauSlice(
+			ShadowMap, ShadowSampler, Level, Plane, Centre, Extent, Depth,
+			JitterTexels, MapSize, Ceiling, BlurWorld, bHasOccluders);
+
+        Tau = lerp(Finer, Tau, smoothstep(ATMO_SHADOW_NEAR_BLEND, 1.0f, Edge));
+    }
+
+    return Tau;
+}

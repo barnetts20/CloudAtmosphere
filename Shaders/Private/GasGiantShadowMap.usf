@@ -25,12 +25,12 @@
 // THE MAP IS SQUARE. Cascade support is isotropic, so a non-square MapSize gives
 // non-square texels and the footprint below would be wrong on one axis.
 //
-// GEOMETRY OCCLUSION IS ONE SCALAR PER RAY. An opaque occluder at depth t_occ
-// says "every threshold not yet crossed is crossed at t_occ", so it clamps the
-// four nodes and shortens the march. Nothing about the FORMAT changes, which is
-// why the reader, the cascade walk and the material are untouched. Where t_occ
-// comes from is swappable -- depth captures here, analytic bodies later --
-// through the single call to GGShadow_Occlusion below.
+// GEOMETRY OCCLUSION IS A SECOND SLICE, NOT A CHANGE TO THE DECK'S. Each thread
+// writes its cascade's nodes and, one band of slices further on, the optical
+// depth geometry adds along the same ray. The two are summed by the reader, so
+// coverage and distance stay linear there; folded into the nodes they could only
+// be all-or-nothing. Where the blocker depth comes from is swappable -- depth
+// captures here, analytic bodies later -- through GGShadow_Occlusion below.
 
 #ifndef GG_SHADOW_THREADS
 #define GG_SHADOW_THREADS 8
@@ -148,6 +148,16 @@ SamplerState OccluderDepthSampler;
 float4 OccluderU[GG_SHADOW_CASCADES];
 float4 OccluderV[GG_SHADOW_CASCADES];
 float4 OccluderPlane[GG_SHADOW_CASCADES];
+
+/** Footprint radius the capture is sampled over, in atmosphere thicknesses --
+ *  a distance, not texels, so every cascade erodes the same amount of ground;
+ *  optical depth a fully covered texel adds, on the same fastest-channel scale
+ *  the deck's thresholds use; and the distance over which that decays behind the
+ *  blocker, also in thicknesses. */
+float OccluderSoftness;
+float OccluderInset;
+float OccluderStrength;
+float OccluderFalloff;
 
 /** Each band's extinction: rgb tint, amount in a. The map stores one scalar
  *  depth, so the bake weights density by the amounts and folds in the largest
@@ -353,19 +363,20 @@ float GGShadow_Crossing(float Target, float Tau, float SigmaA, float SigmaB, flo
 }
 
 /** Depth of the nearest opaque occluder on a texel's ray, in the ray parameter,
- *  or ATMO_OCC_NO_HIT. ONE LOOKUP PER RAY, NOT PER STEP: the captures are
- *  orthographic along the same light direction the ray runs down, so the whole
- *  ray is a single point in every capture.
+ *  with the fraction of the footprint it covers. ONE LOOKUP PER RAY, NOT PER
+ *  STEP: the captures are orthographic along the same light direction the ray
+ *  runs down, so the whole ray is a single point in every capture.
  *
  *  FINEST FIRST, then stop. See AtmoOcc_QueryLevel for what that trades. */
-float GGShadow_Occlusion(float3 Offset, float HalfChord)
+float GGShadow_Occlusion(
+	float3 Offset, float HalfChord, float FootprintWorld, out float OutCoverage)
 {
     float Depth;
 
     if (AtmoOcc_QueryLevel(
 		OccluderDepth2, OccluderDepthSampler,
 		AtmoOcc_MakeFrame(OccluderU[2], OccluderV[2], OccluderPlane[2]),
-		Offset, HalfChord, Depth))
+		Offset, HalfChord, FootprintWorld, Depth, OutCoverage))
     {
         return Depth;
     }
@@ -373,7 +384,7 @@ float GGShadow_Occlusion(float3 Offset, float HalfChord)
     if (AtmoOcc_QueryLevel(
 		OccluderDepth1, OccluderDepthSampler,
 		AtmoOcc_MakeFrame(OccluderU[1], OccluderV[1], OccluderPlane[1]),
-		Offset, HalfChord, Depth))
+		Offset, HalfChord, FootprintWorld, Depth, OutCoverage))
     {
         return Depth;
     }
@@ -381,12 +392,33 @@ float GGShadow_Occlusion(float3 Offset, float HalfChord)
     if (AtmoOcc_QueryLevel(
 		OccluderDepth0, OccluderDepthSampler,
 		AtmoOcc_MakeFrame(OccluderU[0], OccluderV[0], OccluderPlane[0]),
-		Offset, HalfChord, Depth))
+		Offset, HalfChord, FootprintWorld, Depth, OutCoverage))
     {
         return Depth;
     }
 
+    OutCoverage = 0.0f;
+
     return ATMO_OCC_NO_HIT;
+}
+
+/** Writes a cascade's occluder term. A SECOND BAND OF SLICES, one per cascade,
+ *  so the deck's four channels stay the deck's and the reader adds the two.
+ *
+ *  SILENT ON A TARGET WITHOUT THE BAND. The target is sized to one band when the
+ *  feature is off, and the reader gates on the same count, so both sides agree
+ *  without a define or a parameter to keep in step. */
+void GGShadow_WriteOccluder(uint3 Texel, float4 Value)
+{
+    uint Width, Height, Slices;
+    ShadowMapUAV.GetDimensions(Width, Height, Slices);
+
+    if (Slices < uint(ATMO_SHADOW_SLICES_WITH_OCCLUDERS))
+    {
+        return;
+    }
+
+    ShadowMapUAV[uint3(Texel.xy, Texel.z + uint(GG_SHADOW_CASCADES))] = Value;
 }
 
 [numthreads(GG_SHADOW_THREADS, GG_SHADOW_THREADS, 1)]
@@ -424,6 +456,7 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     if (ShadowExtent <= 0.0f)
     {
         ShadowMapUAV[Texel] = GG_SHADOW_NO_DECK;
+        GGShadow_WriteOccluder(Texel, (float4) 0.0f);
         return;
     }
 
@@ -451,6 +484,7 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     if (HalfChordSq <= 0.0f)
     {
         ShadowMapUAV[Texel] = GG_SHADOW_NO_DECK;
+        GGShadow_WriteOccluder(Texel, (float4) 0.0f);
         return;
     }
 
@@ -461,24 +495,21 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
     const float3 Origin = Offset - Dir * HalfChord;
 
-	// THE MARCH ENDS AT THE OCCLUDER, so an occluded ray costs less, not more.
-	// The existing loop bound and the end-of-ray step trim carry it from here
-	// with no extra branch inside the loop.
-    const float TOcc = GGShadow_Occlusion(Offset, HalfChord);
+    const float RayLength = 2.0f * HalfChord;
 
-	// Above the shell entry: nothing of the deck is lit on this ray. Four nodes
-	// at zero read as the saturation ceiling at every depth behind them, which
-	// is what the format can say -- not zero transmittance, about a percent on
-	// the most transmissive octave.
-    BRANCH
-
-    if (TOcc <= 0.0f)
+	// GEOMETRY IS A SEPARATE TERM AND THE DECK IS MARCHED WHOLE. The march used
+	// to stop at the blocker, which is correct only for an all-or-nothing shadow;
+	// a graded one is added to the deck behind it and needs that deck to exist.
+	// Stored in thicknesses, matching the depth the reader arrives with.
     {
-        ShadowMapUAV[Texel] = 0.0f;
-        return;
-    }
+        float Coverage;
+        const float TOcc = GGShadow_Occlusion(
+			Offset, HalfChord, OccluderSoftness * F.Thickness, Coverage);
 
-    const float RayLength = min(2.0f * HalfChord, TOcc);
+        GGShadow_WriteOccluder(Texel, AtmoOcc_Encode(
+			TOcc / F.Thickness, Coverage, OccluderInset,
+			OccluderStrength, OccluderFalloff));
+    }
 
     const float TexelWorld = 2.0f * ShadowExtent / float(max(ShadowMapSize.x, 1));
 
@@ -693,11 +724,7 @@ void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         Node2 = T + (GG_SHADOW_TAU2 - Tau) * TailRate;
     }
 
-	// CLAMPED IN WORLD UNITS, BEFORE THE THICKNESS DIVIDE. The march cannot
-	// itself run past the occluder, but the tail extrapolates unreached
-	// thresholds from the last extinction seen and lands behind it; this is what
-	// puts those nodes on the occluder instead.
-    float4 Out = min(float4(NodeEntry, Node0, Node1, Node2), TOcc) / F.Thickness;
+    float4 Out = float4(NodeEntry, Node0, Node1, Node2) / F.Thickness;
 
 	// NO DEBUG REMAP HERE. The march reads this map, so a define rescaling what
 	// is written rescales the lighting with it, and the symptom -- a fully
