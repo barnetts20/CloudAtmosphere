@@ -105,7 +105,7 @@ public:
     FAtmosphereSimulationParams Simulation;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Raymarch", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FGasGiantRaymarchParams GasGiantRaymarch;
+    FAtmosphereRaymarchParams Raymarch;
 
     // Baked Lighting: the targets the per-frame and on-change bakes write and
     // the march reads. Set once for a performance tier, not tuned for looks.
@@ -203,43 +203,46 @@ public:
     // of the shell it sets. The shared geometry struct, whose one member is the
     // height scale, inlined so the member sits directly under the category.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereGeometryParams GasGiantGeometry;
+    FAtmosphereGeometryParams Geometry;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Deck|Profile", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
     FGasGiantProfileParams GasGiantProfile;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Deck|Flow", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FGasGiantFlowParams GasGiantFlow;
+    FAtmosphereFlowParams Flow;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Deck|Bands", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
+    FGasGiantBandShapeParams GasGiantBandShape;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Deck|Motion", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FGasGiantMotionParams GasGiantMotion;
+    FAtmosphereMotionParams Motion;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Deck|Surface", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FGasGiantSurfaceParams GasGiantSurface;
+    FAtmosphereCarveParams Carve;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Deck|Structure Layer", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FGasGiantNoiseLayerParams GasGiantStructureLayer;
+    FAtmosphereNoiseLayerParams StructureLayer;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Deck|Detail Layer", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FGasGiantNoiseLayerParams GasGiantDetailLayer;
+    FAtmosphereNoiseLayerParams DetailLayer;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Atmosphere Lighting", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FGasGiantAtmosphereLightingParams GasGiantAtmosphereLighting;
+    FAtmosphereLightingParams AtmosphereLighting;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Cloud Lighting|Bands", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
     FGasGiantBandParams GasGiantBands;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Cloud Lighting|Extinction", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FGasGiantExtinctionParams GasGiantExtinction;
+    FAtmosphereExtinctionParams Extinction;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Cloud Lighting|Phase", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FGasGiantPhaseParams GasGiantPhase;
+    FAtmospherePhaseParams Phase;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Cloud Lighting|Multiple Scattering", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FGasGiantMultipleScatteringParams GasGiantMultipleScattering;
+    FAtmosphereMultipleScatteringParams MultipleScattering;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Cloud Lighting|Terminator", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FGasGiantTerminatorParams GasGiantTerminator;
+    FAtmosphereTerminatorParams Terminator;
 
     // --- Lifecycle ---
 
@@ -350,7 +353,7 @@ private:
     void ApplyGasGiantParams(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir);
 
     /** One noise layer's members, each under Prefix + member name. */
-    void ApplyGasGiantLayer(const TCHAR* Prefix, const FGasGiantNoiseLayerParams& Layer);
+    void ApplyGasGiantLayer(const TCHAR* Prefix, const FAtmosphereNoiseLayerParams& Layer);
 
     /** Queues this frame's deck shadow bake with the sim subsystem. SEPARATE FROM
      *  ApplyGasGiantParams because its destination is a compute pass rather than

@@ -1,16 +1,22 @@
 // The parameter sets the two-stage atmosphere post process is driven by, and
 // the derivations that keep them consistent.
 //
-// TIERS, SPLIT BY WHAT OWNS THE VALUE. ENVIRONMENT is what the planet does not
-// choose -- the composite blur and the flow sim, each running in one shared
-// instance, plus the surface shadows both models read from the same map. The
-// rest is the gas giant's, pushed directly by ApplyGasGiantParams.
+// TIERS, SPLIT BY WHOSE QUESTION IT ANSWERS. A group is SHARED when the march
+// or the flow reader asks it something no model owns -- how the air scatters,
+// how far a step may run, how a noise layer travels, how the phase and the
+// octaves behave. It is PER MODEL when the members themselves differ: what a
+// cloud field's vertical profile is, what its material looks like, what a band
+// even means.
 //
-// ONE MODEL, FOR NOW. The gas giant groups are the authoritative layout and the
-// terrestrial model is being cut from them rather than kept alongside, so the
-// groups below are not yet sorted into shared and per-model -- the split lands
-// with that branch. FAtmosphereGeometryParams is the one group already written
-// to be instantiated per model.
+// SHARING A GROUP DOES NOT MAKE TWO MODELS AGREE ON VALUES. An actor is one
+// planet of one type, so a shared group is one property read by whichever model
+// is active; only the member LIST is common. That is why Motion, Phase and
+// Terminator are shared even though a cloud band would be tuned nothing like a
+// deck.
+//
+// A SHARED GROUP CARRIES NO MODEL PREFIX, on the struct or on the actor
+// property. A per-model one carries both, so a second model's copy sits beside
+// it rather than replacing it.
 //
 // RATIOS, NOT ABSOLUTES, WHEREVER ONE VALUE IS BOUNDED BY ANOTHER. A parameter
 // expressed against the thing that constrains it stays valid when that thing is
@@ -406,7 +412,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereGeometryParams
  *  Coefficients are divided by atmosphere thickness in Atmo_BuildParams, so
  *  they are thickness-relative and survive a resize. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FGasGiantAtmosphereLightingParams
+struct CLOUDATMOSPHERE_API FAtmosphereLightingParams
 {
 	GENERATED_BODY()
 
@@ -501,24 +507,29 @@ struct CLOUDATMOSPHERE_API FGasGiantProfileParams
 	 *  capped by the band, past 1 by the excess shown. */
 	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly)
 	float SolvedTopMax = 0.0f;
+
+	/** Total optical depth from the deck top to the surface at core density, down
+	 *  an unrelieved column, at any DensityCurve. Below about 8 the sky shows
+	 *  through. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
+	float DeckOpticalDepth = 2000.0f;
 };
 
-/** How the simulation shapes the deck: bands, pressure and storms. Every relief
- *  amount is a fraction of GradientThickness. */
+/** What the flow field does to a cloud field's shape: pressure, storms and the
+ *  planet's own rotation. Every relief amount is a fraction of GradientThickness.
+ *
+ *  SHARED, BECAUSE THE FLOW IS. These read the sim's pressure and vorticity and
+ *  turn them into relief, which any field driven by that sim wants. What a model
+ *  does with a BAND is its own, and sits in its own group.
+ *
+ *  THE HEMISPHERE PAIR IS HERE RATHER THAN THERE. The sim's channels are
+ *  rotation senses and which sense is cyclonic flips at the equator, so every
+ *  reader of those channels needs the flip handled -- FlowField.ush's
+ *  FlowReadParams takes both, whatever field supplies them. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FGasGiantFlowParams
+struct CLOUDATMOSPHERE_API FAtmosphereFlowParams
 {
 	GENERATED_BODY()
-
-	/** Multiplies already-normalized vorticity, so 1 is neutral and the useful
-	 *  range is roughly 0.5 to 3. Too high flattens elevation to its asymptote
-	 *  everywhere but the boundaries: terraces joined by cliffs. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float BandSharpness = 1.0f;
-
-	/** Shifts which band type dominates without retuning the sim. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float BandBias = 0.3f;
 
 	/** Half-width of the equatorial blend, in DEGREES of latitude. The sim's
 	 *  channels are rotation senses, and which sense is cyclonic flips at the
@@ -535,13 +546,6 @@ struct CLOUDATMOSPHERE_API FGasGiantFlowParams
 	 *  0 gives a band of constant width, which reads as a perfect annulus. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "8.0"))
 	float HemisphereVariance = 2.0f;
-
-	/** Height of zones above belts, a fraction of GradientThickness: each moves
-	 *  half of it from DeckTop, zones up and belts down, meeting at DeckTop on the
-	 *  band boundaries. Positive lifts the anticyclonic zones. Bands are geometry
-	 *  rather than a pattern painted on a sphere. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float BandRelief = 0.3f;
 
 	/** How far pressure lifts the deck. Anticyclones rise, cyclones sink. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
@@ -569,10 +573,37 @@ struct CLOUDATMOSPHERE_API FGasGiantFlowParams
 	float RotationWeight = 0.0f;
 };
 
+/** How a BANDED planet reads the flow: where zones and belts sit and how far
+ *  apart they stand. Gas giant only -- a field without banded material has no
+ *  use for any of it, and the band coordinate it produces means something
+ *  different wherever it exists at all. */
+USTRUCT(BlueprintType)
+struct CLOUDATMOSPHERE_API FGasGiantBandShapeParams
+{
+	GENERATED_BODY()
+
+	/** Multiplies already-normalized vorticity, so 1 is neutral and the useful
+	 *  range is roughly 0.5 to 3. Too high flattens elevation to its asymptote
+	 *  everywhere but the boundaries: terraces joined by cliffs. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float BandSharpness = 1.0f;
+
+	/** Shifts which band type dominates without retuning the sim. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float BandBias = 0.3f;
+
+	/** Height of zones above belts, a fraction of GradientThickness: each moves
+	 *  half of it from DeckTop, zones up and belts down, meeting at DeckTop on the
+	 *  band boundaries. Positive lifts the anticyclonic zones. Bands are geometry
+	 *  rather than a pattern painted on a sphere. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float BandRelief = 0.3f;
+};
+
 /** How the noise layers travel with the flow. Each layer's FlowInherit and
  *  ShearInherit say how much of it that layer follows. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FGasGiantMotionParams
+struct CLOUDATMOSPHERE_API FAtmosphereMotionParams
 {
 	GENERATED_BODY()
 
@@ -604,7 +635,7 @@ struct CLOUDATMOSPHERE_API FGasGiantMotionParams
 
 /** Controls both noise layers' carves share. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FGasGiantSurfaceParams
+struct CLOUDATMOSPHERE_API FAtmosphereCarveParams
 {
 	GENERATED_BODY()
 
@@ -627,7 +658,7 @@ struct CLOUDATMOSPHERE_API FGasGiantSurfaceParams
  *  volume's G gates storm towers, and the detail relief's sidedness is
  *  GG_DETAIL_RELIEF_CENTRED. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FGasGiantNoiseLayerParams
+struct CLOUDATMOSPHERE_API FAtmosphereNoiseLayerParams
 {
 	GENERATED_BODY()
 
@@ -701,9 +732,9 @@ struct CLOUDATMOSPHERE_API FGasGiantNoiseLayerParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	bool bCrossfade = false;
 
-	static FGasGiantNoiseLayerParams MakeStructureDefaults()
+	static FAtmosphereNoiseLayerParams MakeStructureDefaults()
 	{
-		FGasGiantNoiseLayerParams Out;
+		FAtmosphereNoiseLayerParams Out;
 		Out.Scale = 1.0f;
 		Out.Aspect = 12.0f;
 		Out.Relief = 0.5f;
@@ -716,9 +747,9 @@ struct CLOUDATMOSPHERE_API FGasGiantNoiseLayerParams
 		return Out;
 	}
 
-	static FGasGiantNoiseLayerParams MakeDetailDefaults()
+	static FAtmosphereNoiseLayerParams MakeDetailDefaults()
 	{
-		FGasGiantNoiseLayerParams Out;
+		FAtmosphereNoiseLayerParams Out;
 		Out.Scale = 12.0f;
 		Out.Aspect = 3.0f;
 		Out.Relief = 0.15f;
@@ -770,16 +801,11 @@ struct CLOUDATMOSPHERE_API FGasGiantBandParams
 	float BandScale = 2.0f;
 };
 
-/** How much light the deck removes. AUTHORED AS TOTAL OPTICAL DEPTH, NOT AS A
- *  COEFFICIENT: the deck's heights are fractions of atmosphere thickness, so a
- *  coefficient is solved per frame from the depth wanted, where an absolute one
- *  would mean something different after every resize and anchor move.
- *
- *  PITFALL: too low and the deck never saturates, a PERFORMANCE bug as much as a
- *  visual one -- the march's transmittance early-out is dead code until a ray
- *  can go opaque, so every ray burns its full step budget. */
+/** How much light a cloud field removes, and where inside its gradient the mass
+ *  that removes it sits. The TOTAL is the model's, since what it is measured
+ *  across differs; these two do not. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FGasGiantExtinctionParams
+struct CLOUDATMOSPHERE_API FAtmosphereExtinctionParams
 {
 	GENERATED_BODY()
 
@@ -792,12 +818,6 @@ struct CLOUDATMOSPHERE_API FGasGiantExtinctionParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", ClampMax = "4.0"))
 	float DensityCurve = 1.0f;
 
-	/** Total optical depth from the deck top to the surface at core density, down
-	 *  an unrelieved column, at any DensityCurve. Below about 8 the sky shows
-	 *  through. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
-	float DeckOpticalDepth = 2000.0f;
-
 	/** Light-ray extinction as a fraction of the view ray's. Below 1, since light
 	 *  scattered INTO the ray is what multiple scattering stands in for and the
 	 *  full coefficient counts that loss twice. */
@@ -807,7 +827,7 @@ struct CLOUDATMOSPHERE_API FGasGiantExtinctionParams
 
 /** The deck's phase function and its ambient. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FGasGiantPhaseParams
+struct CLOUDATMOSPHERE_API FAtmospherePhaseParams
 {
 	GENERATED_BODY()
 
@@ -838,7 +858,7 @@ struct CLOUDATMOSPHERE_API FGasGiantPhaseParams
  *  more broadly -- the glow inside thick cloud, and a softer rim. One exp per
  *  octave per deck sample. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FGasGiantMultipleScatteringParams
+struct CLOUDATMOSPHERE_API FAtmosphereMultipleScatteringParams
 {
 	GENERATED_BODY()
 
@@ -866,7 +886,7 @@ struct CLOUDATMOSPHERE_API FGasGiantMultipleScatteringParams
  *  ambient width gates both ambients, and the lobe terms keep the forward peaks
  *  from leaking past it. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FGasGiantTerminatorParams
+struct CLOUDATMOSPHERE_API FAtmosphereTerminatorParams
 {
 	GENERATED_BODY()
 
@@ -901,7 +921,7 @@ struct CLOUDATMOSPHERE_API FGasGiantTerminatorParams
 
 /** The march's budget, for a performance tier. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FGasGiantRaymarchParams
+struct CLOUDATMOSPHERE_API FAtmosphereRaymarchParams
 {
 	GENERATED_BODY()
 
