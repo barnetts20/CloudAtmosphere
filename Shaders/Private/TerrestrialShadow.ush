@@ -46,10 +46,7 @@
  *  shadow toward the limb. */
 float TR_ShadowCullRadius(TRFieldParams F)
 {
-    float TopMin, TopMax;
-    TR_TopBounds(F, 1.0f, 1.0f, TopMin, TopMax);
-
-    return F.PlanetRadius + F.Thickness * TopMax;
+    return F.PlanetRadius + F.Thickness * TR_TopMax(F, 1.0f, 1.0f);
 }
 
 /** Half-width of a cascade. DERIVED FROM THE FADES, NOT AUTHORED SEPARATELY:

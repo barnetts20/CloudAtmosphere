@@ -20,11 +20,12 @@
 // terms of the two type names below, so they have to exist first; a missing
 // include fails as an undeclared identifier rather than as a wrong branch.
 //
-// A DECK, NOT A BAND. Coverage is 100% and every feature is relief in a column
-// top, so Field_Sample never returns zero density, Field_Terminus clips on a
-// provable opacity rather than on a surface, and Field_PlanSegments can cone
-// trace an entry because there is a surface to find. A field with holes answers
-// all three differently.
+// A SLAB WITH A SURFACE UNDER IT. Density is zero outside the two traced
+// surfaces and the planet is opaque, so Field_Terminus clips on the planet,
+// Field_PlanSegments cone traces whichever surface the ray approaches, and the
+// marched band ends at the lowest the base can fall rather than at an optical
+// depth. Coverage inside the slab is still 100%: every feature is relief in a
+// surface, so Field_Sample returns zero only outside it.
 
 /** Claims the march's one model slot. A second field defines this too, so
  *  whichever header the material included is the one that answers. */
@@ -58,17 +59,6 @@
 
 #define FIELD_TEXTURE_ARGS \
 	FlowField, FlowSampler, DetailVolume, DetailSampler, StructureVolume, StructureSampler
-
-/** Optical depths below the deck floor at which the VIEW ray is provably
- *  opaque and the march can be clipped.
- *
- *  TWICE WHAT OPACITY NEEDS, because the per-band ScatterX.a multipliers are
- *  not visible where this is used and a band below 1 saturates slower. Erring
- *  deep costs a step; erring shallow blacks out cloud that should still be
- *  visible, at a fixed radius, which is a ring. */
-#ifndef TR_VIEW_OPAQUE_DEPTH
-#define TR_VIEW_OPAQUE_DEPTH 14.0f
-#endif
 
 /** The deck's material and how it is lit. Three band sets rather than one,
  *  because zones and belts are different material and not the same material at
@@ -174,42 +164,53 @@ float3 TR_BandTint(float Band, TRScatterParams S)
     return lerp(S.ExtinctionBase.rgb, Hue.rgb, abs(T));
 }
 
-/** Whether a planned segment carries deck: the fine band, or anything below the
- *  inner radius.
+/** Whether a planned segment carries cloud: the fine band, and nothing else.
  *
- *  TWO CONDITIONS, NOT ONE RADIUS. The fine flag alone misses the saturated
- *  region, which is coarsely stepped and still extinguishes. A radius alone is
- *  wrong the other way: Field_PlanSegments leaves a coarse segment INSIDE
- *  the band and above every column top, and marching that as deck spends seven
- *  fetches a step and the deck's lateral step bound on provably empty air --
- *  which on a grazing ray is the longest span on the ray. A band demoted to
- *  coarse because the ray never reached the deck is not deck either. */
+ *  THE FLAG ALONE, BECAUSE THE BAND IS BOUNDED BOTH WAYS. cloudInnerRadius is
+ *  the lowest the base can fall, so below it there is no cloud to miss -- and
+ *  above the top the same. Marching either as cloud would spend seven fetches a
+ *  step and the field's lateral step bound on provably empty air, which on a
+ *  grazing ray is the longest span on the ray. A band demoted to coarse because
+ *  the ray never reached the slab is not cloud either. */
 bool Field_SegmentIsCloud(float3 Origin, float3 Dir, float4 Segment, PlanetParams Planet)
 {
-    if (Segment.w > 0.5f)
-    {
-        return true;
-    }
-
-    const float3 Mid = Origin + Dir * ((Segment.x + Segment.y) * 0.5f);
-
-    return length(Mid - Planet.planetPos) < Planet.cloudInnerRadius;
+    return Segment.w > 0.5f;
 }
 
 /** Splits the fine segment at the cone-traced entry.
  *
- *  IN THE PLAN, NOT IN THE LOOP. The region between the cull radius and the deck
- *  top is empty of cloud but not of air, so a skip inside the march would drop
+ *  IN THE PLAN, NOT IN THE LOOP. The span between the shell crossing and the
+ *  slab is empty of cloud but not of air, so a skip inside the march would drop
  *  the Rayleigh and Mie the ray is entitled to along it. Splitting keeps that
- *  scattering at the coarse step it deserves and spends the fine steps on the
- *  deck. It also keeps a threshold out of the loop, where every threshold is a
- *  locus and one decided against a jittered position is a dithered locus.
+ *  scattering at the coarse step it deserves and spends the fine steps on cloud.
+ *  It also keeps a threshold out of the loop, where every threshold is a locus
+ *  and one decided against a jittered position is a dithered locus.
+ *
+ *  THE ENTRY MAY BE EITHER SURFACE. A ray descending from outside meets the top;
+ *  a camera under the cloud produces a fine segment that starts at the inner
+ *  shell and climbs to the base. TR_SlabEntry decides which per probe, so the
+ *  split here is the same operation either way.
  *
  *  THE FIRST FINE SEGMENT, AND INSERTED IN ORDER. A ray that crosses the band,
- *  passes below the floor and crosses it again produces two fine segments with a
+ *  passes below the base and crosses it again produces two fine segments with a
  *  coarse one between them, and the march walks the array in order, so appending
- *  would put the deck behind the region under it. Only the near crossing is
- *  worth splitting; the far one lies behind saturated deck. */
+ *  would put the near cloud behind the clear air under it.
+ *
+ *  THE SPLIT IS SNAPPED TO THE FINE LATTICE, AND THAT IS NOT A TIDINESS
+ *  MEASURE. The march starts the fine segment's steps at this boundary, so the
+ *  boundary IS the lattice anchor for every sample on the ray. The traced entry
+ *  is a point sample of one column's lower bound and it flips discontinuously
+ *  from one column to the next between neighbouring pixels; unsnapped, every
+ *  sample position on the ray slides with it and the field is read at a
+ *  different set of altitudes per pixel. That prints as grain that no step
+ *  count, no jitter setting and no amount of tuning the field will touch, and it
+ *  is worst at grazing incidence, where the trace moves furthest for the
+ *  smallest change in angle. Snapped, the entry may only move in whole steps and
+ *  the lattice is a property of the segment's own geometry.
+ *
+ *  FLOORED, so the boundary only ever moves EARLIER. The cone trace has proved
+ *  there is no field before the entry it returned, and marching a little clear
+ *  air costs a step. */
 void Field_PlanSegments(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
@@ -247,20 +248,35 @@ void Field_PlanSegments(
     const float SegEnd = Segments[Band].y;
     const float FineStep = Segments[Band].z;
 
-    const float Entry = TR_DeckEntry(
-		FlowField, FlowSampler, LocalOrigin, LocalDir, SegStart, SegEnd, TopMax, F);
+    bool bMissed;
 
-	// Nothing worth splitting off: the ray was already at the deck.
-    if (Entry <= SegStart + 1e-5f)
+    const float Entry = TR_SlabEntry(
+		FlowField, FlowSampler, LocalOrigin, LocalDir, SegStart, SegEnd, TopMax, F, bMissed);
+
+	// PROVED to miss: demote to coarse rather than dropping it, so the air along
+	// it still scatters, and spend no fine steps on a span that cannot hold
+	// cloud. Only on the proof -- a search that merely ran out of segment leaves
+	// the band fine below, and pays in steps instead of in missing cloud.
+    if (bMissed)
+    {
+        Segments[Band] = float4(SegStart, SegEnd, CoarseStep, 0.0f);
+        return;
+    }
+
+	// Nothing worth splitting off: the ray was already in the slab, or the
+	// search gave up without narrowing the span.
+    if (Entry <= SegStart + 1e-5f || Entry >= SegEnd - 1e-5f)
     {
         return;
     }
 
-	// The ray never reached the deck within this segment. Demote it to coarse
-	// rather than dropping it, so the air along it still scatters.
-    if (Entry >= SegEnd - 1e-5f)
+	// Anchored at the segment's own start, which is a shell crossing: geometry,
+	// not field. A lattice anchored at anything the field decides moves when the
+	// field does.
+    const float Split = SegStart + floor((Entry - SegStart) / max(FineStep, 1e-4f)) * FineStep;
+
+    if (Split <= SegStart + 1e-5f)
     {
-        Segments[Band] = float4(SegStart, SegEnd, CoarseStep, 0.0f);
         return;
     }
 
@@ -272,10 +288,10 @@ void Field_PlanSegments(
         Segments[k] = Segments[k - 1];
     }
 
-	// The deck keeps the fine step the planner assigned; only the empty half
-	// above it drops to coarse.
-    Segments[Band] = float4(SegStart, Entry, CoarseStep, 0.0f);
-    Segments[Band + 1] = float4(Entry, SegEnd, FineStep, 1.0f);
+	// The cloud keeps the fine step the planner assigned; only the empty span
+	// before it drops to coarse.
+    Segments[Band] = float4(SegStart, Split, CoarseStep, 0.0f);
+    Segments[Band + 1] = float4(Split, SegEnd, FineStep, 1.0f);
 
     SegmentCount++;
 }
@@ -335,20 +351,18 @@ TRScatterParams TR_BuildScatter(
     return S;
 }
 
-/** Fills CompositeParams for a gas giant, deriving the cloud shell from the
- *  field rather than taking it as two more pins. Air colours arrive as rgb with
- *  their profile terms as scalars and are packed here into the float4s
- *  Atmo_BuildParams takes; the terrestrial cloud SHAPE arguments go in as zero,
- *  none of them being sampled on this path, and the phase with them since the
- *  deck reads its own from TRScatterParams.
+/** Fills CompositeParams for the terrestrial band, deriving the cloud shell from
+ *  the field rather than taking it as two more pins. Air colours arrive as rgb
+ *  with their profile terms as scalars and are packed here into the float4s
+ *  Atmo_BuildParams takes; the shared builder's own cloud SHAPE arguments go in
+ *  as zero, none of them being sampled on this path, and the phase with them
+ *  since the field reads its own from TRScatterParams.
  *
- *  THE CLOUD RADII ARE NOT AUTHORED. cloudOuterRadius comes from the highest the
- *  deck can reach; cloudInnerRadius from the depth at which it has certainly
- *  gone opaque -- optical, not geometric. The planet surface would make the
- *  deck's bottom a property of the sphere, and on a gas giant that surface is an
- *  arbitrary radius sitting just under the deck. Derived optically the span ends
- *  where the ray stopped seeing, and is free to end BELOW the surface so a thin
- *  deck is not clipped by a sphere with no physical meaning here.
+ *  THE CLOUD RADII ARE NOT AUTHORED. Both come from the surfaces the field can
+ *  actually produce: cloudOuterRadius from the highest a top can reach,
+ *  cloudInnerRadius from the lowest a base can fall. That makes the fine band
+ *  exactly the span that can hold cloud, so no fine step is spent under it and
+ *  nothing below it is marched as cloud.
  *
  *  THE EXTINCTION IS SOLVED, NOT PASSED. TR_DeckBeta turns DeckOpticalDepth into
  *  a grey coefficient from the field's own anchors. PITFALL: the two cloud betas
@@ -396,31 +410,34 @@ CompositeParams TR_BuildAtmo(
 	// against the UNFADED outer radius, larger and so putting that approach nearer
 	// still -- conservative twice over, and free of the circularity of needing the
 	// radius to compute itself.
-    float TopMin, TopMax;
-    TR_TopBounds(F, 1.0f, 1.0f, TopMin, TopMax);
-
     const float NearestApproach = max(
-		length(CameraPosition - PlanetCenter) - (F.PlanetRadius + F.Thickness * TopMax),
+		length(CameraPosition - PlanetCenter)
+			- (F.PlanetRadius + F.Thickness * TR_TopMax(F, 1.0f, 1.0f)),
 		0.0f) / max(F.PlanetRadius, 1e-4f);
 
-    TR_TopBounds(
-		F,
-		1.0f - smoothstep(F.DetailFadeNear, F.DetailFadeFar, NearestApproach),
-		1.0f - smoothstep(F.StructureFadeNear, F.StructureFadeFar, NearestApproach),
-		TopMin, TopMax);
+    const float DetailFade =
+		1.0f - smoothstep(F.DetailFadeNear, F.DetailFadeFar, NearestApproach);
 
-    const float CloudOuter = F.PlanetRadius + F.Thickness * TopMax;
+    const float StructureFade =
+		1.0f - smoothstep(F.StructureFadeNear, F.StructureFadeFar, NearestApproach);
 
-	// -- The band is the gradient -------------------------------------------
+    const float CloudOuter =
+		F.PlanetRadius + F.Thickness * TR_TopMax(F, DetailFade, StructureFade);
+
+	// -- The band is the slab -----------------------------------------------
 	//
-	// NOT AN OPTICAL CULL. Where the deck goes opaque is a property of the
-	// extinction, and deriving a radius from it makes retuning DeckOpticalDepth
-	// move the step size -- a coupling with no visible cause. The backstop is a
-	// geometric anchor and says the same thing better: no gradient reaches below
-	// it unless relief pushed the whole column under, so a coarse step
-	// integrates what is left and transmittance ends the ray within a couple of
-	// them.
-    const float CloudInner = max(F.PlanetRadius + F.Thickness * F.DeckBackstop, 1e-4f);
+	// GEOMETRIC, NOT OPTICAL. Where the cloud goes opaque is a property of the
+	// extinction, and deriving a radius from it would make retuning
+	// DeckOpticalDepth move the step size -- a coupling with no visible cause.
+	// The lowest a base can fall says it better and says it exactly: no density
+	// reaches below it at all.
+	//
+	// HELD AT THE SURFACE, since a base pushed below ground is cloud the planet
+	// has already cut off and a shell inside the planet plans segments the
+	// terminus then discards.
+    const float CloudInner = max(
+		F.PlanetRadius + F.Thickness * TR_BaseMin(F, DetailFade, StructureFade),
+		F.PlanetRadius);
 
 	// Grey: each band's tint and amount are applied per sample from
 	// TRScatterParams, on the view ray and at the light ray's receiver.
@@ -462,31 +479,21 @@ CompositeParams TR_BuildAtmo(
 
 /** Where the view ray stops, and whether it is opaque there.
  *
- *  SCENE DEPTH ONLY. THE PLANET DOES NOT STOP THE VIEW RAY. A gas giant has no
- *  surface and the field knows it: below the deck floor density is 1, and inside
- *  the planet the height goes negative and the profile saturates, so a ray that
- *  continues meets opaque deck and the transmittance early-out ends it.
+ *  THE PLANET STOPS THE RAY, because on this field it is a surface rather than
+ *  an arbitrary radius under an opaque column. Without the clip a ray would pass
+ *  under the base, cross the interior and come back up into cloud on the far
+ *  side, which a sparse or thin slab lets the eye see.
  *
- *  PITFALL: clipping on the planet is not free even where the ray is already
- *  opaque, because MaxDist reaches Atmo_Plan -- it bounds the segments and
- *  decides whether the inner shell is crossed, so the SEGMENT STRUCTURE changes
- *  across the silhouette even where the shading would not. A different step
- *  lattice is what the eye picks up, and the terminus reads as a march disparity
- *  rather than as a shell. The light ray still respects the planet; an occluder
- *  for light and a terminus for the view are different jobs.
+ *  THE SILHOUETTE IS WHERE THE SURFACE IS. MaxDist reaches Atmo_Plan, so the
+ *  clip changes the SEGMENT STRUCTURE and not only the shading -- but the pixels
+ *  either side of it are pixels either side of the planet's own edge, where the
+ *  geometry changes anyway. A different step lattice cannot read as a march
+ *  disparity there.
  *
- *  INNER TERMINUS, WHERE THE DECK IS PROVABLY OPAQUE. With no planet clip the
- *  interior chord would be marched until transmittance happens to die: fine at a
- *  deep optical depth, a cliff at a shallow one, with nothing structural
- *  bounding the loop.
- *
- *  A RADIUS, NOT A STEP. Collapsing the region to one long step gets extinction
- *  exactly right, being homogeneous, but spawns a single light march at the
- *  midpoint of a saturated slab, which is fully shadowed -- so the in-scattering
- *  belonging to the first optical depth below the floor vanishes at a fixed
- *  radius, which is a ring. Clipping changes nothing about how the region above
- *  is sampled, and unlike a planet clip it sits where every ray reaching it is
- *  already opaque, so the segment structure changing there cannot show. */
+ *  THE SPHERE, NOT THE DEPTH BUFFER, is what makes this a bound: terrain occupies
+ *  only the pixels it is drawn into, and the ray needs stopping at the horizon
+ *  whether or not anything was rasterised there. Scene depth still wins where it
+ *  is nearer, which is what keeps cloud out of geometry standing above ground. */
 void Field_Terminus(
 	float3 Origin,
 	float3 Dir,
@@ -499,43 +506,13 @@ void Field_Terminus(
     OutMaxDist = Atmo.mainRayParams.sceneDepth;
     OutOpaque = false;
 
-    const float3 BandLow = min(S.ExtinctionNegative.rgb * S.ExtinctionNegative.a,
-		min(S.ExtinctionPositive.rgb * S.ExtinctionPositive.a,
-			S.ExtinctionBase.rgb * S.ExtinctionBase.a));
+    const float2 PlanetHit = Atmo_RaySphere(
+		Origin, Dir, Atmo.planetParams.planetPos, F.PlanetRadius);
 
-	// PER ATMOSPHERE THICKNESS, to match BoundMin and DeckBackstop.
-	// cloudScatBeta is per WORLD unit, having been divided by thickness in
-	// Atmo_BuildParams, so the depth below would otherwise be a world length
-	// subtracted from a fraction -- at planetary scale always hugely negative,
-	// and the clip never fires.
-    const float BetaMin = Atmo.cloudParams.cloudScatBeta.x
-		* min(BandLow.x, min(BandLow.y, BandLow.z)) * F.Thickness;
-
-	// COUNTED DOWN FROM WHERE EVERY COLUMN IS SATURATED, which is the backstop
-	// or the lowest a column top can fall, whichever is lower. Relief is free to
-	// push a top under the backstop, and above such a top the ray is still
-	// crossing clear air -- counting from the backstop alone would put the
-	// terminus inside cloud that had not gone opaque yet.
-    float BoundMin, BoundMax;
-    TR_TopBounds(F, 1.0f, 1.0f, BoundMin, BoundMax);
-
-	// Against the slowest channel of the slowest band, which the band ramp never
-	// goes below. Erring deep costs a step; erring shallow blacks out cloud that
-	// should still be visible.
-    const float OpaqueFraction = min(F.DeckBackstop, BoundMin)
-		- TR_VIEW_OPAQUE_DEPTH / max(BetaMin, 1e-6f);
-
-    if (OpaqueFraction > 0.0f)
+    if (PlanetHit.x > 0.0f && PlanetHit.x < OutMaxDist)
     {
-        const float2 OpaqueHit = Atmo_RaySphere(
-			Origin, Dir, Atmo.planetParams.planetPos,
-			F.PlanetRadius + F.Thickness * OpaqueFraction);
-
-        if (OpaqueHit.x > 0.0f && OpaqueHit.x < OutMaxDist)
-        {
-            OutMaxDist = OpaqueHit.x;
-            OutOpaque = true;
-        }
+        OutMaxDist = PlanetHit.x;
+        OutOpaque = true;
     }
 }
 
@@ -591,6 +568,15 @@ float3 Field_LightTint(
 float3 Field_NeutralTint(FieldMaterialParams S)
 {
     return S.ExtinctionBase.rgb;
+}
+
+/** Finest RADIAL feature in the field, in world units: what caps how far the
+ *  screen-footprint bound may lengthen a step. THE FINER OF THE TWO RAMPS, since
+ *  a cap sized on the top's alone lets the footprint step over a sharper base --
+ *  which shows as the underside thinning with distance while the top holds. */
+float Field_FeatureSize(FieldParams F)
+{
+    return min(F.GradientThickness, F.BaseThickness) * F.Thickness;
 }
 
 /** Finest lateral feature size at a radius, in world units: what bounds a step

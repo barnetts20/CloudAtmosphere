@@ -57,8 +57,12 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	float DeckTop = 0.0f;
 	float CeilingFalloff = 0.0f;
 	float GradientThickness = 0.0f;
-	float DeckBackstop = 0.0f;
 	float DensityCurve = 0.0f;
+	float DeckBase = 0.0f;
+	float BaseThickness = 0.0f;
+	float BaseCurve = 0.0f;
+	float BaseRelief = 0.0f;
+	float BaseStormDrop = 0.0f;
 	float BandSharpness = 0.0f;
 	float BandBias = 0.0f;
 	float HemisphereBlend = 0.0f;
@@ -186,8 +190,12 @@ SHADER_PARAMETER(float, Time)
 SHADER_PARAMETER(float, DeckTop)
 SHADER_PARAMETER(float, CeilingFalloff)
 SHADER_PARAMETER(float, GradientThickness)
-SHADER_PARAMETER(float, DeckBackstop)
 SHADER_PARAMETER(float, DensityCurve)
+SHADER_PARAMETER(float, DeckBase)
+SHADER_PARAMETER(float, BaseThickness)
+SHADER_PARAMETER(float, BaseCurve)
+SHADER_PARAMETER(float, BaseRelief)
+SHADER_PARAMETER(float, BaseStormDrop)
 SHADER_PARAMETER(float, BandSharpness)
 SHADER_PARAMETER(float, BandBias)
 SHADER_PARAMETER(float, HemisphereBlend)

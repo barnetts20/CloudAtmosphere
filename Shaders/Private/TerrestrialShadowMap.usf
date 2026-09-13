@@ -12,11 +12,11 @@
 // where a ray enters it -- exposed to that loop through the BakeField_ hooks at
 // the bottom of the file.
 //
-// THE DECK THE LIGHT SEES MUST BE THE DECK THE EYE SEES. Every derived quantity
-// here comes from TR_BuildField, TR_Density and TR_DeckBeta, the same functions
-// the material calls from the same authored values. A second derivation on
-// either side fails silently: the shadows stay smooth and plausible and land in
-// the wrong place.
+// THE FIELD THE LIGHT SEES MUST BE THE FIELD THE EYE SEES. Every derived
+// quantity here comes from TR_BuildField, TR_Density and TR_DeckBeta, the same
+// functions the material calls from the same authored values. A second
+// derivation on either side fails silently: the shadows stay smooth and
+// plausible and land in the wrong place.
 
 Texture2DArray FlowTarget;
 SamplerState FlowTargetSampler;
@@ -54,8 +54,12 @@ float Time;
 float DeckTop;
 float CeilingFalloff;
 float GradientThickness;
-float DeckBackstop;
 float DensityCurve;
+float DeckBase;
+float BaseThickness;
+float BaseCurve;
+float BaseRelief;
+float BaseStormDrop;
 float BandSharpness;
 float BandBias;
 float HemisphereBlend;
@@ -212,28 +216,36 @@ float BakeField_CascadeExtent(BakeFieldParams F, int Level)
     return TR_ShadowCascadeExtent(F, Level);
 }
 
-/** Highest the deck can reach, in thicknesses, with both layers at full
+/** Highest the field can reach, in thicknesses, with both layers at full
  *  strength. Bounds the cone trace below. */
 float BakeField_TopBound(BakeFieldParams F)
 {
-    float TopMin, TopMax;
-    TR_TopBounds(F, 1.0f, 1.0f, TopMin, TopMax);
-
-    return TopMax;
+    return TR_TopMax(F, 1.0f, 1.0f);
 }
 
+/** Where the light ray first reaches the slab. The trace takes either surface,
+ *  so a ray grazing under the field and climbing back into it on the far side
+ *  still finds the cloud it must shadow. */
 float BakeField_Entry(float3 Origin, float3 Dir, float RayLength, float TopMax,
 	BakeFieldParams F)
 {
-    return TR_DeckEntry(
-		FlowTarget, FlowTargetSampler, Origin, Dir, 0.0f, RayLength, TopMax, F);
+	// The miss flag is the view march's: the bake marches from wherever the
+	// trace stopped either way, and a ray that reaches no cloud accumulates
+	// nothing and writes the sentinel.
+    bool bMissed;
+
+    return TR_SlabEntry(
+		FlowTarget, FlowTargetSampler, Origin, Dir, 0.0f, RayLength, TopMax, F, bMissed);
 }
 
-/** The radial advance a step is allowed. The gradient is the only part of the
- *  profile that varies, so it is what the budget is spent on. */
+/** The radial advance a step is allowed. The ramps are the only part of the
+ *  profile that varies, so the budget is spent on the finer of the two -- sized
+ *  against the top's alone, a sharp base is crossed in one step and the map
+ *  holds a hard edge the march resolves softly. */
 float BakeField_HeightStep(BakeFieldParams F)
 {
-    return F.GradientThickness * F.Thickness / max(ATMO_BAKE_STEPS_PER_GRADIENT, 1.0f);
+    return min(F.GradientThickness, F.BaseThickness) * F.Thickness
+		/ max(ATMO_BAKE_STEPS_PER_GRADIENT, 1.0f);
 }
 
 float BakeField_LateralArc(float Radius)

@@ -60,8 +60,12 @@ namespace TerrestrialShadow
 		P->DeckTop = Params.DeckTop;
 		P->CeilingFalloff = Params.CeilingFalloff;
 		P->GradientThickness = Params.GradientThickness;
-		P->DeckBackstop = Params.DeckBackstop;
 		P->DensityCurve = Params.DensityCurve;
+		P->DeckBase = Params.DeckBase;
+		P->BaseThickness = Params.BaseThickness;
+		P->BaseCurve = Params.BaseCurve;
+		P->BaseRelief = Params.BaseRelief;
+		P->BaseStormDrop = Params.BaseStormDrop;
 		P->BandSharpness = Params.BandSharpness;
 		P->BandBias = Params.BandBias;
 		P->HemisphereBlend = Params.HemisphereBlend;

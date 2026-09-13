@@ -6,35 +6,29 @@
 
 // Terrestrial cloud band: the field the march samples.
 //
-// A CLONE OF THE GAS GIANT DECK, DELIBERATELY UNCHANGED SO FAR. It renders the
-// same picture through a separate path, which is the point: the two can now be
-// pulled apart one feature at a time with the gas giant unaffected and each step
-// verifiable on its own.
+// A SLAB BETWEEN TWO SURFACES. Every column has a top and a base, both set by
+// the simulated flow and moved by two noise volumes; density ramps up from the
+// base, ramps down to the top and sits at 1 between them. OUTSIDE THE SLAB
+// THERE IS NOTHING -- above the top and below the base density is exactly zero,
+// which is what lets a ray pass under the cloud and a camera stand beneath it.
 //
-// WHERE IT IS EXPECTED TO DIVERGE, none of which has happened yet:
-//   - A TRACED BOTTOM as well as a top, so the band is a slab between two
-//     flow-driven surfaces rather than a column hanging off one. TR_DeckBackstop
-//     is the deck's degenerate version of that bottom.
-//   - SPARSITY: coverage below 1, modulated from the flow rather than carved out
-//     of a solid column. TR_Density never returns zero today.
-//   - ONE MATERIAL with storm darkening, in place of the three band sets. The
-//     march carries TR_Density's second channel without interpreting it, so this
-//     changes what the channel means and nothing that reads it.
+// THE BASE FOLLOWS THE TOP, SCALED. Both surfaces read the same two shape
+// values, the base at BaseRelief of the top's displacement, so a base costs no
+// extra fetch and a tall column is a thick one. The two are decorrelated only by
+// BaseStormDrop, which sinks the base under a vortex while the tower lifts the
+// top. A base with structure of its own would need a third noise layer.
 //
-// A COLUMNAR HEIGHTFIELD WITH A DENSITY RAMP HANGING OFF IT. Every column has a
-// top set by the simulated flow and carved by two noise volumes; below it the
-// density ramps 0 to 1 over an authored thickness and stays at 1. Coverage is
-// 100%, so every feature is relief in the top surface rather than opacity
-// variation, and Band drives ALTITUDE: a zone is a raised deck of fresh ammonia
-// ice, a belt is where the line of sight reaches warmer material. Band itself
-// reaches the march untouched, to be spent on extinction and scattering colour.
+// COVERAGE IS 100%: every feature is relief in a surface rather than opacity
+// variation, and Band drives ALTITUDE. Band itself reaches the march untouched,
+// to be spent on extinction and scattering colour.
 //
 // HOW THE FLOW IS READ IS NOT HERE. FlowField.ush owns the sample and what its
-// channels mean; this file owns what the deck makes of them.
+// channels mean; this file owns what the field makes of them.
 //
-// UNITS. Three absolutes, all atmosphere fractions: DeckTop, DeckBackstop and
-// GradientThickness. Every relief amount, both carves, ErosionDepth and
-// DeckSlope are fractions of GradientThickness. Thickness is the only
+// UNITS. Four absolutes, all atmosphere fractions: DeckTop, DeckBase,
+// GradientThickness and BaseThickness. Every relief amount, both carves,
+// ErosionDepth, BaseStormDrop and DeckSlope are fractions of GradientThickness;
+// BaseRelief is a fraction of the top's own displacement. Thickness is the only
 // world-space length. Space is planet-local, spin axis on Z, positions unit
 // directions except in TR_Density.
 
@@ -79,15 +73,18 @@
 
 /** Fraction of the cone-trace advance actually taken. Under 1 because DeckSlope
  *  is authored, and an under-declared slope is the one way the entry search
- *  steps over the surface. */
+ *  steps over a surface. DeckSlope bounds both surfaces: the base is the flatter
+ *  of the two, so the top's bound is conservative there. */
 #ifndef TR_CONE_RELAXATION
 #define TR_CONE_RELAXATION 0.9f
 #endif
 
 /** Cone-trace iteration cap. Reached only on rays that graze for their whole
- *  length, which return T1 and are treated as missing the deck. */
-#ifndef TR_DECK_ENTRY_PROBES
-#define TR_DECK_ENTRY_PROBES 24
+ *  length, which return T1 and are treated as missing the slab. A ray climbing
+ *  toward the base from below grazes over a longer run than one descending onto
+ *  the top, so this binds there first. */
+#ifndef TR_SLAB_ENTRY_PROBES
+#define TR_SLAB_ENTRY_PROBES 24
 #endif
 
 /** Everything the field, density and deck-top functions read.
@@ -113,8 +110,23 @@ struct TRFieldParams
 	/** How far the density ramp reaches below a column's own top, and the unit
 	 *  every relief amount is a fraction of. Floored against division. */
     float GradientThickness;
-    float DeckBackstop;
     float DensityCurve;
+
+	/** Where an unrelieved column's base sits, an atmosphere fraction, and how
+	 *  far its ramp reaches above it. Both floored against division. */
+    float DeckBase;
+    float BaseThickness;
+    float BaseCurve;
+
+	/** How much of the top's displacement the base takes, signed: 0 holds the
+	 *  base flat while the top moves, 1 translates the slab rigidly, negative
+	 *  opens it where the top rises. */
+    float BaseRelief;
+
+	/** How far a vortex sinks the base, a fraction of GradientThickness, on the
+	 *  same gate that lifts a storm tower. The one term that moves the base
+	 *  without moving the top. */
+    float BaseStormDrop;
 
 	/** What FlowField.ush's interpreters read: the hemisphere width and the
 	 *  band's offset and gain. Held as the shared struct rather than as loose
@@ -208,8 +220,12 @@ TRFieldParams TR_BuildField(
 	float DeckTop,
 	float CeilingFalloff,
 	float GradientThickness,
-	float DeckBackstop,
 	float DensityCurve,
+	float DeckBase,
+	float BaseThickness,
+	float BaseCurve,
+	float BaseRelief,
+	float BaseStormDrop,
 	float BandSharpness,
 	float BandBias,
 	float HemisphereBlend,
@@ -255,8 +271,13 @@ TRFieldParams TR_BuildField(
     F.PlanetRadius = PlanetRadius;
 
     F.GradientThickness = max(GradientThickness, 1e-4f);
-    F.DeckBackstop = DeckBackstop;
     F.DensityCurve = DensityCurve;
+
+    F.DeckBase = DeckBase;
+    F.BaseThickness = max(BaseThickness, 1e-4f);
+    F.BaseCurve = BaseCurve;
+    F.BaseRelief = BaseRelief;
+    F.BaseStormDrop = BaseStormDrop;
 
     F.FlowRead.BandSharpness = BandSharpness;
     F.FlowRead.BandBias = BandBias;
@@ -331,7 +352,7 @@ TRFieldParams TR_BuildField(
 /** The call both consumers make, expanded from one definition beside the
  *  signature it has to match.
  *
- *  PITFALL: 47 POSITIONAL FLOAT ARGUMENTS. A parameter inserted above but missed
+ *  PITFALL: 51 POSITIONAL FLOAT ARGUMENTS. A parameter inserted above but missed
  *  at a call site still compiles, silently shifting every argument after it --
  *  VortexThreshold arriving as StormTowerRelief and so on, with nothing to catch
  *  it. Expanding from here makes that impossible: every name resolves in the
@@ -343,7 +364,8 @@ TRFieldParams TR_BuildField(
  *  what lets one expansion serve both. */
 #define TR_BUILD_FIELD() TR_BuildField( \
 	PlanetRadius, HeightScale, Time, DeckTop, \
-	CeilingFalloff, GradientThickness, DeckBackstop, DensityCurve, \
+	CeilingFalloff, GradientThickness, DensityCurve, DeckBase, \
+	BaseThickness, BaseCurve, BaseRelief, BaseStormDrop, \
 	BandSharpness, BandBias, HemisphereBlend, HemisphereVariance, \
 	BandRelief, PressureRelief, VortexThreshold, StormTowerRelief, \
 	ReliefThinning, RotationWeight, WarpTime, DeepShearRatio, \
@@ -364,6 +386,7 @@ TRFieldParams TR_BuildField(
 struct TRFieldSample
 {
     float Top;
+    float Base;
     float Pressure;
     float Band;
     float BandShift;
@@ -392,57 +415,69 @@ float TR_CeilingFade(float Height, TRFieldParams F)
     return 1.0f - smoothstep(1.0f - F.CeilingFalloff, 1.0f, Height);
 }
 
-/** Density at a height, given the column's top and floor. Peaks at exactly 1
- *  with zero derivative at both ends, so neither the onset nor the join to the
- *  saturated region draws a line. No peak-density term: Cloud Beta is solved
- *  from the optical depth wanted, so a peak here would divide back out.
+/** Density at a height inside a column, from its two surfaces: a ramp down from
+ *  the top times a ramp up from the base, each peaking at exactly 1 with zero
+ *  derivative at both ends so neither onset nor plateau draws a line. Zero
+ *  outside the slab, which is what the empty-air early-out relies on. No peak
+ *  density term: Cloud Beta is solved from the optical depth wanted, so a peak
+ *  here would divide back out.
  *
- *  PITFALL: the onset stays C1 only while Curve is above 0.5. At 0.5 the slope
- *  at the deck top goes finite, creasing along the whole top; below it the top
- *  hardens into an edge. Both are legitimate looks, so this is not clamped --
- *  the floor only keeps the exponent positive, since pow(t, 0) returns 1. */
-float TR_DeckDensity(float Height, float Top, float Bottom, float Curve)
+ *  PITFALL: an onset stays C1 only while its curve is above 0.5. At 0.5 the
+ *  slope at that surface goes finite, creasing along the whole of it; below it
+ *  the surface hardens into an edge. Both are legitimate looks, so this is not
+ *  clamped -- the floor only keeps the exponent positive, since pow(t, 0)
+ *  returns 1. */
+float TR_SlabDensity(float Height, float Top, float Base, TRFieldParams F)
 {
-    const float Span = max(Top - Bottom, 1e-4f);
+    const float Span = max(Top - Base, 1e-4f);
 
-    const float T = saturate((Top - Height) / Span);
+	// BOTH RAMPS CUT AGAINST THE WHOLE SPAN rather than sharing it. A thin
+	// column then peaks below 1 instead of reaching core density over no
+	// distance at all, which is what a thin cloud should do; sharing the span
+	// would hold the peak at 1 however thin the column got and put a hard sheet
+	// where the slab pinches out.
+    const float SpanTop = min(F.GradientThickness, Span);
+    const float SpanBase = min(F.BaseThickness, Span);
 
-    return smoothstep(0.0f, 1.0f, pow(T, max(Curve, 1e-4f)));
+    const float FromTop = saturate((Top - Height) / SpanTop);
+    const float FromBase = saturate((Height - Base) / SpanBase);
+
+    return smoothstep(0.0f, 1.0f, pow(FromTop, max(F.DensityCurve, 1e-4f)))
+		* smoothstep(0.0f, 1.0f, pow(FromBase, max(F.BaseCurve, 1e-4f)));
 }
 
-/** Where a column's gradient bottoms out: the authored thickness below its own
- *  top, backstopped by DeckBackstop. THE ONE PLACE THE FLOOR IS DERIVED -- the
- *  profile, the erosion normalization and the solid-region skip must agree or
- *  the skip fills in cloud the profile left transparent. The backstop keeps the
- *  marched band thin.
- *
- *  PITFALL: never above the top. A column pushed below the backstop would
- *  otherwise get a floor above its own top, inverting the profile so empty air
- *  reads as solid. Clamped, the result is monotone in Top, which is what lets
- *  the skip test a lower bound. */
-float TR_DeckFloor(float Top, TRFieldParams F)
-{
-    return min(max(Top - F.GradientThickness, F.DeckBackstop), Top);
-}
-
-/** The deck's extinction coefficient per atmosphere thickness, solved so a ray
- *  down an unrelieved column accumulates DeckOpticalDepth at core density.
+/** The field's extinction coefficient per atmosphere thickness, solved so a ray
+ *  down an UNRELIEVED column accumulates DeckOpticalDepth at core density.
  *  Multiply by a band's extinction for colour and divide by Thickness for world
- *  units. Solved rather than authored, so retuning the shell leaves the deck's
+ *  units. Solved rather than authored, so retuning the shell leaves the cloud's
  *  opacity where it was put, and shared by the march and the bake, which keeps
- *  the depth where the map goes opaque the depth where the eye sees it. */
+ *  the depth where the map goes opaque the depth where the eye sees it.
+ *
+ *  PITFALL: exact only while the two ramps fit inside DeckTop - DeckBase. Past
+ *  that they overlap, this counts the overlap at full density and solves a
+ *  coefficient too small, so narrowing the slab thins the cloud instead of
+ *  holding the authored depth. */
 float TR_DeckBeta(TRFieldParams F, float DeckOpticalDepth)
 {
-    const float Floor = TR_DeckFloor(F.DeckTop, F);
-
-	// The gradient's mean density: the integral of smoothstep(T^c) over [0,1] is
+	// Each ramp's mean density: the integral of smoothstep(T^c) over [0,1] is
 	// 3/(2c+1) - 2/(3c+1), a half at c = 1. Using it rather than a fixed half
-	// keeps DeckOpticalDepth exact at any curve, so DensityCurve redistributes
-	// mass inside the gradient without changing how much light the deck removes.
-    const float C = max(F.DensityCurve, 1e-4f);
-    const float MeanDensity = 3.0f / (2.0f * C + 1.0f) - 2.0f / (3.0f * C + 1.0f);
+	// keeps DeckOpticalDepth exact at any curve, so the curves redistribute mass
+	// inside the slab without changing how much light it removes.
+    const float Ct = max(F.DensityCurve, 1e-4f);
+    const float Cb = max(F.BaseCurve, 1e-4f);
 
-    return DeckOpticalDepth / max(Floor + MeanDensity * (F.DeckTop - Floor), 1e-4f);
+    const float MeanTop = 3.0f / (2.0f * Ct + 1.0f) - 2.0f / (3.0f * Ct + 1.0f);
+    const float MeanBase = 3.0f / (2.0f * Cb + 1.0f) - 2.0f / (3.0f * Cb + 1.0f);
+
+    const float Span = max(F.DeckTop - F.DeckBase, 1e-4f);
+
+    const float RampTop = min(F.GradientThickness, Span);
+    const float RampBase = min(F.BaseThickness, Span - RampTop);
+
+    const float Plateau = Span - RampTop - RampBase;
+
+    return DeckOpticalDepth
+		/ max(MeanTop * RampTop + MeanBase * RampBase + Plateau, 1e-4f);
 }
 
 /** How far the two carves can move a column top, in atmosphere fractions, at the
@@ -506,78 +541,94 @@ float TR_StormSign(float Pressure)
     return (Pressure >= 0.0f) ? 1.0f : -1.0f;
 }
 
-/** Cloud top altitude, an atmosphere fraction. Flow first -- band height,
- *  pressure lift, storm towers -- then the two carves. With both layers neutral
- *  (carves 0, StormCells 1, ReliefScale 1) this is the flow's own top, which is
- *  what TR_ProbeFromFlow reports below the deck floor.
+/** Both of a column's surfaces, in atmosphere fractions. Flow first -- band
+ *  height, pressure lift, storm towers -- then the two carves, all accumulated
+ *  as ONE SIGNED DISPLACEMENT so the base can take a share of it. With both
+ *  layers neutral (carves 0, StormCells 1, ReliefScale 1) these are the flow's
+ *  own surfaces, which is what TR_ProbeFromFlow reports.
  *
- *  EVERY TERM IS CENTRED ON ZERO, so none moves the deck as a body and DeckTop
- *  stays the typical top however they are tuned. Zones sit high and belts low by
- *  the sign of the band, their boundaries meeting at DeckTop. The pressure sign
- *  is not arbitrary: anticyclones are high pressure, rising, condensing fresh
- *  ammonia above the haze, so they must sit high -- backwards, the field reads
- *  as plausible until you notice every storm is a pit.
+ *  EVERY DISPLACEMENT TERM IS CENTRED ON ZERO, so none moves the field as a body
+ *  and DeckTop and DeckBase stay the typical surfaces however they are tuned.
+ *  Zones sit high and belts low by the sign of the band, their boundaries
+ *  meeting at DeckTop. The pressure sign is not arbitrary: anticyclones are high
+ *  pressure and rising, so they must sit high -- backwards, the field reads as
+ *  plausible until you notice every storm is a pit.
  *
  *  ReliefScale collapses band relief under strain and deliberately does not
  *  touch the lift or the towers, which are vertical motion rather than stretched
  *  material. The storm term is gated on vortex strength -- ungated, Worley F1 is
  *  polka dots -- and StormCells is inverted because F1 is minimal at cell
- *  centres, where a storm belongs. */
-float TR_CloudTop(
+ *  centres, where a storm belongs. That same gate drops the base, so a vortex
+ *  reads as a tall column standing on a low floor rather than as a raised deck.
+ *
+ *  PITFALL: the base is held at or below the top. Uncrossed it would invert the
+ *  profile, and the bounds below assume the slab is a span rather than a
+ *  reversed one. */
+void TR_CloudSurfaces(
 	float BandHeight,
 	float CarveDetail,
 	float ReliefStructure,
 	float Pressure,
 	float StormCells,
 	float ReliefScale,
-	TRFieldParams F)
+	TRFieldParams F,
+	out float OutTop,
+	out float OutBase)
 {
     const float D = F.GradientThickness;
 
 	// Half each way, so zones sit BandRelief above belts.
-    float Top = F.DeckTop + D * ReliefScale * 0.5f * F.BandRelief * BandHeight;
+    float Shift = D * ReliefScale * 0.5f * F.BandRelief * BandHeight;
 
-    Top -= D * F.DetailRelief * CarveDetail;
-    Top += D * F.StructureRelief * ReliefStructure;
+    Shift -= D * F.DetailRelief * CarveDetail;
+    Shift += D * F.StructureRelief * ReliefStructure;
 
-    Top += D * F.PressureRelief * Pressure;
+    Shift += D * F.PressureRelief * Pressure;
 
     const float Vortex = smoothstep(F.VortexThreshold, 1.0f, abs(Pressure));
 
-    Top += D * F.StormTowerRelief * TR_StormSign(Pressure) * (1.0f - StormCells) * Vortex;
+    const float Cell = (1.0f - StormCells) * Vortex;
 
-    return Top;
+    Shift += D * F.StormTowerRelief * TR_StormSign(Pressure) * Cell;
+
+    OutTop = F.DeckTop + Shift;
+
+    OutBase = min(
+		F.DeckBase + Shift * F.BaseRelief - D * F.BaseStormDrop * Cell, OutTop);
 }
 
-/** One flow fetch: the band, the pressure, and the cloud top in three forms. */
+/** One flow fetch: the band, the pressure, and the slab's two surfaces as values
+ *  and as bounds. */
 struct TRFlowProbe
 {
     float Band;
     float Pressure;
 
-	/** The flow's own top, both volumes neutral. Not a bound -- the value. */
+	/** The flow's own surfaces, both volumes neutral. Not bounds -- the
+	 *  values. */
     float TopFlow;
+    float BaseFlow;
 
-	/** Upper bound on the flow terms, carves excluded. */
-    float Top;
-
-	/** Lower bound on the top, every term at its most negative. */
-    float TopLower;
+	/** Highest the top can reach and lowest the base can fall at this column,
+	 *  carves included at the params' own fades. */
+    float TopUpper;
+    float BaseLower;
 };
 
-/** The cloud top from a flow sample, without the volumes.
+/** The slab's surfaces at a column from a flow sample, without the volumes.
  *
- *  Top BOUNDS THE FLOW TERMS FROM ABOVE, with the carves at their median: a
- *  search that overestimates takes another iteration, one that underestimates
- *  steps over the surface. So the band contributes max(BandTerm, 0), ReliefScale
- *  being in [0,1] against a term that changes sign, and the storm term likewise.
- *  NO CARVE MARGIN IN IT -- the shadow ray reads Top as the deck's actual height
- *  and pays in optical depth. The search's margin is TR_CloudTopUpper's.
+ *  THE BOUNDS BRACKET THE SHARED DISPLACEMENT, then each surface takes its own
+ *  share of it. ReliefScale is in [0,1] against the band term and the storm
+ *  cells scale the tower term the same way, so max() and min() bracket both. A
+ *  bound that overestimates costs the search an iteration; one that
+ *  underestimates steps over a surface and lets the early-out skip real cloud.
  *
- *  TopLower TAKES EVERY TERM AT ITS MOST NEGATIVE, both carves included, so a
- *  floor derived from it is at or below the column's real floor. Band and
- *  Pressure must match TR_Field's unshifted values, or the saturated region
- *  tints differently from the gradient above it. */
+ *  THE CARVE REACH ARRIVES AT THE PARAMS' OWN FADES, which makes the bounds
+ *  right for a sample and too tight for a search running ahead of one.
+ *  TR_SlabEntry raises both fades on its copy before probing.
+ *
+ *  Band and Pressure must match TR_Field's unshifted values, or a sample taken
+ *  through the early-out tints differently from one taken the long way. */
 TRFlowProbe TR_ProbeFromFlow(float4 Flow, float3 N, TRFieldParams F)
 {
     TRFlowProbe Probe;
@@ -589,32 +640,42 @@ TRFlowProbe TR_ProbeFromFlow(float4 Flow, float3 N, TRFieldParams F)
 
     const float BandHeight = TR_BandHeight(Probe.Band);
 
-    Probe.TopFlow = TR_CloudTop(BandHeight, 0.0f, 0.0f, Probe.Pressure, 1.0f, 1.0f, F);
-
-    const float Base = F.DeckTop + D * F.PressureRelief * Probe.Pressure;
-
-    const float BandTerm = 0.5f * F.BandRelief * BandHeight;
+    TR_CloudSurfaces(
+		BandHeight, 0.0f, 0.0f, Probe.Pressure, 1.0f, 1.0f, F,
+		Probe.TopFlow, Probe.BaseFlow);
 
     const float Vortex = smoothstep(F.VortexThreshold, 1.0f, abs(Probe.Pressure));
 
-	// At full height wherever the gate is open: the storm cells only scale it
-	// toward zero, so this brackets it from both sides.
-    const float StormTerm = F.StormTowerRelief * TR_StormSign(Probe.Pressure) * Vortex;
-
-    Probe.Top = Base + D * (max(BandTerm, 0.0f) + max(StormTerm, 0.0f));
+    const float PressureTerm = D * F.PressureRelief * Probe.Pressure;
+    const float BandTerm = D * 0.5f * F.BandRelief * BandHeight;
+    const float StormTerm = D * F.StormTowerRelief * TR_StormSign(Probe.Pressure) * Vortex;
 
     float CarveDown, CarveUp;
     TR_CarveReach(F, F.DetailFade, F.StructureFade, CarveDown, CarveUp);
 
-    Probe.TopLower = Base
-		+ D * (min(BandTerm, 0.0f) + min(StormTerm, 0.0f)) - CarveDown;
+    const float ShiftMax = PressureTerm + max(BandTerm, 0.0f) + max(StormTerm, 0.0f);
+    const float ShiftMin = PressureTerm + min(BandTerm, 0.0f) + min(StormTerm, 0.0f);
+
+	// CAPPED AT THE SHELL, where the ceiling fade has already taken density to
+	// zero. Uncapped, a rare tall column would widen every bound derived from
+	// this for the sake of air that cannot scatter.
+    Probe.TopUpper = min(F.DeckTop + ShiftMax + CarveUp, 1.0f);
+
+	// The base's share of a signed displacement, so whichever extreme BaseRelief
+	// turns downward is the one that bounds it. The carve reach is taken at its
+	// larger side for the same reason, which costs a little tightness and no
+	// correctness.
+    Probe.BaseLower = F.DeckBase
+		+ min(ShiftMin * F.BaseRelief, ShiftMax * F.BaseRelief)
+		- abs(F.BaseRelief) * max(CarveDown, CarveUp)
+		- D * max(F.BaseStormDrop, 0.0f) * Vortex;
 
     return Probe;
 }
 
 /** The cheap read, for the jobs that do not need the volumes: finding where a
- *  ray enters the deck, and shading below a column's floor where the volumes
- *  cannot change the density. */
+ *  ray enters the slab, and answering outside it, where the volumes cannot put
+ *  density back. */
 TRFlowProbe TR_FlowProbe(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
@@ -626,35 +687,36 @@ TRFlowProbe TR_FlowProbe(
     return TR_ProbeFromFlow(Flow_Sample(FlowField, FlowSampler, N, TR_FLOW_LAYER), N, F);
 }
 
-/** Conservative upper bound on the deck top, for the entry search: the probe's
- *  top plus the carves' upward reach, taken unfaded since the search runs ahead
- *  of the samples it is finding. */
-float TR_CloudTopUpper(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	float3 P,
-	TRFieldParams F)
-{
-    const float Top = TR_FlowProbe(FlowField, FlowSampler, P, F).Top;
-
-    float CarveDown, CarveUp;
-    TR_CarveReach(F, 1.0f, 1.0f, CarveDown, CarveUp);
-
-    return min(Top + CarveUp, 1.0f);
-}
-
-/** Distance along a ray at which it first reaches the deck. Returns T1 when the
- *  ray never reaches it between T0 and T1. LocalOrigin and LocalDir are in the
- *  field's frame, LocalDir normalized, which an orthonormal WorldToLocal
- *  preserves.
+/** Distance along a ray at which it first reaches the slab, from either side.
+ *  Returns T1 when it does not reach the slab between T0 and T1, and sets
+ *  OutMissed only when that is PROVED rather than merely not found.
+ *
+ *  THE TWO ARE NOT THE SAME ANSWER AND THE CALLER MUST NOT CONFLATE THEM. The
+ *  proofs are geometry: radius is monotone either side of the closest approach,
+ *  so a ray climbing clear of TopMax, or below the base and still descending
+ *  with its perigee outside the span, can be ruled out whatever the field does.
+ *  Running out of segment is different -- the advances rest on DeckSlope
+ *  bounding the surface, and an under-declared slope makes the cone overshoot
+ *  and report a miss on a ray that crosses cloud. Treating that as proof drops
+ *  the cloud entirely on those rays; treating it as "not found" costs them a
+ *  full fine march and nothing else. Errors here have to land on cost.
+ *
+ *  LocalOrigin and
+ *  LocalDir are in the field's frame, LocalDir normalized, which an orthonormal
+ *  WorldToLocal preserves. TopMax is the field-wide upper bound, which is what
+ *  lets a ray climbing clear of the slab give up.
  *
  *  A CONE TRACE, AND NOT AN OPTIMIZATION -- it is what keeps the limb from
- *  breaking. A grazing chord from the cull radius to the surface is enormous,
- *  and stepped at the deck's own step size it exhausts the iteration cap in
- *  empty space, leaving the ray transparent at exactly the angles where its
- *  neighbours a fraction of a degree steeper go opaque: a sharp geometric
- *  threshold, drawing a hard silhouette where the limb should be softest. */
-float TR_DeckEntry(
+ *  breaking. A grazing chord across the shell is enormous, and stepped at the
+ *  field's own step size it exhausts the iteration cap in empty space, leaving
+ *  the ray transparent at exactly the angles where its neighbours a fraction of
+ *  a degree steeper go opaque: a sharp geometric threshold, drawing a hard
+ *  silhouette where the limb should be softest.
+ *
+ *  ONE TRACE FOR BOTH SURFACES, chosen per probe rather than once: a ray
+ *  descending from outside closes on the top, a camera on the ground produces
+ *  nothing but the other kind, and a long grazing ray does both in turn. */
+float TR_SlabEntry(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
 	float3 LocalOrigin,
@@ -662,13 +724,22 @@ float TR_DeckEntry(
 	float T0,
 	float T1,
 	float TopMax,
-	TRFieldParams F)
+	TRFieldParams F,
+	out bool OutMissed)
 {
+    OutMissed = false;
+
+	// UNFADED, ON A LOCAL COPY. The search runs ahead of the samples it is
+	// finding, so a bound narrowed by this pixel's fades is not a bound on the
+	// column it eventually lands in.
+    F.DetailFade = 1.0f;
+    F.StructureFade = 1.0f;
+
     float TSearch = T0;
 
     LOOP
 
-    for (int Probe = 0; Probe < TR_DECK_ENTRY_PROBES; Probe++)
+    for (int Iter = 0; Iter < TR_SLAB_ENTRY_PROBES; Iter++)
     {
         const float3 ProbePos = LocalOrigin + LocalDir * TSearch;
         const float ProbeRadius = length(ProbePos);
@@ -677,33 +748,64 @@ float TR_DeckEntry(
         const float3 ProbeDir = ProbePos / max(ProbeRadius, 1e-4f);
         const float ProbeRate = dot(LocalDir, ProbeDir);
 
-        const float TopUpper = TR_CloudTopUpper(FlowField, FlowSampler, ProbeDir, F);
+        const TRFlowProbe Probe = TR_FlowProbe(FlowField, FlowSampler, ProbeDir, F);
 
-        if (ProbeHeight <= TopUpper)
+        if (ProbeHeight <= Probe.TopUpper && ProbeHeight >= Probe.BaseLower)
         {
             return TSearch;
         }
 
-		// Climbing and clear of the highest the deck can reach. Both conditions
-		// matter: a climbing ray still inside the deck's range can meet a taller
+        const bool bAbove = ProbeHeight > Probe.TopUpper;
+
+		// How far the surface is and how fast the ray alone closes on it.
+        const float Gap = bAbove
+			? ProbeHeight - Probe.TopUpper
+			: Probe.BaseLower - ProbeHeight;
+
+        const float Approach = bAbove ? -ProbeRate : ProbeRate;
+
+		// Climbing and clear of the highest the field can reach. Both conditions
+		// matter: a climbing ray still inside that range can meet a taller
 		// column ahead.
-        if (ProbeRate >= 0.0f && ProbeHeight > TopMax)
+        if (bAbove && ProbeRate >= 0.0f && ProbeHeight > TopMax)
         {
+            OutMissed = true;
             return T1;
         }
 
-		// The deck rises to meet the ray, so the closing rate is the sum of the
-		// ray's descent and the deck's rise across the ground it covers.
-		// Dividing by the descent alone overshoots without bound at tangent.
-		// DeckSlope is in gradient depths per radian, matching the relief that
-		// produces the slope.
+		// BELOW THE BASE AND STILL DESCENDING, so the ray is moving away from
+		// the surface it needs and the cone has nothing to close on. Radius is
+		// monotone either side of the closest approach, so the search resumes
+		// there rather than giving up: a limb ray that skims under the cloud and
+		// climbs back into it would otherwise report the whole segment as
+		// missing the slab, which drops that cloud from the image entirely.
+        if (!bAbove && ProbeRate < 0.0f)
+        {
+            const float TPerigee = -dot(LocalOrigin, LocalDir);
+
+            if (TPerigee <= TSearch || TPerigee >= T1)
+            {
+                OutMissed = true;
+                return T1;
+            }
+
+            TSearch = TPerigee;
+            continue;
+        }
+
+		// The surface moves to meet the ray, so the closing rate is the sum of
+		// the ray's own approach and the surface's slope across the ground it
+		// covers. Dividing by the approach alone overshoots without bound at
+		// tangent. DeckSlope is in gradient depths per radian, matching the
+		// relief that produces the slope, and bounds the base as well: the base
+		// is the flatter surface, so the top's slope errs safe there.
         const float Horizontal = sqrt(max(1.0f - ProbeRate * ProbeRate, 0.0f));
 
-        const float ClosingRate = -ProbeRate
+        const float ClosingRate = Approach
 			+ Horizontal * max(F.DeckSlope, 0.1f) * F.GradientThickness * F.Thickness
 				/ max(ProbeRadius, 1e-4f);
 
-        const float Advance = (ProbeHeight - TopUpper) * F.Thickness / max(ClosingRate, 1e-5f);
+        const float Advance = Gap * F.Thickness / max(ClosingRate, 1e-5f);
 
         TSearch += max(Advance * TR_CONE_RELAXATION, 1e-4f);
 
@@ -984,8 +1086,10 @@ TRFieldSample TR_Field(
 
     TRFieldSample Out;
 
-    Out.Top = TR_CloudTop(
-		TR_BandHeight(Zeta), CarveDetail, ReliefStructure, Pressure, StormGate, ReliefScale, F);
+    TR_CloudSurfaces(
+		TR_BandHeight(Zeta), CarveDetail, ReliefStructure, Pressure, StormGate, ReliefScale, F,
+		Out.Top, Out.Base);
+
     Out.Pressure = Pressure;
     Out.Band = Zeta;
     Out.BandShift = BandShift;
@@ -1021,8 +1125,8 @@ float3 TR_BandColour(float Band, float3 ColourA, float3 ColourB, float3 EdgeColo
  *    y  BAND, signed and unclamped -- what the material is, not a density term,
  *       shifted by the shapes near the surface.
  *    z  Pressure, for tinting vortices. Negative is cyclonic.
- *    w  The deck top at this column. Below the deck floor the volumes are
- *       skipped, so it is the flow's own top: what TR_CloudTop returns with both
+ *    w  The cloud top at this column. Outside the slab the volumes are skipped,
+ *       so it is the flow's own top: what TR_CloudSurfaces returns with both
  *       layers neutral, the value the full path reaches as the fades hit zero. */
 float4 TR_Density(
 	Texture2DArray FlowField,
@@ -1050,21 +1154,15 @@ float4 TR_Density(
 
     BRANCH
 
-	// ONE FETCH BELOW THE COLUMN'S FLOOR RATHER THAN SEVEN: density there is
-	// exactly 1 and the volumes cannot change it, so the probe's fetch supplies
+	// ONE FETCH OUTSIDE THE SLAB RATHER THAN SEVEN: density there is exactly
+	// zero and the volumes cannot put any back, so the probe's fetch supplies
 	// the band and pressure that are all that is left to want. The test uses the
-	// step's far edge, keeping the boundary a half step clear of the lattice,
-	// and runs AGAINST A LOWER BOUND ON THE FLOOR since the real one costs the
-	// volumes. TR_DeckFloor is monotone in Top, so the test can only be
-	// conservative; the upper bound would fill carved troughs back in.
-    if (Height + HalfStep <= TR_DeckFloor(Probe.TopLower, F))
+	// step's NEAR edge on each side, keeping the boundary a half step clear of
+	// the lattice, and runs against bounds rather than the surfaces themselves,
+	// which cost the volumes.
+    if (Height + HalfStep <= Probe.BaseLower || Height - HalfStep >= Probe.TopUpper)
     {
-		// A tall column's saturated region can reach the ceiling band, so the
-		// fade applies here too, integrated across the step as below.
-        const float Ceiling = (TR_CeilingFade(Height - HalfStep, F)
-			+ 4.0f * TR_CeilingFade(Height, F) + TR_CeilingFade(Height + HalfStep, F)) / 6.0f;
-
-        return float4(Ceiling, Probe.Band, Probe.Pressure, Probe.TopFlow);
+        return float4(0.0f, Probe.Band, Probe.Pressure, Probe.TopFlow);
     }
 
     const TRFieldSample Field = TR_Field(
@@ -1073,39 +1171,38 @@ float4 TR_Density(
 		N, Flow0, Probe, Height, F);
 
     const float Top = Field.Top;
-
-    const float Bottom = TR_DeckFloor(Top, F);
+    const float Base = Field.Base;
 
 	// THE PROFILE IS INTEGRATED ACROSS THE STEP, NOT SAMPLED AT ITS MIDPOINT.
-	// One midpoint sample makes the deck a near-binary decision per step, and as
-	// the surface drifts against the lattice that decision flips along a line on
-	// screen. The top varies slowly across a step, so it is evaluated once at
-	// the centre and only the profile is integrated -- three closed-form
+	// One midpoint sample makes the slab a near-binary decision per step, and as
+	// a surface drifts against the lattice that decision flips along a line on
+	// screen. Both surfaces vary slowly across a step, so they are evaluated
+	// once at the centre and only the profile is integrated -- three closed-form
 	// evaluations, no extra fetches. The ceiling fade rides the same points.
-    const float RampNear = TR_DeckDensity(Height - HalfStep, Top, Bottom, F.DensityCurve)
+    const float RampNear = TR_SlabDensity(Height - HalfStep, Top, Base, F)
 		* TR_CeilingFade(Height - HalfStep, F);
-    const float RampMid = TR_DeckDensity(Height, Top, Bottom, F.DensityCurve)
+    const float RampMid = TR_SlabDensity(Height, Top, Base, F)
 		* TR_CeilingFade(Height, F);
-    const float RampFar = TR_DeckDensity(Height + HalfStep, Top, Bottom, F.DensityCurve)
+    const float RampFar = TR_SlabDensity(Height + HalfStep, Top, Base, F)
 		* TR_CeilingFade(Height + HalfStep, F);
 
     const float Gradient = (RampNear + 4.0f * RampMid + RampFar) / 6.0f;
 
     const float DepthFraction =
-		saturate((Top - Height) / max(Top - Bottom, 1e-4f));
+		saturate((Top - Height) / max(Top - Base, 1e-4f));
 
-	// Full erosion at the surface, none below ErosionDepth, or the deck is
-	// uniformly pitted rather than solid material with a worked surface.
+	// Full erosion at the top, none below ErosionDepth into the slab, or the
+	// cloud is uniformly pitted rather than solid material with a worked top.
 	// Smoothstep rather than linear: a linear falloff leaves the end of erosion
 	// C0, a faint shelf edge-on at a constant altitude.
     const float CarveWeight =
 		1.0f - smoothstep(0.0f, max(F.ErosionDepth, 1e-4f), DepthFraction);
 
 	// THE CARVE MODULATES THE GRADIENT AND NOTHING ELSE. Multiplicative, and the
-	// gradient is exactly zero above Top, so nothing the noise does can put
-	// density outside the bound TR_TopBounds computed. Each lerp floors its
-	// layer at (1 - erosion) rather than zero: there is no lower cloud shell, so
-	// a transparent column would let a ray run to the far side of the planet.
+	// gradient is exactly zero outside the slab, so nothing the noise does can
+	// put density beyond the bounds TR_TopMax and TR_BaseMin computed.
+	// Each lerp floors its layer at (1 - erosion) rather than zero, which is
+	// what keeps erosion a worked surface rather than coverage.
     const float CarveDetail = lerp(1.0f, Field.ShapeDetail,
 		saturate(F.DetailErosion) * CarveWeight);
 
@@ -1114,48 +1211,67 @@ float4 TR_Density(
 
     const float Density = Gradient * CarveDetail * CarveStructure;
 
-	// Mixing lives in the worked surface and is gone by the floor, where the
-	// saturated early-out reports the probe's unshifted band. Smoothstep so the
-	// weight is C1 at both ends and the handoff draws no contour in colour.
+	// Mixing lives in the worked top and is gone by the base, where the
+	// early-out reports the probe's unshifted band. Smoothstep so the weight is
+	// C1 at both ends and the handoff draws no contour in colour.
     const float MixWeight = 1.0f - smoothstep(0.0f, 1.0f, DepthFraction);
 
     return float4(Density, Field.Band + Field.BandShift * MixWeight, Field.Pressure, Top);
 }
 
-/** Closed-form bounds on the cloud top, in atmosphere fractions.
+/** How far the shared displacement can move a surface, in atmosphere fractions.
+ *  THE ONE DERIVATION OF THE FIELD-WIDE REACH, read by both bounds below.
  *
- *  EVERY TERM IN TR_CloudTop HAS TO APPEAR HERE. An underestimate is not
- *  conservative, it is a clipping error: the cull radius comes from OutMax, so a
- *  term left out slices the tops off the features it belongs to. TR_BandHeight
- *  is in [-1,1] scaled by a half, pressure is soft-saturated sim-side so it
- *  contributes the whole of PressureRelief, and the storm term reaches the whole
- *  of StormTowerRelief either way. ReliefScale never exceeds one, so ignoring it
- *  errs safe. The carves come from TR_CarveReach, scaled by the fades: a bound
- *  reserving room for a layer a faded ray never sees coarsens the march wherever
- *  that layer is absent, since OutMax over cloudSteps is the step size.
- *
- *  OutMin is the lowest a column top can be, hence the altitude below which
- *  every column is saturated -- the anchor the opaque clip counts down from. It
- *  does not bound the marched band: that ends at the backstop. */
-void TR_TopBounds(
+ *  EVERY TERM IN TR_CloudSurfaces HAS TO APPEAR HERE. An underestimate is not
+ *  conservative, it is a clipping error: the cull radius comes from the top
+ *  bound, so a term left out slices the tops off the features it belongs to.
+ *  TR_BandHeight is in [-1,1] scaled by a half, pressure is soft-saturated
+ *  sim-side so it contributes the whole of PressureRelief, the storm term
+ *  reaches the whole of StormTowerRelief either way, and ReliefScale never
+ *  exceeds one so ignoring it errs safe. The carves are scaled by the fades: a
+ *  bound reserving room for a layer a faded ray never sees coarsens the march
+ *  wherever that layer is absent, the marched band over cloudSteps being the
+ *  step size. */
+void TR_ShiftReach(
 	TRFieldParams F,
 	float DetailFade,
 	float StructureFade,
-	out float OutMin,
-	out float OutMax)
+	out float Down,
+	out float Up)
 {
-    const float D = F.GradientThickness;
-
-    const float Span = D * (0.5f * abs(F.BandRelief) + abs(F.PressureRelief)
-		+ abs(F.StormTowerRelief));
+    const float Span = F.GradientThickness * (0.5f * abs(F.BandRelief)
+		+ abs(F.PressureRelief) + abs(F.StormTowerRelief));
 
     float CarveDown, CarveUp;
     TR_CarveReach(F, DetailFade, StructureFade, CarveDown, CarveUp);
 
-    OutMin = F.DeckTop - Span - CarveDown;
+    Down = Span + CarveDown;
+    Up = Span + CarveUp;
+}
 
-	// CLAMPED AT THE SHELL: the ceiling fade leaves no density above it.
-	// Unclamped, a tall rare feature would widen the marched band and coarsen
-	// every step for the sake of a few columns.
-    OutMax = min(F.DeckTop + Span + CarveUp, 1.0f);
+/** The highest any column top can reach, an atmosphere fraction.
+ *
+ *  CLAMPED AT THE SHELL: the ceiling fade leaves no density above it. Unclamped,
+ *  a tall rare feature would widen the marched band and coarsen every step for
+ *  the sake of a few columns. */
+float TR_TopMax(TRFieldParams F, float DetailFade, float StructureFade)
+{
+    float Down, Up;
+    TR_ShiftReach(F, DetailFade, StructureFade, Down, Up);
+
+    return min(F.DeckTop + Up, 1.0f);
+}
+
+/** The lowest any column base can fall, an atmosphere fraction: WHERE THE
+ *  MARCHED BAND ENDS, and the altitude a ray passes beneath without meeting
+ *  cloud. The base takes a SIGNED share of the displacement, so its reach is the
+ *  larger side of that displacement whichever way BaseRelief points -- loose,
+ *  and loose in the safe direction. */
+float TR_BaseMin(TRFieldParams F, float DetailFade, float StructureFade)
+{
+    float Down, Up;
+    TR_ShiftReach(F, DetailFade, StructureFade, Down, Up);
+
+    return F.DeckBase - abs(F.BaseRelief) * max(Down, Up)
+		- F.GradientThickness * max(F.BaseStormDrop, 0.0f);
 }

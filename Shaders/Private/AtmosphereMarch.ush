@@ -66,15 +66,34 @@
  *    4  deck ambient only
  *    5  sun transmittance at the first deck sample, as greyscale
  *    6  Mie lobe survival at the LAST step, as greyscale: 1 in clear air
+ *    7  steps taken on the ray, over ATMO_MAX_ITER
+ *    8  samples that returned density, over ATMO_MAX_ITER
+ *    9  density at the first sample that returned any
+ *   10  altitude of that sample, in atmosphere fractions
  *
  *  1 to 4 PARTITION THE LIT IMAGE, air against deck and direct against ambient,
  *  so a glow present in 2 and absent in 3 and 4 is air Mie in front of the deck.
  *  Absent from all four but present with the mode off puts it in the stage 3
  *  composite rather than in anything this file produced. 5 and 6 read a scalar
  *  instead of a term and between them cover the two shadow paths, which is where
- *  a terminator that looks wrong usually comes from. */
+ *  a terminator that looks wrong usually comes from.
+ *
+ *  7 TO 10 READ THE MARCH RATHER THAN THE IMAGE, which is what separates a
+ *  lighting artefact from a sampling one. A boundary visible in 7 or 8 is the
+ *  LATTICE differing between neighbouring rays -- how many samples they took, or
+ *  whether they were given a fine segment at all -- and no amount of tuning the
+ *  field will move it. A boundary visible in 9 or 10 and not in 7 or 8 is the
+ *  FIELD answering differently at positions the rays agree on. All four are
+ *  multiplied by ATMO_DEBUG_SCALE, since the range of interest is rarely
+ *  [0,1]. */
 #ifndef ATMO_DEBUG_TERM
 #define ATMO_DEBUG_TERM 0
+#endif
+
+/** Multiplies the scalar readouts, 7 to 10. Raise until the range of interest
+ *  fills the screen. */
+#ifndef ATMO_DEBUG_SCALE
+#define ATMO_DEBUG_SCALE 0.0f
 #endif
 
 
@@ -382,11 +401,15 @@ float4 Atmo_MainMarch(
 	float3 DebugAccum = float3(0.0f, 0.0f, 0.0f);
 #endif
 
-#if ATMO_DEBUG_TERM == 5
+#if ATMO_DEBUG_TERM == 5 || ATMO_DEBUG_TERM == 9 || ATMO_DEBUG_TERM == 10
 	// Only the first deck sample is wanted: the rest of the ray is behind it,
 	// and reading a scalar at every step would average a shadow the camera
 	// never sees through.
 	bool bDebugFirstCloud = true;
+#endif
+
+#if ATMO_DEBUG_TERM == 8
+	int DebugFieldHits = 0;
 #endif
 
 	// Deck optical depth between the camera and the current sample, tracked
@@ -468,8 +491,7 @@ float4 Atmo_MainMarch(
             const float FootprintStep = Pos * P.PixelAngle * P.ViewStepPixels;
 
             const float FeatureCap = min(
-				P.Field.GradientThickness * P.Field.Thickness,
-				P.Atmo.scatteringParams.rayScaleH);
+				Field_FeatureSize(P.Field), P.Atmo.scatteringParams.rayScaleH);
 
             float CurrentStep = Atmo_AdaptiveStepSize(BaseStepSize, Pos, RayStart,
 				ReferenceLength, P.Atmo.mainRayParams.stepScaleFactor);
@@ -733,6 +755,21 @@ float4 Atmo_MainMarch(
 							DebugAccum = SunTransmittance;
 							bDebugFirstCloud = false;
 						}
+#elif ATMO_DEBUG_TERM == 8
+						DebugFieldHits++;
+#elif ATMO_DEBUG_TERM == 9
+						if (bDebugFirstCloud)
+						{
+							DebugAccum = (Sample.x * ATMO_DEBUG_SCALE).xxx;
+							bDebugFirstCloud = false;
+						}
+#elif ATMO_DEBUG_TERM == 10
+						if (bDebugFirstCloud)
+						{
+							DebugAccum = ((DistFromCentre - P.Atmo.planetParams.planetRadius)
+								/ P.Field.Thickness * ATMO_DEBUG_SCALE).xxx;
+							bDebugFirstCloud = false;
+						}
 #endif
 
                         AccumLight += Transmittance * CloudStepLight;
@@ -773,6 +810,12 @@ float4 Atmo_MainMarch(
     {
         Transmittance = float3(0.0f, 0.0f, 0.0f);
     }
+
+#if ATMO_DEBUG_TERM == 7
+	DebugAccum = (float(StepIndex) / float(ATMO_MAX_ITER) * ATMO_DEBUG_SCALE).xxx;
+#elif ATMO_DEBUG_TERM == 8
+	DebugAccum = (float(DebugFieldHits) / float(ATMO_MAX_ITER) * ATMO_DEBUG_SCALE).xxx;
+#endif
 
 	// -- Cloud shadows on geometry ------------------------------------------
 	//
