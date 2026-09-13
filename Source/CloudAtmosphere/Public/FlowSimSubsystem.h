@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "GasGiantShadowMap.h"
+#include "TerrestrialShadowMap.h"
 #include "FlowSimTypes.h"
 #include "FlowSimSubsystem.generated.h"
 
@@ -61,6 +62,11 @@ public:
 	 *  rather than a wrong shadow, and a property of the delivery. */
 	void RequestShadowBake(const FGasGiantShadowParams& InParams);
 
+	/** The terrestrial field's bake. A SEPARATE QUEUE, not an overload sharing
+	 *  one: the two params structs are separate types bound to separate shaders,
+	 *  and they diverge as the fields do. */
+	void RequestShadowBake(const FTerrestrialShadowParams& InParams);
+
 	// -- Control ------------------------------------------------------------
 
 	/** Begin stepping against this config. Safe to call again with a different
@@ -115,6 +121,8 @@ private:
 	 *  by requester: each request names its own destination, so there is nothing to
 	 *  match up and nothing to leave stale. */
 	TArray<FGasGiantShadowParams> ShadowRequests;
+
+	TArray<FTerrestrialShadowParams> TerrestrialShadowRequests;
 
 	/** Builds the flat render-thread snapshot. Returns false if the config is
 	 *  unusable, having already logged why. */

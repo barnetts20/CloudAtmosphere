@@ -23,9 +23,9 @@
 // relocated asset is a data edit rather than a code one.
 // --------------------------------------------------------------------------
 
-static const TCHAR* MatPath_Terrestrial = TEXT("/CloudAtmosphere/Material/MT_UCA_Default_Inst.MT_UCA_Default_Inst");
-static const TCHAR* MatPath_GasGiant = TEXT("/CloudAtmosphere/Material/MT_UGA_Default_Inst.MT_UGA_Default_Inst");
-static const TCHAR* MatPath_Postprocess = TEXT("/CloudAtmosphere/Material/MT_UCA_Postprocess_Inst.MT_UCA_Postprocess_Inst");
+static const TCHAR* MatPath_Terrestrial = TEXT("/CloudAtmosphere/Material/MT_TerrestrialAtmosphere_Default_Inst.MT_TerrestrialAtmosphere_Default_Inst");
+static const TCHAR* MatPath_GasGiant = TEXT("/CloudAtmosphere/Material/MT_GasGiantAtmosphere_Default_Inst.MT_GasGiantAtmosphere_Default_Inst");
+static const TCHAR* MatPath_Postprocess = TEXT("/CloudAtmosphere/Material/MT_Atmosphere_Postprocess_Inst.MT_Atmosphere_Postprocess_Inst");
 
 // --------------------------------------------------------------------------
 // Checked parameter pushes
@@ -590,25 +590,11 @@ void APlanetAtmosphereActor::UpdateMaterialParameters()
     // regardless of parent rotation. The user/gizmo sets relative rotation directly.
     const FVector LightDir = GetRootComponent()->GetRelativeRotation().Vector();
 
-    // ONE MODEL. The terrestrial march and its parameter groups were removed
-    // ahead of being cut from the gas giant path, so that case pushes nothing
-    // and slot 0 draws whatever its material happens to be. Warned once rather
-    // than left silent, since the symptom is a blank atmosphere with no cause.
-    if (BuiltType == EPlanetAtmosphereType::GasGiant)
-    {
-        ApplyGasGiantParams(PlanetRadius, PlanetCenter, LightDir);
-        RequestGasGiantShadowBake(PlanetRadius, PlanetCenter, LightDir);
-        UpdateTransmittanceTable(PlanetRadius);
-    }
-    else if (!bWarnedTerrestrialPath)
-    {
-        bWarnedTerrestrialPath = true;
-
-        UE_LOG(LogTemp, Warning,
-            TEXT("%s: PlanetType is Terrestrial and that model has no march yet. ")
-            TEXT("Set it to GasGiant and press Rebuild Material Instances."),
-            *GetName());
-    }
+    // BOTH MODELS TAKE THE SAME THREE STEPS. Which field they describe is
+    // decided inside, on BuiltType, so nothing about the sequence is per model.
+    ApplyMarchParams(PlanetRadius, PlanetCenter, LightDir);
+    RequestShadowBake(PlanetRadius, PlanetCenter, LightDir);
+    UpdateTransmittanceTable(PlanetRadius);
 
     // --- Postprocess (slot 1) ---
     //
@@ -629,18 +615,18 @@ void APlanetAtmosphereActor::UpdateMaterialParameters()
 // READOUT ONLY, NEVER PUSHED. Mirrors GG_TopBounds' upper bound before its
 // clamp at the shell, with the detail carve centred as GG_DETAIL_RELIEF_CENTRED's
 // default has it. A mismatch misreports the readout and changes nothing drawn.
-static float SolveTopMaxReadout(const FGasGiantProfileParams& Profile,
-    const FAtmosphereFlowParams& Flow, const FGasGiantBandShapeParams& BandShape,
+static float SolveTopMaxReadout(float DeckTop, float GradientThickness, float BandRelief,
+    const FAtmosphereFlowParams& Flow,
     const FAtmosphereNoiseLayerParams& Structure, const FAtmosphereNoiseLayerParams& Detail)
 {
-    const float UpReach = 0.5f * FMath::Abs(BandShape.BandRelief) + FMath::Abs(Flow.PressureRelief)
+    const float UpReach = 0.5f * FMath::Abs(BandRelief) + FMath::Abs(Flow.PressureRelief)
         + 0.5f * FMath::Abs(Structure.Relief) + 0.5f * FMath::Abs(Detail.Relief)
         + FMath::Abs(Flow.StormTowerRelief);
 
-    return Profile.DeckTop + FMath::Max(Profile.GradientThickness, 1e-4f) * UpReach;
+    return DeckTop + FMath::Max(GradientThickness, 1e-4f) * UpReach;
 }
 
-void APlanetAtmosphereActor::ApplyGasGiantParams(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir)
+void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir)
 {
     // EVERY NAME HERE IS THE MEMBER'S OWN, so the parameter, the Custom node pin
     // and the shader term all read the same. A name the material lacks is caught
@@ -681,37 +667,37 @@ void APlanetAtmosphereActor::ApplyGasGiantParams(float PlanetRadius, const FVect
     //
     // ShadowTarget's sampler must be CLAMP on both axes: the map is a disc
     // inside a square, and wrapping puts the far limb against the near one. The
-    // camera it centred its cascades on goes out in RequestGasGiantShadowBake.
+    // camera it centred its cascades on goes out in RequestShadowBake.
 
     if (Simulation.Config && Simulation.Config->FlowTarget)
     {
         SetTextureChecked(MID_Atmosphere, TEXT("FlowTarget"), Simulation.Config->FlowTarget);
     }
 
-    if (GasGiantShadowTarget)
+    if (ShadowTarget)
     {
-        SetTextureChecked(MID_Atmosphere, TEXT("ShadowTarget"), GasGiantShadowTarget);
+        SetTextureChecked(MID_Atmosphere, TEXT("ShadowTarget"), ShadowTarget);
     }
 
     // -- Gas Giant ----------------------------------------------------------------
 
     SetScalarChecked(MID_Atmosphere, TEXT("HeightScale"), Geometry.HeightScale);
 
-    // -- Deck ---------------------------------------------------------------------
+    // -- The field's own ----------------------------------------------------------
 
-    GasGiantProfile.SolvedTopMax = SolveTopMaxReadout(
-        GasGiantProfile, Flow, GasGiantBandShape, StructureLayer, DetailLayer);
+    if (BuiltType == EPlanetAtmosphereType::GasGiant)
+    {
+        ApplyGasGiantModelParams();
+    }
+    else
+    {
+        ApplyTerrestrialModelParams();
+    }
 
-    SetScalarChecked(MID_Atmosphere, TEXT("DeckTop"), GasGiantProfile.DeckTop);
-    SetScalarChecked(MID_Atmosphere, TEXT("CeilingFalloff"), GasGiantProfile.CeilingFalloff);
-    SetScalarChecked(MID_Atmosphere, TEXT("GradientThickness"), GasGiantProfile.GradientThickness);
-    SetScalarChecked(MID_Atmosphere, TEXT("DeckBackstop"), GasGiantProfile.DeckBackstop);
+    // -- Flow, motion and carving, shared -----------------------------------------
 
-    SetScalarChecked(MID_Atmosphere, TEXT("BandSharpness"), GasGiantBandShape.BandSharpness);
-    SetScalarChecked(MID_Atmosphere, TEXT("BandBias"), GasGiantBandShape.BandBias);
     SetScalarChecked(MID_Atmosphere, TEXT("HemisphereBlend"), Flow.HemisphereBlend);
     SetScalarChecked(MID_Atmosphere, TEXT("HemisphereVariance"), Flow.HemisphereVariance);
-    SetScalarChecked(MID_Atmosphere, TEXT("BandRelief"), GasGiantBandShape.BandRelief);
     SetScalarChecked(MID_Atmosphere, TEXT("PressureRelief"), Flow.PressureRelief);
     SetScalarChecked(MID_Atmosphere, TEXT("VortexThreshold"), Flow.VortexThreshold);
     SetScalarChecked(MID_Atmosphere, TEXT("StormTowerRelief"), Flow.StormTowerRelief);
@@ -744,18 +730,9 @@ void APlanetAtmosphereActor::ApplyGasGiantParams(float PlanetRadius, const FVect
     SetVectorChecked(MID_Atmosphere, TEXT("AtmosphereAmbient"), Air.AtmosphereAmbient);
     SetScalarChecked(MID_Atmosphere, TEXT("AtmosphereAmbientFloor"), Air.AtmosphereAmbientFloor);
 
-    // -- Cloud Lighting -----------------------------------------------------------
-
-    SetVectorChecked(MID_Atmosphere, TEXT("ScatterNegative"), GasGiantBands.ScatterNegative);
-    SetVectorChecked(MID_Atmosphere, TEXT("ExtinctionNegative"), GasGiantBands.ExtinctionNegative);
-    SetVectorChecked(MID_Atmosphere, TEXT("ScatterPositive"), GasGiantBands.ScatterPositive);
-    SetVectorChecked(MID_Atmosphere, TEXT("ExtinctionPositive"), GasGiantBands.ExtinctionPositive);
-    SetVectorChecked(MID_Atmosphere, TEXT("ScatterBase"), GasGiantBands.ScatterBase);
-    SetVectorChecked(MID_Atmosphere, TEXT("ExtinctionBase"), GasGiantBands.ExtinctionBase);
-    SetScalarChecked(MID_Atmosphere, TEXT("BandScale"), GasGiantBands.BandScale);
+    // -- Cloud Lighting, shared -----------------------------------------------------
 
     SetScalarChecked(MID_Atmosphere, TEXT("DensityCurve"), Extinction.DensityCurve);
-    SetScalarChecked(MID_Atmosphere, TEXT("DeckOpticalDepth"), GasGiantProfile.DeckOpticalDepth);
     SetScalarChecked(MID_Atmosphere, TEXT("LightExtinctionFraction"), Extinction.LightExtinctionFraction);
 
     SetScalarChecked(MID_Atmosphere, TEXT("ForwardG"), Phase.ForwardG);
@@ -786,8 +763,67 @@ void APlanetAtmosphereActor::ApplyGasGiantParams(float PlanetRadius, const FVect
     //
     // PACKED, unlike everything above: four related scalars on one Custom node
     // pin, the way the band tints and the cloud phase already travel. Pack()
-    // owns the layout and GGAtmo_BuildAtmo unpacks it.
+    // owns the layout and GG_BuildAtmo unpacks it.
     SetVectorChecked(MID_Atmosphere, TEXT("SurfaceShadow"), SurfaceShadow.Pack());
+}
+
+// --------------------------------------------------------------------------
+// The field's own parameters
+//
+// SAME NAMES ON BOTH PATHS. The two materials carry the same pins, so what
+// differs is only which authored group a value is read from. When a field stops
+// wanting one of these it stops pushing it and its material drops the pin; the
+// checked setters catch the half-done case.
+// --------------------------------------------------------------------------
+
+void APlanetAtmosphereActor::ApplyGasGiantModelParams()
+{
+    GasGiantProfile.SolvedTopMax = SolveTopMaxReadout(
+        GasGiantProfile.DeckTop, GasGiantProfile.GradientThickness,
+        GasGiantBandShape.BandRelief, Flow, StructureLayer, DetailLayer);
+
+    SetScalarChecked(MID_Atmosphere, TEXT("DeckTop"), GasGiantProfile.DeckTop);
+    SetScalarChecked(MID_Atmosphere, TEXT("CeilingFalloff"), GasGiantProfile.CeilingFalloff);
+    SetScalarChecked(MID_Atmosphere, TEXT("GradientThickness"), GasGiantProfile.GradientThickness);
+    SetScalarChecked(MID_Atmosphere, TEXT("DeckBackstop"), GasGiantProfile.DeckBackstop);
+    SetScalarChecked(MID_Atmosphere, TEXT("DeckOpticalDepth"), GasGiantProfile.DeckOpticalDepth);
+
+    SetScalarChecked(MID_Atmosphere, TEXT("BandSharpness"), GasGiantBandShape.BandSharpness);
+    SetScalarChecked(MID_Atmosphere, TEXT("BandBias"), GasGiantBandShape.BandBias);
+    SetScalarChecked(MID_Atmosphere, TEXT("BandRelief"), GasGiantBandShape.BandRelief);
+
+    SetVectorChecked(MID_Atmosphere, TEXT("ScatterNegative"), GasGiantBands.ScatterNegative);
+    SetVectorChecked(MID_Atmosphere, TEXT("ExtinctionNegative"), GasGiantBands.ExtinctionNegative);
+    SetVectorChecked(MID_Atmosphere, TEXT("ScatterPositive"), GasGiantBands.ScatterPositive);
+    SetVectorChecked(MID_Atmosphere, TEXT("ExtinctionPositive"), GasGiantBands.ExtinctionPositive);
+    SetVectorChecked(MID_Atmosphere, TEXT("ScatterBase"), GasGiantBands.ScatterBase);
+    SetVectorChecked(MID_Atmosphere, TEXT("ExtinctionBase"), GasGiantBands.ExtinctionBase);
+    SetScalarChecked(MID_Atmosphere, TEXT("BandScale"), GasGiantBands.BandScale);
+}
+
+void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
+{
+    TerrestrialProfile.SolvedTopMax = SolveTopMaxReadout(
+        TerrestrialProfile.DeckTop, TerrestrialProfile.GradientThickness,
+        TerrestrialBandShape.BandRelief, Flow, StructureLayer, DetailLayer);
+
+    SetScalarChecked(MID_Atmosphere, TEXT("DeckTop"), TerrestrialProfile.DeckTop);
+    SetScalarChecked(MID_Atmosphere, TEXT("CeilingFalloff"), TerrestrialProfile.CeilingFalloff);
+    SetScalarChecked(MID_Atmosphere, TEXT("GradientThickness"), TerrestrialProfile.GradientThickness);
+    SetScalarChecked(MID_Atmosphere, TEXT("DeckBackstop"), TerrestrialProfile.DeckBackstop);
+    SetScalarChecked(MID_Atmosphere, TEXT("DeckOpticalDepth"), TerrestrialProfile.DeckOpticalDepth);
+
+    SetScalarChecked(MID_Atmosphere, TEXT("BandSharpness"), TerrestrialBandShape.BandSharpness);
+    SetScalarChecked(MID_Atmosphere, TEXT("BandBias"), TerrestrialBandShape.BandBias);
+    SetScalarChecked(MID_Atmosphere, TEXT("BandRelief"), TerrestrialBandShape.BandRelief);
+
+    SetVectorChecked(MID_Atmosphere, TEXT("ScatterNegative"), TerrestrialBands.ScatterNegative);
+    SetVectorChecked(MID_Atmosphere, TEXT("ExtinctionNegative"), TerrestrialBands.ExtinctionNegative);
+    SetVectorChecked(MID_Atmosphere, TEXT("ScatterPositive"), TerrestrialBands.ScatterPositive);
+    SetVectorChecked(MID_Atmosphere, TEXT("ExtinctionPositive"), TerrestrialBands.ExtinctionPositive);
+    SetVectorChecked(MID_Atmosphere, TEXT("ScatterBase"), TerrestrialBands.ScatterBase);
+    SetVectorChecked(MID_Atmosphere, TEXT("ExtinctionBase"), TerrestrialBands.ExtinctionBase);
+    SetScalarChecked(MID_Atmosphere, TEXT("BandScale"), TerrestrialBands.BandScale);
 }
 
 void APlanetAtmosphereActor::ApplyGasGiantLayer(const TCHAR* Prefix, const FAtmosphereNoiseLayerParams& Layer)
@@ -812,9 +848,9 @@ void APlanetAtmosphereActor::ApplyGasGiantLayer(const TCHAR* Prefix, const FAtmo
     SetScalarChecked(MID_Atmosphere, Name(TEXT("Crossfade")), Layer.bCrossfade ? 1.0f : 0.0f);
 }
 
-bool APlanetAtmosphereActor::PrepareGasGiantShadowTarget()
+bool APlanetAtmosphereActor::PrepareShadowTarget()
 {
-    UTextureRenderTarget2DArray* Target = GasGiantShadowTarget;
+    UTextureRenderTarget2DArray* Target = ShadowTarget;
 
     if (!Target)
     {
@@ -831,7 +867,7 @@ bool APlanetAtmosphereActor::PrepareGasGiantShadowTarget()
         return false;
     }
 
-    const int32 Edge = FMath::Clamp(GasGiantShadowResolution, 64, 4096);
+    const int32 Edge = FMath::Clamp(ShadowResolution, 64, 4096);
 
     // bCanCreateUAV must be set BEFORE the resource is created, or the texture
     // comes back without UAV support and every dispatch that writes it silently
@@ -984,7 +1020,7 @@ bool APlanetAtmosphereActor::PrepareGasGiantOccluderCaptures()
 
     // The cascade's resolution, so the capture and the slice share a texel grid
     // and the resample is an identity.
-    const int32 Edge = FMath::Clamp(GasGiantShadowResolution, 64, 4096);
+    const int32 Edge = FMath::Clamp(ShadowResolution, 64, 4096);
 
     // R32F, NOT A HALF FORMAT. Eleven mantissa bits is a part in four thousand
     // of the distance -- kilometres at planetary range, against a comparison
@@ -1068,10 +1104,11 @@ bool APlanetAtmosphereActor::PrepareGasGiantOccluderCaptures()
     return bAnyLive;
 }
 
-void APlanetAtmosphereActor::UpdateGasGiantOccluderCaptures(
+template<typename TShadowParams>
+void APlanetAtmosphereActor::UpdateOccluderCaptures(
     float PlanetRadius, const FVector& PlanetCenter,
     const FVector3f& LightLocal, const FVector3f& CameraLocal,
-    FGasGiantShadowParams& Params)
+    TShadowParams& Params)
 {
     if (!PrepareGasGiantOccluderCaptures())
     {
@@ -1135,7 +1172,7 @@ void APlanetAtmosphereActor::UpdateGasGiantOccluderCaptures(
     // comfortably inside and background is unambiguous.
     const float Far = PlaneDist + 2.0f * Disc;
 
-    const int32 Edge = FMath::Clamp(GasGiantShadowResolution, 64, 4096);
+    const int32 Edge = FMath::Clamp(ShadowResolution, 64, 4096);
 
     for (int32 Level = 0; Level < AtmoShadowBake::CascadeCount; ++Level)
     {
@@ -1334,7 +1371,7 @@ void APlanetAtmosphereActor::UpdateTransmittanceTable(float PlanetRadius)
         return;
     }
 
-    // The values ApplyGasGiantParams pushes: the table is keyed to them, and
+    // The values ApplyMarchParams pushes: the table is keyed to them, and
     // AtmoT_Profile converts them on both sides.
     const FAtmosphereLightingParams& Air = AtmosphereLighting;
 
@@ -1356,35 +1393,34 @@ void APlanetAtmosphereActor::UpdateTransmittanceTable(float PlanetRadius)
     SetTextureChecked(MID_Atmosphere, TEXT("TransmittanceTable"), TransmittanceTable);
 }
 
-void APlanetAtmosphereActor::RequestGasGiantShadowBake(
-    float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir)
+template<typename TShadowParams>
+bool APlanetAtmosphereActor::FillSharedShadowParams(
+    TShadowParams& Params, float PlanetRadius, const FVector& PlanetCenter,
+    const FVector& LightDir, FTextureRenderTargetResource*& OutFlowRes)
 {
     UWorld* World = GetWorld();
 
-    if (!World || !PrepareGasGiantShadowTarget())
+    if (!World || !PrepareShadowTarget())
     {
-        return;
+        return false;
     }
 
-    UFlowSimSubsystem* Sim = World->GetSubsystem<UFlowSimSubsystem>();
-
-    if (!Sim || !Simulation.Config || !Simulation.Config->FlowTarget)
+    if (!Simulation.Config || !Simulation.Config->FlowTarget)
     {
-        return;
+        return false;
     }
 
-    FTextureRenderTargetResource* FlowRes =
-        Simulation.Config->FlowTarget->GameThread_GetRenderTargetResource();
+    OutFlowRes = Simulation.Config->FlowTarget->GameThread_GetRenderTargetResource();
 
     FTextureRenderTargetResource* MapRes =
-        GasGiantShadowTarget->GameThread_GetRenderTargetResource();
+        ShadowTarget->GameThread_GetRenderTargetResource();
 
-    if (!FlowRes || !MapRes)
+    if (!OutFlowRes || !MapRes)
     {
-        return;
+        return false;
     }
 
-    FGasGiantShadowParams Params;
+    FTextureRenderTargetResource* FlowRes = OutFlowRes;
 
     // -- Frame --------------------------------------------------------------
     //
@@ -1433,11 +1469,11 @@ void APlanetAtmosphereActor::RequestGasGiantShadowBake(
     // the fade radii and its centre from the camera, on both sides, so the level
     // index is the only thing that distinguishes them -- and that comes from the
     // dispatch rather than from here.
-    Params.MapSize = FIntPoint(GasGiantShadowTarget->SizeX, GasGiantShadowTarget->SizeY);
+    Params.MapSize = FIntPoint(ShadowTarget->SizeX, ShadowTarget->SizeY);
 
     // -- Deck ---------------------------------------------------------------
     //
-    // GG_BuildField's arguments, under the names ApplyGasGiantParams pushes them
+    // The field's arguments, under the names ApplyMarchParams pushes them
     // to the material. The bake derives from them with the same shader
     // functions, so any divergence here is a deck the light sees and the eye
     // does not.
@@ -1449,17 +1485,10 @@ void APlanetAtmosphereActor::RequestGasGiantShadowBake(
     Params.HeightScale = Geometry.HeightScale;
     Params.Time = GetGasGiantTime();
 
-    Params.DeckTop = GasGiantProfile.DeckTop;
-    Params.CeilingFalloff = GasGiantProfile.CeilingFalloff;
-    Params.GradientThickness = GasGiantProfile.GradientThickness;
-    Params.DeckBackstop = GasGiantProfile.DeckBackstop;
     Params.DensityCurve = Extinction.DensityCurve;
 
-    Params.BandSharpness = GasGiantBandShape.BandSharpness;
-    Params.BandBias = GasGiantBandShape.BandBias;
     Params.HemisphereBlend = Flow.HemisphereBlend;
     Params.HemisphereVariance = Flow.HemisphereVariance;
-    Params.BandRelief = GasGiantBandShape.BandRelief;
     Params.PressureRelief = Flow.PressureRelief;
     Params.VortexThreshold = Flow.VortexThreshold;
     Params.StormTowerRelief = Flow.StormTowerRelief;
@@ -1504,16 +1533,11 @@ void APlanetAtmosphereActor::RequestGasGiantShadowBake(
 
     // -- Extinction ---------------------------------------------------------
 
-    Params.ExtinctionNegative = ToVector4(GasGiantBands.ExtinctionNegative);
-    Params.ExtinctionPositive = ToVector4(GasGiantBands.ExtinctionPositive);
-    Params.ExtinctionBase = ToVector4(GasGiantBands.ExtinctionBase);
-    Params.BandScale = GasGiantBands.BandScale;
-    Params.DeckOpticalDepth = GasGiantProfile.DeckOpticalDepth;
     Params.LightExtinctionFraction = Extinction.LightExtinctionFraction;
 
     // -- Volumes ------------------------------------------------------------
     //
-    // RHI handles taken from the properties ApplyGasGiantParams already pushes,
+    // RHI handles taken from the properties ApplyMarchParams already pushes,
     // not a second reference to the assets. A compute pass runs on the render
     // thread and cannot reach a UObject, so this is the only crossing available.
 
@@ -1546,10 +1570,83 @@ void APlanetAtmosphereActor::RequestGasGiantShadowBake(
     Params.OccluderStrength = GasGiantOccluderShadows.Strength;
     Params.OccluderFalloff = GasGiantOccluderShadows.FalloffDistance;
 
-    UpdateGasGiantOccluderCaptures(
+    UpdateOccluderCaptures(
         PlanetRadius, PlanetCenter, Params.LightDir, Params.CameraLocal, Params);
 
-    Sim->RequestShadowBake(Params);
+    return true;
+}
+
+void APlanetAtmosphereActor::RequestShadowBake(
+    float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir)
+{
+    UWorld* World = GetWorld();
+
+    UFlowSimSubsystem* Sim = World ? World->GetSubsystem<UFlowSimSubsystem>() : nullptr;
+
+    if (!Sim)
+    {
+        return;
+    }
+
+    // ONE REQUEST PER FIELD TYPE, because the two parameter structs are separate
+    // types bound to separate shaders. What they hold is the same today and is
+    // expected not to stay that way.
+    const auto ToVector4 = [](const FLinearColor& C) { return FVector4f(C.R, C.G, C.B, C.A); };
+
+    FTextureRenderTargetResource* FlowRes = nullptr;
+
+    if (BuiltType == EPlanetAtmosphereType::GasGiant)
+    {
+        FGasGiantShadowParams Params;
+
+        if (!FillSharedShadowParams(Params, PlanetRadius, PlanetCenter, LightDir, FlowRes))
+        {
+            return;
+        }
+
+        Params.DeckTop = GasGiantProfile.DeckTop;
+        Params.CeilingFalloff = GasGiantProfile.CeilingFalloff;
+        Params.GradientThickness = GasGiantProfile.GradientThickness;
+        Params.DeckBackstop = GasGiantProfile.DeckBackstop;
+        Params.DeckOpticalDepth = GasGiantProfile.DeckOpticalDepth;
+
+        Params.BandSharpness = GasGiantBandShape.BandSharpness;
+        Params.BandBias = GasGiantBandShape.BandBias;
+        Params.BandRelief = GasGiantBandShape.BandRelief;
+
+        Params.ExtinctionNegative = ToVector4(GasGiantBands.ExtinctionNegative);
+        Params.ExtinctionPositive = ToVector4(GasGiantBands.ExtinctionPositive);
+        Params.ExtinctionBase = ToVector4(GasGiantBands.ExtinctionBase);
+        Params.BandScale = GasGiantBands.BandScale;
+
+        Sim->RequestShadowBake(Params);
+    }
+    else
+    {
+        FTerrestrialShadowParams Params;
+
+        if (!FillSharedShadowParams(Params, PlanetRadius, PlanetCenter, LightDir, FlowRes))
+        {
+            return;
+        }
+
+        Params.DeckTop = TerrestrialProfile.DeckTop;
+        Params.CeilingFalloff = TerrestrialProfile.CeilingFalloff;
+        Params.GradientThickness = TerrestrialProfile.GradientThickness;
+        Params.DeckBackstop = TerrestrialProfile.DeckBackstop;
+        Params.DeckOpticalDepth = TerrestrialProfile.DeckOpticalDepth;
+
+        Params.BandSharpness = TerrestrialBandShape.BandSharpness;
+        Params.BandBias = TerrestrialBandShape.BandBias;
+        Params.BandRelief = TerrestrialBandShape.BandRelief;
+
+        Params.ExtinctionNegative = ToVector4(TerrestrialBands.ExtinctionNegative);
+        Params.ExtinctionPositive = ToVector4(TerrestrialBands.ExtinctionPositive);
+        Params.ExtinctionBase = ToVector4(TerrestrialBands.ExtinctionBase);
+        Params.BandScale = TerrestrialBands.BandScale;
+
+        Sim->RequestShadowBake(Params);
+    }
 }
 
 // --------------------------------------------------------------------------

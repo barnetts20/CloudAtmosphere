@@ -13,7 +13,7 @@ class FRDGBuilder;
  *
  *  Copied into a render command, so it holds no UObject -- the same split
  *  FFlowSimParams draws. Filled from the same deck groups and derivations
- *  ApplyGasGiantParams pushes to the material, which is what keeps the deck the
+ *  ApplyMarchParams pushes to the material, which is what keeps the deck the
  *  light sees identical to the deck the eye sees.
  *
  *  NOT PART OF FFlowSimParams. That struct is the fluid solver's state and

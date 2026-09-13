@@ -387,6 +387,120 @@ struct CLOUDATMOSPHERE_API FAtmosphereGeometryParams
 	}
 };
 
+
+// Terrestrial parameter groups. Only the groups whose MEMBERS differ from the
+// gas giant's are twinned; everything shared is one instance on the actor,
+// since a planet is one model at a time.
+
+/** The terrestrial band's vertical profile. A CLONE OF THE DECK'S, unchanged
+ *  so far: the bottom is still a fixed backstop rather than a traced surface,
+ *  which is the first thing expected to differ. */
+USTRUCT(BlueprintType)
+struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
+{
+	GENERATED_BODY()
+
+	/** Where an unrelieved column's top sits, as a fraction of atmosphere
+	 *  thickness. Relief shapes the deck around it and never moves it as a whole,
+	 *  so every relief control is independent of deck altitude. PITFALL: keep it
+	 *  below 1 - CeilingFalloff, since a typical top inside the ceiling band thins
+	 *  the whole deck and DeckOpticalDepth stops being exact. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float DeckTop = 0.85f;
+
+	/** Width of the band under the shell top across which density fades to zero,
+	 *  as a fraction of atmosphere thickness. WHAT LETS RARE FEATURES REACH THE
+	 *  SHELL: a storm tower that would cross it flattens into a soft cap instead
+	 *  of being cut, so the deck never sits lower to make room for its tallest
+	 *  outlier. Wider gives rounder domes, narrower flatter caps. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "0.5"))
+	float CeilingFalloff = 0.05f;
+
+	/** How far the density gradient reaches below a column's own top, and the unit
+	 *  every relief amount is a fraction of. THE GRAIN HANDLE: widen it and the
+	 *  deck top spreads over more march steps. Relief scales with it, so widening
+	 *  also raises the bands -- the deck getting deeper, not a side effect. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", ClampMax = "1.0"))
+	float GradientThickness = 0.3f;
+
+	/** Backstop under the gradient: no column's density ramp reaches below this,
+	 *  however low relief takes its top. ALSO THE MARCHED BAND'S LOWER EDGE --
+	 *  columns topping out above this plus GradientThickness get the full uniform
+	 *  span and the rest compress toward a step, so lowering it buys uniformity in
+	 *  the troughs and widens the fine band one for one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float DeckBackstop = 0.3f;
+
+	/** READOUT, not authored: the highest every relief term together could reach,
+	 *  before the ceiling. Above 1 - CeilingFalloff the tallest features are being
+	 *  capped by the band, past 1 by the excess shown. */
+	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly)
+	float SolvedTopMax = 0.0f;
+
+	/** Total optical depth from the deck top to the surface at core density, down
+	 *  an unrelieved column, at any DensityCurve. Below about 8 the sky shows
+	 *  through. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
+	float DeckOpticalDepth = 2000.0f;
+};
+
+/** How the terrestrial field reads the flow into shape. A CLONE, and the group
+ *  most likely to be replaced outright: a band coordinate means something else
+ *  on a planet without zones and belts. */
+USTRUCT(BlueprintType)
+struct CLOUDATMOSPHERE_API FTerrestrialBandShapeParams
+{
+	GENERATED_BODY()
+
+	/** Multiplies already-normalized vorticity, so 1 is neutral and the useful
+	 *  range is roughly 0.5 to 3. Too high flattens elevation to its asymptote
+	 *  everywhere but the boundaries: terraces joined by cliffs. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float BandSharpness = 1.0f;
+
+	/** Shifts which band type dominates without retuning the sim. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float BandBias = 0.3f;
+
+	/** Height of zones above belts, a fraction of GradientThickness: each moves
+	 *  half of it from DeckTop, zones up and belts down, meeting at DeckTop on the
+	 *  band boundaries. Positive lifts the anticyclonic zones. Bands are geometry
+	 *  rather than a pattern painted on a sphere. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float BandRelief = 0.3f;
+};
+
+/** The terrestrial field's material. A CLONE OF THE DECK'S THREE BAND SETS,
+ *  pending the single colour with storm darkening that replaces them. */
+USTRUCT(BlueprintType)
+struct CLOUDATMOSPHERE_API FTerrestrialBandParams
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
+	FLinearColor ScatterNegative = FLinearColor(0.11422f, 0.200265f, 1.0f, 1.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FLinearColor ExtinctionNegative = FLinearColor(1.0f, 0.969f, 0.938f, 1.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
+	FLinearColor ScatterPositive = FLinearColor(0.136704f, 1.0f, 0.994174f, 1.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FLinearColor ExtinctionPositive = FLinearColor(1.0f, 0.969f, 0.938f, 1.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
+	FLinearColor ScatterBase = FLinearColor(1.0f, 0.0f, 0.127569f, 1.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FLinearColor ExtinctionBase = FLinearColor(1.0f, 0.969f, 0.938f, 1.0f);
+
+	/** Where the band ramp saturates. Matching the inverse of the sim debug view's
+	 *  DebugScale makes the two agree about where boundaries are. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float BandScale = 2.0f;
+};
+
 // Gas giant parameter groups.
 //
 // ONE STRUCT PER PANEL GROUP, declared on the actor as one property and inlined

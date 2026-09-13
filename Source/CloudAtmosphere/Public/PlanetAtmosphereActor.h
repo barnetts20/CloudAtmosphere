@@ -71,8 +71,7 @@ public:
     // Soft material references rather than hardcoded paths: a stale path logs a
     // warning and otherwise just looks like a broken material.
 
-    /** Slot 0 for PlanetType::Terrestrial. Points at the old march material,
-     *  which no longer compiles; it is the slot the branched copy lands in. */
+    /** Slot 0 for PlanetType::Terrestrial. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Materials")
     TSoftObjectPtr<UMaterialInterface> TerrestrialMarchMaterial;
 
@@ -117,7 +116,7 @@ public:
      *  on assignment; a target without bCanCreateUAV accepts every dispatch and
      *  stays black. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides))
-    TObjectPtr<UTextureRenderTarget2DArray> GasGiantShadowTarget;
+    TObjectPtr<UTextureRenderTarget2DArray> ShadowTarget;
 
     /** Edge of each cascade slice, in texels. The target is resized to match, so
      *  this rather than the asset's own size is the handle. EVERY LEVEL SHARES
@@ -129,7 +128,7 @@ public:
      *  RGBA16F. The bake band-limits at its source, so a lower value softens
      *  shadows rather than aliasing them. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ClampMin = "128", ClampMax = "4096"))
-    int32 GasGiantShadowResolution = 1024;
+    int32 ShadowResolution = 1024;
 
     /** Opaque geometry casting into the deck shadow map. PARKED, so it carries
      *  no edit specifier and reaches neither the details panel nor Blueprint;
@@ -196,8 +195,20 @@ public:
     // model's groups exist both are visible at once, distinguished only by their
     // parent category.
 
-    // Gas giant: the authoritative layout, and currently the only one.
-    // ApplyGasGiantParams pushes these directly, under their members' own names.
+    // Terrestrial: the groups whose members differ from the gas giant's. The
+    // shared ones above are single instances and serve whichever model is built.
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Band|Profile", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
+    FTerrestrialProfileParams TerrestrialProfile;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Band|Shape", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
+    FTerrestrialBandShapeParams TerrestrialBandShape;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Cloud Lighting|Bands", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
+    FTerrestrialBandParams TerrestrialBands;
+
+    // Gas giant: the same three groups over its own field.
+    // ApplyMarchParams pushes these directly, under their members' own names.
 
     // THE MASTER SCALE, first under Gas Giant: every deck height is a fraction
     // of the shell it sets. The shared geometry struct, whose one member is the
@@ -346,33 +357,51 @@ private:
      *  BuiltType, not PlanetType. */
     void UpdateMaterialParameters();
 
-    /** Every gas giant group under its members' own names, plus the planet, the
-     *  light, the clock and the local frame. AUTHORED VALUES ONLY: everything
-     *  derived is computed in the shader, once, from these, and a value derived
-     *  here would be a second source that can disagree with the bake's. */
-    void ApplyGasGiantParams(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir);
+    /** Every group under its members' own names, plus the planet, the light, the
+     *  clock and the local frame. AUTHORED VALUES ONLY: everything derived is
+     *  computed in the shader, once, from these, and a value derived here would
+     *  be a second source that can disagree with the bake's.
+     *
+     *  Pushes the shared groups, then hands off to the built model's own. */
+    void ApplyMarchParams(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir);
+
+    /** The three groups whose members are the model's: its profile, its band
+     *  shaping and its material. Same parameter NAMES on both paths, since the
+     *  two materials carry the same pins. */
+    void ApplyGasGiantModelParams();
+    void ApplyTerrestrialModelParams();
 
     /** One noise layer's members, each under Prefix + member name. */
     void ApplyGasGiantLayer(const TCHAR* Prefix, const FAtmosphereNoiseLayerParams& Layer);
 
     /** Queues this frame's deck shadow bake with the sim subsystem. SEPARATE FROM
-     *  ApplyGasGiantParams because its destination is a compute pass rather than
+     *  ApplyMarchParams because its destination is a compute pass rather than
      *  a MID: it sends the same authored values under the same names, and the
      *  bake derives from them with the same shader functions, which keeps the
      *  deck the light sees identical to the deck the eye sees. */
-    void RequestGasGiantShadowBake(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir);
+    void RequestShadowBake(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir);
+
+    /** Fills the half of a bake request that does not depend on which field is
+     *  baked: the map, the frame, the light, the camera and the shared groups.
+     *  Returns false when the request could not be made usable.
+     *
+     *  A TEMPLATE BECAUSE THE TWO PARAMS STRUCTS ARE SEPARATE TYPES, deliberately
+     *  -- they diverge as the fields do. Both instantiations live in the one
+     *  translation unit that uses them. */
+    template<typename TShadowParams>
+    bool FillSharedShadowParams(TShadowParams& Params, float PlanetRadius,
+        const FVector& PlanetCenter, const FVector& LightDir,
+        class FTextureRenderTargetResource*& OutFlowRes);
 
     /** Forces the assigned shadow target to RGBA16F with UAV support, resizing
      *  only when the format is wrong. Returns false when nothing is usable,
      *  having logged the reason at most once per state. */
-    bool PrepareGasGiantShadowTarget();
+    bool PrepareShadowTarget();
 
     /** Suppresses the per-tick repeat of the shadow target complaint. Cleared
      *  when a usable target appears, so a fixed asset logs its recovery. */
     bool bWarnedShadowTarget = false;
 
-    /** Warned once that PlanetType is Terrestrial and no march runs. */
-    bool bWarnedTerrestrialPath = false;
 
     // --- Occluder captures ---
     //
@@ -410,11 +439,16 @@ private:
     bool PrepareGasGiantOccluderCaptures();
 
     /** Places each capture in the light's frame, captures the levels due this
-     *  frame, and fills Params.Occluders from what each level last rendered. */
-    void UpdateGasGiantOccluderCaptures(
+     *  frame, and fills Params.Occluders from what each level last rendered.
+     *
+     *  A TEMPLATE for the same reason FillSharedShadowParams is: the occluder
+     *  band belongs to the map rather than to the field, so both params structs
+     *  carry it and neither type is the right one to name here. */
+    template<typename TShadowParams>
+    void UpdateOccluderCaptures(
         float PlanetRadius, const FVector& PlanetCenter,
         const FVector3f& LightLocal, const FVector3f& CameraLocal,
-        FGasGiantShadowParams& Params);
+        TShadowParams& Params);
 
     /** Frees the capture components and targets. */
     void DestroyGasGiantOccluderCaptures();

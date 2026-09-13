@@ -16,7 +16,7 @@ class FRDGBuilder;
  *
  *  Copied into a render command, so it holds no UObject -- the same split
  *  FFlowSimParams draws. Filled from the same field groups and derivations
- *  ApplyTerrestrialParams pushes to the material, which is what keeps the band
+ *  ApplyMarchParams pushes to the material, which is what keeps the band
  *  the light sees identical to the band the eye sees.
  *
  *  NOT PART OF FFlowSimParams. That struct is the fluid solver's state and

@@ -1041,6 +1041,11 @@ void UFlowSimSubsystem::RequestShadowBake(const FGasGiantShadowParams& InParams)
 	ShadowRequests.Add(InParams);
 }
 
+void UFlowSimSubsystem::RequestShadowBake(const FTerrestrialShadowParams& InParams)
+{
+	TerrestrialShadowRequests.Add(InParams);
+}
+
 void UFlowSimSubsystem::BakeShadowMap()
 {
 	// CONSUMED, NOT HELD. A planet that stops asking stops baking on the next
@@ -1065,6 +1070,31 @@ void UFlowSimSubsystem::BakeShadowMap()
 				FRDGBuilder GraphBuilder(RHICmdList);
 
 				GasGiantShadow::AddBakePass_RenderThread(GraphBuilder, Params);
+
+				GraphBuilder.Execute();
+			});
+	}
+
+
+	// THE SECOND FIELD'S QUEUE, drained identically. Separate because the params
+	// structs are separate types bound to separate shaders; a planet only ever
+	// fills one of the two, so at most one loop does any work.
+	TArray<FTerrestrialShadowParams> TerrestrialRequests = MoveTemp(TerrestrialShadowRequests);
+	TerrestrialShadowRequests.Reset();
+
+	for (const FTerrestrialShadowParams& Params : TerrestrialRequests)
+	{
+		if (!Params.IsUsable())
+		{
+			continue;
+		}
+
+		ENQUEUE_RENDER_COMMAND(TerrestrialShadowBake)(
+			[Params](FRHICommandListImmediate& RHICmdList)
+			{
+				FRDGBuilder GraphBuilder(RHICmdList);
+
+				TerrestrialShadow::AddBakePass_RenderThread(GraphBuilder, Params);
 
 				GraphBuilder.Execute();
 			});
