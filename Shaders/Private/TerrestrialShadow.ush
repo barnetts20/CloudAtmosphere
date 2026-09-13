@@ -1,0 +1,140 @@
+#pragma once
+
+#include "/Plugin/CloudAtmosphere/Private/TerrestrialDeck.ush"
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereShadowMap.ush"
+
+// The terrestrial band's side of the shadow map: what the field contributes to a
+// frame, and nothing else.
+//
+// THE FORMAT IS NOT HERE. Encoding, reconstruction, the cascade walk and the
+// occluder composite live in AtmosphereShadowMap.ush and know nothing about this
+// model. What remains below is the three numbers the deck supplies -- a cull
+// radius, a depth unit and the cascade half-widths -- plus the names the bake and
+// the march already call.
+//
+// THE ALIASES ARE FOR CALLERS, NOT FOR OVERRIDES. Predefining a TR_SHADOW_ name
+// does nothing, since the shared header has already resolved its own by the time
+// these are defined; override the ATMO_SHADOW_ name instead.
+
+#define TR_SHADOW_TAU_ENTRY ATMO_SHADOW_TAU_ENTRY
+#define TR_SHADOW_TAU0 ATMO_SHADOW_TAU0
+#define TR_SHADOW_TAU1 ATMO_SHADOW_TAU1
+#define TR_SHADOW_TAU2 ATMO_SHADOW_TAU2
+#define TR_SHADOW_SATURATION ATMO_SHADOW_SATURATION
+#define TR_SHADOW_MIN_TAU_SCALE ATMO_SHADOW_MIN_TAU_SCALE
+#define TR_SHADOW_NO_DECK ATMO_SHADOW_NO_DECK
+#define TR_SHADOW_EXTENT_MARGIN ATMO_SHADOW_EXTENT_MARGIN
+#define TR_SHADOW_LOOKUP_JITTER ATMO_SHADOW_LOOKUP_JITTER
+#define TR_SHADOW_CASCADES ATMO_SHADOW_CASCADES
+#define TR_SHADOW_NEAR_BLEND ATMO_SHADOW_NEAR_BLEND
+#define TR_SHADOW_OCCLUDER_BLUR ATMO_SHADOW_OCCLUDER_BLUR
+#define TR_SHADOW_OCCLUDER_TAPS ATMO_SHADOW_OCCLUDER_TAPS
+
+#define TR_ShadowOccluderSlice(Level) AtmoShadow_OccluderSlice(Level)
+#define TR_ShadowBasis(L, OutU, OutV) AtmoShadow_Basis(L, OutU, OutV)
+#define TR_ShadowTauFromNodes(Node, Depth, Ceiling) AtmoShadow_TauFromNodes(Node, Depth, Ceiling)
+#define TR_ExtinctionTintRange(Neg, Pos, Base) AtmoShadow_ExtinctionTintRange(Neg, Pos, Base)
+
+#define TR_ShadowCascadeCentre(Level, CameraLocal, U, V, Extent, MapSize) \
+	AtmoShadow_CascadeCentre(Level, CameraLocal, U, V, Extent, MapSize)
+
+/** The radius the map covers: the cull radius at UNFADED bounds.
+ *
+ *  PITFALL: not planetParams.cloudOuterRadius, which carries the camera's layer
+ *  fades and shrinks as the structure layer fades out. A map written against one
+ *  radius and read against another samples at the wrong scale, sliding the whole
+ *  shadow toward the limb. */
+float TR_ShadowCullRadius(TRFieldParams F)
+{
+    float TopMin, TopMax;
+    TR_TopBounds(F, 1.0f, 1.0f, TopMin, TopMax);
+
+    return F.PlanetRadius + F.Thickness * TopMax;
+}
+
+/** Half-width of a cascade. DERIVED FROM THE FADES, NOT AUTHORED SEPARATELY:
+ *  level 1 reaches as far as structure is drawn, level 2 as far as detail, so
+ *  inside a level both the map and the eye carry that layer and outside neither
+ *  does. Any other sizing makes the two LODs disagree somewhere.
+ *
+ *  STRICTLY ORDERED, because nothing makes the authored fades so: a detail range
+ *  wider than the structure range would put the coarse slice inside the fine
+ *  one, which reads as the fine slice not working. A zero extent collapses that
+ *  level and the walk skips it. */
+float TR_ShadowCascadeExtent(TRFieldParams F, int Level)
+{
+    const float Disc = TR_ShadowCullRadius(F) * ATMO_SHADOW_EXTENT_MARGIN;
+
+    if (Level <= 0)
+    {
+        return Disc;
+    }
+
+    const float Structure = min(F.PlanetRadius * max(F.StructureFadeFar, 0.0f), Disc);
+
+    if (Level == 1)
+    {
+        return Structure;
+    }
+
+    return min(F.PlanetRadius * max(F.DetailFadeFar, 0.0f), Structure);
+}
+
+/** The deck's contribution to a shared frame. THE ONLY PLACE THIS MODEL MEETS
+ *  THE FORMAT: everything downstream reads the frame, so a terrestrial field
+ *  builds its own here and inherits the rest unchanged. */
+AtmoShadowFrame TR_ShadowFrame(TRFieldParams F)
+{
+    AtmoShadowFrame Frame;
+
+    Frame.CullRadius = TR_ShadowCullRadius(F);
+    Frame.Thickness = F.Thickness;
+
+    UNROLL
+
+    for (int Level = 0; Level < ATMO_SHADOW_CASCADES; Level++)
+    {
+        Frame.Extents[Level] = TR_ShadowCascadeExtent(F, Level);
+    }
+
+    return Frame;
+}
+
+/** Optical depth between a planet-local position and the light, on the fastest
+ *  absorption channel. The march's entry point; see AtmoShadow_Tau for what it
+ *  does. */
+float TR_ShadowTau(
+	Texture2DArray ShadowMap,
+	SamplerState ShadowSampler,
+	float3 LocalPos,
+	float3 LightLocal,
+	float3 CameraLocal,
+	float2 JitterTexels,
+	float Ceiling,
+	TRFieldParams F)
+{
+    return AtmoShadow_Tau(
+		ShadowMap, ShadowSampler, LocalPos, LightLocal, CameraLocal,
+		JitterTexels, Ceiling, TR_ShadowFrame(F));
+}
+
+/** Band-weighted deck depth above a point on opaque geometry, fold constant
+ *  removed. The caller multiplies by cloudAbsBeta and the receiving band's tint,
+ *  exactly as it does for Atmo_LightMarch's deck depth. See
+ *  AtmoShadow_SurfaceOptDepth. */
+float TR_ShadowSurfaceOptDepth(
+	Texture2DArray ShadowMap,
+	SamplerState ShadowSampler,
+	float3 LocalPos,
+	float3 LightLocal,
+	float3 CameraLocal,
+	float2 JitterTexels,
+	float Ceiling,
+	float FoldConstant,
+	float ReceiverBias,
+	TRFieldParams F)
+{
+    return AtmoShadow_SurfaceOptDepth(
+		ShadowMap, ShadowSampler, LocalPos, LightLocal, CameraLocal,
+		JitterTexels, Ceiling, TR_ShadowFrame(F), FoldConstant, ReceiverBias);
+}

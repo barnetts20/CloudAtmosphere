@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
-#include "GasGiantSnapshot.generated.h"
+#include "FlowSnapshot.generated.h"
 
 /** The profile a snapshot was captured under.
  *
@@ -14,7 +14,7 @@
  *  different from what was captured. Silent and slow is the worst combination,
  *  so this is reported at load instead. */
 USTRUCT(BlueprintType)
-struct FGasGiantSnapshotProvenance
+struct FFlowSnapshotProvenance
 {
 	GENERATED_BODY()
 
@@ -45,7 +45,7 @@ struct FGasGiantSnapshotProvenance
 	 *  or dissipation is still registered correctly on its jets, it just relaxes
 	 *  toward a different equilibrium -- a legitimate thing to do deliberately,
 	 *  and the recorded value is there to make it visible. */
-	bool MatchesShape(const FGasGiantSnapshotProvenance& Other) const
+	bool MatchesShape(const FFlowSnapshotProvenance& Other) const
 	{
 		const float Tol = 1e-3f;
 
@@ -73,7 +73,7 @@ struct FGasGiantSnapshotProvenance
  *  reproducing the captured psi only to solver tolerance. Doubling the file
  *  removes all three. */
 UCLASS(BlueprintType)
-class CLOUDATMOSPHERE_API UGasGiantSnapshot : public UDataAsset
+class CLOUDATMOSPHERE_API UFlowSnapshot : public UDataAsset
 {
 	GENERATED_BODY()
 
@@ -92,7 +92,7 @@ public:
 	TArray<float> Psi;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Snapshot")
-	FGasGiantSnapshotProvenance Provenance;
+	FFlowSnapshotProvenance Provenance;
 
 	/** Simulated time and step count when captured. Carried so a restored run
 	 *  continues the forcing drift from where it left off rather than jumping

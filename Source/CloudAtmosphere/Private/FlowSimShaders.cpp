@@ -1,4 +1,4 @@
-#include "GasGiantSimShaders.h"
+#include "FlowSimShaders.h"
 
 #include "DataDrivenShaderPlatformInfo.h"
 #include "ShaderCompilerCore.h"
@@ -6,7 +6,7 @@
 // IsFeatureLevelSupported.
 #include "RenderUtils.h"
 
-namespace GasGiantSimShader
+namespace FlowSimShader
 {
 	bool ShouldCompile(const FGlobalShaderPermutationParameters& Parameters)
 	{
@@ -31,26 +31,26 @@ namespace GasGiantSimShader
 	}
 }
 
-// Entry point names must match the [numthreads] functions in GasGiantSim.usf.
+// Entry point names must match the [numthreads] functions in FlowSim.usf.
 // A mismatch here fails at cook time as a missing entry point rather than
 // anywhere useful, so they are listed adjacent for comparison.
 
 #define GG_IMPLEMENT_SIM_SHADER(ClassName, EntryPoint) \
-	IMPLEMENT_GLOBAL_SHADER(ClassName, "/Plugin/CloudAtmosphere/Private/GasGiantSim.usf", EntryPoint, SF_Compute)
+	IMPLEMENT_GLOBAL_SHADER(ClassName, "/Plugin/CloudAtmosphere/Private/FlowSim.usf", EntryPoint, SF_Compute)
 
-GG_IMPLEMENT_SIM_SHADER(FGasGiantInitZonalPotentialCS, "MainInitZonalPotentialCS")
-GG_IMPLEMENT_SIM_SHADER(FGasGiantInitPotentialCS, "MainInitPotentialCS")
-GG_IMPLEMENT_SIM_SHADER(FGasGiantInitVorticityCS, "MainInitVorticityCS")
-GG_IMPLEMENT_SIM_SHADER(FGasGiantVelocityCS, "MainVelocityCS")
-GG_IMPLEMENT_SIM_SHADER(FGasGiantAdvectCS, "MainAdvectCS")
-GG_IMPLEMENT_SIM_SHADER(FGasGiantReduceRowsCS, "MainReduceRowsCS")
-GG_IMPLEMENT_SIM_SHADER(FGasGiantReducePsiRowsCS, "MainReducePsiRowsCS")
-GG_IMPLEMENT_SIM_SHADER(FGasGiantReduceGlobalCS, "MainReduceGlobalCS")
-GG_IMPLEMENT_SIM_SHADER(FGasGiantForceCS, "MainForceCS")
-GG_IMPLEMENT_SIM_SHADER(FGasGiantPolarFilterCS, "MainPolarFilterCS")
-GG_IMPLEMENT_SIM_SHADER(FGasGiantPoissonCS, "MainPoissonCS")
-GG_IMPLEMENT_SIM_SHADER(FGasGiantCaptureCS, "MainCaptureCS")
-GG_IMPLEMENT_SIM_SHADER(FGasGiantRestoreCS, "MainRestoreCS")
-GG_IMPLEMENT_SIM_SHADER(FGasGiantDebugVisCS, "MainDebugVisCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimInitZonalPotentialCS, "MainInitZonalPotentialCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimInitPotentialCS, "MainInitPotentialCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimInitVorticityCS, "MainInitVorticityCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimVelocityCS, "MainVelocityCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimAdvectCS, "MainAdvectCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimReduceRowsCS, "MainReduceRowsCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimReducePsiRowsCS, "MainReducePsiRowsCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimReduceGlobalCS, "MainReduceGlobalCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimForceCS, "MainForceCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimPolarFilterCS, "MainPolarFilterCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimPoissonCS, "MainPoissonCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimCaptureCS, "MainCaptureCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimRestoreCS, "MainRestoreCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimDebugVisCS, "MainDebugVisCS")
 
 #undef GG_IMPLEMENT_SIM_SHADER

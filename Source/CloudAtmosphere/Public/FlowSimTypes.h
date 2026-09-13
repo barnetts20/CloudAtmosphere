@@ -2,16 +2,16 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
-#include "GasGiantSimTypes.generated.h"
+#include "FlowSimTypes.generated.h"
 
 class UVolumeTexture;
-class UGasGiantSnapshot;
+class UFlowSnapshot;
 class UTextureRenderTarget2D;
 class UTextureRenderTarget2DArray;
 
-/** Which field the debug view renders. Mirrors GG_DEBUG_* in GasGiantSim.usf. */
+/** Which field the debug view renders. Mirrors GG_DEBUG_* in FlowSim.usf. */
 UENUM(BlueprintType)
-enum class EGasGiantDebugMode : uint8
+enum class EFlowDebugMode : uint8
 {
 	Vorticity   UMETA(DisplayName = "Vorticity"),
 	Psi         UMETA(DisplayName = "Streamfunction"),
@@ -37,7 +37,7 @@ enum class EGasGiantDebugMode : uint8
  *  layer's jets at different latitudes, and the bands the material draws come
  *  from the shared profile, so they would register with none of them. */
 USTRUCT(BlueprintType)
-struct FGasGiantLayerProfile
+struct FFlowLayerProfile
 {
 	GENERATED_BODY()
 
@@ -66,7 +66,7 @@ struct FGasGiantLayerProfile
  *  a material can reference the flow target by asset path and the debug target
  *  can be watched in the content browser while the sim runs. */
 UCLASS(BlueprintType)
-class CLOUDATMOSPHERE_API UGasGiantSimConfig : public UDataAsset
+class CLOUDATMOSPHERE_API UFlowSimConfig : public UDataAsset
 {
 	GENERATED_BODY()
 
@@ -95,7 +95,7 @@ public:
 	int32 LayerCount = 3;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid")
-	TArray<FGasGiantLayerProfile> LayerProfiles;
+	TArray<FFlowLayerProfile> LayerProfiles;
 
 	// -- Jet profile --------------------------------------------------------
 	//
@@ -287,7 +287,7 @@ public:
 	 *  resampling of a vorticity field is cheaper or more faithful than re-running
 	 *  the spin-up. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Start State")
-	TObjectPtr<UGasGiantSnapshot> InitialState;
+	TObjectPtr<UFlowSnapshot> InitialState;
 
 	// -- Spin-up ------------------------------------------------------------
 
@@ -328,7 +328,7 @@ public:
 	// -- Debug --------------------------------------------------------------
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
-	EGasGiantDebugMode DebugMode = EGasGiantDebugMode::Vorticity;
+	EFlowDebugMode DebugMode = EFlowDebugMode::Vorticity;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (ClampMin = "0", ClampMax = "7"))
 	int32 DebugLayer = 0;
@@ -350,7 +350,7 @@ public:
  *  is a crash waiting for a garbage collection to schedule itself badly.
  *  Everything needed is copied here on the game thread, RHI references
  *  included. */
-struct FGasGiantSimParams
+struct FFlowSimParams
 {
 	FIntVector GridSize = FIntVector(512, 256, 3);
 

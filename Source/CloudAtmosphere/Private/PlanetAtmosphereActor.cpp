@@ -11,8 +11,8 @@
 #include "Engine/TextureRenderTarget2DArray.h"
 #include "AtmosphereTransmittance.h"
 #include "GasGiantShadowMap.h"
-#include "GasGiantSimSubsystem.h"
-#include "GasGiantSimTypes.h"
+#include "FlowSimSubsystem.h"
+#include "FlowSimTypes.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "MaterialTypes.h"
 
@@ -171,7 +171,7 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
 
     // Past any authored interval, so every level captures on its first tick
     // rather than shadowing nothing until its cadence comes round.
-    for (int32 Level = 0; Level < GasGiantShadow::CascadeCount; ++Level)
+    for (int32 Level = 0; Level < AtmoShadowBake::CascadeCount; ++Level)
     {
         FramesSinceCapture[Level] = MAX_int32;
     }
@@ -219,7 +219,7 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
         UE_LOG(LogTemp, Warning, TEXT("PlanetAtmosphereActor: Failed to load default deck structure volume"));
     }
 
-    static ConstructorHelpers::FObjectFinder<UGasGiantSimConfig> DefaultSimConfig(
+    static ConstructorHelpers::FObjectFinder<UFlowSimConfig> DefaultSimConfig(
         TEXT("/CloudAtmosphere/NoiseRecipes/GasGiantSimScratch"));
     if (DefaultSimConfig.Succeeded())
     {
@@ -242,7 +242,7 @@ void APlanetAtmosphereActor::BeginPlay()
     if (PlanetType == EPlanetAtmosphereType::GasGiant &&
         Simulation.bStartOnBeginPlay)
     {
-        StartGasGiantSimulation();
+        StartFlowSimulation();
     }
 }
 
@@ -496,7 +496,7 @@ void APlanetAtmosphereActor::DestroyChildActors()
     {
         if (UWorld* World = GetWorld())
         {
-            if (UGasGiantSimSubsystem* Sim = World->GetSubsystem<UGasGiantSimSubsystem>())
+            if (UFlowSimSubsystem* Sim = World->GetSubsystem<UFlowSimSubsystem>())
             {
                 Sim->StopSimulation();
             }
@@ -842,7 +842,7 @@ bool APlanetAtmosphereActor::PrepareGasGiantShadowTarget()
     // what stops them paying for it, and the allocation is the only place the
     // decision lives.
     const int32 DesiredSlices =
-        GasGiantShadow::SlicesFor(GasGiantOccluderShadows.IsEnabled());
+        AtmoShadowBake::SlicesFor(GasGiantOccluderShadows.IsEnabled());
 
     const bool bMismatch =
         Target->SizeX != Edge ||
@@ -882,7 +882,7 @@ bool APlanetAtmosphereActor::PrepareGasGiantShadowTarget()
 // nodes to it.
 //
 // THE CAPTURE DESCRIBES ITSELF. Its axes are read back off the component's own
-// transform and travel to the bake in FGasGiantOccluderFrame, so nothing here
+// transform and travel to the bake in FAtmoOccluderFrame, so nothing here
 // has to agree with GasGiantShadow.ush about where a cascade is. Matching the
 // cascade's extent, resolution and texel snapping is what makes the resample an
 // identity and keeps the two lattices moving together; a mismatch costs
@@ -979,8 +979,8 @@ bool APlanetAtmosphereActor::PrepareGasGiantOccluderCaptures()
         return false;
     }
 
-    OccluderCaptures.SetNum(GasGiantShadow::CascadeCount);
-    OccluderDepthTargets.SetNum(GasGiantShadow::CascadeCount);
+    OccluderCaptures.SetNum(AtmoShadowBake::CascadeCount);
+    OccluderDepthTargets.SetNum(AtmoShadowBake::CascadeCount);
 
     // The cascade's resolution, so the capture and the slice share a texel grid
     // and the resample is an identity.
@@ -995,7 +995,7 @@ bool APlanetAtmosphereActor::PrepareGasGiantOccluderCaptures()
 
     bool bAnyLive = false;
 
-    for (int32 Level = 0; Level < GasGiantShadow::CascadeCount; ++Level)
+    for (int32 Level = 0; Level < AtmoShadowBake::CascadeCount; ++Level)
     {
         if (!GasGiantOccluderShadows.IsLevelEnabled(Level))
         {
@@ -1006,7 +1006,7 @@ bool APlanetAtmosphereActor::PrepareGasGiantOccluderCaptures()
             }
 
             OccluderDepthTargets[Level] = nullptr;
-            OccluderFrames[Level] = FGasGiantOccluderFrame();
+            OccluderFrames[Level] = FAtmoOccluderFrame();
             FramesSinceCapture[Level] = MAX_int32;
 
             continue;
@@ -1109,7 +1109,7 @@ void APlanetAtmosphereActor::UpdateGasGiantOccluderCaptures(
     // resolution. Levels 1 and 2 ARE the shader's expression, because there it
     // is an authored fade times a radius rather than a derivation.
     const float Disc = PlanetRadius * (1.0f + Geometry.HeightScale)
-        * GasGiantShadow::CaptureExtentMargin;
+        * AtmoShadowBake::CaptureExtentMargin;
 
     const float StructureFar = PlanetRadius *
         (StructureLayer.FadeNear + FMath::Max(StructureLayer.FadeSpan, 1e-4f));
@@ -1117,7 +1117,7 @@ void APlanetAtmosphereActor::UpdateGasGiantOccluderCaptures(
     const float DetailFar = PlanetRadius *
         (DetailLayer.FadeNear + FMath::Max(DetailLayer.FadeSpan, 1e-4f));
 
-    float Extents[GasGiantShadow::CascadeCount];
+    float Extents[AtmoShadowBake::CascadeCount];
     Extents[0] = Disc;
     Extents[1] = FMath::Min(StructureFar, Extents[0]);
     Extents[2] = FMath::Min(DetailFar, Extents[1]);
@@ -1137,7 +1137,7 @@ void APlanetAtmosphereActor::UpdateGasGiantOccluderCaptures(
 
     const int32 Edge = FMath::Clamp(GasGiantShadowResolution, 64, 4096);
 
-    for (int32 Level = 0; Level < GasGiantShadow::CascadeCount; ++Level)
+    for (int32 Level = 0; Level < AtmoShadowBake::CascadeCount; ++Level)
     {
         USceneCaptureComponent2D* Capture = OccluderCaptures[Level];
 
@@ -1215,7 +1215,7 @@ void APlanetAtmosphereActor::UpdateGasGiantOccluderCaptures(
             Capture->HiddenActors.Add(SunLight);
         }
 
-        FGasGiantOccluderFrame& Frame = OccluderFrames[Level];
+        FAtmoOccluderFrame& Frame = OccluderFrames[Level];
 
         const int32 Interval = GasGiantOccluderShadows.GetIntervalFrames(Level);
 
@@ -1278,9 +1278,9 @@ void APlanetAtmosphereActor::DestroyGasGiantOccluderCaptures()
 
     OccluderDepthTargets.Reset();
 
-    for (int32 Level = 0; Level < GasGiantShadow::CascadeCount; ++Level)
+    for (int32 Level = 0; Level < AtmoShadowBake::CascadeCount; ++Level)
     {
-        OccluderFrames[Level] = FGasGiantOccluderFrame();
+        OccluderFrames[Level] = FAtmoOccluderFrame();
         FramesSinceCapture[Level] = MAX_int32;
     }
 }
@@ -1366,7 +1366,7 @@ void APlanetAtmosphereActor::RequestGasGiantShadowBake(
         return;
     }
 
-    UGasGiantSimSubsystem* Sim = World->GetSubsystem<UGasGiantSimSubsystem>();
+    UFlowSimSubsystem* Sim = World->GetSubsystem<UFlowSimSubsystem>();
 
     if (!Sim || !Simulation.Config || !Simulation.Config->FlowTarget)
     {
@@ -1556,7 +1556,7 @@ void APlanetAtmosphereActor::RequestGasGiantShadowBake(
 // Gas giant simulation
 // --------------------------------------------------------------------------
 
-void APlanetAtmosphereActor::StartGasGiantSimulation()
+void APlanetAtmosphereActor::StartFlowSimulation()
 {
     if (!Simulation.Config)
     {
@@ -1569,7 +1569,7 @@ void APlanetAtmosphereActor::StartGasGiantSimulation()
     UWorld* World = GetWorld();
     if (!World) return;
 
-    UGasGiantSimSubsystem* Sim = World->GetSubsystem<UGasGiantSimSubsystem>();
+    UFlowSimSubsystem* Sim = World->GetSubsystem<UFlowSimSubsystem>();
     if (!Sim) return;
 
     Sim->StartSimulation(Simulation.Config);
@@ -1580,7 +1580,7 @@ float APlanetAtmosphereActor::GetGasGiantTime() const
 {
     if (const UWorld* World = GetWorld())
     {
-        if (const UGasGiantSimSubsystem* Sim = World->GetSubsystem<UGasGiantSimSubsystem>())
+        if (const UFlowSimSubsystem* Sim = World->GetSubsystem<UFlowSimSubsystem>())
         {
             return Sim->GetSimulatedTime();
         }

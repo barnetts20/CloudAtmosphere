@@ -1,4 +1,4 @@
-#include "GasGiantShadowMap.h"
+#include "TerrestrialShadowMap.h"
 
 #include "DataDrivenShaderPlatformInfo.h"
 #include "RenderGraphBuilder.h"
@@ -8,29 +8,29 @@
 // IsFeatureLevelSupported, GBlackVolumeTexture.
 #include "RenderUtils.h"
 
-bool FGasGiantShadowBakeCS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+bool FTerrestrialShadowBakeCS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 {
 	return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
 }
 
-void FGasGiantShadowBakeCS::ModifyCompilationEnvironment(
+void FTerrestrialShadowBakeCS::ModifyCompilationEnvironment(
 	const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
 {
 	OutEnvironment.SetDefine(TEXT("ATMO_BAKE_THREADS"), AtmoShadowBake::ThreadGroupSize);
 }
 
-// Entry point name must match the [numthreads] function in GasGiantShadowMap.usf.
+// Entry point name must match the [numthreads] function in TerrestrialShadowMap.usf.
 // A mismatch fails at cook time as a missing entry point rather than anywhere
 // that names the cause.
 IMPLEMENT_GLOBAL_SHADER(
-	FGasGiantShadowBakeCS,
-	"/Plugin/CloudAtmosphere/Private/GasGiantShadowMap.usf",
+	FTerrestrialShadowBakeCS,
+	"/Plugin/CloudAtmosphere/Private/TerrestrialShadowMap.usf",
 	"MainShadowBakeCS",
 	SF_Compute);
 
-namespace GasGiantShadow
+namespace TerrestrialShadow
 {
-	void AddBakePass_RenderThread(FRDGBuilder& GraphBuilder, const FGasGiantShadowParams& Params)
+	void AddBakePass_RenderThread(FRDGBuilder& GraphBuilder, const FTerrestrialShadowParams& Params)
 	{
 		check(IsInRenderingThread());
 
@@ -39,12 +39,12 @@ namespace GasGiantShadow
 			return;
 		}
 
-		RDG_EVENT_SCOPE(GraphBuilder, "GasGiantShadowBake");
+		RDG_EVENT_SCOPE(GraphBuilder, "TerrestrialShadowBake");
 
 		FRDGTextureRef Map = GraphBuilder.RegisterExternalTexture(
-			CreateRenderTarget(Params.MapTexture, TEXT("GasGiant.ShadowMap")));
+			CreateRenderTarget(Params.MapTexture, TEXT("Terrestrial.ShadowMap")));
 
-		FGasGiantShadowParameters* P = GraphBuilder.AllocParameters<FGasGiantShadowParameters>();
+		FTerrestrialShadowParameters* P = GraphBuilder.AllocParameters<FTerrestrialShadowParameters>();
 
 		P->ShadowMapSize = Params.MapSize;
 		P->ShadowInvMapSize = FVector2f(
@@ -120,7 +120,7 @@ namespace GasGiantShadow
 		P->FlowTargetSampler = TStaticSamplerState<SF_Bilinear, AM_Wrap, AM_Clamp, AM_Clamp>::GetRHI();
 
 		// A missing volume binds black rather than refusing the bake. Black is a
-		// defined value through GG_PerlinWorley, so the deck comes out uncarved
+		// defined value through TR_PerlinWorley, so the deck comes out uncarved
 		// and the shadow is still broadly right -- diagnosable at a glance,
 		// where a planet with no shadows at all looks like a broken pass.
 		P->DetailVolume = Params.DetailTexture.IsValid()
@@ -184,10 +184,10 @@ namespace GasGiantShadow
 			FMath::DivideAndRoundUp(Params.MapSize.Y, AtmoShadowBake::ThreadGroupSize),
 			AtmoShadowBake::CascadeCount);
 
-		TShaderMapRef<FGasGiantShadowBakeCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		TShaderMapRef<FTerrestrialShadowBakeCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		FComputeShaderUtils::AddPass(
 			GraphBuilder,
-			RDG_EVENT_NAME("GasGiant.ShadowBake"), Shader, P, Groups);
+			RDG_EVENT_NAME("Terrestrial.ShadowBake"), Shader, P, Groups);
 	}
 }

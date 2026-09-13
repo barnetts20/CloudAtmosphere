@@ -1,9 +1,9 @@
-#include "GasGiantSimSubsystem.h"
+#include "FlowSimSubsystem.h"
 
 #include "GasGiantShadowMap.h"
-#include "GasGiantSimulation.h"
-#include "GasGiantSimSettings.h"
-#include "GasGiantSnapshot.h"
+#include "FlowSimulation.h"
+#include "FlowSimSettings.h"
+#include "FlowSnapshot.h"
 #include "RHIGPUReadback.h"
 #include "RenderGraphBuilder.h"
 #include "Engine/VolumeTexture.h"
@@ -18,8 +18,6 @@
 // UWorld::GetSubsystem, used by the console commands to find the right
 // per-world instance.
 #include "Engine/World.h"
-
-DEFINE_LOG_CATEGORY_STATIC(LogGasGiant, Log, All);
 
 // ---------------------------------------------------------------------------
 // Console commands. Present because the fastest debugging loop for a field
@@ -65,33 +63,33 @@ static TAutoConsoleVariable<int32> CVarGasGiantPaused(
 
 namespace
 {
-	UGasGiantSimSubsystem* FindSubsystem(UWorld* World)
+	UFlowSimSubsystem* FindSubsystem(UWorld* World)
 	{
-		return World ? World->GetSubsystem<UGasGiantSimSubsystem>() : nullptr;
+		return World ? World->GetSubsystem<UFlowSimSubsystem>() : nullptr;
 	}
 
 	/** Resolves an optional asset path argument, falling back to the project
 	 *  setting. Both paths are logged, because "started against the wrong
 	 *  config" and "did not start" look identical from the debug view. */
-	UGasGiantSimConfig* ResolveConfig(const TArray<FString>& Args)
+	UFlowSimConfig* ResolveConfig(const TArray<FString>& Args)
 	{
 		if (Args.Num() > 0)
 		{
-			UGasGiantSimConfig* Loaded = LoadObject<UGasGiantSimConfig>(nullptr, *Args[0]);
+			UFlowSimConfig* Loaded = LoadObject<UFlowSimConfig>(nullptr, *Args[0]);
 
 			if (!Loaded)
 			{
-				UE_LOG(LogGasGiant, Error, TEXT("No GasGiantSimConfig at '%s'."), *Args[0]);
+				UE_LOG(LogFlowSim, Error, TEXT("No FlowSimConfig at '%s'."), *Args[0]);
 			}
 
 			return Loaded;
 		}
 
-		const UGasGiantSimSettings* Settings = GetDefault<UGasGiantSimSettings>();
+		const UFlowSimSettings* Settings = GetDefault<UFlowSimSettings>();
 
 		if (!Settings || Settings->DefaultConfig.IsNull())
 		{
-			UE_LOG(LogGasGiant, Error,
+			UE_LOG(LogFlowSim, Error,
 				TEXT("No config given and no DefaultConfig set in ")
 				TEXT("Project Settings -> Plugins -> Gas Giant Sim."));
 			return nullptr;
@@ -101,86 +99,86 @@ namespace
 	}
 }
 
-static FAutoConsoleCommandWithWorldAndArgs GGasGiantStartCmd(
-	TEXT("GasGiant.Start"),
-	TEXT("Start the flow sim. Optional argument is a GasGiantSimConfig asset path; ")
+static FAutoConsoleCommandWithWorldAndArgs GFlowSimStartCmd(
+	TEXT("FlowSim.Start"),
+	TEXT("Start the flow sim. Optional argument is a FlowSimConfig asset path; ")
 	TEXT("with none, uses the DefaultConfig from Project Settings."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
 		[](const TArray<FString>& Args, UWorld* World)
 		{
-			if (UGasGiantSimSubsystem* Sub = FindSubsystem(World))
+			if (UFlowSimSubsystem* Sub = FindSubsystem(World))
 			{
-				if (UGasGiantSimConfig* Config = ResolveConfig(Args))
+				if (UFlowSimConfig* Config = ResolveConfig(Args))
 				{
 					Sub->StartSimulation(Config);
-					UE_LOG(LogGasGiant, Log, TEXT("Started against '%s'."), *Config->GetName());
+					UE_LOG(LogFlowSim, Log, TEXT("Started against '%s'."), *Config->GetName());
 				}
 			}
 		}));
 
-static FAutoConsoleCommandWithWorldAndArgs GGasGiantStopCmd(
-	TEXT("GasGiant.Stop"),
+static FAutoConsoleCommandWithWorldAndArgs GFlowSimStopCmd(
+	TEXT("FlowSim.Stop"),
 	TEXT("Stop stepping. State is kept, so GasGiant.Start resumes rather than reseeds."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
 		[](const TArray<FString>&, UWorld* World)
 		{
-			if (UGasGiantSimSubsystem* Sub = FindSubsystem(World))
+			if (UFlowSimSubsystem* Sub = FindSubsystem(World))
 			{
 				Sub->StopSimulation();
 			}
 		}));
 
-static FAutoConsoleCommandWithWorldAndArgs GGasGiantResetCmd(
-	TEXT("GasGiant.Reset"),
+static FAutoConsoleCommandWithWorldAndArgs GFlowSimResetCmd(
+	TEXT("FlowSim.Reset"),
 	TEXT("Discard the field and reseed from the current config. Also the way to ")
 	TEXT("pick up a changed grid size or seed volume."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
 		[](const TArray<FString>&, UWorld* World)
 		{
-			if (UGasGiantSimSubsystem* Sub = FindSubsystem(World))
+			if (UFlowSimSubsystem* Sub = FindSubsystem(World))
 			{
 				Sub->ResetSimulation();
 			}
 		}));
 
-static FAutoConsoleCommandWithWorldAndArgs GGasGiantStepCmd(
-	TEXT("GasGiant.Step"),
+static FAutoConsoleCommandWithWorldAndArgs GFlowSimStepCmd(
+	TEXT("FlowSim.Step"),
 	TEXT("Advance N substeps while paused. Default 1."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
 		[](const TArray<FString>& Args, UWorld* World)
 		{
-			if (UGasGiantSimSubsystem* Sub = FindSubsystem(World))
+			if (UFlowSimSubsystem* Sub = FindSubsystem(World))
 			{
 				Sub->StepOnce(Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 1);
 			}
 		}));
 
-static FAutoConsoleCommandWithWorldAndArgs GGasGiantSaveCmd(
-	TEXT("GasGiant.Save"),
-	TEXT("Capture the live state into a GasGiantSnapshot asset. Argument is the ")
+static FAutoConsoleCommandWithWorldAndArgs GFlowSimSaveCmd(
+	TEXT("FlowSim.Save"),
+	TEXT("Capture the live state into a FlowSnapshot asset. Argument is the ")
 	TEXT("asset path. Blocks on the GPU; an authoring operation."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
 		[](const TArray<FString>& Args, UWorld* World)
 		{
 			if (Args.Num() == 0)
 			{
-				UE_LOG(LogGasGiant, Error, TEXT("GasGiant.Save needs a snapshot asset path."));
+				UE_LOG(LogFlowSim, Error, TEXT("FlowSim.Save needs a snapshot asset path."));
 				return;
 			}
 
-			UGasGiantSimSubsystem* Sub = FindSubsystem(World);
+			UFlowSimSubsystem* Sub = FindSubsystem(World);
 
 			if (!Sub)
 			{
 				return;
 			}
 
-			UGasGiantSnapshot* Target = LoadObject<UGasGiantSnapshot>(nullptr, *Args[0]);
+			UFlowSnapshot* Target = LoadObject<UFlowSnapshot>(nullptr, *Args[0]);
 
 			if (!Target)
 			{
-				UE_LOG(LogGasGiant, Error,
-					TEXT("No GasGiantSnapshot at '%s'. Create the asset first, then save into it."),
+				UE_LOG(LogFlowSim, Error,
+					TEXT("No FlowSnapshot at '%s'. Create the asset first, then save into it."),
 					*Args[0]);
 				return;
 			}
@@ -188,15 +186,15 @@ static FAutoConsoleCommandWithWorldAndArgs GGasGiantSaveCmd(
 			Sub->SaveSnapshot(Target);
 		}));
 
-static FAutoConsoleCommandWithWorldAndArgs GGasGiantStatusCmd(
-	TEXT("GasGiant.Status"),
+static FAutoConsoleCommandWithWorldAndArgs GFlowSimStatusCmd(
+	TEXT("FlowSim.Status"),
 	TEXT("Report step count, simulated time and spin-up progress."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
 		[](const TArray<FString>&, UWorld* World)
 		{
-			if (UGasGiantSimSubsystem* Sub = FindSubsystem(World))
+			if (UFlowSimSubsystem* Sub = FindSubsystem(World))
 			{
-				UE_LOG(LogGasGiant, Display,
+				UE_LOG(LogFlowSim, Display,
 					TEXT("steps %d, simulated time %.2f, Courant %.3f, %s"),
 					Sub->GetStepsCompleted(),
 					Sub->GetSimulatedTime(),
@@ -212,19 +210,19 @@ static FAutoConsoleCommandWithWorldAndArgs GGasGiantStatusCmd(
  *  The saturation caps the shaped term at 1, and the equatorial boost is added
  *  AFTER it and so is not bounded by it. Conservative when the profile does not
  *  fully saturate, exact when it does -- which it does at the defaults. */
-static float GasGiantPeakRate(const UGasGiantSimConfig& Config)
+static float GasGiantPeakRate(const UFlowSimConfig& Config)
 {
 	return FMath::Max(Config.JetStrength * (1.0f + Config.EquatorialBoost), 1e-6f);
 }
 
-void UGasGiantSimSubsystem::Initialize(FSubsystemCollectionBase& Collection)
+void UFlowSimSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 
-	Simulation = new FGasGiantSimulation();
+	Simulation = new FFlowSimulation();
 }
 
-void UGasGiantSimSubsystem::Deinitialize()
+void UFlowSimSubsystem::Deinitialize()
 {
 	if (Simulation)
 	{
@@ -232,7 +230,7 @@ void UGasGiantSimSubsystem::Deinitialize()
 		// there and the flush is what makes deleting the object afterwards
 		// safe. Deleting from the game thread without this races a frame that
 		// is already referencing them.
-		FGasGiantSimulation* Sim = Simulation;
+		FFlowSimulation* Sim = Simulation;
 		Simulation = nullptr;
 
 		ENQUEUE_RENDER_COMMAND(GasGiantRelease)(
@@ -248,23 +246,23 @@ void UGasGiantSimSubsystem::Deinitialize()
 	Super::Deinitialize();
 }
 
-bool UGasGiantSimSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
+bool UFlowSimSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
 	return WorldType == EWorldType::Game
 		|| WorldType == EWorldType::PIE
 		|| WorldType == EWorldType::Editor;
 }
 
-TStatId UGasGiantSimSubsystem::GetStatId() const
+TStatId UFlowSimSubsystem::GetStatId() const
 {
-	RETURN_QUICK_DECLARE_CYCLE_STAT(UGasGiantSimSubsystem, STATGROUP_Tickables);
+	RETURN_QUICK_DECLARE_CYCLE_STAT(UFlowSimSubsystem, STATGROUP_Tickables);
 }
 
-void UGasGiantSimSubsystem::StartSimulation(UGasGiantSimConfig* InConfig)
+void UFlowSimSubsystem::StartSimulation(UFlowSimConfig* InConfig)
 {
 	if (!InConfig)
 	{
-		UE_LOG(LogGasGiant, Warning, TEXT("StartSimulation called with a null config."));
+		UE_LOG(LogFlowSim, Warning, TEXT("StartSimulation called with a null config."));
 		return;
 	}
 
@@ -285,7 +283,7 @@ void UGasGiantSimSubsystem::StartSimulation(UGasGiantSimConfig* InConfig)
 	ResetSimulation();
 }
 
-float UGasGiantSimSubsystem::GetCourant() const
+float UFlowSimSubsystem::GetCourant() const
 {
 	if (!Config)
 	{
@@ -298,7 +296,7 @@ float UGasGiantSimSubsystem::GetCourant() const
 	return GasGiantPeakRate(*Config) * Step * W / (2.0f * UE_PI);
 }
 
-void UGasGiantSimSubsystem::ReportInertSettings() const
+void UFlowSimSubsystem::ReportInertSettings() const
 {
 	if (!Config)
 	{
@@ -311,7 +309,7 @@ void UGasGiantSimSubsystem::ReportInertSettings() const
 	// assigned, which is a surprising amount of change from one assignment.
 	if (Config->ForcingAmplitude > 0.0f && !Config->ForcingVolume)
 	{
-		UE_LOG(LogGasGiant, Warning,
+		UE_LOG(LogFlowSim, Warning,
 			TEXT("ForcingAmplitude is %.3f but no ForcingVolume is bound, so the ")
 			TEXT("stochastic forcing is inactive. The nudge is the only energy ")
 			TEXT("source. Assigning a volume will switch amplitude, scale and ")
@@ -330,7 +328,7 @@ void UGasGiantSimSubsystem::ReportInertSettings() const
 
 		if (Growth > 0.0f && DriftRate > 0.0f && DriftRate < Growth * 0.05f)
 		{
-			UE_LOG(LogGasGiant, Warning,
+			UE_LOG(LogFlowSim, Warning,
 				TEXT("ForcingDrift %.4f is far below the growth rate %.2f, so the ")
 				TEXT("forcing is effectively frozen and the field will settle to a ")
 				TEXT("fixed pattern. Near %.2f puts refresh on the turnover timescale."),
@@ -341,7 +339,7 @@ void UGasGiantSimSubsystem::ReportInertSettings() const
 	// Vertical coupling with nothing to couple to.
 	if (Config->LayerCoupling > 0.0f && Config->LayerCount < 2)
 	{
-		UE_LOG(LogGasGiant, Warning,
+		UE_LOG(LogFlowSim, Warning,
 			TEXT("LayerCoupling is %.3f but LayerCount is 1, so it does nothing."),
 			Config->LayerCoupling);
 	}
@@ -349,7 +347,7 @@ void UGasGiantSimSubsystem::ReportInertSettings() const
 	// Spin-up that will never run, and the solve that goes with it.
 	if (Config->InitialState && Config->SpinUpSteps > 0)
 	{
-		UE_LOG(LogGasGiant, Log,
+		UE_LOG(LogFlowSim, Log,
 			TEXT("InitialState is bound, so SpinUpSteps (%d) and ")
 			TEXT("InitPoissonIterations (%d) are skipped -- a restored state is ")
 			TEXT("already spun up and its psi arrives consistent with its ")
@@ -362,7 +360,7 @@ void UGasGiantSimSubsystem::ReportInertSettings() const
 	// FilterMaxHalfWidth then looks like it should be doing something.
 	if (Config->FilterLatitude <= 0.0f)
 	{
-		UE_LOG(LogGasGiant, Log,
+		UE_LOG(LogFlowSim, Log,
 			TEXT("FilterLatitude is 0, so the polar filter is disabled entirely ")
 			TEXT("and FilterMaxHalfWidth has no effect."));
 	}
@@ -370,7 +368,7 @@ void UGasGiantSimSubsystem::ReportInertSettings() const
 	{
 		const float Deg = FMath::RadiansToDegrees(FMath::Acos(Config->FilterLatitude));
 
-		UE_LOG(LogGasGiant, Log,
+		UE_LOG(LogFlowSim, Log,
 			TEXT("FilterLatitude %.2f engages the longitudinal filter poleward of ")
 			TEXT("%.1f degrees, which is most of the visible disc rather than just ")
 			TEXT("the poles."),
@@ -385,14 +383,14 @@ void UGasGiantSimSubsystem::ReportInertSettings() const
 
 	if (Growth > 0.0f && Config->NudgeRate > 0.0f && Config->NudgeRate < Growth * 0.01f)
 	{
-		UE_LOG(LogGasGiant, Log,
+		UE_LOG(LogFlowSim, Log,
 			TEXT("NudgeRate %.3f is under 1%% of the growth rate %.2f, so the ")
 			TEXT("prescribed profile will not hold against the instability."),
 			Config->NudgeRate, Growth);
 	}
 }
 
-void UGasGiantSimSubsystem::ReportCourant() const
+void UFlowSimSubsystem::ReportCourant() const
 {
 	if (!Config)
 	{
@@ -414,7 +412,7 @@ void UGasGiantSimSubsystem::ReportCourant() const
 	const float Step = Config->TimeScale * Config->StepRatio;
 	const float Courant = GetCourant();
 
-	UE_LOG(LogGasGiant, Log,
+	UE_LOG(LogFlowSim, Log,
 		TEXT("StepRatio %.5f -> step %.5f at TimeScale %.2f, Courant %.3f, ")
 		TEXT("%.1f substeps/frame at 60fps."),
 		Config->StepRatio, Step, Config->TimeScale, Courant,
@@ -422,7 +420,7 @@ void UGasGiantSimSubsystem::ReportCourant() const
 
 	if (Courant > 0.33f)
 	{
-		UE_LOG(LogGasGiant, Log,
+		UE_LOG(LogFlowSim, Log,
 			TEXT("Courant is above 0.33, so numerical diffusion is a significant ")
 			TEXT("energy sink and the look is tied to this TimeScale -- Courant ")
 			TEXT("scales with it while DragRate does not. Intended at the defaults; ")
@@ -430,12 +428,12 @@ void UGasGiantSimSubsystem::ReportCourant() const
 	}
 }
 
-void UGasGiantSimSubsystem::StopSimulation()
+void UFlowSimSubsystem::StopSimulation()
 {
 	bRunning = false;
 }
 
-void UGasGiantSimSubsystem::ResetSimulation()
+void UFlowSimSubsystem::ResetSimulation()
 {
 	SimulatedTime = 0.0f;
 	StepsCompleted = 0;
@@ -446,7 +444,7 @@ void UGasGiantSimSubsystem::ResetSimulation()
 		return;
 	}
 
-	FGasGiantSimulation* Sim = Simulation;
+	FFlowSimulation* Sim = Simulation;
 
 	ENQUEUE_RENDER_COMMAND(GasGiantReset)(
 		[Sim](FRHICommandListImmediate&)
@@ -472,14 +470,14 @@ void UGasGiantSimSubsystem::ResetSimulation()
 	}
 }
 
-bool UGasGiantSimSubsystem::QueueInitialState()
+bool UFlowSimSubsystem::QueueInitialState()
 {
 	if (!Config || !Config->InitialState || !Simulation)
 	{
 		return false;
 	}
 
-	UGasGiantSnapshot* Snapshot = Config->InitialState;
+	UFlowSnapshot* Snapshot = Config->InitialState;
 
 	const FIntVector Grid(
 		FMath::Max(Config->GridLongitude & ~1, 32),
@@ -488,7 +486,7 @@ bool UGasGiantSimSubsystem::QueueInitialState()
 
 	if (!Snapshot->IsValidFor(Grid))
 	{
-		UE_LOG(LogGasGiant, Warning,
+		UE_LOG(LogFlowSim, Warning,
 			TEXT("InitialState '%s' was captured at %dx%dx%d but the config is ")
 			TEXT("%dx%dx%d. Seeding instead -- a vorticity field cannot be ")
 			TEXT("resampled onto a different grid any more cheaply than it can ")
@@ -505,7 +503,7 @@ bool UGasGiantSimSubsystem::QueueInitialState()
 	// just is not the state that was captured, and it drifts toward the new
 	// profile while looking like neither. Worth saying out loud, because
 	// nothing about the result points back at the snapshot.
-	FGasGiantSnapshotProvenance Now;
+	FFlowSnapshotProvenance Now;
 	Now.BandCount = Config->BandCount;
 	Now.JetStrength = Config->JetStrength;
 	Now.EquatorialBoost = Config->EquatorialBoost;
@@ -515,7 +513,7 @@ bool UGasGiantSimSubsystem::QueueInitialState()
 
 	if (!Snapshot->Provenance.MatchesShape(Now))
 	{
-		UE_LOG(LogGasGiant, Warning,
+		UE_LOG(LogFlowSim, Warning,
 			TEXT("InitialState '%s' was captured under a different jet profile. ")
 			TEXT("Its eddies sit on jets this config does not have; the nudge ")
 			TEXT("will re-register them over a few hundred steps."),
@@ -528,7 +526,7 @@ bool UGasGiantSimSubsystem::QueueInitialState()
 	Payload.Append(Snapshot->Vorticity);
 	Payload.Append(Snapshot->Psi);
 
-	FGasGiantSimulation* Sim = Simulation;
+	FFlowSimulation* Sim = Simulation;
 
 	ENQUEUE_RENDER_COMMAND(GasGiantQueueRestore)(
 		[Sim, Payload = MoveTemp(Payload)](FRHICommandListImmediate&) mutable
@@ -536,21 +534,21 @@ bool UGasGiantSimSubsystem::QueueInitialState()
 			Sim->QueueRestore_RenderThread(MoveTemp(Payload));
 		});
 
-	UE_LOG(LogGasGiant, Log, TEXT("Starting from snapshot '%s' at simulated time %.2f."),
+	UE_LOG(LogFlowSim, Log, TEXT("Starting from snapshot '%s' at simulated time %.2f."),
 		*Snapshot->GetName(), Snapshot->SimulatedTime);
 
 	return true;
 }
 
-bool UGasGiantSimSubsystem::SaveSnapshot(UGasGiantSnapshot* Target)
+bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 {
 	if (!Target || !Config || !Simulation)
 	{
-		UE_LOG(LogGasGiant, Error, TEXT("SaveSnapshot needs a target asset and a running sim."));
+		UE_LOG(LogFlowSim, Error, TEXT("SaveSnapshot needs a target asset and a running sim."));
 		return false;
 	}
 
-	FGasGiantSimParams Params;
+	FFlowSimParams Params;
 	if (!BuildParams(Params))
 	{
 		return false;
@@ -558,7 +556,7 @@ bool UGasGiantSimSubsystem::SaveSnapshot(UGasGiantSnapshot* Target)
 
 	const int32 Total = Params.GridSize.X * Params.GridSize.Y * Params.GridSize.Z;
 
-	FGasGiantSimulation* Sim = Simulation;
+	FFlowSimulation* Sim = Simulation;
 
 	// THE READBACK MUST BE LOCKED ON THE RENDER THREAD.
 	//
@@ -578,7 +576,7 @@ bool UGasGiantSimSubsystem::SaveSnapshot(UGasGiantSnapshot* Target)
 	ENQUEUE_RENDER_COMMAND(GasGiantCapture)(
 		[Sim, Params, Total, &Result, &bSucceeded](FRHICommandListImmediate& RHICmdList)
 		{
-			FRHIGPUBufferReadback Readback(TEXT("GasGiant.SnapshotReadback"));
+			FRHIGPUBufferReadback Readback(TEXT("FlowSim.SnapshotReadback"));
 
 			{
 				FRDGBuilder GraphBuilder(RHICmdList);
@@ -615,7 +613,7 @@ bool UGasGiantSimSubsystem::SaveSnapshot(UGasGiantSnapshot* Target)
 
 	if (!bSucceeded || Result.Num() != Total * 2)
 	{
-		UE_LOG(LogGasGiant, Error,
+		UE_LOG(LogFlowSim, Error,
 			TEXT("Snapshot readback failed. Is the sim initialised and running?"));
 		return false;
 	}
@@ -637,7 +635,7 @@ bool UGasGiantSimSubsystem::SaveSnapshot(UGasGiantSnapshot* Target)
 
 	Target->MarkPackageDirty();
 
-	UE_LOG(LogGasGiant, Display,
+	UE_LOG(LogFlowSim, Display,
 		TEXT("Saved snapshot '%s': %dx%dx%d, %d steps, simulated time %.2f."),
 		*Target->GetName(), Target->Grid.X, Target->Grid.Y, Target->Grid.Z,
 		StepsCompleted, SimulatedTime);
@@ -645,12 +643,12 @@ bool UGasGiantSimSubsystem::SaveSnapshot(UGasGiantSnapshot* Target)
 	return true;
 }
 
-void UGasGiantSimSubsystem::StepOnce(int32 NumSteps)
+void UFlowSimSubsystem::StepOnce(int32 NumSteps)
 {
 	PendingManualSteps += FMath::Max(NumSteps, 1);
 }
 
-bool UGasGiantSimSubsystem::PrepareTargets() const
+bool UFlowSimSubsystem::PrepareTargets() const
 {
 	if (!Config)
 	{
@@ -667,7 +665,7 @@ bool UGasGiantSimSubsystem::PrepareTargets() const
 
 	if (!Flow)
 	{
-		UE_LOG(LogGasGiant, Error,
+		UE_LOG(LogFlowSim, Error,
 			TEXT("No FlowTarget set. Create a Texture Render Target 2D Array asset, ")
 			TEXT("set it here, and the sim will size it automatically."));
 		return false;
@@ -684,7 +682,7 @@ bool UGasGiantSimSubsystem::PrepareTargets() const
 	{
 		if (!Config->bAutoResizeTargets)
 		{
-			UE_LOG(LogGasGiant, Error,
+			UE_LOG(LogFlowSim, Error,
 				TEXT("FlowTarget is %dx%dx%d, needs %dx%dx%d RGBA16F with bCanCreateUAV. ")
 				TEXT("Enable bAutoResizeTargets or fix the asset."),
 				Flow->SizeX, Flow->SizeY, Flow->Slices, W, H, Slices);
@@ -702,7 +700,7 @@ bool UGasGiantSimSubsystem::PrepareTargets() const
 		Flow->Init(W, H, Slices, PF_FloatRGBA);
 		Flow->UpdateResourceImmediate(true);
 
-		UE_LOG(LogGasGiant, Log, TEXT("Resized FlowTarget to %dx%d x %d slices."), W, H, Slices);
+		UE_LOG(LogFlowSim, Log, TEXT("Resized FlowTarget to %dx%d x %d slices."), W, H, Slices);
 	}
 
 	// -- Debug target -------------------------------------------------------
@@ -721,14 +719,14 @@ bool UGasGiantSimSubsystem::PrepareTargets() const
 			Debug->InitCustomFormat(W, H, PF_FloatRGBA, /*bForceLinearGamma*/ true);
 			Debug->UpdateResourceImmediate(true);
 
-			UE_LOG(LogGasGiant, Log, TEXT("Resized DebugTarget to %dx%d."), W, H);
+			UE_LOG(LogFlowSim, Log, TEXT("Resized DebugTarget to %dx%d."), W, H);
 		}
 	}
 
 	return true;
 }
 
-bool UGasGiantSimSubsystem::BuildParams(FGasGiantSimParams& Out) const
+bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
 {
 	if (!Config)
 	{
@@ -758,9 +756,9 @@ bool UGasGiantSimSubsystem::BuildParams(FGasGiantSimParams& Out) const
 		// shared profile rather than to zero. Zero would give a layer with no
 		// jets at all, which reads as a bug in the sim rather than as a missing
 		// array entry.
-		const FGasGiantLayerProfile P = Config->LayerProfiles.IsValidIndex(i)
+		const FFlowLayerProfile P = Config->LayerProfiles.IsValidIndex(i)
 			? Config->LayerProfiles[i]
-			: FGasGiantLayerProfile();
+			: FFlowLayerProfile();
 
 		Out.LayerProfile[i] = FVector4f(P.JetScale, P.BoostScale, P.ForcingScale, P.DragScale);
 	}
@@ -847,17 +845,17 @@ bool UGasGiantSimSubsystem::BuildParams(FGasGiantSimParams& Out) const
 
 		switch (Config->DebugMode)
 		{
-		case EGasGiantDebugMode::Vorticity:   Out.DebugScale = ZetaScale + Config->ForcingAmplitude; break;
-		case EGasGiantDebugMode::Psi:         Out.DebugScale = PsiScale * 2.0f; break;
-		case EGasGiantDebugMode::Speed:
-		case EGasGiantDebugMode::East:        Out.DebugScale = PeakRate; break;
+		case EFlowDebugMode::Vorticity:   Out.DebugScale = ZetaScale + Config->ForcingAmplitude; break;
+		case EFlowDebugMode::Psi:         Out.DebugScale = PsiScale * 2.0f; break;
+		case EFlowDebugMode::Speed:
+		case EFlowDebugMode::East:        Out.DebugScale = PeakRate; break;
 			// Meridional flow is eddy only, with no zonal contribution at all, so
 			// it is far smaller than the eastward component.
-		case EGasGiantDebugMode::North:       Out.DebugScale = PeakRate * 0.15f; break;
+		case EFlowDebugMode::North:       Out.DebugScale = PeakRate * 0.15f; break;
 			// Should be near zero. Scaled hard so a residual that is merely small
 			// still reads, rather than rounding to black alongside a converged one.
-		case EGasGiantDebugMode::Residual:    Out.DebugScale = ZetaScale * 0.01f; break;
-		case EGasGiantDebugMode::ZonalError:  Out.DebugScale = ZetaScale * 0.05f; break;
+		case EFlowDebugMode::Residual:    Out.DebugScale = ZetaScale * 0.01f; break;
+		case EFlowDebugMode::ZonalError:  Out.DebugScale = ZetaScale * 0.05f; break;
 		default:                              Out.DebugScale = ZetaScale; break;
 		}
 
@@ -891,9 +889,9 @@ bool UGasGiantSimSubsystem::BuildParams(FGasGiantSimParams& Out) const
 	return Out.FlowTexture.IsValid();
 }
 
-void UGasGiantSimSubsystem::TryAutoStart()
+void UFlowSimSubsystem::TryAutoStart()
 {
-	const UGasGiantSimSettings* Settings = GetDefault<UGasGiantSimSettings>();
+	const UFlowSimSettings* Settings = GetDefault<UFlowSimSettings>();
 
 	if (!Settings || Settings->DefaultConfig.IsNull())
 	{
@@ -915,16 +913,16 @@ void UGasGiantSimSubsystem::TryAutoStart()
 		return;
 	}
 
-	if (UGasGiantSimConfig* Loaded = Settings->DefaultConfig.LoadSynchronous())
+	if (UFlowSimConfig* Loaded = Settings->DefaultConfig.LoadSynchronous())
 	{
-		UE_LOG(LogGasGiant, Log, TEXT("Auto-starting against '%s' in %s world."),
+		UE_LOG(LogFlowSim, Log, TEXT("Auto-starting against '%s' in %s world."),
 			*Loaded->GetName(), bEditorWorld ? TEXT("editor") : TEXT("game"));
 
 		StartSimulation(Loaded);
 	}
 }
 
-void UGasGiantSimSubsystem::Tick(float DeltaTime)
+void UFlowSimSubsystem::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
@@ -951,7 +949,7 @@ void UGasGiantSimSubsystem::Tick(float DeltaTime)
 	BakeShadowMap();
 }
 
-void UGasGiantSimSubsystem::StepSimulation(float DeltaTime)
+void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 {
 	if (!bRunning || !Config || !Simulation)
 	{
@@ -1011,7 +1009,7 @@ void UGasGiantSimSubsystem::StepSimulation(float DeltaTime)
 		StepAccumulator = FMath::Min(StepAccumulator, StepSize);
 	}
 
-	FGasGiantSimParams Params;
+	FFlowSimParams Params;
 	if (!BuildParams(Params))
 	{
 		return;
@@ -1022,7 +1020,7 @@ void UGasGiantSimSubsystem::StepSimulation(float DeltaTime)
 	SimulatedTime += Substeps * StepSize;
 	StepsCompleted += Substeps;
 
-	FGasGiantSimulation* Sim = Simulation;
+	FFlowSimulation* Sim = Simulation;
 
 	// Zero substeps still enqueues. The debug view must keep updating on a
 	// paused or fully spun-up-and-idle sim, or switching debug modes while
@@ -1038,12 +1036,12 @@ void UGasGiantSimSubsystem::StepSimulation(float DeltaTime)
 		});
 }
 
-void UGasGiantSimSubsystem::RequestShadowBake(const FGasGiantShadowParams& InParams)
+void UFlowSimSubsystem::RequestShadowBake(const FGasGiantShadowParams& InParams)
 {
 	ShadowRequests.Add(InParams);
 }
 
-void UGasGiantSimSubsystem::BakeShadowMap()
+void UFlowSimSubsystem::BakeShadowMap()
 {
 	// CONSUMED, NOT HELD. A planet that stops asking stops baking on the next
 	// tick, rather than leaving a map frozen at whatever light direction it last

@@ -9,18 +9,21 @@
 
 class FRDGBuilder;
 
-/** Everything the shadow bake reads, flattened for the render thread.
+/** Everything the terrestrial bake reads, flattened for the render thread.
+ *
+ *  A CLONE OF THE GAS GIANT'S, unchanged so far. The two diverge as the field
+ *  does; until then the only difference is which .usf they bind.
  *
  *  Copied into a render command, so it holds no UObject -- the same split
- *  FFlowSimParams draws. Filled from the same deck groups and derivations
- *  ApplyGasGiantParams pushes to the material, which is what keeps the deck the
- *  light sees identical to the deck the eye sees.
+ *  FFlowSimParams draws. Filled from the same field groups and derivations
+ *  ApplyTerrestrialParams pushes to the material, which is what keeps the band
+ *  the light sees identical to the band the eye sees.
  *
  *  NOT PART OF FFlowSimParams. That struct is the fluid solver's state and
  *  changes when the solver does; this changes when the deck or the light does.
  *  Sharing one would put the first unrelated member into a struct whose whole
  *  justification is that its members change together. */
-struct CLOUDATMOSPHERE_API FGasGiantShadowParams
+struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 {
 	// -- Map ----------------------------------------------------------------
 	//
@@ -34,7 +37,7 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 	// Planet-local. The light points TOWARD the star, matching the march.
 	//
 	// NO BASIS AND NO EXTENT. Both are derived from the light and the field by
-	// GasGiantShadow.ush, which the bake and the march share -- a copy computed
+	// TerrestrialShadow.ush, which the bake and the march share -- a copy computed
 	// here would be a second derivation that can disagree, and a map read in a
 	// basis it was not written in gives smooth, plausible, misplaced shadows.
 
@@ -44,9 +47,9 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 
 	// -- Deck ---------------------------------------------------------------
 	//
-	// GG_BuildField's arguments, in its order and under its names -- the same
+	// TR_BuildField's arguments, in its order and under its names -- the same
 	// names the material parameters carry. An addition there has to appear here
-	// and in GasGiantShadowMap.usf.
+	// and in TerrestrialShadowMap.usf.
 
 	float PlanetRadius = 0.0f;
 	float HeightScale = 0.0f;
@@ -98,7 +101,7 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 
 	// -- Extinction ---------------------------------------------------------
 	//
-	// Each band's rgb tint and amount in a, plus what GG_DeckBeta solves the
+	// Each band's rgb tint and amount in a, plus what TR_DeckBeta solves the
 	// light ray's coefficient from. The albedo is a property of the scattering
 	// site, not of the medium the light crossed, and stays per-pixel.
 
@@ -165,10 +168,11 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 	}
 };
 
-/** Names must match the declarations in GasGiantShadowMap.usf exactly. An
+/** Names must match the .usf's declarations exactly -- this file's own, and
+ *  the format half that AtmosphereShadowBake.ush declares. An
  *  unbound one is a warning that is easy to scroll past, which is the same
  *  silent-edit failure mode the checked material setters exist for. */
-BEGIN_SHADER_PARAMETER_STRUCT(FGasGiantShadowParameters, )
+BEGIN_SHADER_PARAMETER_STRUCT(FTerrestrialShadowParameters, )
 
 SHADER_PARAMETER(FIntPoint, ShadowMapSize)
 SHADER_PARAMETER(FVector2f, ShadowInvMapSize)
@@ -263,25 +267,25 @@ END_SHADER_PARAMETER_STRUCT()
 // first through an unrolled chain, so a fourth cascade is not just a larger
 // array. Caught here rather than as an unbound-parameter warning.
 static_assert(AtmoShadowBake::CascadeCount == 3,
-	"OccluderDepth0..2 and GGShadow_Occlusion are written out per cascade.");
+	"OccluderDepth0..2 and TRShadow_Occlusion are written out per cascade.");
 
-class FGasGiantShadowBakeCS : public FGlobalShader
+class FTerrestrialShadowBakeCS : public FGlobalShader
 {
-	DECLARE_GLOBAL_SHADER(FGasGiantShadowBakeCS);
+	DECLARE_GLOBAL_SHADER(FTerrestrialShadowBakeCS);
 
 public:
-	using FParameters = FGasGiantShadowParameters;
-	SHADER_USE_PARAMETER_STRUCT(FGasGiantShadowBakeCS, FGlobalShader);
+	using FParameters = FTerrestrialShadowParameters;
+	SHADER_USE_PARAMETER_STRUCT(FTerrestrialShadowBakeCS, FGlobalShader);
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
 	static void ModifyCompilationEnvironment(
 		const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
 };
 
-namespace GasGiantShadow
+namespace TerrestrialShadow
 {
 	/** Adds the bake to the graph, or does nothing when Params is unusable.
 	 *  Render thread. */
 	CLOUDATMOSPHERE_API void AddBakePass_RenderThread(
-		FRDGBuilder& GraphBuilder, const FGasGiantShadowParams& Params);
+		FRDGBuilder& GraphBuilder, const FTerrestrialShadowParams& Params);
 }

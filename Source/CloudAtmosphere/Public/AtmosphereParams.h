@@ -35,7 +35,7 @@
 
 class AActor;
 
-class UGasGiantSimConfig;
+class UFlowSimConfig;
 
 class UVolumeTexture;
 
@@ -111,7 +111,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereSimulationParams
 	/** Owns the flow render target the materials sample and the settings the sim
 	 *  subsystem steps against. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	TObjectPtr<UGasGiantSimConfig> Config = nullptr;
+	TObjectPtr<UFlowSimConfig> Config = nullptr;
 
 	/** Start the sim on BeginPlay. Off when another actor already drives it: the
 	 *  subsystem is per-world, so two planets starting it fight. */

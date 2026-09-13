@@ -1,0 +1,621 @@
+#pragma once
+
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
+#include "/Plugin/CloudAtmosphere/Private/AtmospherePlan.ush"
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereSetup.ush"
+#include "/Plugin/CloudAtmosphere/Private/TerrestrialDeck.ush"
+#include "/Plugin/CloudAtmosphere/Private/TerrestrialShadow.ush"
+
+// The terrestrial band's side of the march: what this field is, and what the
+// march is allowed to ask it.
+//
+// THE MARCH KNOWS NOTHING BELOW THIS LINE. It calls the Field_ functions, the
+// FieldParams and FieldMaterialParams names, and the two texture macros; every
+// one of them is defined here, and a second model defines the same set over its
+// own field. That is the whole interface, and it is small because the march's real
+// content -- the plan, the step bounds, the octaves, the shadow read -- does not
+// depend on what fills the shell.
+//
+// INCLUDED BEFORE THE MARCH, NEVER AFTER. The march declares AtmoMarchParams in
+// terms of the two type names below, so they have to exist first; a missing
+// include fails as an undeclared identifier rather than as a wrong branch.
+//
+// A DECK, NOT A BAND. Coverage is 100% and every feature is relief in a column
+// top, so Field_Sample never returns zero density, Field_Terminus clips on a
+// provable opacity rather than on a surface, and Field_PlanSegments can cone
+// trace an entry because there is a surface to find. A field with holes answers
+// all three differently.
+
+/** Claims the march's one model slot. A second field defines this too, so
+ *  whichever header the material included is the one that answers. */
+#define ATMO_FIELD_INCLUDED 1
+
+/** The concrete types the march refers to by these names: the field's shape and
+ *  its material.
+ *
+ *  PITFALL: neither alias may shadow a type the shared headers already declare.
+ *  A macro over an existing struct name compiles wherever that struct was
+ *  declared first and fails somewhere else, which is the worst shape a name
+ *  collision can take. */
+#define FieldParams TRFieldParams
+#define FieldMaterialParams TRScatterParams
+
+/** The field's own textures, as a declaration and as a forwarding list.
+ *
+ *  A MACRO BECAUSE HLSL CANNOT PUT A TEXTURE IN A STRUCT, so the march's
+ *  signature has to name them and a shared march cannot. The march declares the
+ *  first and forwards the second to every Field_ call.
+ *
+ *  PITFALL: the two must stay in step. A mismatch is an argument-count error
+ *  inside the march, pointing at a line that never mentions a texture. */
+#define FIELD_TEXTURE_DECL \
+	Texture2DArray FlowField, \
+	SamplerState FlowSampler, \
+	Texture3D DetailVolume, \
+	SamplerState DetailSampler, \
+	Texture3D StructureVolume, \
+	SamplerState StructureSampler
+
+#define FIELD_TEXTURE_ARGS \
+	FlowField, FlowSampler, DetailVolume, DetailSampler, StructureVolume, StructureSampler
+
+/** Optical depths below the deck floor at which the VIEW ray is provably
+ *  opaque and the march can be clipped.
+ *
+ *  TWICE WHAT OPACITY NEEDS, because the per-band ScatterX.a multipliers are
+ *  not visible where this is used and a band below 1 saturates slower. Erring
+ *  deep costs a step; erring shallow blacks out cloud that should still be
+ *  visible, at a fixed radius, which is a ring. */
+#ifndef TR_VIEW_OPAQUE_DEPTH
+#define TR_VIEW_OPAQUE_DEPTH 14.0f
+#endif
+
+/** The deck's material and how it is lit. Three band sets rather than one,
+ *  because zones and belts are different material and not the same material at
+ *  different brightness:
+ *
+ *  Scatter     Single-scattering albedo: what fraction of extinction is
+ *              scattered rather than absorbed, per channel.
+ *  Extinction  rgb tint, amount in a: a MULTIPLIER on the deck's solved
+ *              extinction, 1 neutral. A multiplier because the base is
+ *              thickness-relative, so a resize changes the deck's opacity no
+ *              more than the air's.
+ *
+ *  BandScale sets where the ramp saturates, matching TR_BandColour's Scale. */
+struct TRScatterParams
+{
+    float3 ScatterNegative;
+    float3 ScatterPositive;
+    float3 ScatterBase;
+
+    float4 ExtinctionNegative;
+    float4 ExtinctionPositive;
+    float4 ExtinctionBase;
+
+	/** TR_ExtinctionTintRange of the three tints: (smallest, largest). */
+    float2 TintRange;
+
+    float BandScale;
+
+	/** Dual-lobe phase: forward g, backward g magnitude, forward share. */
+    float ForwardG;
+    float BackwardG;
+    float ForwardWeight;
+
+	/** Octave i sees the deck's optical depth toward the light scaled by
+	 *  OctaveAttenuation^i, weighs OctaveContribution^i, and uses the phase
+	 *  with both lobes' g scaled by OctaveEccentricity^i. Octave 0 is single
+	 *  scattering. OctaveCount is whole and in [1, ATMO_MS_MAX_OCTAVES]. */
+    float OctaveCount;
+    float OctaveAttenuation;
+    float OctaveContribution;
+    float OctaveEccentricity;
+
+	/** Width of the planet-shadow falloff, as a fraction of atmosphere
+	 *  thickness. What shapes the terminator: the geometric shadow of a sphere
+	 *  has a hard boundary and a real terminator does not. */
+    float TerminatorSoftness;
+
+	/** Width of the ambient terminator, in cosine of sun elevation. Both
+	 *  ambient terms stand in for light that bounced, and behind an opaque
+	 *  planet there is none to bounce. */
+    float AmbientTerminator;
+
+	/** How fast the Mie forward lobe dies behind deck: optical depths for an
+	 *  e-fold, inverted. Light that crossed a dense medium has lost its
+	 *  direction, so the sharp forward peak washes out. */
+    float MieLobeDecay;
+
+	/** Exponent on the planet shadow for the ANISOTROPIC terms only. The lobe
+	 *  arrives along one path and is genuinely hard-shadowed. A power on the
+	 *  same smoothstep rather than a narrower one, so no new endpoint appears
+	 *  -- the curve stays C1 where it already was and only its tail is
+	 *  crushed. */
+    float LobeShadowPower;
+};
+
+/** The three band sets blended by the signed band. Same sign-and-magnitude shape
+ *  as TR_BandColour, so the material and the debug view agree about which band
+ *  is which: the SIGN picks the set and the ramp runs from Base at zero to it at
+ *  full magnitude. A plain two-way lerp would blend the families through their
+ *  midpoint and lose the boundary between them. */
+float TR_BandRamp(float Band, TRScatterParams S)
+{
+    return clamp(Band * S.BandScale, -1.0f, 1.0f);
+}
+
+/** Albedo at a band. */
+float3 TR_BandScatter(float Band, TRScatterParams S)
+{
+    const float T = TR_BandRamp(Band, S);
+
+    return lerp(S.ScatterBase, (T < 0.0f) ? S.ScatterNegative : S.ScatterPositive, abs(T));
+}
+
+/** Extinction multiplier at a band, tint times amount: what the view ray
+ *  applies to the deck's solved coefficient. */
+float3 TR_BandExtinction(float Band, TRScatterParams S)
+{
+    const float T = TR_BandRamp(Band, S);
+
+    const float4 Hue = (T < 0.0f) ? S.ExtinctionNegative : S.ExtinctionPositive;
+
+    return lerp(S.ExtinctionBase.rgb * S.ExtinctionBase.a, Hue.rgb * Hue.a, abs(T));
+}
+
+/** Extinction tint alone at a band. The light ray's AMOUNTS are already in the
+ *  shadow map's depth; its colour is applied where the depth is read. */
+float3 TR_BandTint(float Band, TRScatterParams S)
+{
+    const float T = TR_BandRamp(Band, S);
+
+    const float4 Hue = (T < 0.0f) ? S.ExtinctionNegative : S.ExtinctionPositive;
+
+    return lerp(S.ExtinctionBase.rgb, Hue.rgb, abs(T));
+}
+
+/** Whether a planned segment carries deck: the fine band, or anything below the
+ *  inner radius.
+ *
+ *  TWO CONDITIONS, NOT ONE RADIUS. The fine flag alone misses the saturated
+ *  region, which is coarsely stepped and still extinguishes. A radius alone is
+ *  wrong the other way: Field_PlanSegments leaves a coarse segment INSIDE
+ *  the band and above every column top, and marching that as deck spends seven
+ *  fetches a step and the deck's lateral step bound on provably empty air --
+ *  which on a grazing ray is the longest span on the ray. A band demoted to
+ *  coarse because the ray never reached the deck is not deck either. */
+bool Field_SegmentIsCloud(float3 Origin, float3 Dir, float4 Segment, PlanetParams Planet)
+{
+    if (Segment.w > 0.5f)
+    {
+        return true;
+    }
+
+    const float3 Mid = Origin + Dir * ((Segment.x + Segment.y) * 0.5f);
+
+    return length(Mid - Planet.planetPos) < Planet.cloudInnerRadius;
+}
+
+/** Splits the fine segment at the cone-traced entry.
+ *
+ *  IN THE PLAN, NOT IN THE LOOP. The region between the cull radius and the deck
+ *  top is empty of cloud but not of air, so a skip inside the march would drop
+ *  the Rayleigh and Mie the ray is entitled to along it. Splitting keeps that
+ *  scattering at the coarse step it deserves and spends the fine steps on the
+ *  deck. It also keeps a threshold out of the loop, where every threshold is a
+ *  locus and one decided against a jittered position is a dithered locus.
+ *
+ *  THE FIRST FINE SEGMENT, AND INSERTED IN ORDER. A ray that crosses the band,
+ *  passes below the floor and crosses it again produces two fine segments with a
+ *  coarse one between them, and the march walks the array in order, so appending
+ *  would put the deck behind the region under it. Only the near crossing is
+ *  worth splitting; the far one lies behind saturated deck. */
+void Field_PlanSegments(
+	Texture2DArray FlowField,
+	SamplerState FlowSampler,
+	float3 LocalOrigin,
+	float3 LocalDir,
+	float TopMax,
+	float CoarseStep,
+	TRFieldParams F,
+	inout float4 Segments[ATMO_MAX_SEGMENTS],
+	inout int SegmentCount)
+{
+    if (SegmentCount <= 0 || SegmentCount >= ATMO_MAX_SEGMENTS)
+    {
+        return;
+    }
+
+    int Band = -1;
+
+	[loop]
+    for (int i = 0; i < SegmentCount; i++)
+    {
+        if (Segments[i].w > 0.5f)
+        {
+            Band = i;
+            break;
+        }
+    }
+
+    if (Band < 0)
+    {
+        return;
+    }
+
+    const float SegStart = Segments[Band].x;
+    const float SegEnd = Segments[Band].y;
+    const float FineStep = Segments[Band].z;
+
+    const float Entry = TR_DeckEntry(
+		FlowField, FlowSampler, LocalOrigin, LocalDir, SegStart, SegEnd, TopMax, F);
+
+	// Nothing worth splitting off: the ray was already at the deck.
+    if (Entry <= SegStart + 1e-5f)
+    {
+        return;
+    }
+
+	// The ray never reached the deck within this segment. Demote it to coarse
+	// rather than dropping it, so the air along it still scatters.
+    if (Entry >= SegEnd - 1e-5f)
+    {
+        Segments[Band] = float4(SegStart, SegEnd, CoarseStep, 0.0f);
+        return;
+    }
+
+	// Open a slot after the band, walking backwards so nothing is overwritten
+	// before it has been copied.
+	[loop]
+    for (int k = SegmentCount; k > Band + 1; k--)
+    {
+        Segments[k] = Segments[k - 1];
+    }
+
+	// The deck keeps the fine step the planner assigned; only the empty half
+	// above it drops to coarse.
+    Segments[Band] = float4(SegStart, Entry, CoarseStep, 0.0f);
+    Segments[Band + 1] = float4(Entry, SegEnd, FineStep, 1.0f);
+
+    SegmentCount++;
+}
+
+/** Fills TRScatterParams from the Bands, Phase, Multiple Scattering and
+ *  Terminator groups, in panel order. Set all three bands equal for a
+ *  single-material deck. */
+TRScatterParams TR_BuildScatter(
+	float3 ScatterNegative,
+	float4 ExtinctionNegative,
+	float3 ScatterPositive,
+	float4 ExtinctionPositive,
+	float3 ScatterBase,
+	float4 ExtinctionBase,
+	float BandScale,
+	float ForwardG,
+	float BackwardG,
+	float ForwardWeight,
+	float OctaveCount,
+	float OctaveAttenuation,
+	float OctaveContribution,
+	float OctaveEccentricity,
+	float TerminatorSoftness,
+	float AmbientTerminator,
+	float MieLobeDecay,
+	float LobeShadowPower)
+{
+    TRScatterParams S;
+
+    S.ScatterNegative = ScatterNegative;
+    S.ScatterPositive = ScatterPositive;
+    S.ScatterBase = ScatterBase;
+
+    S.ExtinctionNegative = ExtinctionNegative;
+    S.ExtinctionPositive = ExtinctionPositive;
+    S.ExtinctionBase = ExtinctionBase;
+    S.TintRange = TR_ExtinctionTintRange(ExtinctionNegative.rgb, ExtinctionPositive.rgb, ExtinctionBase.rgb);
+
+    S.BandScale = BandScale;
+
+    S.ForwardG = ForwardG;
+    S.BackwardG = BackwardG;
+    S.ForwardWeight = ForwardWeight;
+
+    S.OctaveCount = clamp(round(OctaveCount), 1.0f, float(ATMO_MS_MAX_OCTAVES));
+    S.OctaveAttenuation = saturate(OctaveAttenuation);
+    S.OctaveContribution = saturate(OctaveContribution);
+    S.OctaveEccentricity = saturate(OctaveEccentricity);
+
+	// Floored where zero is degenerate: the softness divides a smoothstep's
+	// width, and a zero-width one is a step along the light's tangent cone.
+    S.TerminatorSoftness = max(TerminatorSoftness, 1e-4f);
+    S.AmbientTerminator = max(AmbientTerminator, 1e-4f);
+    S.MieLobeDecay = max(MieLobeDecay, 0.0f);
+    S.LobeShadowPower = max(LobeShadowPower, 0.0f);
+
+    return S;
+}
+
+/** Fills CompositeParams for a gas giant, deriving the cloud shell from the
+ *  field rather than taking it as two more pins. Air colours arrive as rgb with
+ *  their profile terms as scalars and are packed here into the float4s
+ *  Atmo_BuildParams takes; the terrestrial cloud SHAPE arguments go in as zero,
+ *  none of them being sampled on this path, and the phase with them since the
+ *  deck reads its own from TRScatterParams.
+ *
+ *  THE CLOUD RADII ARE NOT AUTHORED. cloudOuterRadius comes from the highest the
+ *  deck can reach; cloudInnerRadius from the depth at which it has certainly
+ *  gone opaque -- optical, not geometric. The planet surface would make the
+ *  deck's bottom a property of the sphere, and on a gas giant that surface is an
+ *  arbitrary radius sitting just under the deck. Derived optically the span ends
+ *  where the ray stopped seeing, and is free to end BELOW the surface so a thin
+ *  deck is not clipped by a sphere with no physical meaning here.
+ *
+ *  THE EXTINCTION IS SOLVED, NOT PASSED. TR_DeckBeta turns DeckOpticalDepth into
+ *  a grey coefficient from the field's own anchors. PITFALL: the two cloud betas
+ *  are not a scattering/absorption split despite their names -- cloudScatBeta is
+ *  that full solved coefficient, which the VIEW ray extinguishes with, and
+ *  cloudAbsBeta is LightExtinctionFraction of it, which the LIGHT ray uses. Band
+ *  colours are applied per sample, and the bake solves the same way from the
+ *  same values. */
+CompositeParams TR_BuildAtmo(
+	float2 SvPosition,
+	float3 RayDir,
+	float3 CameraPosition,
+	float SceneDepth,
+	float3 PlanetCenter,
+	float3 LightDirection,
+	float3 LightColor,
+	float3 RayleighBeta,
+	float RayleighScaleHeight,
+	float3 MieBeta,
+	float MieScaleHeight,
+	float MieG,
+	float3 AbsorptionBeta,
+	float AbsorptionAltitude,
+	float AbsorptionFalloff,
+	float3 AtmosphereAmbient,
+	float AtmosphereAmbientFloor,
+	float DeckOpticalDepth,
+	float LightExtinctionFraction,
+	float3 CloudAmbient,
+	float CloudAmbientFloor,
+	float AtmosphereSteps,
+	float CloudSteps,
+	float StepScaleFactor,
+	float4 SurfaceShadow,
+	TRFieldParams F)
+{
+	// BOUNDS, WITH THE LAYERS' FADES FOLDED IN. The outer bound sets the marched
+	// band and the band over cloudSteps is the step size, so a bound reserving
+	// room for a faded-out layer coarsens the march wherever that layer is absent
+	// and a shape control ends up moving the lighting.
+	//
+	// THE NEAREST THE RAY CAN COME, not where it hits. The fade only falls with
+	// distance, so the fade at the nearest possible approach is at least the fade
+	// at every sample along the ray, which is what keeps the bound a bound. Taken
+	// against the UNFADED outer radius, larger and so putting that approach nearer
+	// still -- conservative twice over, and free of the circularity of needing the
+	// radius to compute itself.
+    float TopMin, TopMax;
+    TR_TopBounds(F, 1.0f, 1.0f, TopMin, TopMax);
+
+    const float NearestApproach = max(
+		length(CameraPosition - PlanetCenter) - (F.PlanetRadius + F.Thickness * TopMax),
+		0.0f) / max(F.PlanetRadius, 1e-4f);
+
+    TR_TopBounds(
+		F,
+		1.0f - smoothstep(F.DetailFadeNear, F.DetailFadeFar, NearestApproach),
+		1.0f - smoothstep(F.StructureFadeNear, F.StructureFadeFar, NearestApproach),
+		TopMin, TopMax);
+
+    const float CloudOuter = F.PlanetRadius + F.Thickness * TopMax;
+
+	// -- The band is the gradient -------------------------------------------
+	//
+	// NOT AN OPTICAL CULL. Where the deck goes opaque is a property of the
+	// extinction, and deriving a radius from it makes retuning DeckOpticalDepth
+	// move the step size -- a coupling with no visible cause. The backstop is a
+	// geometric anchor and says the same thing better: no gradient reaches below
+	// it unless relief pushed the whole column under, so a coarse step
+	// integrates what is left and transmittance ends the ray within a couple of
+	// them.
+    const float CloudInner = max(F.PlanetRadius + F.Thickness * F.DeckBackstop, 1e-4f);
+
+	// Grey: each band's tint and amount are applied per sample from
+	// TRScatterParams, on the view ray and at the light ray's receiver.
+    const float3 CloudScatterBeta = TR_DeckBeta(F, DeckOpticalDepth).xxx;
+
+    CompositeParams Params = Atmo_BuildParams(
+		SvPosition, RayDir, CameraPosition, PlanetCenter,
+		F.PlanetRadius, F.PlanetRadius + F.Thickness, CloudOuter, CloudInner,
+		SceneDepth, LightDirection, LightColor,
+		float4(RayleighBeta, RayleighScaleHeight),
+		float4(MieBeta, MieScaleHeight),
+		float4(AbsorptionBeta, AbsorptionAltitude),
+		AbsorptionFalloff,
+		float4(AtmosphereAmbient, AtmosphereAmbientFloor), MieG,
+		CloudScatterBeta, CloudScatterBeta * LightExtinctionFraction,
+		float4(CloudAmbient, CloudAmbientFloor),
+		float4(0.0f, 0.0f, 0.0f, 0.0f),
+		0.0f, float2(0.0f, 0.0f), 0.0f, 0.0f,
+		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
+		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
+		0.0f, 0.0f, float4(0.0f, 0.0f, 0.0f, 0.0f),
+		(int) AtmosphereSteps, (int) CloudSteps,
+		StepScaleFactor);
+
+	// ONE PIN FOR FOUR RELATED SCALARS, matching how the band tints and the
+	// cloud phase already travel. FAtmosphereSurfaceShadowParams::Pack writes
+	// this layout and nothing checks that the two still agree.
+    Params.surfaceShadowParams.enabled = SurfaceShadow.x;
+    Params.surfaceShadowParams.directFraction = saturate(SurfaceShadow.y);
+    Params.surfaceShadowParams.receiverBias = max(SurfaceShadow.z, 0.0f);
+    Params.surfaceShadowParams.strength = max(SurfaceShadow.w, 0.0f);
+
+    return Params;
+}
+
+// ---------------------------------------------------------------------------
+// The march's hooks
+// ---------------------------------------------------------------------------
+
+/** Where the view ray stops, and whether it is opaque there.
+ *
+ *  SCENE DEPTH ONLY. THE PLANET DOES NOT STOP THE VIEW RAY. A gas giant has no
+ *  surface and the field knows it: below the deck floor density is 1, and inside
+ *  the planet the height goes negative and the profile saturates, so a ray that
+ *  continues meets opaque deck and the transmittance early-out ends it.
+ *
+ *  PITFALL: clipping on the planet is not free even where the ray is already
+ *  opaque, because MaxDist reaches Atmo_Plan -- it bounds the segments and
+ *  decides whether the inner shell is crossed, so the SEGMENT STRUCTURE changes
+ *  across the silhouette even where the shading would not. A different step
+ *  lattice is what the eye picks up, and the terminus reads as a march disparity
+ *  rather than as a shell. The light ray still respects the planet; an occluder
+ *  for light and a terminus for the view are different jobs.
+ *
+ *  INNER TERMINUS, WHERE THE DECK IS PROVABLY OPAQUE. With no planet clip the
+ *  interior chord would be marched until transmittance happens to die: fine at a
+ *  deep optical depth, a cliff at a shallow one, with nothing structural
+ *  bounding the loop.
+ *
+ *  A RADIUS, NOT A STEP. Collapsing the region to one long step gets extinction
+ *  exactly right, being homogeneous, but spawns a single light march at the
+ *  midpoint of a saturated slab, which is fully shadowed -- so the in-scattering
+ *  belonging to the first optical depth below the floor vanishes at a fixed
+ *  radius, which is a ring. Clipping changes nothing about how the region above
+ *  is sampled, and unlike a planet clip it sits where every ray reaching it is
+ *  already opaque, so the segment structure changing there cannot show. */
+void Field_Terminus(
+	float3 Origin,
+	float3 Dir,
+	CompositeParams Atmo,
+	FieldParams F,
+	FieldMaterialParams S,
+	out float OutMaxDist,
+	out bool OutOpaque)
+{
+    OutMaxDist = Atmo.mainRayParams.sceneDepth;
+    OutOpaque = false;
+
+    const float3 BandLow = min(S.ExtinctionNegative.rgb * S.ExtinctionNegative.a,
+		min(S.ExtinctionPositive.rgb * S.ExtinctionPositive.a,
+			S.ExtinctionBase.rgb * S.ExtinctionBase.a));
+
+	// PER ATMOSPHERE THICKNESS, to match BoundMin and DeckBackstop.
+	// cloudScatBeta is per WORLD unit, having been divided by thickness in
+	// Atmo_BuildParams, so the depth below would otherwise be a world length
+	// subtracted from a fraction -- at planetary scale always hugely negative,
+	// and the clip never fires.
+    const float BetaMin = Atmo.cloudParams.cloudScatBeta.x
+		* min(BandLow.x, min(BandLow.y, BandLow.z)) * F.Thickness;
+
+	// COUNTED DOWN FROM WHERE EVERY COLUMN IS SATURATED, which is the backstop
+	// or the lowest a column top can fall, whichever is lower. Relief is free to
+	// push a top under the backstop, and above such a top the ray is still
+	// crossing clear air -- counting from the backstop alone would put the
+	// terminus inside cloud that had not gone opaque yet.
+    float BoundMin, BoundMax;
+    TR_TopBounds(F, 1.0f, 1.0f, BoundMin, BoundMax);
+
+	// Against the slowest channel of the slowest band, which the band ramp never
+	// goes below. Erring deep costs a step; erring shallow blacks out cloud that
+	// should still be visible.
+    const float OpaqueFraction = min(F.DeckBackstop, BoundMin)
+		- TR_VIEW_OPAQUE_DEPTH / max(BetaMin, 1e-6f);
+
+    if (OpaqueFraction > 0.0f)
+    {
+        const float2 OpaqueHit = Atmo_RaySphere(
+			Origin, Dir, Atmo.planetParams.planetPos,
+			F.PlanetRadius + F.Thickness * OpaqueFraction);
+
+        if (OpaqueHit.x > 0.0f && OpaqueHit.x < OutMaxDist)
+        {
+            OutMaxDist = OpaqueHit.x;
+            OutOpaque = true;
+        }
+    }
+}
+
+/** Density and material at a planet-local point, as (density, band, unused).
+ *  StepHalfHeight is the sample's own half-extent along the radius, which the
+ *  field uses to prefilter its relief.
+ *
+ *  THE SECOND CHANNEL IS OPAQUE TO THE MARCH. It carries it from here to
+ *  Field_Albedo and Field_Extinction without interpreting it; on this field it
+ *  is the signed band. */
+float4 Field_Sample(
+	FIELD_TEXTURE_DECL,
+	float3 LocalPos,
+	float StepHalfHeight,
+	FieldParams F)
+{
+    return TR_Density(
+		FlowField, FlowSampler, DetailVolume, DetailSampler,
+		StructureVolume, StructureSampler, LocalPos, StepHalfHeight, F);
+}
+
+/** Single-scattering albedo at a sample's material coordinate. */
+float3 Field_Albedo(float Material, FieldMaterialParams S)
+{
+    return TR_BandScatter(Material, S);
+}
+
+/** Extinction multiplier the VIEW ray applies, tint times amount. */
+float3 Field_Extinction(float Material, FieldMaterialParams S)
+{
+    return TR_BandExtinction(Material, S);
+}
+
+/** Extinction TINT at a receiver, the light ray's amounts already being in the
+ *  shadow map. One coarse field read, paid only where the map shadows at all.
+ *
+ *  THE RECEIVER'S OWN MATERIAL COLOURS WHAT SHADOWED IT. The map holds one
+ *  depth, not the colours of everything the light crossed, and bands are far
+ *  wider than the deck is deep so the path stays mostly in the receiver's band.
+ *  Off near band edges at low sun. */
+float3 Field_LightTint(
+	Texture2DArray FlowField,
+	SamplerState FlowSampler,
+	float3 LocalPos,
+	FieldParams F,
+	FieldMaterialParams S)
+{
+    return TR_BandTint(TR_BandCoarse(FlowField, FlowSampler, LocalPos, F), S);
+}
+
+/** The tint to fall back on where nothing shadowed the receiver, so the branch
+ *  above is skipped rather than taken with a null result. */
+float3 Field_NeutralTint(FieldMaterialParams S)
+{
+    return S.ExtinctionBase.rgb;
+}
+
+/** Finest lateral feature size at a radius, in world units: what bounds a step
+ *  taken sideways. The deck top varies at the flow grid's scale, so a ray
+ *  stepping further than this samples one column out of the several it crossed
+ *  and the jitter picks which -- a choice, not an estimate with noise on it. */
+float Field_LateralArc(Texture2DArray FlowField, float Radius)
+{
+    return Flow_TexelArc(FlowField, Radius);
+}
+
+/** The map's geometry for this field. */
+AtmoShadowFrame Field_ShadowFrame(FieldParams F)
+{
+    return TR_ShadowFrame(F);
+}
+
+/** What the bake folded into the map's depths, for the reader to divide back
+ *  out: the light coefficient times the largest tint channel any band can have.
+ *
+ *  AND THE SMALLEST, as the second channel. The caller exponentiates the depth
+ *  at the receiving band's tint over the largest, so the ceiling has to be set
+ *  against the most transmissive term or saturated deck glows through it. */
+float2 Field_FoldConstant(CompositeParams Atmo, FieldMaterialParams S)
+{
+    return float2(Atmo.cloudParams.cloudAbsBeta.x * S.TintRange.y,
+		S.TintRange.x / max(S.TintRange.y, 1e-8f));
+}

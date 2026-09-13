@@ -1,6 +1,6 @@
-#include "GasGiantSimulation.h"
+#include "FlowSimulation.h"
 
-#include "GasGiantSimShaders.h"
+#include "FlowSimShaders.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
 #include "RenderTargetPool.h"
@@ -14,12 +14,12 @@
 // TStaticSamplerState, for the wrapped trilinear seed sampler.
 #include "RHIStaticStates.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogGasGiantSim, Log, All);
+DEFINE_LOG_CATEGORY(LogFlowSim);
 
 /** Everything registered into this frame's graph. Bundled so the pass helpers
  *  take one argument rather than nine, and so that the ping-pong swap is a
  *  single Swap() rather than three call sites that must agree. */
-struct FGasGiantSimResources
+struct FFlowSimResources
 {
 	FRDGTextureRef Vorticity[2] = { nullptr, nullptr };
 	FRDGTextureRef Psi = nullptr;
@@ -38,7 +38,7 @@ struct FGasGiantSimResources
 
 namespace
 {
-	using namespace GasGiantSimShader;
+	using namespace FlowSimShader;
 
 	FIntVector GroupCount2D(const FIntVector& GridSize)
 	{
@@ -54,7 +54,7 @@ namespace
 	 *  struct: there is exactly one place where a config value becomes a shader
 	 *  value, so a parameter cannot be threaded through to some passes and
 	 *  quietly dropped from others. */
-	void FillCommonParameters(FGasGiantSimParameters& P, const FGasGiantSimParams& Params)
+	void FillCommonParameters(FFlowSimParameters& P, const FFlowSimParams& Params)
 	{
 		P.SimGridSize = Params.GridSize;
 		P.SimInvGridSize = FVector3f(
@@ -115,7 +115,7 @@ namespace
 	void AddSimPass(
 		FRDGBuilder& GraphBuilder,
 		const TCHAR* Name,
-		FGasGiantSimParameters* Parameters,
+		FFlowSimParameters* Parameters,
 		const FIntVector& Groups)
 	{
 		TShaderMapRef<TShader> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
@@ -129,12 +129,12 @@ namespace
 	}
 }
 
-void FGasGiantSimulation::RequestReset()
+void FFlowSimulation::RequestReset()
 {
 	bResetRequested = true;
 }
 
-void FGasGiantSimulation::QueueRestore_RenderThread(TArray<float>&& InData)
+void FFlowSimulation::QueueRestore_RenderThread(TArray<float>&& InData)
 {
 	check(IsInRenderingThread());
 
@@ -145,7 +145,7 @@ void FGasGiantSimulation::QueueRestore_RenderThread(TArray<float>&& InData)
 	bResetRequested = true;
 }
 
-void FGasGiantSimulation::Release_RenderThread()
+void FFlowSimulation::Release_RenderThread()
 {
 	PooledVorticity[0].SafeRelease();
 	PooledVorticity[1].SafeRelease();
@@ -172,7 +172,7 @@ void FGasGiantSimulation::Release_RenderThread()
 	bResetRequested = false;
 }
 
-bool FGasGiantSimulation::EnsureResources(const FGasGiantSimParams& Params)
+bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 {
 	const bool bGridChanged = (AllocatedGrid != Params.GridSize);
 
@@ -193,9 +193,9 @@ bool FGasGiantSimulation::EnsureResources(const FGasGiantSimParams& Params)
 			Size, PF_R32_FLOAT, FClearValueBinding::Black,
 			TexCreate_ShaderResource | TexCreate_UAV, Slices);
 
-		PooledVorticity[0] = AllocatePooledTexture(StateDesc, TEXT("GasGiant.VorticityA"));
-		PooledVorticity[1] = AllocatePooledTexture(StateDesc, TEXT("GasGiant.VorticityB"));
-		PooledPsi = AllocatePooledTexture(StateDesc, TEXT("GasGiant.Psi"));
+		PooledVorticity[0] = AllocatePooledTexture(StateDesc, TEXT("FlowSim.VorticityA"));
+		PooledVorticity[1] = AllocatePooledTexture(StateDesc, TEXT("FlowSim.VorticityB"));
+		PooledPsi = AllocatePooledTexture(StateDesc, TEXT("FlowSim.Psi"));
 
 		// (row, layer). Also carries the zonal streamfunction during init; see
 		// MainInitZonalPotentialCS for why it is reused rather than duplicated.
@@ -203,21 +203,21 @@ bool FGasGiantSimulation::EnsureResources(const FGasGiantSimParams& Params)
 			FIntPoint(Params.GridSize.Y, Slices), PF_R32_FLOAT, FClearValueBinding::Black,
 			TexCreate_ShaderResource | TexCreate_UAV);
 
-		PooledRowMean = AllocatePooledTexture(RowDesc, TEXT("GasGiant.RowMean"));
-		PooledPsiRowMean = AllocatePooledTexture(RowDesc, TEXT("GasGiant.PsiRowMean"));
+		PooledRowMean = AllocatePooledTexture(RowDesc, TEXT("FlowSim.RowMean"));
+		PooledPsiRowMean = AllocatePooledTexture(RowDesc, TEXT("FlowSim.PsiRowMean"));
 
 		const FRDGTextureDesc GlobalDesc = FRDGTextureDesc::Create2D(
 			FIntPoint(1, Slices), PF_R32_FLOAT, FClearValueBinding::Black,
 			TexCreate_ShaderResource | TexCreate_UAV);
 
-		PooledGlobalMean = AllocatePooledTexture(GlobalDesc, TEXT("GasGiant.GlobalMean"));
+		PooledGlobalMean = AllocatePooledTexture(GlobalDesc, TEXT("FlowSim.GlobalMean"));
 
 		AllocatedGrid = Params.GridSize;
 		CurrentVorticity = 0;
 		bInitialised = false;
 		bResetRequested = false;
 
-		UE_LOG(LogGasGiantSim, Log, TEXT("Allocated sim state at %dx%d x %d layers."),
+		UE_LOG(LogFlowSim, Log, TEXT("Allocated sim state at %dx%d x %d layers."),
 			Params.GridSize.X, Params.GridSize.Y, Params.GridSize.Z);
 
 		return true;
@@ -226,7 +226,7 @@ bool FGasGiantSimulation::EnsureResources(const FGasGiantSimParams& Params)
 	return false;
 }
 
-void FGasGiantSimulation::AddInitPasses(FRDGBuilder& GraphBuilder, const FGasGiantSimParams& Params, const FGasGiantSimResources& R)
+void FFlowSimulation::AddInitPasses(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
 {
 	const FIntVector Groups2D = GroupCount2D(Params.GridSize);
 
@@ -239,37 +239,37 @@ void FGasGiantSimulation::AddInitPasses(FRDGBuilder& GraphBuilder, const FGasGia
 	// -- Zonal streamfunction, by quadrature, one value per row -------------
 
 	{
-		FGasGiantSimParameters* P = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
 		FillCommonParameters(*P, Params);
 		P->SimRowMeanUAV = GraphBuilder.CreateUAV(R.RowMean);
 
-		AddSimPass<FGasGiantInitZonalPotentialCS>(GraphBuilder, TEXT("GasGiant.InitZonalPotential"), P, GroupsRows);
+		AddSimPass<FFlowSimInitZonalPotentialCS>(GraphBuilder, TEXT("FlowSim.InitZonalPotential"), P, GroupsRows);
 	}
 
 	// -- Full streamfunction: zonal plus seeded eddies ----------------------
 
 	{
-		FGasGiantSimParameters* P = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
 		FillCommonParameters(*P, Params);
 		P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
 		P->SimPsiUAV = GraphBuilder.CreateUAV(R.Psi);
 
-		AddSimPass<FGasGiantInitPotentialCS>(GraphBuilder, TEXT("GasGiant.InitPotential"), P, Groups2D);
+		AddSimPass<FFlowSimInitPotentialCS>(GraphBuilder, TEXT("FlowSim.InitPotential"), P, Groups2D);
 	}
 
 	// -- Vorticity, through the same discrete operator the solver inverts ---
 
 	{
-		FGasGiantSimParameters* P = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
 		FillCommonParameters(*P, Params);
 		P->SimPsiSRV = GraphBuilder.CreateSRV(R.Psi);
 		P->SimVorticityUAV = GraphBuilder.CreateUAV(R.Vorticity[R.Current]);
 
-		AddSimPass<FGasGiantInitVorticityCS>(GraphBuilder, TEXT("GasGiant.InitVorticity"), P, Groups2D);
+		AddSimPass<FFlowSimInitVorticityCS>(GraphBuilder, TEXT("FlowSim.InitVorticity"), P, Groups2D);
 	}
 }
 
-void FGasGiantSimulation::AddRestorePass(FRDGBuilder& GraphBuilder, const FGasGiantSimParams& Params, const FGasGiantSimResources& R)
+void FFlowSimulation::AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
 {
 	const int32 Total = Params.GridSize.X * Params.GridSize.Y * Params.GridSize.Z;
 
@@ -277,22 +277,22 @@ void FGasGiantSimulation::AddRestorePass(FRDGBuilder& GraphBuilder, const FGasGi
 	// so the pass below reads it without a separate transfer step.
 	FRDGBufferRef Upload = CreateStructuredBuffer(
 		GraphBuilder,
-		TEXT("GasGiant.RestoreUpload"),
+		TEXT("FlowSim.RestoreUpload"),
 		sizeof(float),
 		Total * 2,
 		PendingRestore.GetData(),
 		PendingRestore.Num() * sizeof(float));
 
-	FGasGiantSimParameters* P = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+	FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
 	FillCommonParameters(*P, Params);
 	P->SimRestoreBuffer = GraphBuilder.CreateSRV(Upload);
 	P->SimVorticityUAV = GraphBuilder.CreateUAV(R.Vorticity[R.Current]);
 	P->SimPsiUAV = GraphBuilder.CreateUAV(R.Psi);
 
-	AddSimPass<FGasGiantRestoreCS>(GraphBuilder, TEXT("GasGiant.Restore"), P, GroupCount2D(Params.GridSize));
+	AddSimPass<FFlowSimRestoreCS>(GraphBuilder, TEXT("FlowSim.Restore"), P, GroupCount2D(Params.GridSize));
 }
 
-void FGasGiantSimulation::AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, const FGasGiantSimParams& Params, FRHIGPUBufferReadback* Readback)
+void FFlowSimulation::AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, FRHIGPUBufferReadback* Readback)
 {
 	check(IsInRenderingThread());
 
@@ -313,20 +313,20 @@ void FGasGiantSimulation::AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder,
 
 	FRDGBufferRef Capture = GraphBuilder.CreateBuffer(
 		FRDGBufferDesc::CreateStructuredDesc(sizeof(float), Total * 2),
-		TEXT("GasGiant.Capture"));
+		TEXT("FlowSim.Capture"));
 
-	FGasGiantSimParameters* P = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+	FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
 	FillCommonParameters(*P, Params);
 	P->SimVorticitySRV = GraphBuilder.CreateSRV(Vorticity);
 	P->SimPsiSRV = GraphBuilder.CreateSRV(Psi);
 	P->SimCaptureBuffer = GraphBuilder.CreateUAV(Capture);
 
-	AddSimPass<FGasGiantCaptureCS>(GraphBuilder, TEXT("GasGiant.Capture"), P, GroupCount2D(AllocatedGrid));
+	AddSimPass<FFlowSimCaptureCS>(GraphBuilder, TEXT("FlowSim.Capture"), P, GroupCount2D(AllocatedGrid));
 
 	AddEnqueueCopyPass(GraphBuilder, Readback, Capture, Total * 2 * sizeof(float));
 }
 
-void FGasGiantSimulation::AddPoissonSolve(FRDGBuilder& GraphBuilder, const FGasGiantSimParams& Params, const FGasGiantSimResources& R, int32 Iterations)
+void FFlowSimulation::AddPoissonSolve(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R, int32 Iterations)
 {
 	const FIntVector Groups2D = GroupCount2D(Params.GridSize);
 
@@ -337,18 +337,18 @@ void FGasGiantSimulation::AddPoissonSolve(FRDGBuilder& GraphBuilder, const FGasG
 	{
 		for (int32 Parity = 0; Parity < 2; ++Parity)
 		{
-			FGasGiantSimParameters* P = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+			FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
 			FillCommonParameters(*P, Params);
 			P->SimRedBlackParity = Parity;
 			P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
 			P->SimPsiUAV = GraphBuilder.CreateUAV(R.Psi);
 
-			AddSimPass<FGasGiantPoissonCS>(GraphBuilder, TEXT("GasGiant.Poisson"), P, Groups2D);
+			AddSimPass<FFlowSimPoissonCS>(GraphBuilder, TEXT("FlowSim.Poisson"), P, Groups2D);
 		}
 	}
 }
 
-void FGasGiantSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FGasGiantSimParams& Params, FGasGiantSimResources& R)
+void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, FFlowSimResources& R)
 {
 	const FIntVector Groups2D = GroupCount2D(Params.GridSize);
 
@@ -369,35 +369,35 @@ void FGasGiantSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FGasGiantS
 	// so the two uses are one pass rather than two.
 
 	{
-		FGasGiantSimParameters* P = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
 		FillCommonParameters(*P, Params);
 		P->SimPsiSRV = GraphBuilder.CreateSRV(R.Psi);
 		P->SimPsiRowMeanUAV = GraphBuilder.CreateUAV(R.PsiRowMean);
 
-		AddSimPass<FGasGiantReducePsiRowsCS>(GraphBuilder, TEXT("GasGiant.ReducePsiRows"), P, GroupsRows);
+		AddSimPass<FFlowSimReducePsiRowsCS>(GraphBuilder, TEXT("FlowSim.ReducePsiRows"), P, GroupsRows);
 	}
 
 	{
-		FGasGiantSimParameters* P = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
 		FillCommonParameters(*P, Params);
 		P->SimPsiSRV = GraphBuilder.CreateSRV(R.Psi);
 		P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
 		P->SimPsiRowMeanSRV = GraphBuilder.CreateSRV(R.PsiRowMean);
 		P->SimVelocityUAV = GraphBuilder.CreateUAV(R.Velocity);
 
-		AddSimPass<FGasGiantVelocityCS>(GraphBuilder, TEXT("GasGiant.Velocity"), P, Groups2D);
+		AddSimPass<FFlowSimVelocityCS>(GraphBuilder, TEXT("FlowSim.Velocity"), P, Groups2D);
 	}
 
 	// -- 2. Advect absolute vorticity ---------------------------------------
 
 	{
-		FGasGiantSimParameters* P = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
 		FillCommonParameters(*P, Params);
 		P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
 		P->SimVelocitySRV = GraphBuilder.CreateSRV(R.Velocity);
 		P->SimVorticityUAV = GraphBuilder.CreateUAV(R.Dest());
 
-		AddSimPass<FGasGiantAdvectCS>(GraphBuilder, TEXT("GasGiant.Advect"), P, Groups2D);
+		AddSimPass<FFlowSimAdvectCS>(GraphBuilder, TEXT("FlowSim.Advect"), P, Groups2D);
 	}
 	R.Swap();
 
@@ -407,46 +407,46 @@ void FGasGiantSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FGasGiantS
 	// has actually become rather than what it was at the top of the step.
 
 	{
-		FGasGiantSimParameters* P = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
 		FillCommonParameters(*P, Params);
 		P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
 		P->SimRowMeanUAV = GraphBuilder.CreateUAV(R.RowMean);
 
-		AddSimPass<FGasGiantReduceRowsCS>(GraphBuilder, TEXT("GasGiant.ReduceRows"), P, GroupsRows);
+		AddSimPass<FFlowSimReduceRowsCS>(GraphBuilder, TEXT("FlowSim.ReduceRows"), P, GroupsRows);
 	}
 
 	{
-		FGasGiantSimParameters* P = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
 		FillCommonParameters(*P, Params);
 		P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
 		P->SimGlobalMeanUAV = GraphBuilder.CreateUAV(R.GlobalMean);
 
-		AddSimPass<FGasGiantReduceGlobalCS>(GraphBuilder, TEXT("GasGiant.ReduceGlobal"), P, GroupsLayers);
+		AddSimPass<FFlowSimReduceGlobalCS>(GraphBuilder, TEXT("FlowSim.ReduceGlobal"), P, GroupsLayers);
 	}
 
 	// -- 4. Forcing ---------------------------------------------------------
 
 	{
-		FGasGiantSimParameters* P = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
 		FillCommonParameters(*P, Params);
 		P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
 		P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
 		P->SimGlobalMeanSRV = GraphBuilder.CreateSRV(R.GlobalMean);
 		P->SimVorticityUAV = GraphBuilder.CreateUAV(R.Dest());
 
-		AddSimPass<FGasGiantForceCS>(GraphBuilder, TEXT("GasGiant.Force"), P, Groups2D);
+		AddSimPass<FFlowSimForceCS>(GraphBuilder, TEXT("FlowSim.Force"), P, Groups2D);
 	}
 	R.Swap();
 
 	// -- 5. Polar filter ----------------------------------------------------
 
 	{
-		FGasGiantSimParameters* P = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
 		FillCommonParameters(*P, Params);
 		P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
 		P->SimVorticityUAV = GraphBuilder.CreateUAV(R.Dest());
 
-		AddSimPass<FGasGiantPolarFilterCS>(GraphBuilder, TEXT("GasGiant.PolarFilter"), P, Groups2D);
+		AddSimPass<FFlowSimPolarFilterCS>(GraphBuilder, TEXT("FlowSim.PolarFilter"), P, Groups2D);
 	}
 	R.Swap();
 
@@ -458,7 +458,7 @@ void FGasGiantSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FGasGiantS
 	AddPoissonSolve(GraphBuilder, Params, R, Params.PoissonIterations);
 }
 
-void FGasGiantSimulation::AddDebugPass(FRDGBuilder& GraphBuilder, const FGasGiantSimParams& Params, const FGasGiantSimResources& R)
+void FFlowSimulation::AddDebugPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
 {
 	if (!R.Debug)
 	{
@@ -470,7 +470,7 @@ void FGasGiantSimulation::AddDebugPass(FRDGBuilder& GraphBuilder, const FGasGian
 		FMath::DivideAndRoundUp(Params.DebugSize.Y, ThreadGroupSize2D),
 		1);
 
-	FGasGiantSimParameters* P = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+	FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
 	FillCommonParameters(*P, Params);
 	P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
 	P->SimPsiSRV = GraphBuilder.CreateSRV(R.Psi);
@@ -478,10 +478,10 @@ void FGasGiantSimulation::AddDebugPass(FRDGBuilder& GraphBuilder, const FGasGian
 	P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
 	P->SimDebugUAV = GraphBuilder.CreateUAV(R.Debug);
 
-	AddSimPass<FGasGiantDebugVisCS>(GraphBuilder, TEXT("GasGiant.DebugVis"), P, Groups);
+	AddSimPass<FFlowSimDebugVisCS>(GraphBuilder, TEXT("FlowSim.DebugVis"), P, Groups);
 }
 
-void FGasGiantSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FGasGiantSimParams& Params, int32 NumSubsteps)
+void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, int32 NumSubsteps)
 {
 	check(IsInRenderingThread());
 
@@ -495,9 +495,9 @@ void FGasGiantSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const 
 
 	const bool bNeedsSeeding = EnsureResources(Params);
 
-	RDG_EVENT_SCOPE(GraphBuilder, "GasGiantSim");
+	RDG_EVENT_SCOPE(GraphBuilder, "FlowSim");
 
-	FGasGiantSimResources R;
+	FFlowSimResources R;
 	R.Vorticity[0] = GraphBuilder.RegisterExternalTexture(PooledVorticity[0]);
 	R.Vorticity[1] = GraphBuilder.RegisterExternalTexture(PooledVorticity[1]);
 	R.Psi = GraphBuilder.RegisterExternalTexture(PooledPsi);
@@ -507,12 +507,12 @@ void FGasGiantSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const 
 	R.Current = CurrentVorticity;
 
 	R.Velocity = GraphBuilder.RegisterExternalTexture(
-		CreateRenderTarget(Params.FlowTexture, TEXT("GasGiant.Flow")));
+		CreateRenderTarget(Params.FlowTexture, TEXT("FlowSim.Flow")));
 
 	if (Params.DebugTexture.IsValid() && Params.DebugSize.X > 0 && Params.DebugSize.Y > 0)
 	{
 		R.Debug = GraphBuilder.RegisterExternalTexture(
-			CreateRenderTarget(Params.DebugTexture, TEXT("GasGiant.Debug")));
+			CreateRenderTarget(Params.DebugTexture, TEXT("FlowSim.Debug")));
 	}
 
 	if (bNeedsSeeding || !bInitialised)
@@ -524,7 +524,7 @@ void FGasGiantSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const 
 			// solving could only move it away from the captured state.
 			AddRestorePass(GraphBuilder, Params, R);
 
-			UE_LOG(LogGasGiantSim, Log, TEXT("Restored state from snapshot."));
+			UE_LOG(LogFlowSim, Log, TEXT("Restored state from snapshot."));
 
 			PendingRestore.Empty();
 			bInitialised = true;
@@ -533,7 +533,7 @@ void FGasGiantSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const 
 		{
 			if (PendingRestore.Num() > 0)
 			{
-				UE_LOG(LogGasGiantSim, Warning,
+				UE_LOG(LogFlowSim, Warning,
 					TEXT("Snapshot has %d floats, grid needs %d. Seeding instead."),
 					PendingRestore.Num(),
 					Params.GridSize.X * Params.GridSize.Y * Params.GridSize.Z * 2);
@@ -576,21 +576,21 @@ void FGasGiantSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const 
 		const FIntVector GroupsRows(
 			FMath::DivideAndRoundUp(Params.GridSize.Y, ThreadGroupSize1D), Params.GridSize.Z, 1);
 
-		FGasGiantSimParameters* PR = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+		FFlowSimParameters* PR = GraphBuilder.AllocParameters<FFlowSimParameters>();
 		FillCommonParameters(*PR, Params);
 		PR->SimPsiSRV = GraphBuilder.CreateSRV(R.Psi);
 		PR->SimPsiRowMeanUAV = GraphBuilder.CreateUAV(R.PsiRowMean);
 
-		AddSimPass<FGasGiantReducePsiRowsCS>(GraphBuilder, TEXT("GasGiant.ReducePsiRowsFinal"), PR, GroupsRows);
+		AddSimPass<FFlowSimReducePsiRowsCS>(GraphBuilder, TEXT("FlowSim.ReducePsiRowsFinal"), PR, GroupsRows);
 
-		FGasGiantSimParameters* P = GraphBuilder.AllocParameters<FGasGiantSimParameters>();
+		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
 		FillCommonParameters(*P, Params);
 		P->SimPsiSRV = GraphBuilder.CreateSRV(R.Psi);
 		P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
 		P->SimPsiRowMeanSRV = GraphBuilder.CreateSRV(R.PsiRowMean);
 		P->SimVelocityUAV = GraphBuilder.CreateUAV(R.Velocity);
 
-		AddSimPass<FGasGiantVelocityCS>(GraphBuilder, TEXT("GasGiant.VelocityFinal"), P, GroupCount2D(Params.GridSize));
+		AddSimPass<FFlowSimVelocityCS>(GraphBuilder, TEXT("FlowSim.VelocityFinal"), P, GroupCount2D(Params.GridSize));
 	}
 
 	AddDebugPass(GraphBuilder, Params, R);

@@ -18,8 +18,8 @@
  *  transitions nor lifetime-extends anything a pass does not touch. What is left
  *  is a few bytes of uniform buffer per dispatch.
  *
- *  Names must match the declarations in GasGiantSim.usf exactly. */
-BEGIN_SHADER_PARAMETER_STRUCT(FGasGiantSimParameters, )
+ *  Names must match the declarations in FlowSim.usf exactly. */
+BEGIN_SHADER_PARAMETER_STRUCT(FFlowSimParameters, )
 
 // -- Grid ---------------------------------------------------------------
 SHADER_PARAMETER(FIntVector, SimGridSize)
@@ -86,14 +86,14 @@ SHADER_PARAMETER_SAMPLER(SamplerState, SimForcingNoiseSampler)
 
 END_SHADER_PARAMETER_STRUCT()
 
-namespace GasGiantSimShader
+namespace FlowSimShader
 {
 	CLOUDATMOSPHERE_API bool ShouldCompile(const FGlobalShaderPermutationParameters& Parameters);
 	CLOUDATMOSPHERE_API void ModifyEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
 
 	// THE SHADER TAKES ITS GROUP SIZES FROM THESE. ModifyEnvironment pushes all
-	// three as defines that GasGiantSim.usf's [numthreads] read, and
-	// GasGiantSimulation.cpp sizes every dispatch from the same constants, so a
+	// three as defines that FlowSim.usf's [numthreads] read, and
+	// FlowSimulation.cpp sizes every dispatch from the same constants, so a
 	// group size and its group count cannot disagree.
 
 	/** Thread group edge for the 2D kernels. 8x8 = 64, a full wave on AMD and two
@@ -108,7 +108,7 @@ namespace GasGiantSimShader
 	static constexpr int32 ThreadGroupSizeLayers = 8;
 }
 
-/** One class per entry point, all sharing FGasGiantSimParameters. A macro
+/** One class per entry point, all sharing FFlowSimParameters. A macro
  *  because the bodies are identical and a hand-written set would drift apart. If
  *  it ever trips over an engine change to SHADER_USE_PARAMETER_STRUCT, expanding
  *  it by hand is mechanical -- the contents are exactly what is written here. */
@@ -117,32 +117,32 @@ namespace GasGiantSimShader
 	{                                                                                       \
 		DECLARE_GLOBAL_SHADER(ClassName);                                                   \
 	public:                                                                                 \
-		using FParameters = FGasGiantSimParameters;                                         \
+		using FParameters = FFlowSimParameters;                                         \
 		SHADER_USE_PARAMETER_STRUCT(ClassName, FGlobalShader);                              \
 		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& P)   \
 		{                                                                                   \
-			return GasGiantSimShader::ShouldCompile(P);                                     \
+			return FlowSimShader::ShouldCompile(P);                                     \
 		}                                                                                   \
 		static void ModifyCompilationEnvironment(                                           \
 			const FGlobalShaderPermutationParameters& P, FShaderCompilerEnvironment& E)      \
 		{                                                                                   \
-			GasGiantSimShader::ModifyEnvironment(P, E);                                     \
+			FlowSimShader::ModifyEnvironment(P, E);                                     \
 		}                                                                                   \
 	};
 
-GG_DECLARE_SIM_SHADER(FGasGiantInitZonalPotentialCS)
-GG_DECLARE_SIM_SHADER(FGasGiantInitPotentialCS)
-GG_DECLARE_SIM_SHADER(FGasGiantInitVorticityCS)
-GG_DECLARE_SIM_SHADER(FGasGiantVelocityCS)
-GG_DECLARE_SIM_SHADER(FGasGiantAdvectCS)
-GG_DECLARE_SIM_SHADER(FGasGiantReduceRowsCS)
-GG_DECLARE_SIM_SHADER(FGasGiantReducePsiRowsCS)
-GG_DECLARE_SIM_SHADER(FGasGiantReduceGlobalCS)
-GG_DECLARE_SIM_SHADER(FGasGiantForceCS)
-GG_DECLARE_SIM_SHADER(FGasGiantPolarFilterCS)
-GG_DECLARE_SIM_SHADER(FGasGiantPoissonCS)
-GG_DECLARE_SIM_SHADER(FGasGiantCaptureCS)
-GG_DECLARE_SIM_SHADER(FGasGiantRestoreCS)
-GG_DECLARE_SIM_SHADER(FGasGiantDebugVisCS)
+GG_DECLARE_SIM_SHADER(FFlowSimInitZonalPotentialCS)
+GG_DECLARE_SIM_SHADER(FFlowSimInitPotentialCS)
+GG_DECLARE_SIM_SHADER(FFlowSimInitVorticityCS)
+GG_DECLARE_SIM_SHADER(FFlowSimVelocityCS)
+GG_DECLARE_SIM_SHADER(FFlowSimAdvectCS)
+GG_DECLARE_SIM_SHADER(FFlowSimReduceRowsCS)
+GG_DECLARE_SIM_SHADER(FFlowSimReducePsiRowsCS)
+GG_DECLARE_SIM_SHADER(FFlowSimReduceGlobalCS)
+GG_DECLARE_SIM_SHADER(FFlowSimForceCS)
+GG_DECLARE_SIM_SHADER(FFlowSimPolarFilterCS)
+GG_DECLARE_SIM_SHADER(FFlowSimPoissonCS)
+GG_DECLARE_SIM_SHADER(FFlowSimCaptureCS)
+GG_DECLARE_SIM_SHADER(FFlowSimRestoreCS)
+GG_DECLARE_SIM_SHADER(FFlowSimDebugVisCS)
 
 #undef GG_DECLARE_SIM_SHADER

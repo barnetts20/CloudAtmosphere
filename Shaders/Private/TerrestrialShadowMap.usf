@@ -1,9 +1,9 @@
 #include "/Engine/Public/Platform.ush"
 #include "/Engine/Private/Common.ush"
-#include "/Plugin/CloudAtmosphere/Private/GasGiantShadow.ush"
+#include "/Plugin/CloudAtmosphere/Private/TerrestrialShadow.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereShadowBake.ush"
 
-// Gas giant deck shadow map: this field's side of the bake.
+// Terrestrial cloud band shadow map: this field's side of the bake.
 //
 // THE MARCH IS NOT HERE. The ray setup, the step lattice, the crossing
 // accumulation and the occluder band live in AtmosphereShadowBake.ush and
@@ -13,7 +13,7 @@
 // the bottom of the file.
 //
 // THE DECK THE LIGHT SEES MUST BE THE DECK THE EYE SEES. Every derived quantity
-// here comes from GG_BuildField, GG_Density and GG_DeckBeta, the same functions
+// here comes from TR_BuildField, TR_Density and TR_DeckBeta, the same functions
 // the material calls from the same authored values. A second derivation on
 // either side fails silently: the shadows stay smooth and plausible and land in
 // the wrong place.
@@ -37,15 +37,15 @@ float4 ExtinctionPositive;
 float4 ExtinctionBase;
 float BandScale;
 
-/** Solved into the light ray's coefficient by GG_DeckBeta, as the material
+/** Solved into the light ray's coefficient by TR_DeckBeta, as the material
  *  solves it. */
 float DeckOpticalDepth;
 float LightExtinctionFraction;
 
-// -- GG_BuildField's arguments, in its order -------------------------------
+// -- TR_BuildField's arguments, in its order -------------------------------
 //
 // The same values the material passes, under the same names, so there is one
-// derivation of the deck rather than two. Any addition to GG_BuildField's
+// derivation of the deck rather than two. Any addition to TR_BuildField's
 // signature has to appear here and in FGasGiantShadowParams.
 
 float PlanetRadius;
@@ -96,16 +96,16 @@ float DetailBandMix;
 float DetailCrossfade;
 float DeckSlope;
 
-GGFieldParams GGShadow_Field()
+TRFieldParams TRShadow_Field()
 {
-    return GG_BUILD_FIELD();
+    return TR_BUILD_FIELD();
 }
 
 /** Per-layer level of detail at a point, from its distance to the camera, in
  *  planet radii. MUST MATCH the view march's expression, or the deck the light
  *  sees carries layers the eye has dropped -- lumpy shadows on a smooth surface,
  *  which reads as dirt rather than as under-resolved noise. */
-void GGShadow_Fades(float3 LocalPos, GGFieldParams F, out float OutDetail, out float OutStructure)
+void TRShadow_Fades(float3 LocalPos, TRFieldParams F, out float OutDetail, out float OutStructure)
 {
     const float Distance =
 		length(LocalPos - ShadowCameraLocal) / max(F.PlanetRadius, 1e-4f);
@@ -115,7 +115,7 @@ void GGShadow_Fades(float3 LocalPos, GGFieldParams F, out float OutDetail, out f
 }
 
 /** Per-band extinction amount, blended by the signed band. Mirrors
- *  GG_BandRamp and GG_BandTint on the a channel instead of rgb: sign
+ *  TR_BandRamp and TR_BandTint on the a channel instead of rgb: sign
  *  picks the family, the ramp runs from Base at zero to that family at full
  *  magnitude, and a plain two-way lerp would blend the families through their
  *  midpoint and lose the boundary between them.
@@ -126,7 +126,7 @@ void GGShadow_Fades(float3 LocalPos, GGFieldParams F, out float OutDetail, out f
  *  lerps: equal at both ends, differing mid-ramp by a quarter of
  *  (Base.rgb - Hue.rgb)(Base.a - Hue.a). That is the price of one scalar depth
  *  channel, not a defect to fix here. */
-float GGShadow_BandAlpha(float Band)
+float TRShadow_BandAlpha(float Band)
 {
     const float T = clamp(Band * BandScale, -1.0f, 1.0f);
 
@@ -140,22 +140,22 @@ float GGShadow_BandAlpha(float Band)
  *  part of the reconstruction through the mean and reintroduce the bias the map
  *  exists to remove.
  *
- *  BOTH LAYERS, BOTH FADES. Detail is erosion -- GG_Density applies it as a
+ *  BOTH LAYERS, BOTH FADES. Detail is erosion -- TR_Density applies it as a
  *  carve, lowering mean density rather than only adding variation -- so dropping
  *  it would leave the shadow deck uniformly denser than the visible one. A layer
  *  may only be dropped from the map if it moves the variance and not the mean.
  *  The fades vary over planet radii, so they are evaluated once per step. */
-float GGShadow_Sigma(
+float TRShadow_Sigma(
 	float3 Pos,
 	float3 BasisU,
 	float3 BasisV,
 	float TexelWorld,
 	float StepHalfHeight,
 	float AbsMax,
-	GGFieldParams F)
+	TRFieldParams F)
 {
     float FadeDetail, FadeStructure;
-    GGShadow_Fades(Pos, F, FadeDetail, FadeStructure);
+    TRShadow_Fades(Pos, F, FadeDetail, FadeStructure);
 
     F.DetailFade = FadeDetail;
     F.StructureFade = FadeStructure;
@@ -172,7 +172,7 @@ float GGShadow_Sigma(
 
         const float3 SubPos = Pos + BasisU * Offset.x + BasisV * Offset.y;
 
-        const float4 Deck = GG_Density(
+        const float4 Deck = TR_Density(
 			FlowTarget, FlowTargetSampler,
 			DetailVolume, DetailVolumeSampler,
 			StructureVolume, StructureVolumeSampler,
@@ -180,7 +180,7 @@ float GGShadow_Sigma(
 
 		// Band scales extinction, so a belt shadows more than a zone, and it
 		// arrives on the same fetch the density came from.
-        Density += Deck.x * GGShadow_BandAlpha(Deck.y);
+        Density += Deck.x * TRShadow_BandAlpha(Deck.y);
     }
 
     return Density * AbsMax / float(ATMO_BAKE_SUBSAMPLES);
@@ -193,23 +193,23 @@ float GGShadow_Sigma(
 // its signature. AtmosphereShadowBakeLoop.ush is included below, after these.
 // ---------------------------------------------------------------------------
 
-#define BakeFieldParams GGFieldParams
+#define BakeFieldParams TRFieldParams
 
 BakeFieldParams BakeField_Params()
 {
-    return GGShadow_Field();
+    return TRShadow_Field();
 }
 
 /** The shell the map covers, at UNFADED bounds: the map is shared by every pixel
  *  so no one camera's fades may narrow it. */
 float BakeField_CullRadius(BakeFieldParams F)
 {
-    return GG_ShadowCullRadius(F);
+    return TR_ShadowCullRadius(F);
 }
 
 float BakeField_CascadeExtent(BakeFieldParams F, int Level)
 {
-    return GG_ShadowCascadeExtent(F, Level);
+    return TR_ShadowCascadeExtent(F, Level);
 }
 
 /** Highest the deck can reach, in thicknesses, with both layers at full
@@ -217,7 +217,7 @@ float BakeField_CascadeExtent(BakeFieldParams F, int Level)
 float BakeField_TopBound(BakeFieldParams F)
 {
     float TopMin, TopMax;
-    GG_TopBounds(F, 1.0f, 1.0f, TopMin, TopMax);
+    TR_TopBounds(F, 1.0f, 1.0f, TopMin, TopMax);
 
     return TopMax;
 }
@@ -225,7 +225,7 @@ float BakeField_TopBound(BakeFieldParams F)
 float BakeField_Entry(float3 Origin, float3 Dir, float RayLength, float TopMax,
 	BakeFieldParams F)
 {
-    return GG_DeckEntry(
+    return TR_DeckEntry(
 		FlowTarget, FlowTargetSampler, Origin, Dir, 0.0f, RayLength, TopMax, F);
 }
 
@@ -247,15 +247,15 @@ float BakeField_LateralArc(float Radius)
  *  Field_FoldConstant divides the same product back out on the read side. */
 float BakeField_FoldConstant(BakeFieldParams F)
 {
-    return GG_DeckBeta(F, DeckOpticalDepth) * LightExtinctionFraction / F.Thickness
-		* GG_ExtinctionTintRange(
+    return TR_DeckBeta(F, DeckOpticalDepth) * LightExtinctionFraction / F.Thickness
+		* TR_ExtinctionTintRange(
 			ExtinctionNegative.rgb, ExtinctionPositive.rgb, ExtinctionBase.rgb).y;
 }
 
 float BakeField_Sigma(float3 Pos, float3 BasisU, float3 BasisV, float TexelWorld,
 	float StepHalfHeight, float AbsMax, BakeFieldParams F)
 {
-    return GGShadow_Sigma(Pos, BasisU, BasisV, TexelWorld, StepHalfHeight, AbsMax, F);
+    return TRShadow_Sigma(Pos, BasisU, BasisV, TexelWorld, StepHalfHeight, AbsMax, F);
 }
 
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereShadowBakeLoop.ush"

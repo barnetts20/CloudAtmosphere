@@ -108,11 +108,30 @@ static const float2 AtmoBake_SubOffsets[4] =
 
 RWTexture2DArray<float4> ShadowMapUAV;
 
+int2 ShadowMapSize;
+float2 ShadowInvMapSize;
+
+/** Planet-local, pointing TOWARD the light -- the same convention as
+ *  lightRayParams.lightDir, so sun elevation stays dot(up, lightDir). The basis
+ *  and the extent are derived from it and from the field, not passed: see
+ *  GasGiantShadow.ush. */
+float3 ShadowLightDir;
+
+/** Camera position, planet-local. The layer fades are a function of camera and
+ *  sample position, both of which this pass has, so they are evaluated per march
+ *  sample rather than pinned to full strength.
+ *
+ *  ONE CAMERA PER PLANET: the map reaches the march as a material parameter,
+ *  which has no view dimension, so a second viewport shares these fade
+ *  distances. An LOD mismatch in the secondary view, not a wrong shadow, and a
+ *  property of the delivery rather than of this pass. */
+float3 ShadowCameraLocal;
+
 /** One depth capture per cascade, named rather than arrayed: each is a separate
  *  render target owned by a separate component, and a Texture2D array cannot be
  *  indexed dynamically here anyway. Adding a cascade means adding a texture, a
- *  frame and a branch in AtmoBake_Occlusion; a static_assert in
- *  GasGiantShadowMap.h holds the count. */
+ *  frame and a branch in AtmoBake_Occlusion; a static_assert on the C++ side
+ *  holds the count. */
 Texture2D OccluderDepth0;
 Texture2D OccluderDepth1;
 Texture2D OccluderDepth2;

@@ -3,11 +3,11 @@
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "GasGiantShadowMap.h"
-#include "GasGiantSimTypes.h"
-#include "GasGiantSimSubsystem.generated.h"
+#include "FlowSimTypes.h"
+#include "FlowSimSubsystem.generated.h"
 
-class FGasGiantSimulation;
-class UGasGiantSnapshot;
+class FFlowSimulation;
+class UFlowSnapshot;
 
 /** Game-thread driver for the flow sim.
  *
@@ -28,7 +28,7 @@ class UGasGiantSnapshot;
  *  never appears in the palette and every BlueprintCallable member below is
  *  unreachable -- present in the class, impossible to call. */
 UCLASS(BlueprintType)
-class CLOUDATMOSPHERE_API UGasGiantSimSubsystem : public UTickableWorldSubsystem
+class CLOUDATMOSPHERE_API UFlowSimSubsystem : public UTickableWorldSubsystem
 {
 	GENERATED_BODY()
 
@@ -65,42 +65,42 @@ public:
 
 	/** Begin stepping against this config. Safe to call again with a different
 	 *  config; only a grid change forces a reseed. */
-	UFUNCTION(BlueprintCallable, Category = "Gas Giant")
-	void StartSimulation(UGasGiantSimConfig* InConfig);
+	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
+	void StartSimulation(UFlowSimConfig* InConfig);
 
-	UFUNCTION(BlueprintCallable, Category = "Gas Giant")
+	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	void StopSimulation();
 
 	/** Discard the field and re-seed, or re-upload InitialState if one is set. */
-	UFUNCTION(BlueprintCallable, Category = "Gas Giant")
+	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	void ResetSimulation();
 
 	/** Capture the live state into a snapshot asset. BLOCKS on the GPU: it flushes
 	 *  rendering, waits for the readback and copies a few megabytes. An authoring
 	 *  operation, not a runtime one. */
-	UFUNCTION(BlueprintCallable, Category = "Gas Giant")
-	bool SaveSnapshot(UGasGiantSnapshot* Target);
+	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
+	bool SaveSnapshot(UFlowSnapshot* Target);
 
 	/** Advance exactly N substeps and then pause. Watching one advection step at a
 	 *  time in the residual view is what localises a discretisation bug. */
-	UFUNCTION(BlueprintCallable, Category = "Gas Giant")
+	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	void StepOnce(int32 NumSteps = 1);
 
-	UFUNCTION(BlueprintCallable, Category = "Gas Giant")
+	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	bool IsSpinningUp() const { return StepsCompleted < SpinUpTarget; }
 
 	/** Simulated time elapsed. */
-	UFUNCTION(BlueprintCallable, Category = "Gas Giant")
+	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	float GetSimulatedTime() const { return SimulatedTime; }
 
-	UFUNCTION(BlueprintCallable, Category = "Gas Giant")
+	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	int32 GetStepsCompleted() const { return StepsCompleted; }
 
 	/** Current Courant number: peak rate * step * GridLongitude / 2pi. A
 	 *  consequence of StepRatio, the profile and the grid rather than a control.
 	 *  Above 0.33 the numerical diffusion becomes a real dissipation term, so it
 	 *  is worth watching when tuning DragRate. */
-	UFUNCTION(BlueprintCallable, Category = "Gas Giant")
+	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	float GetCourant() const;
 
 private:
@@ -118,7 +118,7 @@ private:
 
 	/** Builds the flat render-thread snapshot. Returns false if the config is
 	 *  unusable, having already logged why. */
-	bool BuildParams(FGasGiantSimParams& OutParams) const;
+	bool BuildParams(FFlowSimParams& OutParams) const;
 
 	/** Checks the render targets against the grid, reconfiguring them when
 	 *  bAutoResizeTargets is set. Returns false if they remain unusable. All of
@@ -127,16 +127,16 @@ private:
 	bool PrepareTargets() const;
 
 	UPROPERTY(Transient)
-	TObjectPtr<UGasGiantSimConfig> Config;
+	TObjectPtr<UFlowSimConfig> Config;
 
-	FGasGiantSimulation* Simulation = nullptr;
+	FFlowSimulation* Simulation = nullptr;
 
 	/** Hands the render thread the InitialState payload, if there is one worth
 	 *  handing over. Returns true when a restore was queued, so the caller can
 	 *  skip spin-up. */
 	bool QueueInitialState();
 
-	/** Consults UGasGiantSimSettings and starts if this world type wants it. Run
+	/** Consults UFlowSimSettings and starts if this world type wants it. Run
 	 *  from the first Tick rather than Initialize: the world is not reliably ready
 	 *  to resolve a soft object reference that early. */
 	void TryAutoStart();

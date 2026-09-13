@@ -384,7 +384,7 @@ private:
     // TArray rather than a fixed array on the reflected members: the header
     // tool wants a literal bound, and a second spelling of CascadeCount is a
     // number that can drift from the one the dispatch uses. Sized to
-    // GasGiantShadow::CascadeCount wherever they are touched.
+    // AtmoShadowBake::CascadeCount wherever they are touched.
 
     UPROPERTY(Transient)
     TArray<TObjectPtr<USceneCaptureComponent2D>> OccluderCaptures;
@@ -400,9 +400,9 @@ private:
      *  tick. A level on a slow cadence is then placed correctly and only late,
      *  where reusing this tick's frame would drag its last image across the
      *  deck as the light moves. */
-    FGasGiantOccluderFrame OccluderFrames[GasGiantShadow::CascadeCount];
+    FAtmoOccluderFrame OccluderFrames[AtmoShadowBake::CascadeCount];
 
-    int32 FramesSinceCapture[GasGiantShadow::CascadeCount];
+    int32 FramesSinceCapture[AtmoShadowBake::CascadeCount];
 
     /** Creates or destroys the capture components and their R32F targets to
      *  match the current settings and resolution. Returns whether any level is
@@ -428,7 +428,7 @@ private:
     void PrepareTransmittanceTable();
 
     /** Starts the sim subsystem against the deck's config. */
-    void StartGasGiantSimulation();
+    void StartFlowSimulation();
 
     /** Simulated time from the sim subsystem, or 0 when it is not running. NOT
      *  WORLD TIME: the field is coherent against the sim's own clock, and the two
