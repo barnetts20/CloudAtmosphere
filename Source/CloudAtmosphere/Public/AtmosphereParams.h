@@ -291,6 +291,72 @@ struct CLOUDATMOSPHERE_API FGasGiantOccluderShadowParams
 	}
 };
 
+/** Cloud and deck shadows falling on whatever opaque geometry the depth buffer
+ *  holds: terrain, meshes, a mesh inner surface, other actors.
+ *
+ *  A READ-SIDE FEATURE ENTIRELY. The shadow map already answers the question --
+ *  its optical depth is valid anywhere inside the shell, so a point on terrain
+ *  below the deck reads the whole column above it exactly as a deck sample reads
+ *  the column above itself. Nothing here changes the bake, and the march
+ *  evaluates it once, where the view ray stopped.
+ *
+ *  COMMON, NOT PER MODEL, because both marches reach the map through the same
+ *  reader. Only a model that HAS a map can honour it; a march without one leaves
+ *  the group at its disabled default.
+ *
+ *  OUT OF SCOPE: translucent receivers, which do not write depth and so are
+ *  unshadowed, and the engine's lighting as opposed to its output -- this
+ *  multiplies the lit result, so specular and indirect darken with direct sun.
+ *  A light function is the tool when that distinction matters. */
+USTRUCT(BlueprintType)
+struct CLOUDATMOSPHERE_API FAtmosphereSurfaceShadowParams
+{
+	GENERATED_BODY()
+
+	/** Off multiplies by one and costs one scalar branch. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	bool bEnabled = false;
+
+	/** How much of a surface's brightness comes from the sun rather than from
+	 *  sky and bounce. The shadow scales only that share, so a shadowed surface
+	 *  floors at 1 - this rather than going to black.
+	 *
+	 *  THE DIAL THAT STOPS CLOUD SHADOWS READING AS HOLES IN THE WORLD. At 1
+	 *  ambient is shadowed along with the sun and deep shade goes to the map's
+	 *  ceiling; at 0 nothing happens. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0", ClampMax = "1.0"))
+	float DirectFraction = 0.7f;
+
+	/** Distance along the light the receiver is lifted before the map is
+	 *  sampled, in ATMOSPHERE THICKNESSES.
+	 *
+	 *  FOR THE OCCLUDER BAND ONLY. A surface captured into the occluder slices
+	 *  holds its own depth there, so an unbiased receiver reads the occluder's
+	 *  full peak and every captured surface shadows itself everywhere. The
+	 *  deck's own crossings sit above the receiver and need none, so with
+	 *  captures off this can be zero.
+	 *
+	 *  PITFALL: it must clear the occluder lattice's depth quantisation across
+	 *  one texel, which on a slope is the texel width times the slope -- a few
+	 *  kilometres on the disc cascade, so this is not a small number. Too much
+	 *  detaches shadows from the ground near the terminator, where a lift along
+	 *  a grazing light travels a long way laterally. Tune there, not at noon. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0"))
+	float ReceiverBias = 0.0f;
+
+	/** Final multiplier on the optical depth read from the map, for art control
+	 *  independent of the physical terms. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0"))
+	float Strength = 1.0f;
+
+	/** The single vector parameter the march unpacks, four related scalars on
+	 *  one Custom node pin. GGAtmo_BuildAtmo mirrors this layout. */
+	FLinearColor Pack() const
+	{
+		return FLinearColor(bEnabled ? 1.0f : 0.0f, DirectFraction, ReceiverBias, Strength);
+	}
+};
+
 /** Where the shell sits. Planet Center and Planet Radius come from the actor's
  *  transform, not from here; everything below is a fraction of the radius, so
  *  resizing the planet moves the whole system together. */

@@ -149,6 +149,12 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides))
     FGasGiantOccluderShadowParams GasGiantOccluderShadows;
 
+    /** Cloud shadows cast onto opaque geometry. Reads the same map the deck
+     *  does and adds no pass; the edit condition is gas giant only because that
+     *  is the model with a map to read. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides))
+    FAtmosphereSurfaceShadowParams SurfaceShadows;
+
     // --- Atmosphere ---
     //
     // What the actor IS, before anything about how it looks.

@@ -64,11 +64,15 @@ float4 Atmo_Composite(
 	float depthTapScale,
 	float blurWeight)
 {
-	// COLOUR ONLY. Blurring transmittance would soften the boundary between
-	// atmosphere in front of this pixel and clear air, which is the edge the
-	// depth weight below exists to preserve: colour may bleed across a
-	// silhouette, occlusion may not.
+	// COLOUR AND TRANSMITTANCE, UNDER ONE SET OF WEIGHTS. Occlusion must not
+	// bleed across a silhouette, but the depth weight below is what prevents
+	// that and it guards both terms identically -- so leaving transmittance
+	// unfiltered does not protect the silhouette, it only sends the march's
+	// opacity noise to the screen raw. That noise hides against sky, where it
+	// modulates something near-uniform, and does not against a lit surface a few
+	// metres behind the deck.
     float3 sum = center.rgb;
+    float alphaSum = center.a;
     float totalWeight = 1.0;
 
     const float radiusF = float(max(radius, 1));
@@ -80,9 +84,28 @@ float4 Atmo_Composite(
 
     const float radiusSq = radiusF * radiusF;
 
-    const float2 depthTexel = View.ViewSizeAndInvSize.zw * max(depthTapScale, 1.0);
+	// MEASURED FROM screenUV ITSELF, not from View.ViewSizeAndInvSize. A user
+	// scene texture pass renders at OUTPUT resolution while View describes the
+	// INTERNAL one, so below 100% screen percentage a texel taken from View is
+	// short by that factor and every depth tap is read nearer than its colour
+	// tap. The derivative steps by one pixel of whatever this pass is actually
+	// rendering at.
+    const float2 depthTexel =
+		float2(abs(ddx(screenUV.x)), abs(ddy(screenUV.y))) * max(depthTapScale, 1.0);
 
     const float centerDepth = Atmo_SceneDepthAt(ViewportUVToBufferUV(screenUV));
+
+	// THE WEIGHT BELOW MUST REJECT A DISCONTINUITY AND ADMIT A GRADIENT, and
+	// comparing raw depths cannot separate them: a surface seen at a shallow
+	// angle changes depth by tens of percent across the kernel with nothing
+	// discontinuous in it, so every tap fails, the blur collapses to the centre
+	// pixel and the march's dither reaches the screen unfiltered. Predicting a
+	// tap's depth from the local gradient makes a smooth slope read as no
+	// difference at any obliquity.
+	//
+	// PITFALL: derivatives need the whole quad, so this cannot move inside the
+	// loop or under a branch.
+    const float2 depthGradient = float2(ddx(centerDepth), ddy(centerDepth));
 
     for (int x = -radius; x <= radius; x++)
     {
@@ -97,26 +120,51 @@ float4 Atmo_Composite(
                 continue;
 
             float2 offset = float2(x, y);
-            float3 s = SceneTextureFetchFunc(Parameters, SceneTextureId, offset).rgb;
+            float4 s = SceneTextureFetchFunc(Parameters, SceneTextureId, offset);
 
             float spatialW = exp(-dist2 * invW);
+
+            float2 screenOffset = offset * depthTexel;
+            float sampleDepth = Atmo_SceneDepthAt(ViewportUVToBufferUV(screenUV + screenOffset));
+
+			// THE SMALLER OF THE TWO DIFFERENCES, so the plane fit can only ever
+			// admit a tap the flat test rejected. On level ground the gradient
+			// is zero and the two agree; on a slope the fit wins; where the fit
+			// runs away -- across a silhouette, where the gradient is one
+			// pixel's worth of a cliff -- the flat difference is still there to
+			// reject on, so this cannot be worse than not fitting at all.
+			//
+			// PITFALL: a steep slope whose gradient happens to extrapolate onto
+			// a background object at the edge of the kernel is a false accept,
+			// and colour bleeds across that silhouette. Narrow, and the standard
+			// trade for the fit.
+			// IN PIXELS, the unit ddx returns a rate in -- offset is in march
+			// texels and depthTapScale converts.
+            float predicted = centerDepth
+				+ dot(offset * max(depthTapScale, 1.0), depthGradient);
 
 			// Normalized by the centre depth so the tolerance is relative: an
 			// absolute threshold would be far too tight at planetary distance
 			// and far too loose up close.
-            float2 sampleUV = screenUV + offset * depthTexel;
-            float sampleDepth = Atmo_SceneDepthAt(ViewportUVToBufferUV(sampleUV));
-            float depthDiff = abs(centerDepth - sampleDepth) / max(centerDepth, 1.0);
+            float depthDiff = min(
+				abs(centerDepth - sampleDepth),
+				abs(predicted - sampleDepth)) / max(centerDepth, 1.0);
+
             float depthW = exp(-depthDiff * depthDiff * depthSharpness);
 
             float w = spatialW * depthW;
 
-            sum += s * w;
+            sum += s.rgb * w;
+            alphaSum += s.a * w;
             totalWeight += w;
         }
     }
 
-    const float3 atmo = lerp(center.rgb, sum / totalWeight, saturate(blurWeight));
+    const float invTotal = 1.0 / totalWeight;
+    const float weight = saturate(blurWeight);
 
-    return float4(atmo + sceneColor * center.a, 1.0);
+    const float3 atmo = lerp(center.rgb, sum * invTotal, weight);
+    const float alpha = lerp(center.a, alphaSum * invTotal, weight);
+
+    return float4(atmo + sceneColor * alpha, 1.0);
 }

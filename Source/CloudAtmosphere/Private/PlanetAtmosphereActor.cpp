@@ -845,6 +845,13 @@ void APlanetAtmosphereActor::ApplyGasGiantParams(float PlanetRadius, const FVect
     SetScalarChecked(MID_Atmosphere, TEXT("StepScaleFactor"), GasGiantRaymarch.StepScaleFactor);
     SetScalarChecked(MID_Atmosphere, TEXT("ViewStepPixels"), GasGiantRaymarch.ViewStepPixels);
     SetScalarChecked(MID_Atmosphere, TEXT("DeckSlope"), GasGiantRaymarch.DeckSlope);
+
+    // -- Surface Shadows ----------------------------------------------------------
+    //
+    // PACKED, unlike everything above: four related scalars on one Custom node
+    // pin, the way the band tints and the cloud phase already travel. Pack()
+    // owns the layout and GGAtmo_BuildAtmo unpacks it.
+    SetVectorChecked(MID_Atmosphere, TEXT("SurfaceShadow"), SurfaceShadows.Pack());
 }
 
 void APlanetAtmosphereActor::ApplyGasGiantLayer(const TCHAR* Prefix, const FGasGiantNoiseLayerParams& Layer)

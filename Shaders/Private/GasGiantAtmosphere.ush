@@ -476,6 +476,7 @@ CompositeParams GGAtmo_BuildAtmo(
 	float AtmosphereSteps,
 	float CloudSteps,
 	float StepScaleFactor,
+	float4 SurfaceShadow,
 	GGFieldParams F)
 {
 	// BOUNDS, WITH THE LAYERS' FADES FOLDED IN. The outer bound sets the marched
@@ -519,7 +520,7 @@ CompositeParams GGAtmo_BuildAtmo(
 	// GGScatterParams, on the view ray and at the light ray's receiver.
     const float3 CloudScatterBeta = GG_DeckBeta(F, DeckOpticalDepth).xxx;
 
-    return Atmo_BuildParams(
+    CompositeParams Params = Atmo_BuildParams(
 		SvPosition, RayDir, CameraPosition, PlanetCenter,
 		F.PlanetRadius, F.PlanetRadius + F.Thickness, CloudOuter, CloudInner,
 		SceneDepth, LightDirection, LightColor,
@@ -537,6 +538,16 @@ CompositeParams GGAtmo_BuildAtmo(
 		0.0f, 0.0f, float4(0.0f, 0.0f, 0.0f, 0.0f),
 		(int) AtmosphereSteps, (int) CloudSteps,
 		StepScaleFactor);
+
+	// ONE PIN FOR FOUR RELATED SCALARS, matching how the band tints and the
+	// cloud phase already travel. FAtmosphereSurfaceShadowParams::Pack writes
+	// this layout and nothing checks that the two still agree.
+    Params.surfaceShadowParams.enabled = SurfaceShadow.x;
+    Params.surfaceShadowParams.directFraction = saturate(SurfaceShadow.y);
+    Params.surfaceShadowParams.receiverBias = max(SurfaceShadow.z, 0.0f);
+    Params.surfaceShadowParams.strength = max(SurfaceShadow.w, 0.0f);
+
+    return Params;
 }
 
 /** Light reaching a sample, as the air's transmittance with the planet shadow
@@ -1228,8 +1239,85 @@ float4 GGAtmo_MainMarch(
         Transmittance = float3(0.0f, 0.0f, 0.0f);
     }
 
+	// -- Cloud shadows on geometry ------------------------------------------
+	//
+	// THE SAME EXPRESSION THE DECK SAMPLES RUN, at the place the view ray
+	// stopped. Folded into Transmittance before it collapses, so the composite,
+	// the render targets and the parameter set are untouched and no second pass
+	// exists.
+	//
+	// GATED ON A REAL HIT. ATMO_NO_OCCLUDER_DISTANCE means the ray left through
+	// the shell into sky, where there is nothing to shadow and the position
+	// below would be a point on the far side of the atmosphere. An
+	// already-opaque ray is skipped because the multiply cannot change it.
+    BRANCH
+
+    if (P.Atmo.surfaceShadowParams.enabled > 0.0f
+		&& P.Atmo.mainRayParams.sceneDepth < ATMO_NO_OCCLUDER_DISTANCE
+		&& max(Transmittance.x, max(Transmittance.y, Transmittance.z)) > 0.0f)
+    {
+		// sceneDepth is a TRUE RAY DISTANCE and LocalDir is a rotation of a unit
+		// direction, so it spends the same along either. Rederiving the surface
+		// from the depth buffer here would be a second derivation of the value
+		// already bounding the march.
+        const float3 SurfaceLocal =
+			LocalOrigin + LocalDir * P.Atmo.mainRayParams.sceneDepth;
+
+        const float3 LightLocal = mul(P.WorldToLocal, P.Atmo.lightRayParams.lightDir);
+
+		// The fold constant and the ceiling scale as the light march builds
+		// them, minus the octave term: a surface receives single scattering.
+        const float AbsMax = P.Atmo.cloudParams.cloudAbsBeta.x * P.Scatter.TintRange.y;
+
+        const float TauScale = max(
+			P.Scatter.TintRange.x / max(P.Scatter.TintRange.y, 1e-8f),
+			GG_SHADOW_MIN_TAU_SCALE);
+
+		// NO LOOKUP JITTER. A light ray's samples jitter because there are many
+		// of them along one ray to average the texel neighbourhood; this is one
+		// tap, so an offset is not an average but a per-pixel dither -- and it
+		// lands in TRANSMITTANCE, which the composite does not filter as heavily
+		// as colour. The quintic reconstruction is already continuous, so
+		// reading it unjittered costs nothing.
+        const float SurfaceOptDepth = GG_ShadowSurfaceOptDepth(
+			ShadowMap, ShadowSampler, SurfaceLocal, LightLocal, ShadowCameraLocal,
+			float2(0.0f, 0.0f), GG_SHADOW_SATURATION / TauScale, AbsMax,
+			P.Atmo.surfaceShadowParams.receiverBias, P.Field)
+			* P.Atmo.surfaceShadowParams.strength;
+
+		// THE RECEIVER'S BAND COLOURS THE DECK IT WAS SHADOWED BY, the rule the
+		// deck samples above already follow, with the same guard and the same
+		// fallback. A second tint would be a second answer to one question.
+		//
+		// PITFALL: the rule rests on bands being far wider than the deck is
+		// deep, so the light path stays mostly in the receiver's band. A surface
+		// can sit much further below the deck than a deck sample does, which
+		// makes that path longer and the approximation weaker -- worst at low
+		// sun near a band edge.
+        float3 LightTint = P.Scatter.ExtinctionBase.rgb;
+
+        BRANCH
+
+        if (SurfaceOptDepth > 0.0f)
+        {
+            LightTint = GGAtmo_BandTint(
+				GG_BandCoarse(FlowField, FlowSampler, SurfaceLocal, P.Field), P.Scatter);
+        }
+
+		// LERPED AGAINST THE DIRECT SHARE, NOT FOLDED INTO THE EXPONENT. Only
+		// the sun's contribution is occluded; sky and bounce reach the surface
+		// regardless, so the multiplier has to floor at 1 - directFraction.
+		// Scaling the optical depth instead still runs every channel to black
+		// under a thick deck, which is the hole in the world this dial exists to
+		// prevent -- it only takes more cloud to get there.
+        Transmittance *= lerp(1.0f,
+			exp(-P.Atmo.cloudParams.cloudAbsBeta * LightTint * SurfaceOptDepth),
+			P.Atmo.surfaceShadowParams.directFraction);
+    }
+
 	// The MOST opaque channel: the alpha is one value composited against the
-	// scene behind.
+	// scene behind. A coloured surface shadow survives only to here and then
+	// becomes that channel, the same compromise the air's own extinction makes.
     const float MinTrans = min(Transmittance.x, min(Transmittance.y, Transmittance.z));
 
 #if GG_DEBUG_TERM

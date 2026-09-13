@@ -489,3 +489,57 @@ float AtmoShadow_Tau(
 
     return Tau;
 }
+
+/** Band-weighted optical depth between a point on OPAQUE GEOMETRY and the light,
+ *  with the bake's fold constant divided back out. Zero where the receiver is
+ *  outside the shell.
+ *
+ *  DEPTH, NOT TRANSMITTANCE, mirroring what a light march hands back: the
+ *  amounts are in the map and the colour is applied where the depth is read,
+ *  since the band coordinate at the receiver only a model can compute.
+ *
+ *  THE RADIAL GATE IS NOT REDUNDANT. AtmoShadow_Tau tests the ray's
+ *  PERPENDICULAR offset, which admits any point laterally inside the disc. One
+ *  in front of the planet reads near zero and is harmless; one behind it reads
+ *  the ceiling, and would be shadowed for standing behind a planet rather than
+ *  under a cloud.
+ *
+ *  THE BIAS RUNS ALONG THE LIGHT, not along the surface normal, because the
+ *  quantity being compared is a depth along the light and no normal is available
+ *  here -- so the amount needed grows with surface slope and is authored rather
+ *  than derived. It exists for the OCCLUDER BAND: a captured surface holds its
+ *  own depth in the occluder slice, so an unbiased receiver evaluates at
+ *  Past == 0, the occluder's full peak, and every captured surface shadows
+ *  itself everywhere. The deck's own nodes need none, sitting above the
+ *  receiver, so with captures off this can be zero.
+ *
+ *  PITFALL: the bias must clear the occluder lattice's depth quantisation across
+ *  one texel, which on a slope is texel width times slope -- kilometres on the
+ *  disc cascade. Too much detaches shadows from the ground near the terminator,
+ *  where a step along a grazing light travels a long way laterally. Tune there,
+ *  not at noon. */
+float AtmoShadow_SurfaceOptDepth(
+	Texture2DArray ShadowMap,
+	SamplerState ShadowSampler,
+	float3 LocalPos,
+	float3 LightLocal,
+	float3 CameraLocal,
+	float2 JitterTexels,
+	float Ceiling,
+	AtmoShadowFrame Frame,
+	float FoldConstant,
+	float ReceiverBias)
+{
+    if (dot(LocalPos, LocalPos) > Frame.CullRadius * Frame.CullRadius)
+    {
+        return 0.0f;
+    }
+
+    const float3 L = normalize(LightLocal);
+
+    const float Tau = AtmoShadow_Tau(
+		ShadowMap, ShadowSampler, LocalPos + L * (ReceiverBias * Frame.Thickness),
+		L, CameraLocal, JitterTexels, Ceiling, Frame);
+
+    return Tau / max(FoldConstant, 1e-8f);
+}

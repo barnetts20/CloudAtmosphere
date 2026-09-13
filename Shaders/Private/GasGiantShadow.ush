@@ -117,3 +117,24 @@ float GG_ShadowTau(
 		ShadowMap, ShadowSampler, LocalPos, LightLocal, CameraLocal,
 		JitterTexels, Ceiling, GG_ShadowFrame(F));
 }
+
+/** Band-weighted deck depth above a point on opaque geometry, fold constant
+ *  removed. The caller multiplies by cloudAbsBeta and the receiving band's tint,
+ *  exactly as it does for GGAtmo_LightMarch's deck depth. See
+ *  AtmoShadow_SurfaceOptDepth. */
+float GG_ShadowSurfaceOptDepth(
+	Texture2DArray ShadowMap,
+	SamplerState ShadowSampler,
+	float3 LocalPos,
+	float3 LightLocal,
+	float3 CameraLocal,
+	float2 JitterTexels,
+	float Ceiling,
+	float FoldConstant,
+	float ReceiverBias,
+	GGFieldParams F)
+{
+    return AtmoShadow_SurfaceOptDepth(
+		ShadowMap, ShadowSampler, LocalPos, LightLocal, CameraLocal,
+		JitterTexels, Ceiling, GG_ShadowFrame(F), FoldConstant, ReceiverBias);
+}

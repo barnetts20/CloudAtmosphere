@@ -85,6 +85,17 @@ struct LightRayParams
     int parentStepIndex; // salts the light ray's jitter
 };
 
+/** Cloud shadows cast onto the opaque geometry a view ray stops on, evaluated
+ *  once per pixel from the shadow map. A march with no map to read leaves
+ *  enabled at zero and pays one scalar branch. */
+struct SurfaceShadowParams
+{
+    float enabled;
+    float directFraction; // the sun's share of a surface's brightness
+    float receiverBias; // lift along the light, in atmosphere thicknesses
+    float strength; // multiplier on optical depth, for art control
+};
+
 /** Everything one march reads, built once per pixel. */
 struct CompositeParams
 {
@@ -93,6 +104,7 @@ struct CompositeParams
     CloudParams cloudParams;
     MainRayParams mainRayParams;
     LightRayParams lightRayParams;
+    SurfaceShadowParams surfaceShadowParams;
 };
 
 /** Ray against a sphere: (near, far) distances along dir, or (-1, -1) on a miss.

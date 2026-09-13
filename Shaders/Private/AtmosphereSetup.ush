@@ -174,5 +174,13 @@ CompositeParams Atmo_BuildParams(
     params.lightRayParams.stepSizeMult = 1.0;
     params.lightRayParams.parentStepIndex = 0;
 
+	// OFF UNLESS A MODEL TURNS IT ON. Surface shadows are read from a shadow
+	// map, which this function knows nothing about, so the default has to be the
+	// one a march without a map can honour.
+    params.surfaceShadowParams.enabled = 0.0;
+    params.surfaceShadowParams.directFraction = 0.0;
+    params.surfaceShadowParams.receiverBias = 0.0;
+    params.surfaceShadowParams.strength = 0.0;
+
     return params;
 }
