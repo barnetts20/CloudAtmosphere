@@ -12,6 +12,15 @@
 // THERE IS NOTHING -- above the top and below the base density is exactly zero,
 // which is what lets a ray pass under the cloud and a camera stand beneath it.
 //
+// COVERAGE IS DEPTH, NOT A MASK. The base is the condensation level and barely
+// moves; what changes with the weather is how far a column rises above it. So
+// coverage scales the depth and nothing thresholds anything: where it runs
+// shallow the relief pushes the top through the base, the two clamp together
+// and the column is empty. Holes are columns of no depth, so they are empty at
+// every altitude, and their edges are shaped by the same relief that shapes the
+// tops. SIGNED, -1 TO 1, so a clear sky is clear: at -1 the depth starts a full
+// thickness below zero and no relief can lift it back.
+//
 // THE BASE FOLLOWS THE TOP, SCALED. Both surfaces read the same two shape
 // values, the base at BaseRelief of the top's displacement, so a base costs no
 // extra fetch and a tall column is a thick one. The two are decorrelated only by
@@ -114,6 +123,17 @@ struct TRFieldParams
 	 *  0.5 the onset loses its C1 join. */
     float TopCurve;
     float BottomCurve;
+
+	/** Depth of a column as a signed multiple of CloudThickness, before relief:
+	 *  1 a full column, 0 a column made entirely of relief, -1 a column relief
+	 *  cannot reach. Authored 0 to 1 and remapped in TR_BuildField. */
+    float CloudCover;
+
+	/** How far falling pressure adds depth, a multiple of CloudThickness per
+	 *  unit of pressure. Cyclonic air converges and rises, so the sign is
+	 *  negative-pressure-adds -- the inverse of what the same channel does to a
+	 *  gas giant deck. */
+    float CoverPressure;
 
 	/** How much of the band's displacement the base takes, signed: 0 holds the
 	 *  base flat while the top moves and the depth carries the relief, 1
@@ -228,6 +248,8 @@ TRFieldParams TR_BuildField(
 	float BottomSoftness,
 	float TopCurve,
 	float BottomCurve,
+	float CloudCover,
+	float CoverPressure,
 	float BaseRelief,
 	float BaseStormDrop,
 	float BandSharpness,
@@ -279,6 +301,13 @@ TRFieldParams TR_BuildField(
 
     F.TopCurve = TopCurve;
     F.BottomCurve = BottomCurve;
+
+	// REMAPPED TO SIGNED HERE, once. Authored as cover, used as depth: 0 has to
+	// reach a full thickness below zero, or the relief leaves cloud in a sky the
+	// slider says is clear.
+    F.CloudCover = CloudCover * 2.0f - 1.0f;
+    F.CoverPressure = CoverPressure;
+
     F.BaseRelief = BaseRelief;
     F.BaseStormDrop = BaseStormDrop;
 
@@ -367,7 +396,7 @@ TRFieldParams TR_BuildField(
 /** The call both consumers make, expanded from one definition beside the
  *  signature it has to match.
  *
- *  PITFALL: 51 POSITIONAL FLOAT ARGUMENTS. A parameter inserted above but missed
+ *  PITFALL: 53 POSITIONAL FLOAT ARGUMENTS. A parameter inserted above but missed
  *  at a call site still compiles, silently shifting every argument after it --
  *  VortexThreshold arriving as StormTowerRelief and so on, with nothing to catch
  *  it. Expanding from here makes that impossible: every name resolves in the
@@ -380,7 +409,8 @@ TRFieldParams TR_BuildField(
 #define TR_BUILD_FIELD() TR_BuildField( \
 	PlanetRadius, HeightScale, Time, \
 	CloudBase, CloudThickness, CeilingFalloff, TopSoftness, \
-	BottomSoftness, TopCurve, BottomCurve, BaseRelief, BaseStormDrop, \
+	BottomSoftness, TopCurve, BottomCurve, CloudCover, CoverPressure, \
+	BaseRelief, BaseStormDrop, \
 	BandSharpness, BandBias, HemisphereBlend, HemisphereVariance, \
 	BandRelief, PressureRelief, VortexThreshold, StormTowerRelief, \
 	ReliefThinning, RotationWeight, WarpTime, DeepShearRatio, \
@@ -569,9 +599,21 @@ float TR_StormSign(float Pressure)
  *  centres, where a storm belongs. That same gate drops the base, so a vortex
  *  reads as a tall column standing on a low floor rather than as a raised deck.
  *
+ *  COVERAGE SETS THE DEPTH AND THE CLAMP MAKES THE HOLES. A shallow column is
+ *  one the relief can push through: Shift reaches the top whole and the base at
+ *  BaseRelief of it, so the two close at a depth of Shift*(1 - BaseRelief) and
+ *  everything shallower than that is empty. No threshold, no second noise --
+ *  the same relief that shapes the tops shapes the edges of the gaps.
+ *
  *  PITFALL: the base is held at or below the top. Uncrossed it would invert the
  *  profile, and the bounds below assume the slab is a span rather than a
- *  reversed one. */
+ *  reversed one. It is also what makes a hole a hole, so it is load-bearing
+ *  rather than defensive.
+ *
+ *  PITFALL: Shift*(1 - BaseRelief) has to stay under CloudThickness or coverage
+ *  at its floor stops being clear -- relief alone then builds cloud in a sky the
+ *  slider says is empty, which reads as a coverage fault and is a relief one.
+ *  SolvedReliefReach is that number against its budget. */
 void TR_CloudSurfaces(
 	float BandHeight,
 	float CarveDetail,
@@ -599,9 +641,14 @@ void TR_CloudSurfaces(
 
     Shift += D * F.StormTowerRelief * TR_StormSign(Pressure) * Cell;
 
-	// THE TOP IS DERIVED, NOT AUTHORED: the band hangs its full depth above its
-	// own base, and relief moves that base and the top by their own shares.
-    OutTop = F.CloudBase + D + Shift;
+	// Cyclonic air converges and rises, so falling pressure deepens the column.
+	// Clamped to the authored range at both ends: past 1 the sky cannot get any
+	// more overcast, and past -1 the extra depth is unreachable anyway.
+    const float Coverage = clamp(F.CloudCover - F.CoverPressure * Pressure, -1.0f, 1.0f);
+
+	// THE TOP IS DERIVED, NOT AUTHORED: the band hangs its own depth above its
+	// base, and relief moves that base and the top by their own shares.
+    OutTop = F.CloudBase + D * Coverage + Shift;
 
     OutBase = min(
 		F.CloudBase + Shift * F.BaseRelief - D * F.BaseStormDrop * Cell, OutTop);
@@ -666,10 +713,15 @@ TRFlowProbe TR_ProbeFromFlow(float4 Flow, float3 N, TRFieldParams F)
     const float ShiftMax = PressureTerm + max(BandTerm, 0.0f) + max(StormTerm, 0.0f);
     const float ShiftMin = PressureTerm + min(BandTerm, 0.0f) + min(StormTerm, 0.0f);
 
+	// AT THIS COLUMN'S OWN COVERAGE, which the probe already knows: pressure is
+	// on it and the global term is a constant, so the bound tightens wherever
+	// the sky is clear and the empty-air early-out fires over more of the shell.
+    const float Coverage = clamp(F.CloudCover - F.CoverPressure * Probe.Pressure, -1.0f, 1.0f);
+
 	// CAPPED AT THE SHELL, where the ceiling fade has already taken density to
 	// zero. Uncapped, a rare tall column would widen every bound derived from
 	// this for the sake of air that cannot scatter.
-    Probe.TopUpper = min(F.CloudBase + D + ShiftMax + CarveUp, 1.0f);
+    Probe.TopUpper = min(F.CloudBase + D * Coverage + ShiftMax + CarveUp, 1.0f);
 
 	// The base's share of a signed displacement, so whichever extreme BaseRelief
 	// turns downward is the one that bounds it. The carve reach is taken at its
@@ -1279,6 +1331,13 @@ void TR_ShiftReach(
 
 /** The highest any column top can reach, an atmosphere fraction.
  *
+ *  AT FULL COVERAGE WHATEVER THE SLIDER SAYS, because the shells are planet-wide
+ *  and a single cyclone is enough to deepen a column somewhere. The marched band
+ *  therefore does not narrow when the sky clears, which costs fine steps across
+ *  air that has no cloud in it -- recoverable later from the authored cover and
+ *  the pressure term's own range, and not worth bounding until that range is
+ *  known.
+ *
  *  CLAMPED AT THE SHELL: the ceiling fade leaves no density above it. Unclamped,
  *  a tall rare feature would widen the marched band and coarsen every step for
  *  the sake of a few columns. */
@@ -1288,6 +1347,17 @@ float TR_TopMax(TRFieldParams F, float DetailFade, float StructureFade)
     TR_ShiftReach(F, DetailFade, StructureFade, Down, Up);
 
     return min(F.CloudBase + F.CloudThickness + Up, 1.0f);
+}
+
+/** How much depth the relief can add to a column on its own, an atmosphere
+ *  fraction: what coverage at its floor has to out-reach, and the readout that
+ *  says whether it does. */
+float TR_ReliefReach(TRFieldParams F)
+{
+    float Down, Up;
+    TR_ShiftReach(F, 1.0f, 1.0f, Down, Up);
+
+    return Up * (1.0f - F.BaseRelief);
 }
 
 /** The lowest any column base can fall, an atmosphere fraction: WHERE THE

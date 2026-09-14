@@ -674,7 +674,7 @@ static void SolveTerrestrialBounds(
     const FTerrestrialProfileParams& Profile, float BandRelief,
     const FAtmosphereFlowParams& Flow,
     const FAtmosphereNoiseLayerParams& Structure, const FAtmosphereNoiseLayerParams& Detail,
-    float& OutTopMax, float& OutBaseMin)
+    float& OutTopMax, float& OutBaseMin, float& OutReliefReach)
 {
     const float Depth = FMath::Max(Profile.CloudThickness, 1e-4f);
 
@@ -686,6 +686,8 @@ static void SolveTerrestrialBounds(
 
     OutBaseMin = Profile.CloudBase - FMath::Abs(Profile.BaseRelief) * Reach
         - Depth * FMath::Max(Profile.BaseStormDrop, 0.0f);
+
+    OutReliefReach = Reach * (1.0f - Profile.BaseRelief);
 }
 
 void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir)
@@ -882,7 +884,8 @@ void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
     SolveTerrestrialBounds(
         TerrestrialProfile, TerrestrialBandShape.BandRelief,
         TerrestrialFlow, TerrestrialStructureLayer, TerrestrialDetailLayer,
-        TerrestrialProfile.SolvedTopMax, TerrestrialProfile.SolvedBaseMin);
+        TerrestrialProfile.SolvedTopMax, TerrestrialProfile.SolvedBaseMin,
+        TerrestrialProfile.SolvedReliefReach);
 
     SetScalarChecked(MID_Atmosphere, TEXT("CloudBase"), TerrestrialProfile.CloudBase);
     SetScalarChecked(MID_Atmosphere, TEXT("CloudThickness"), TerrestrialProfile.CloudThickness);
@@ -891,6 +894,8 @@ void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
     SetScalarChecked(MID_Atmosphere, TEXT("BottomSoftness"), TerrestrialProfile.BottomSoftness);
     SetScalarChecked(MID_Atmosphere, TEXT("TopCurve"), TerrestrialProfile.TopCurve);
     SetScalarChecked(MID_Atmosphere, TEXT("BottomCurve"), TerrestrialProfile.BottomCurve);
+    SetScalarChecked(MID_Atmosphere, TEXT("CloudCover"), TerrestrialProfile.CloudCover);
+    SetScalarChecked(MID_Atmosphere, TEXT("CoverPressure"), TerrestrialProfile.CoverPressure);
     SetScalarChecked(MID_Atmosphere, TEXT("BaseRelief"), TerrestrialProfile.BaseRelief);
     SetScalarChecked(MID_Atmosphere, TEXT("BaseStormDrop"), TerrestrialProfile.BaseStormDrop);
     SetScalarChecked(MID_Atmosphere, TEXT("CloudSlope"), TerrestrialProfile.CloudSlope);
@@ -1724,6 +1729,8 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.BottomSoftness = TerrestrialProfile.BottomSoftness;
         Params.TopCurve = TerrestrialProfile.TopCurve;
         Params.BottomCurve = TerrestrialProfile.BottomCurve;
+        Params.CloudCover = TerrestrialProfile.CloudCover;
+        Params.CoverPressure = TerrestrialProfile.CoverPressure;
         Params.BaseRelief = TerrestrialProfile.BaseRelief;
         Params.BaseStormDrop = TerrestrialProfile.BaseStormDrop;
         Params.CloudSlope = TerrestrialProfile.CloudSlope;

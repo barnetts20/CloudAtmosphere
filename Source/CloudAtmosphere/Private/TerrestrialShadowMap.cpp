@@ -64,6 +64,8 @@ namespace TerrestrialShadow
 		P->BottomSoftness = Params.BottomSoftness;
 		P->TopCurve = Params.TopCurve;
 		P->BottomCurve = Params.BottomCurve;
+		P->CloudCover = Params.CloudCover;
+		P->CoverPressure = Params.CoverPressure;
 		P->BaseRelief = Params.BaseRelief;
 		P->BaseStormDrop = Params.BaseStormDrop;
 		P->BandSharpness = Params.BandSharpness;

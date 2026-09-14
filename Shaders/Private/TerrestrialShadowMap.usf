@@ -58,6 +58,8 @@ float TopSoftness;
 float BottomSoftness;
 float TopCurve;
 float BottomCurve;
+float CloudCover;
+float CoverPressure;
 float BaseRelief;
 float BaseStormDrop;
 float BandSharpness;

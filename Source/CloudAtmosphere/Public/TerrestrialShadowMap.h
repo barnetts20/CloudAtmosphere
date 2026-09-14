@@ -61,6 +61,8 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	float BottomSoftness = 0.0f;
 	float TopCurve = 0.0f;
 	float BottomCurve = 0.0f;
+	float CloudCover = 0.0f;
+	float CoverPressure = 0.0f;
 	float BaseRelief = 0.0f;
 	float BaseStormDrop = 0.0f;
 	float BandSharpness = 0.0f;
@@ -194,6 +196,8 @@ SHADER_PARAMETER(float, TopSoftness)
 SHADER_PARAMETER(float, BottomSoftness)
 SHADER_PARAMETER(float, TopCurve)
 SHADER_PARAMETER(float, BottomCurve)
+SHADER_PARAMETER(float, CloudCover)
+SHADER_PARAMETER(float, CoverPressure)
 SHADER_PARAMETER(float, BaseRelief)
 SHADER_PARAMETER(float, BaseStormDrop)
 SHADER_PARAMETER(float, BandSharpness)

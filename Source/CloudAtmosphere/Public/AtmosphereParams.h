@@ -447,6 +447,26 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001"))
 	float BottomCurve = 1.5f;
 
+	/** How much of a full column the weather builds before relief. THE MASTER
+	 *  COVER HANDLE: 1 is overcast, 0 is a sky relief alone cannot fill, and a
+	 *  half is broken cloud whose gaps and edges are shaped by the same noise
+	 *  that shapes the tops. Remapped to a signed depth in the shader, which is
+	 *  what lets 0 reach far enough below zero to stay clear. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CloudCover = 0.6f;
+
+	/** How much falling pressure deepens a column, as a multiple of
+	 *  CloudThickness per unit of pressure. Cyclonic air converges and rises, so
+	 *  lows are cloudy and highs are clear -- the inverse of what the same
+	 *  channel does to a gas giant deck.
+	 *
+	 *  Pressure is a proxy for the ascent that actually makes cloud. If cloud
+	 *  ends up pooled in the middle of a low rather than along its converging
+	 *  edge, the velocity field's divergence is the truer driver, at four
+	 *  neighbour taps against a channel already on the probe. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float CoverPressure = 0.5f;
+
 	/** How much of the band's displacement the base takes. 0 holds the base flat
 	 *  while the top moves, so every feature is depth; 1 translates the band
 	 *  rigidly and the depth is uniform; negative opens the band where the top
@@ -490,6 +510,13 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	 *  ceiling. Above 1 - CeilingFalloff the tallest features are being capped. */
 	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly)
 	float SolvedTopMax = 0.0f;
+
+	/** READOUT, not authored: how much depth the relief can add to a column on
+	 *  its own. KEEP IT UNDER CloudThickness, or coverage at 0 stops being clear
+	 *  and relief builds cloud in an empty sky -- which reads as a coverage fault
+	 *  and is a relief one. */
+	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly)
+	float SolvedReliefReach = 0.0f;
 
 	/** READOUT, not authored: the lowest a column base could fall, which is where
 	 *  the marched band ends. The span between this and SolvedTopMax is what
