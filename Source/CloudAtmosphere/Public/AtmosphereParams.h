@@ -411,7 +411,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	 *  thickness. THE ANCHOR: relief moves the band about this rather than about
 	 *  its top, so raising it lifts the whole cloud without reshaping it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float CloudBase = 0.10f;
+	float CloudBase = 0.05f;
 
 	/** Depth of an unrelieved column, as a fraction of atmosphere thickness, and
 	 *  the unit every relief amount is a multiple of. THE GRAIN HANDLE: widen it
@@ -420,22 +420,16 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	 *  this below 1 - CeilingFalloff, or the ceiling thins the whole column and
 	 *  CloudOpticalDepth stops being exact. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", ClampMax = "1.0"))
-	float CloudThickness = 0.08f;
+	float CloudThickness = 1.0f;
 
-	/** Share of the depth the TOP ramp occupies, 0 a hard surface and 1 a band
-	 *  that ramps the whole way down with no core. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float TopSoftness = 0.5f;
-
-	/** Share of the depth the BOTTOM ramp occupies. Cloud bases are sharper than
-	 *  cloud tops, so this is normally well under TopSoftness -- and it also sets
-	 *  the bake's step, which is taken against the finer of the two.
-	 *
-	 *  THE TWO SHARES ARE FITTED, NOT CLAMPED. Asking for more than the depth
-	 *  scales both down together and keeps their ratio, so the ramps can never
-	 *  overlap and peak density always reaches exactly 1. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float BottomSoftness = 0.15f;
+	/** Share of the depth each surface's ramp occupies. At the half it caps at,
+	 *  the two meet in the middle and the column has no core; at zero both
+	 *  surfaces are hard. ONE SHARE FOR BOTH, with the two curves below carrying
+	 *  whatever asymmetry the surfaces want -- a base is sharper than a top
+	 *  because BottomCurve says so, not because it was given less room. Also sets
+	 *  the bake's step. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "0.5"))
+	float SurfaceSoftness = 0.5f;
 
 	/** Shape of the top ramp. PITFALL: below 0.5 the onset loses its C1 join and
 	 *  the surface hardens into an edge -- a legitimate look, not clamped. */
@@ -445,7 +439,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	/** Shape of the bottom ramp, as TopCurve is for the top. Above 1 flattens the
 	 *  base, which is what a cumulus field wants. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001"))
-	float BottomCurve = 1.5f;
+	float BottomCurve = 1.0f;
 
 	/** How much of a full column the weather builds before relief. THE MASTER
 	 *  COVER HANDLE: 1 is overcast, 0 is a sky relief alone cannot fill, and a
@@ -453,37 +447,111 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	 *  that shapes the tops. Remapped to a signed depth in the shader, which is
 	 *  what lets 0 reach far enough below zero to stay clear. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float CloudCover = 0.6f;
+	float CloudCover = 0.333f;
 
-	/** How much falling pressure deepens a column, as a multiple of
-	 *  CloudThickness per unit of pressure. Cyclonic air converges and rises, so
-	 *  lows are cloudy and highs are clear -- the inverse of what the same
-	 *  channel does to a gas giant deck.
+	// -- The four flow signals -----------------------------------------------
+	//
+	// Each answers "how much of a thing is at this column", in [0,1], and each
+	// gets three handles: how much DEPTH it adds, how much LIFT it adds, and how
+	// far the RAMP is allowed to invert it. Depth and lift are multiples of
+	// CloudThickness; ramp is 0 to 1.
+	//
+	// THE RAMP IS THE SECOND DIMENSION. A presence says a thing is here; the
+	// ramp says whether the air there is rising or sinking. At ramp 0 a channel
+	// only ever adds. At 1 it fully inverts wherever the air is slack, so the
+	// same signal builds where air rises and carves where it sinks -- which is
+	// what puts an eye in a hurricane, since a vortex turns hardest at its
+	// centre and moves fastest at its wall.
+	//
+	// A RAMPED CHANNEL COSTS BOUND WIDTH, because it reaches both ways and the
+	// shells have to allow for it. SolvedTopMax and SolvedBaseMin are where that
+	// shows.
+
+	/** ACTIVITY: rotation magnitude, the finest scale the flow has. Full ramp is
+	 *  what hollows out the middle of a rotating system. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float ActivityDepth = 0.40f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float ActivityLift = 0.10f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ActivityRamp = 1.0f;
+
+	/** SYSTEM STRENGTH: pressure magnitude, and THE ONLY LARGE-SCALE CHANNEL --
+	 *  every derivative of the streamfunction kills the broad scales, so without
+	 *  this a planet has small features and latitude bands and nothing between.
+	 *  It is also the only channel that knows you are inside a strong system when
+	 *  everything local is quiet, which is what the interior of a high is. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float SystemDepth = 0.30f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float SystemLift = 0.10f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SystemRamp = 0.6f;
+
+	/** JET: flow speed, read as a presence. Linear ribbons where two systems
+	 *  meet rather than where either one is. No ramp handle -- gating speed by
+	 *  speed is the same quantity twice. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float JetDepth = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float JetLift = 0.10f;
+
+	/** TROPICAL: 1 at the equator falling to 0 at the poles. The one channel with
+	 *  no flow in it, and the one that reaches the equatorial band -- which on a
+	 *  planet is the cloudiest. Normally wants no ramp: the equator being cloudy
+	 *  is a standing fact, not something the local wind should veto. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float TropicalDepth = 0.10f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float TropicalLift = 0.10f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float TropicalRamp = 0.0f;
+
+	/** Flow speed the ramp crosses zero at, in the sim's own angular velocity
+	 *  units: below it the air is taken as sinking and above it as rising. Dead
+	 *  air reads -1 and about one and a half times this reads +1.
 	 *
-	 *  Pressure is a proxy for the ascent that actually makes cloud. If cloud
-	 *  ends up pooled in the middle of a low rather than along its converging
-	 *  edge, the velocity field's divergence is the truer driver, at four
-	 *  neighbour taps against a channel already on the probe. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float CoverPressure = 0.5f;
+	 *  MEASURE IT AGAINST THE FLOW RATHER THAN GUESSING. Far too high and every
+	 *  mixed channel carves everywhere; far too low and none of them ever do. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.000001"))
+	float RampSpeed = 0.33f;
 
-	/** How much of the band's displacement the base takes. 0 holds the base flat
-	 *  while the top moves, so every feature is depth; 1 translates the band
-	 *  rigidly and the depth is uniform; negative opens the band where the top
-	 *  rises, which thickens tall columns fastest. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-1.0", ClampMax = "1.0"))
-	float BaseRelief = 0.25f;
+	/** Slope of the ramp where it crosses. 1 is nearly linear across the working
+	 *  range; raising it tightens the transition toward a soft step, which
+	 *  narrows a hurricane's eyewall and hardens the edge of a clearing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001"))
+	float RampSharpness = 0.5f;
 
-	/** How far a vortex sinks the base, as a multiple of CloudThickness, on the
-	 *  same gate that lifts a storm tower. THE ONLY TERM THAT SEPARATES THE TWO
-	 *  SURFACES: everything else moves them together, so this is what makes a
-	 *  storm a deep column rather than a raised one.
+	/** How far the ramp stretches the noise VERTICALLY. Rising air draws a
+	 *  feature out taller and sinking air presses the same one into a sheet,
+	 *  which is the tower-against-stratus distinction coming out of the signal
+	 *  that already puts the eye in a hurricane.
 	 *
-	 *  PITFALL: it reaches the base WHOLE while shared relief reaches it at
-	 *  BaseRelief, so it is usually what makes the base the steeper surface. Raise
-	 *  CloudSlope with it. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float BaseStormDrop = 0.5f;
+	 *  A SHAPE CHANGE, NOT A DISPLACEMENT: it divides the vertical frequency
+	 *  rather than offsetting the coordinate, so a feature is redrawn taller
+	 *  instead of slid upward unaltered. Touches only the noise between the two
+	 *  surfaces, so it costs the marched band nothing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-0.9"))
+	float RampStretch = 0.0f;
+
+	/** How far the ramp DISPLACES the noise vertically, a multiple of
+	 *  CloudThickness. Rising air carries a feature up and sinking air carries
+	 *  it down, unaltered in shape -- where RampStretch redraws the same feature
+	 *  taller or flatter.
+	 *
+	 *  The two are alternative readings of the same signal and compose, so zero
+	 *  one to isolate the other. Both touch only the noise between the surfaces
+	 *  and cost the marched band nothing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float RampShift = 0.5f;
+
 
 	/** Width of the band under the shell top across which density fades to zero,
 	 *  as a fraction of atmosphere thickness. WHAT LETS RARE FEATURES REACH THE
@@ -491,30 +559,30 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	 *  of being cut, so the band never sits lower to make room for its tallest
 	 *  outlier. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "0.5"))
-	float CeilingFalloff = 0.05f;
+	float CeilingFalloff = 0.5f;
 
 	/** Bound on either surface's slope, in cloud depths per radian: the cone angle
 	 *  for the entry search. Under-declaring it is the one way that search steps
 	 *  over a surface, and the symptom is cloud missing on grazing rays rather
 	 *  than anything that looks like a slope problem. Raise it first. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
-	float CloudSlope = 16.0f;
+	float CloudSlope = 40.0f;
 
 	/** Total optical depth through an unrelieved column, base to top, at any pair
 	 *  of curves. Below about 8 the sky shows through; far above a few hundred the
 	 *  cloud has no bright edge left at any sun angle. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
-	float CloudOpticalDepth = 40.0f;
+	float CloudOpticalDepth = 10.0f;
 
 	/** READOUT, not authored: the highest a column top could reach, before the
 	 *  ceiling. Above 1 - CeilingFalloff the tallest features are being capped. */
 	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly)
 	float SolvedTopMax = 0.0f;
 
-	/** READOUT, not authored: how much depth the relief can add to a column on
-	 *  its own. KEEP IT UNDER CloudThickness, or coverage at 0 stops being clear
-	 *  and relief builds cloud in an empty sky -- which reads as a coverage fault
-	 *  and is a relief one. */
+	/** READOUT, not authored: how much depth the NOISE can add to a column on
+	 *  its own. KEEP IT UNDER CloudThickness, or CloudCover at 0 stops being
+	 *  clear and the noise builds cloud in an empty sky -- which reads as a
+	 *  coverage fault and is a relief one. */
 	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly)
 	float SolvedReliefReach = 0.0f;
 
@@ -543,12 +611,6 @@ struct CLOUDATMOSPHERE_API FTerrestrialBandShapeParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float BandBias = 0.3f;
 
-	/** Height of zones above belts, a fraction of GradientThickness: each moves
-	 *  half of it from DeckTop, zones up and belts down, meeting at DeckTop on the
-	 *  band boundaries. Positive lifts the anticyclonic zones. Bands are geometry
-	 *  rather than a pattern painted on a sphere. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float BandRelief = 0.3f;
 };
 
 /** The terrestrial field's material. A CLONE OF THE DECK'S THREE BAND SETS,

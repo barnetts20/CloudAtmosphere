@@ -57,22 +57,29 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	float CloudBase = 0.0f;
 	float CloudThickness = 0.0f;
 	float CeilingFalloff = 0.0f;
-	float TopSoftness = 0.0f;
-	float BottomSoftness = 0.0f;
+	float SurfaceSoftness = 0.0f;
 	float TopCurve = 0.0f;
 	float BottomCurve = 0.0f;
 	float CloudCover = 0.0f;
-	float CoverPressure = 0.0f;
-	float BaseRelief = 0.0f;
-	float BaseStormDrop = 0.0f;
+	float ActivityDepth = 0.0f;
+	float ActivityLift = 0.0f;
+	float ActivityRamp = 0.0f;
+	float SystemDepth = 0.0f;
+	float SystemLift = 0.0f;
+	float SystemRamp = 0.0f;
+	float JetDepth = 0.0f;
+	float JetLift = 0.0f;
+	float TropicalDepth = 0.0f;
+	float TropicalLift = 0.0f;
+	float TropicalRamp = 0.0f;
+	float RampSpeed = 1.0f;
+	float RampSharpness = 2.0f;
+	float RampStretch = 0.0f;
+	float RampShift = 0.5f;
 	float BandSharpness = 0.0f;
 	float BandBias = 0.0f;
 	float HemisphereBlend = 0.0f;
 	float HemisphereVariance = 0.0f;
-	float BandRelief = 0.0f;
-	float PressureRelief = 0.0f;
-	float VortexThreshold = 0.0f;
-	float StormTowerRelief = 0.0f;
 	float ReliefThinning = 0.0f;
 	float RotationWeight = 0.0f;
 	float WarpTime = 0.0f;
@@ -192,22 +199,29 @@ SHADER_PARAMETER(float, Time)
 SHADER_PARAMETER(float, CloudBase)
 SHADER_PARAMETER(float, CloudThickness)
 SHADER_PARAMETER(float, CeilingFalloff)
-SHADER_PARAMETER(float, TopSoftness)
-SHADER_PARAMETER(float, BottomSoftness)
+SHADER_PARAMETER(float, SurfaceSoftness)
 SHADER_PARAMETER(float, TopCurve)
 SHADER_PARAMETER(float, BottomCurve)
 SHADER_PARAMETER(float, CloudCover)
-SHADER_PARAMETER(float, CoverPressure)
-SHADER_PARAMETER(float, BaseRelief)
-SHADER_PARAMETER(float, BaseStormDrop)
+SHADER_PARAMETER(float, ActivityDepth)
+SHADER_PARAMETER(float, ActivityLift)
+SHADER_PARAMETER(float, ActivityRamp)
+SHADER_PARAMETER(float, SystemDepth)
+SHADER_PARAMETER(float, SystemLift)
+SHADER_PARAMETER(float, SystemRamp)
+SHADER_PARAMETER(float, JetDepth)
+SHADER_PARAMETER(float, JetLift)
+SHADER_PARAMETER(float, TropicalDepth)
+SHADER_PARAMETER(float, TropicalLift)
+SHADER_PARAMETER(float, TropicalRamp)
+SHADER_PARAMETER(float, RampSpeed)
+SHADER_PARAMETER(float, RampSharpness)
+SHADER_PARAMETER(float, RampStretch)
+SHADER_PARAMETER(float, RampShift)
 SHADER_PARAMETER(float, BandSharpness)
 SHADER_PARAMETER(float, BandBias)
 SHADER_PARAMETER(float, HemisphereBlend)
 SHADER_PARAMETER(float, HemisphereVariance)
-SHADER_PARAMETER(float, BandRelief)
-SHADER_PARAMETER(float, PressureRelief)
-SHADER_PARAMETER(float, VortexThreshold)
-SHADER_PARAMETER(float, StormTowerRelief)
 SHADER_PARAMETER(float, ReliefThinning)
 SHADER_PARAMETER(float, RotationWeight)
 SHADER_PARAMETER(float, WarpTime)

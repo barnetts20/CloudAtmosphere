@@ -190,10 +190,39 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     TerrestrialStructureLayer = FAtmosphereNoiseLayerParams::MakeStructureDefaults();
     TerrestrialDetailLayer = FAtmosphereNoiseLayerParams::MakeDetailDefaults();
 
-    // A TENTH THE SHELL, and every fraction of it moves with that. The cloud
-    // sits in the bottom eighth rather than near the top, since the air above it
-    // is the part a surface dweller looks through.
-    TerrestrialGeometry.HeightScale = 0.1f;
+    // COARSER AND STRONGER THAN THE DECK'S. The band is thin enough that the
+    // noise is most of its shape rather than a finish on it, and both layers
+    // drive depth alone, so relief here is coverage rather than relief.
+    TerrestrialStructureLayer.Scale = 2.0f;
+    TerrestrialStructureLayer.Aspect = 4.0f;
+    TerrestrialStructureLayer.Relief = 2.0f;
+    TerrestrialStructureLayer.FadeNear = 0.3f;
+    TerrestrialStructureLayer.FadeSpan = 0.6f;
+    TerrestrialStructureLayer.bCrossfade = true;
+
+    TerrestrialDetailLayer.Scale = 24.0f;
+    TerrestrialDetailLayer.Aspect = 2.0f;
+    TerrestrialDetailLayer.Relief = 0.75f;
+    TerrestrialDetailLayer.FadeSpan = 0.3f;
+
+    TerrestrialGeometry.HeightScale = 0.2f;
+
+    // The band is a latitude read on this path, not a driver, so the flow's own
+    // banding is left flat and the hemisphere blend is widened to something
+    // Coriolis-shaped -- three degrees is a step, and a step turns a system that
+    // crosses it into two halves.
+    TerrestrialFlow.HemisphereBlend = 30.0f;
+    TerrestrialFlow.HemisphereVariance = 1.0f;
+    TerrestrialFlow.ReliefThinning = 0.0f;
+    TerrestrialFlow.RotationWeight = 0.083f;
+
+    TerrestrialBandShape.BandSharpness = 0.0f;
+    TerrestrialBandShape.BandBias = 0.0f;
+
+    TerrestrialMotion.WarpTime = 0.2f;
+    TerrestrialMotion.TurbulenceFloor = 1.0f;
+
+    TerrestrialExtinction.LightExtinctionFraction = 1.0f;
 
     // SIZED TO BE LOOKED THROUGH FROM UNDERNEATH, which is the whole difference
     // from the gas giant's air. Every beta is per atmosphere thickness and every
@@ -205,12 +234,12 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     // The absorber is the term to watch. It is a Lorentzian scaled by the
     // Rayleigh profile, so its column integral is roughly half a scale height,
     // and at a beta of 100 it alone closes the sky.
-    TerrestrialAtmosphereLighting.RayleighBeta = FLinearColor(2.32f, 4.87f, 6.25f, 1.0f);
-    TerrestrialAtmosphereLighting.RayleighScaleHeight = 0.04f;
-    TerrestrialAtmosphereLighting.MieBeta = FLinearColor(10.0f, 8.931090f, 7.559319f, 1.0f);
-    TerrestrialAtmosphereLighting.MieScaleHeight = 0.01f;
-    TerrestrialAtmosphereLighting.MieG = 0.76f;
-    TerrestrialAtmosphereLighting.AbsorptionBeta = FLinearColor(1.61f, 1.30f, 1.41f, 1.0f);
+    TerrestrialAtmosphereLighting.RayleighBeta = FLinearColor(0.416289f, 1.270482f, 2.0f, 1.0f);
+    TerrestrialAtmosphereLighting.RayleighScaleHeight = 0.15f;
+    TerrestrialAtmosphereLighting.MieBeta = FLinearColor(1.0f, 0.893109f, 0.755932f, 1.0f);
+    TerrestrialAtmosphereLighting.MieScaleHeight = 0.1f;
+    TerrestrialAtmosphereLighting.MieG = 0.95f;
+    TerrestrialAtmosphereLighting.AbsorptionBeta = FLinearColor(0.5f, 0.403727f, 0.437888f, 1.0f);
 
     // NOT NEAR-BLACK, unlike the gas giant's. Under a cloud base there is a lit
     // surface bouncing light back up, and this term is the whole of it: left at
@@ -240,7 +269,6 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     if (DefaultDetailVolume.Succeeded())
     {
         DetailLayer.Volume = DefaultDetailVolume.Object;
-        TerrestrialDetailLayer.Volume = DefaultDetailVolume.Object;
     }
     else
     {
@@ -252,7 +280,12 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     if (DefaultStructureVolume.Succeeded())
     {
         StructureLayer.Volume = DefaultStructureVolume.Object;
+
+        // BOTH TERRESTRIAL LAYERS ON THE COARSE VOLUME, at different scales. The
+        // detail layer's own asset is tuned for a deck's fine finish, which on a
+        // band reads as static rather than as cloud.
         TerrestrialStructureLayer.Volume = DefaultStructureVolume.Object;
+        TerrestrialDetailLayer.Volume = DefaultStructureVolume.Object;
     }
     else
     {
@@ -666,28 +699,61 @@ static float SolveTopMaxReadout(float DeckTop, float GradientThickness, float Ba
     return DeckTop + FMath::Max(GradientThickness, 1e-4f) * UpReach;
 }
 
-/** READOUT ONLY, NEVER PUSHED. Mirrors TR_ShiftReach at unfaded layers and the
- *  two bounds derived from it, with the detail carve centred as
- *  TR_DETAIL_RELIEF_CENTRED's default has it. A mismatch misreports the readouts
- *  and changes nothing drawn. */
+/** READOUT ONLY, NEVER PUSHED. Mirrors TR_FieldReach: each signal is clamped to
+ *  [-1,1] shader-side, so a weight vector's reach is the sum of its magnitudes,
+ *  and the detail carve is centred as TR_DETAIL_RELIEF_CENTRED's default has it.
+ *  A mismatch misreports the readouts and changes nothing drawn. */
 static void SolveTerrestrialBounds(
-    const FTerrestrialProfileParams& Profile, float BandRelief,
-    const FAtmosphereFlowParams& Flow,
+    const FTerrestrialProfileParams& Profile,
     const FAtmosphereNoiseLayerParams& Structure, const FAtmosphereNoiseLayerParams& Detail,
     float& OutTopMax, float& OutBaseMin, float& OutReliefReach)
 {
     const float Depth = FMath::Max(Profile.CloudThickness, 1e-4f);
 
-    const float Reach = Depth * (0.5f * FMath::Abs(BandRelief)
-        + FMath::Abs(Flow.PressureRelief) + FMath::Abs(Flow.StormTowerRelief)
-        + 0.5f * FMath::Abs(Structure.Relief) + 0.5f * FMath::Abs(Detail.Relief));
+    // SIDED, as TR_FieldReach is: the signals are in [0,1], so a weight's range
+    // runs between zero and itself rather than either side of zero.
+    // A channel's gate runs between 1 and 1 - 2*Ramp, and its presence between 0
+    // and 1, so its contribution spans zero, its weight, and its weight times
+    // that floor. Mirrors TR_FieldReach.
+    const float Ramp[4] = {
+        Profile.ActivityRamp, Profile.SystemRamp, 0.0f, Profile.TropicalRamp };
 
-    OutTopMax = FMath::Min(Profile.CloudBase + Depth + Reach, 1.0f);
+    auto SumUp = [&Ramp](const float(&W)[4])
+        {
+            float S = 0.0f;
+            for (int32 i = 0; i < 4; ++i)
+            {
+                S += FMath::Max(FMath::Max(W[i], W[i] * (1.0f - 2.0f * Ramp[i])), 0.0f);
+            }
+            return S;
+        };
 
-    OutBaseMin = Profile.CloudBase - FMath::Abs(Profile.BaseRelief) * Reach
-        - Depth * FMath::Max(Profile.BaseStormDrop, 0.0f);
+    auto SumDown = [&Ramp](const float(&W)[4])
+        {
+            float S = 0.0f;
+            for (int32 i = 0; i < 4; ++i)
+            {
+                S -= FMath::Min(FMath::Min(W[i], W[i] * (1.0f - 2.0f * Ramp[i])), 0.0f);
+            }
+            return S;
+        };
 
-    OutReliefReach = Reach * (1.0f - Profile.BaseRelief);
+    const float DepthW[4] = {
+        Profile.ActivityDepth, Profile.SystemDepth,
+        Profile.JetDepth, Profile.TropicalDepth };
+
+    const float LiftW[4] = {
+        Profile.ActivityLift, Profile.SystemLift,
+        Profile.JetLift, Profile.TropicalLift };
+
+    OutReliefReach = Depth
+        * (0.5f * FMath::Abs(Structure.Relief) + 0.5f * FMath::Abs(Detail.Relief));
+
+    const float Reach = Depth * (FMath::Max(Profile.CloudCover * 2.0f - 1.0f, 0.0f)
+        + SumUp(DepthW)) + OutReliefReach;
+
+    OutTopMax = FMath::Min(Profile.CloudBase + Depth * SumUp(LiftW) + Reach, 1.0f);
+    OutBaseMin = Profile.CloudBase - Depth * SumDown(LiftW);
 }
 
 void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir)
@@ -770,9 +836,6 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
 
     SetScalarChecked(MID_Atmosphere, TEXT("HemisphereBlend"), FlowP.HemisphereBlend);
     SetScalarChecked(MID_Atmosphere, TEXT("HemisphereVariance"), FlowP.HemisphereVariance);
-    SetScalarChecked(MID_Atmosphere, TEXT("PressureRelief"), FlowP.PressureRelief);
-    SetScalarChecked(MID_Atmosphere, TEXT("VortexThreshold"), FlowP.VortexThreshold);
-    SetScalarChecked(MID_Atmosphere, TEXT("StormTowerRelief"), FlowP.StormTowerRelief);
     SetScalarChecked(MID_Atmosphere, TEXT("ReliefThinning"), FlowP.ReliefThinning);
     SetScalarChecked(MID_Atmosphere, TEXT("RotationWeight"), FlowP.RotationWeight);
 
@@ -866,9 +929,16 @@ void APlanetAtmosphereActor::ApplyGasGiantModelParams()
     SetScalarChecked(MID_Atmosphere, TEXT("DeckOpticalDepth"), GasGiantProfile.DeckOpticalDepth);
     SetScalarChecked(MID_Atmosphere, TEXT("DensityCurve"), Extinction.DensityCurve);
 
+    // Read by the deck's relief and not by the terrestrial band, which routes the
+    // same channels through its own weight vectors instead.
     SetScalarChecked(MID_Atmosphere, TEXT("BandSharpness"), GasGiantBandShape.BandSharpness);
     SetScalarChecked(MID_Atmosphere, TEXT("BandBias"), GasGiantBandShape.BandBias);
+    // These four are the deck's relief. The terrestrial band routes the same
+    // channels through its own weight vectors and carries no such pins.
     SetScalarChecked(MID_Atmosphere, TEXT("BandRelief"), GasGiantBandShape.BandRelief);
+    SetScalarChecked(MID_Atmosphere, TEXT("PressureRelief"), Flow.PressureRelief);
+    SetScalarChecked(MID_Atmosphere, TEXT("VortexThreshold"), Flow.VortexThreshold);
+    SetScalarChecked(MID_Atmosphere, TEXT("StormTowerRelief"), Flow.StormTowerRelief);
 
     SetVectorChecked(MID_Atmosphere, TEXT("ScatterNegative"), GasGiantBands.ScatterNegative);
     SetVectorChecked(MID_Atmosphere, TEXT("ExtinctionNegative"), GasGiantBands.ExtinctionNegative);
@@ -882,28 +952,37 @@ void APlanetAtmosphereActor::ApplyGasGiantModelParams()
 void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
 {
     SolveTerrestrialBounds(
-        TerrestrialProfile, TerrestrialBandShape.BandRelief,
-        TerrestrialFlow, TerrestrialStructureLayer, TerrestrialDetailLayer,
+        TerrestrialProfile, TerrestrialStructureLayer, TerrestrialDetailLayer,
         TerrestrialProfile.SolvedTopMax, TerrestrialProfile.SolvedBaseMin,
         TerrestrialProfile.SolvedReliefReach);
 
     SetScalarChecked(MID_Atmosphere, TEXT("CloudBase"), TerrestrialProfile.CloudBase);
     SetScalarChecked(MID_Atmosphere, TEXT("CloudThickness"), TerrestrialProfile.CloudThickness);
     SetScalarChecked(MID_Atmosphere, TEXT("CeilingFalloff"), TerrestrialProfile.CeilingFalloff);
-    SetScalarChecked(MID_Atmosphere, TEXT("TopSoftness"), TerrestrialProfile.TopSoftness);
-    SetScalarChecked(MID_Atmosphere, TEXT("BottomSoftness"), TerrestrialProfile.BottomSoftness);
+    SetScalarChecked(MID_Atmosphere, TEXT("SurfaceSoftness"), TerrestrialProfile.SurfaceSoftness);
     SetScalarChecked(MID_Atmosphere, TEXT("TopCurve"), TerrestrialProfile.TopCurve);
     SetScalarChecked(MID_Atmosphere, TEXT("BottomCurve"), TerrestrialProfile.BottomCurve);
     SetScalarChecked(MID_Atmosphere, TEXT("CloudCover"), TerrestrialProfile.CloudCover);
-    SetScalarChecked(MID_Atmosphere, TEXT("CoverPressure"), TerrestrialProfile.CoverPressure);
-    SetScalarChecked(MID_Atmosphere, TEXT("BaseRelief"), TerrestrialProfile.BaseRelief);
-    SetScalarChecked(MID_Atmosphere, TEXT("BaseStormDrop"), TerrestrialProfile.BaseStormDrop);
+    SetScalarChecked(MID_Atmosphere, TEXT("ActivityDepth"), TerrestrialProfile.ActivityDepth);
+    SetScalarChecked(MID_Atmosphere, TEXT("ActivityLift"), TerrestrialProfile.ActivityLift);
+    SetScalarChecked(MID_Atmosphere, TEXT("ActivityRamp"), TerrestrialProfile.ActivityRamp);
+    SetScalarChecked(MID_Atmosphere, TEXT("SystemDepth"), TerrestrialProfile.SystemDepth);
+    SetScalarChecked(MID_Atmosphere, TEXT("SystemLift"), TerrestrialProfile.SystemLift);
+    SetScalarChecked(MID_Atmosphere, TEXT("SystemRamp"), TerrestrialProfile.SystemRamp);
+    SetScalarChecked(MID_Atmosphere, TEXT("JetDepth"), TerrestrialProfile.JetDepth);
+    SetScalarChecked(MID_Atmosphere, TEXT("JetLift"), TerrestrialProfile.JetLift);
+    SetScalarChecked(MID_Atmosphere, TEXT("TropicalDepth"), TerrestrialProfile.TropicalDepth);
+    SetScalarChecked(MID_Atmosphere, TEXT("TropicalLift"), TerrestrialProfile.TropicalLift);
+    SetScalarChecked(MID_Atmosphere, TEXT("TropicalRamp"), TerrestrialProfile.TropicalRamp);
+    SetScalarChecked(MID_Atmosphere, TEXT("RampSpeed"), TerrestrialProfile.RampSpeed);
+    SetScalarChecked(MID_Atmosphere, TEXT("RampSharpness"), TerrestrialProfile.RampSharpness);
+    SetScalarChecked(MID_Atmosphere, TEXT("RampStretch"), TerrestrialProfile.RampStretch);
+    SetScalarChecked(MID_Atmosphere, TEXT("RampShift"), TerrestrialProfile.RampShift);
     SetScalarChecked(MID_Atmosphere, TEXT("CloudSlope"), TerrestrialProfile.CloudSlope);
     SetScalarChecked(MID_Atmosphere, TEXT("CloudOpticalDepth"), TerrestrialProfile.CloudOpticalDepth);
 
     SetScalarChecked(MID_Atmosphere, TEXT("BandSharpness"), TerrestrialBandShape.BandSharpness);
     SetScalarChecked(MID_Atmosphere, TEXT("BandBias"), TerrestrialBandShape.BandBias);
-    SetScalarChecked(MID_Atmosphere, TEXT("BandRelief"), TerrestrialBandShape.BandRelief);
 
     SetVectorChecked(MID_Atmosphere, TEXT("ScatterNegative"), TerrestrialBands.ScatterNegative);
     SetVectorChecked(MID_Atmosphere, TEXT("ExtinctionNegative"), TerrestrialBands.ExtinctionNegative);
@@ -1581,9 +1660,6 @@ bool APlanetAtmosphereActor::FillSharedShadowParams(
 
     Params.HemisphereBlend = FlowP.HemisphereBlend;
     Params.HemisphereVariance = FlowP.HemisphereVariance;
-    Params.PressureRelief = FlowP.PressureRelief;
-    Params.VortexThreshold = FlowP.VortexThreshold;
-    Params.StormTowerRelief = FlowP.StormTowerRelief;
     Params.ReliefThinning = FlowP.ReliefThinning;
     Params.RotationWeight = FlowP.RotationWeight;
 
@@ -1705,6 +1781,9 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.BandSharpness = GasGiantBandShape.BandSharpness;
         Params.BandBias = GasGiantBandShape.BandBias;
         Params.BandRelief = GasGiantBandShape.BandRelief;
+        Params.PressureRelief = Flow.PressureRelief;
+        Params.VortexThreshold = Flow.VortexThreshold;
+        Params.StormTowerRelief = Flow.StormTowerRelief;
 
         Params.ExtinctionNegative = ToVector4(GasGiantBands.ExtinctionNegative);
         Params.ExtinctionPositive = ToVector4(GasGiantBands.ExtinctionPositive);
@@ -1725,20 +1804,30 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.CloudBase = TerrestrialProfile.CloudBase;
         Params.CloudThickness = TerrestrialProfile.CloudThickness;
         Params.CeilingFalloff = TerrestrialProfile.CeilingFalloff;
-        Params.TopSoftness = TerrestrialProfile.TopSoftness;
-        Params.BottomSoftness = TerrestrialProfile.BottomSoftness;
+        Params.SurfaceSoftness = TerrestrialProfile.SurfaceSoftness;
         Params.TopCurve = TerrestrialProfile.TopCurve;
         Params.BottomCurve = TerrestrialProfile.BottomCurve;
         Params.CloudCover = TerrestrialProfile.CloudCover;
-        Params.CoverPressure = TerrestrialProfile.CoverPressure;
-        Params.BaseRelief = TerrestrialProfile.BaseRelief;
-        Params.BaseStormDrop = TerrestrialProfile.BaseStormDrop;
+        Params.ActivityDepth = TerrestrialProfile.ActivityDepth;
+        Params.ActivityLift = TerrestrialProfile.ActivityLift;
+        Params.ActivityRamp = TerrestrialProfile.ActivityRamp;
+        Params.SystemDepth = TerrestrialProfile.SystemDepth;
+        Params.SystemLift = TerrestrialProfile.SystemLift;
+        Params.SystemRamp = TerrestrialProfile.SystemRamp;
+        Params.JetDepth = TerrestrialProfile.JetDepth;
+        Params.JetLift = TerrestrialProfile.JetLift;
+        Params.TropicalDepth = TerrestrialProfile.TropicalDepth;
+        Params.TropicalLift = TerrestrialProfile.TropicalLift;
+        Params.TropicalRamp = TerrestrialProfile.TropicalRamp;
+        Params.RampSpeed = TerrestrialProfile.RampSpeed;
+        Params.RampSharpness = TerrestrialProfile.RampSharpness;
+        Params.RampStretch = TerrestrialProfile.RampStretch;
+        Params.RampShift = TerrestrialProfile.RampShift;
         Params.CloudSlope = TerrestrialProfile.CloudSlope;
         Params.CloudOpticalDepth = TerrestrialProfile.CloudOpticalDepth;
 
         Params.BandSharpness = TerrestrialBandShape.BandSharpness;
         Params.BandBias = TerrestrialBandShape.BandBias;
-        Params.BandRelief = TerrestrialBandShape.BandRelief;
 
         Params.ExtinctionNegative = ToVector4(TerrestrialBands.ExtinctionNegative);
         Params.ExtinctionPositive = ToVector4(TerrestrialBands.ExtinctionPositive);
