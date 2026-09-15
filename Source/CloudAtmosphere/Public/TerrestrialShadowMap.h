@@ -76,6 +76,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	float RampSharpness = 2.0f;
 	float RampStretch = 0.0f;
 	float RampShift = 0.5f;
+	float RampDepth = 0.15f;
 	float BandSharpness = 0.0f;
 	float BandBias = 0.0f;
 	float HemisphereBlend = 0.0f;
@@ -218,6 +219,7 @@ SHADER_PARAMETER(float, RampSpeed)
 SHADER_PARAMETER(float, RampSharpness)
 SHADER_PARAMETER(float, RampStretch)
 SHADER_PARAMETER(float, RampShift)
+SHADER_PARAMETER(float, RampDepth)
 SHADER_PARAMETER(float, BandSharpness)
 SHADER_PARAMETER(float, BandBias)
 SHADER_PARAMETER(float, HemisphereBlend)

@@ -70,6 +70,11 @@
  *    8  samples that returned density, over ATMO_MAX_ITER
  *    9  density at the first sample that returned any
  *   10  altitude of that sample, in atmosphere fractions
+ *   11  1 where the ray was given any cloud segment at all, 0 where it was not
+ *   12  total cloud chord on the ray, over the marched band's own thickness
+ *   13  how far the entry split moved the first cloud segment's start, over the
+ *       band's thickness: 0 where the field was found at the shell crossing,
+ *       large where a long span was demoted to coarse ahead of it
  *
  *  1 to 4 PARTITION THE LIT IMAGE, air against deck and direct against ambient,
  *  so a glow present in 2 and absent in 3 and 4 is air Mie in front of the deck.
@@ -365,9 +370,37 @@ float4 Atmo_MainMarch(
 
     const float CoarseStep = AtmoThickness / float(max(P.Atmo.mainRayParams.atmoSteps, 1));
 
+#if ATMO_DEBUG_TERM == 13
+	// The first cloud segment as the planner left it, before the field is given
+	// a chance to move it.
+    float DebugFineBefore = -1.0f;
+
+    for (int e = 0; e < SegmentCount; e++)
+    {
+        if (Field_SegmentIsCloud(RayOrigin, RayDir, Segments[e], P.Atmo.planetParams))
+        {
+            DebugFineBefore = Segments[e].x;
+            break;
+        }
+    }
+#endif
+
     Field_PlanSegments(
 		FlowField, FlowSampler, LocalOrigin, LocalDir, TopMax, CoarseStep,
 		P.Field, Segments, SegmentCount);
+
+#if ATMO_DEBUG_TERM == 13
+    float DebugFineAfter = DebugFineBefore;
+
+    for (int f = 0; f < SegmentCount; f++)
+    {
+        if (Field_SegmentIsCloud(RayOrigin, RayDir, Segments[f], P.Atmo.planetParams))
+        {
+            DebugFineAfter = Segments[f].x;
+            break;
+        }
+    }
+#endif
 
     float3 AccumLight = float3(0.0f, 0.0f, 0.0f);
     float3 Transmittance = float3(1.0f, 1.0f, 1.0f);
@@ -385,6 +418,21 @@ float4 Atmo_MainMarch(
 
 #if ATMO_DEBUG_TERM == 8
 	int DebugFieldHits = 0;
+#endif
+
+#if ATMO_DEBUG_TERM == 11 || ATMO_DEBUG_TERM == 12
+	// READ OFF THE PLAN, NOT THE LOOP. These two answer whether the ray was ever
+	// offered the cloud, which is a different question from whether it found any
+	// -- and the only one that separates a planning fault from a field one.
+	float DebugCloudChord = 0.0f;
+
+	for (int d = 0; d < SegmentCount; d++)
+	{
+		if (Field_SegmentIsCloud(RayOrigin, RayDir, Segments[d], P.Atmo.planetParams))
+		{
+			DebugCloudChord += max(Segments[d].y - Segments[d].x, 0.0f);
+		}
+	}
 #endif
 
 	// Deck optical depth between the camera and the current sample, tracked
@@ -773,6 +821,16 @@ float4 Atmo_MainMarch(
 	DebugAccum = (float(StepIndex) / float(ATMO_MAX_ITER) * ATMO_DEBUG_SCALE).xxx;
 #elif ATMO_DEBUG_TERM == 8
 	DebugAccum = (float(DebugFieldHits) / float(ATMO_MAX_ITER) * ATMO_DEBUG_SCALE).xxx;
+#elif ATMO_DEBUG_TERM == 11
+	DebugAccum = ((DebugCloudChord > 0.0f ? 1.0f : 0.0f) * ATMO_DEBUG_SCALE).xxx;
+#elif ATMO_DEBUG_TERM == 12
+	DebugAccum = (DebugCloudChord
+		/ max(P.Atmo.planetParams.cloudOuterRadius
+			- P.Atmo.planetParams.cloudInnerRadius, 1e-4f) * ATMO_DEBUG_SCALE).xxx;
+#elif ATMO_DEBUG_TERM == 13
+	DebugAccum = (max(DebugFineAfter - DebugFineBefore, 0.0f)
+		/ max(P.Atmo.planetParams.cloudOuterRadius
+			- P.Atmo.planetParams.cloudInnerRadius, 1e-4f) * ATMO_DEBUG_SCALE).xxx;
 #endif
 
 	// -- Cloud shadows on geometry ------------------------------------------

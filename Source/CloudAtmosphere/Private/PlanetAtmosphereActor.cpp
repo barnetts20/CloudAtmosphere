@@ -194,15 +194,16 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     // noise is most of its shape rather than a finish on it, and both layers
     // drive depth alone, so relief here is coverage rather than relief.
     TerrestrialStructureLayer.Scale = 2.0f;
-    TerrestrialStructureLayer.Aspect = 4.0f;
-    TerrestrialStructureLayer.Relief = 2.0f;
+    TerrestrialStructureLayer.Aspect = 1.0f;
+    TerrestrialStructureLayer.Relief = 1.0f;
     TerrestrialStructureLayer.FadeNear = 0.3f;
     TerrestrialStructureLayer.FadeSpan = 0.6f;
     TerrestrialStructureLayer.bCrossfade = true;
 
-    TerrestrialDetailLayer.Scale = 24.0f;
-    TerrestrialDetailLayer.Aspect = 2.0f;
-    TerrestrialDetailLayer.Relief = 0.75f;
+    TerrestrialDetailLayer.Scale = 12.0f;
+    TerrestrialDetailLayer.Aspect = 1.0f;
+    TerrestrialDetailLayer.Relief = 0.5f;
+    TerrestrialDetailLayer.ShearInherit = 0.3f;
     TerrestrialDetailLayer.FadeSpan = 0.3f;
 
     TerrestrialGeometry.HeightScale = 0.2f;
@@ -214,12 +215,15 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     TerrestrialFlow.HemisphereBlend = 30.0f;
     TerrestrialFlow.HemisphereVariance = 1.0f;
     TerrestrialFlow.ReliefThinning = 0.0f;
-    TerrestrialFlow.RotationWeight = 0.083f;
+    TerrestrialFlow.RotationWeight = 0.1f;
 
-    TerrestrialBandShape.BandSharpness = 0.0f;
+    // Band is read only as the material channel here, so its shape needs only
+    // enough gain to separate one side from the other.
+    TerrestrialBandShape.BandSharpness = 0.5f;
     TerrestrialBandShape.BandBias = 0.0f;
 
     TerrestrialMotion.WarpTime = 0.2f;
+    TerrestrialMotion.DeepShearRatio = 0.5f;
     TerrestrialMotion.TurbulenceFloor = 1.0f;
 
     TerrestrialExtinction.LightExtinctionFraction = 1.0f;
@@ -750,10 +754,16 @@ static void SolveTerrestrialBounds(
         * (0.5f * FMath::Abs(Structure.Relief) + 0.5f * FMath::Abs(Detail.Relief));
 
     const float Reach = Depth * (FMath::Max(Profile.CloudCover * 2.0f - 1.0f, 0.0f)
-        + SumUp(DepthW)) + OutReliefReach;
+        + FMath::Abs(Profile.RampDepth) + SumUp(DepthW)) + OutReliefReach;
 
-    OutTopMax = FMath::Min(Profile.CloudBase + Depth * SumUp(LiftW) + Reach, 1.0f);
-    OutBaseMin = Profile.CloudBase - Depth * SumDown(LiftW);
+    // Mirrors TR_BAND_MARGIN, which is a shader constant rather than a handle:
+    // it is somewhere for the first fine step to land, not a look.
+    const float Margin = Depth * 0.05f;
+
+    OutTopMax = FMath::Min(
+        Profile.CloudBase + Depth * SumUp(LiftW) + Reach + Margin, 1.0f);
+
+    OutBaseMin = Profile.CloudBase - Depth * SumDown(LiftW) - Margin;
 }
 
 void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir)
@@ -978,6 +988,7 @@ void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
     SetScalarChecked(MID_Atmosphere, TEXT("RampSharpness"), TerrestrialProfile.RampSharpness);
     SetScalarChecked(MID_Atmosphere, TEXT("RampStretch"), TerrestrialProfile.RampStretch);
     SetScalarChecked(MID_Atmosphere, TEXT("RampShift"), TerrestrialProfile.RampShift);
+    SetScalarChecked(MID_Atmosphere, TEXT("RampDepth"), TerrestrialProfile.RampDepth);
     SetScalarChecked(MID_Atmosphere, TEXT("CloudSlope"), TerrestrialProfile.CloudSlope);
     SetScalarChecked(MID_Atmosphere, TEXT("CloudOpticalDepth"), TerrestrialProfile.CloudOpticalDepth);
 
@@ -1823,6 +1834,7 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.RampSharpness = TerrestrialProfile.RampSharpness;
         Params.RampStretch = TerrestrialProfile.RampStretch;
         Params.RampShift = TerrestrialProfile.RampShift;
+        Params.RampDepth = TerrestrialProfile.RampDepth;
         Params.CloudSlope = TerrestrialProfile.CloudSlope;
         Params.CloudOpticalDepth = TerrestrialProfile.CloudOpticalDepth;
 

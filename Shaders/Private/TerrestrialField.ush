@@ -222,6 +222,7 @@ void Field_PlanSegments(
 	inout float4 Segments[ATMO_MAX_SEGMENTS],
 	inout int SegmentCount)
 {
+    return;
     if (SegmentCount <= 0 || SegmentCount >= ATMO_MAX_SEGMENTS)
     {
         return;
@@ -412,17 +413,14 @@ CompositeParams TR_BuildAtmo(
 	// radius to compute itself.
     const float NearestApproach = max(
 		length(CameraPosition - PlanetCenter)
-			- (F.PlanetRadius + F.Thickness * TR_TopMax(F, 1.0f, 1.0f)),
+			- (F.PlanetRadius + F.Thickness * TR_TopMax(F, 1.0f)),
 		0.0f) / max(F.PlanetRadius, 1e-4f);
 
     const float DetailFade =
 		1.0f - smoothstep(F.DetailFadeNear, F.DetailFadeFar, NearestApproach);
 
-    const float StructureFade =
-		1.0f - smoothstep(F.StructureFadeNear, F.StructureFadeFar, NearestApproach);
-
     const float CloudOuter =
-		F.PlanetRadius + F.Thickness * TR_TopMax(F, DetailFade, StructureFade);
+		F.PlanetRadius + F.Thickness * TR_TopMax(F, DetailFade);
 
 	// -- The band is the slab -----------------------------------------------
 	//
@@ -436,7 +434,7 @@ CompositeParams TR_BuildAtmo(
 	// has already cut off and a shell inside the planet plans segments the
 	// terminus then discards.
     const float CloudInner = max(
-		F.PlanetRadius + F.Thickness * TR_BaseMin(F, DetailFade, StructureFade),
+		F.PlanetRadius + F.Thickness * TR_BaseMin(F, DetailFade),
 		F.PlanetRadius);
 
 	// Grey: each band's tint and amount are applied per sample from

@@ -79,6 +79,7 @@ namespace TerrestrialShadow
 		P->RampSharpness = Params.RampSharpness;
 		P->RampStretch = Params.RampStretch;
 		P->RampShift = Params.RampShift;
+		P->RampDepth = Params.RampDepth;
 		P->BandSharpness = Params.BandSharpness;
 		P->BandBias = Params.BandBias;
 		P->HemisphereBlend = Params.HemisphereBlend;

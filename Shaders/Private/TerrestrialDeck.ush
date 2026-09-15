@@ -113,6 +113,26 @@
 #define TR_DETAIL_RELIEF_CENTRED 1
 #endif
 
+/** Slack the marched band gets beyond the surfaces' own reach, above and below,
+ *  as a fraction of CloudThickness.
+ *
+ *  A TIGHT BOUND IS NOT A USABLE ONE. The reaches are exact, so cloud can sit
+ *  arbitrarily close to either shell -- and the fine segment's first sample
+ *  lands a jittered step inside it with nothing sampled before. A wedge of cloud
+ *  against the shell then has no sample in it at all, and how much is lost moves
+ *  with the step lattice, which moves with the camera: the symptom is a thin
+ *  slice popping in and out as the camera climbs, not anything that looks like a
+ *  missing bound.
+ *
+ *  SIZED IN FINE STEPS, NOT IN CLOUD. At the counts this marches at, a fine step
+ *  is under a hundredth of the band, so this is several of them -- enough for the
+ *  first one to land clear of anything. It costs a little of the band and
+ *  therefore a little of every fine step, which is why it is a constant and not
+ *  a handle: there is nothing here to art direct. */
+#ifndef TR_BAND_MARGIN
+#define TR_BAND_MARGIN 0.0f
+#endif
+
 /** Fraction of the cone-trace advance actually taken. Under 1 because CloudSlope
  *  is authored, and an under-declared slope is the one way the entry search
  *  steps over a surface. */
@@ -186,6 +206,12 @@ struct TRFieldParams
 	 *  CloudThickness. Rising air carries a feature up, sinking air carries it
 	 *  down, unaltered in shape. */
     float RampShift;
+
+	/** How much DEPTH the ramp adds on its own, a multiple of CloudThickness and
+	 *  signed. The only path from ascent to depth that needs no presence channel
+	 *  under it. */
+    float RampDepth;
+
 
 	/** What FlowField.ush's interpreters read: the hemisphere width and the
 	 *  band's offset and gain. Held as the shared struct rather than as loose
@@ -262,8 +288,14 @@ struct TRFieldParams
 
 	// -- Per sample ----------------------------------------------------------
 
-	/** Per-layer level of detail, 1 at full strength and 0 faded out. Each
-	 *  scales its layer's carve and erosion and gates the fetches feeding it. */
+	/** Per-layer level of detail, 1 at full strength and 0 faded out. Scales the
+	 *  layer's carve and erosion and gates the fetches feeding it.
+	 *
+	 *  STRUCTURE'S IS WRITTEN BY THE MARCH AND DELIBERATELY UNREAD. The layer
+	 *  applies at every range: the warp makes its tiling believable far out and
+	 *  sparsity hides what is left, so fading it only removed the shape the
+	 *  silhouette is made of. Its authored range survives as the shadow
+	 *  cascade's extent, which is the one thing still reading it. */
     float StructureFade;
     float DetailFade;
 };
@@ -300,6 +332,7 @@ TRFieldParams TR_BuildField(
 	float RampSharpness,
 	float RampStretch,
 	float RampShift,
+	float RampDepth,
 	float BandSharpness,
 	float BandBias,
 	float HemisphereBlend,
@@ -365,6 +398,7 @@ TRFieldParams TR_BuildField(
     F.RampSharpness = max(RampSharpness, 1e-3f);
     F.RampStretch = RampStretch;
     F.RampShift = RampShift;
+    F.RampDepth = RampDepth;
 
     F.FlowRead.BandSharpness = BandSharpness;
     F.FlowRead.BandBias = BandBias;
@@ -462,7 +496,7 @@ TRFieldParams TR_BuildField(
 	JetDepth, JetLift, \
 	TropicalDepth, TropicalLift, TropicalRamp, \
 	RampSpeed, RampSharpness, \
-	RampStretch, RampShift, \
+	RampStretch, RampShift, RampDepth, \
 	BandSharpness, BandBias, HemisphereBlend, HemisphereVariance, \
 	ReliefThinning, RotationWeight, WarpTime, DeepShearRatio, \
 	TurbulenceFloor, CrossfadePeriod, EdgeBias, ErosionDepth, \
@@ -577,11 +611,11 @@ float TR_CloudBeta(TRFieldParams F, float CloudOpticalDepth)
  *
  *  Pass 1 for a fade to get the unconditional reach. Any fade passed must be at
  *  least the fade at every sample the bound covers, or the bound is not one. */
-void TR_CarveReach(TRFieldParams F, float DetailFade, float StructureFade, out float Down, out float Up)
+void TR_CarveReach(TRFieldParams F, float DetailFade, out float Down, out float Up)
 {
     const float D = F.CloudThickness;
 
-    const float StructureHalf = D * 0.5f * abs(F.StructureRelief) * saturate(StructureFade);
+    const float StructureHalf = D * 0.5f * abs(F.StructureRelief);
 
     const float DetailCarve = D * abs(F.DetailRelief) * saturate(DetailFade);
 
@@ -664,6 +698,12 @@ void TR_Signals(
  *  which is what a storm is, and what one displacement split by a ratio could
  *  never say.
  *
+ *  THE RAMP REACHES DEPTH TWICE. Through a channel's mix, which gates what that
+ *  channel contributes, and directly through RampDepth, which needs no presence
+ *  under it. The second is what thickens an eyewall: ascent there is not a
+ *  signal being present, it is the air rising, and without it a warped eye reads
+ *  as a domed sheet rather than as a wall around a hole.
+ *
  *  THE NOISE IS DEPTH ONLY. A cloud base is a condensation level, not a carved
  *  surface, so it stays flat except where lift moves it. That also leaves the
  *  base an exact function of the flow, which the entry search and the empty-air
@@ -695,7 +735,7 @@ void TR_CloudSurfaces(
 
     const float Lift = D * dot(F.LiftWeights, Signals);
 
-    float Depth = D * (F.CloudCover + dot(F.DepthWeights, Signals));
+    float Depth = D * (F.CloudCover + F.RampDepth * Ramp + dot(F.DepthWeights, Signals));
 
     Depth += D * ReliefScale * F.StructureRelief * ReliefStructure;
     Depth -= D * F.DetailRelief * CarveDetail;
@@ -759,7 +799,7 @@ TRFlowProbe TR_ProbeFromFlow(float4 Flow, float3 N, TRFieldParams F)
 		Probe.TopFlow, Probe.BaseFlow);
 
     float CarveDown, CarveUp;
-    TR_CarveReach(F, F.DetailFade, F.StructureFade, CarveDown, CarveUp);
+    TR_CarveReach(F, F.DetailFade, CarveDown, CarveUp);
 
     Probe.BaseLower = Probe.BaseFlow;
 
@@ -830,7 +870,6 @@ float TR_SlabEntry(
 	// finding, so a bound narrowed by this pixel's fades is not a bound on the
 	// column it eventually lands in.
     F.DetailFade = 1.0f;
-    F.StructureFade = 1.0f;
 
     float TSearch = T0;
 
@@ -1033,7 +1072,7 @@ TRFieldSample TR_Field(
 	// smoothstep returns exactly 1 past its far edge, so the branch still fires
 	// over the whole faded region.
     const bool bWantDetail = (F.DetailFade > 0.0f);
-    const bool bWantStructure = (F.StructureFade > 0.0f);
+    const bool bWantStructure = (F.StructureNoiseWeights.w > 0.0f);
 
     BRANCH
 
@@ -1072,8 +1111,19 @@ TRFieldSample TR_Field(
 	// Either alone is a look; zero one to isolate the other. Both touch the
 	// noise only, so they cost the bounds nothing -- the surfaces are where they
 	// were and only the texture between them moves.
-    const float Stretch = max(1.0f + F.RampStretch * Probe.Ramp, 0.1f);
-    const float Shift = F.RampShift * F.CloudThickness * Probe.Ramp;
+	//
+	// SCALED BY HOW MUCH COLUMN THERE IS TO WARP, from the flow's own surfaces,
+	// which are known without the volumes. A displacement fixed against
+	// CloudThickness moves a thin column's texture by more than the column's own
+	// depth, and since the ramp varies across a system that shears the noise into
+	// a cone -- an eye pulled down into a funnel with a wall too thin to march.
+	// Gated, a column with no depth gets no warp, which is the only answer that
+	// means anything there.
+    const float WarpRoom =
+		saturate((Probe.TopFlow - Probe.BaseFlow) / F.CloudThickness) * Probe.Ramp;
+
+    const float Stretch = max(1.0f + F.RampStretch * WarpRoom, 0.1f);
+    const float Shift = F.RampShift * F.CloudThickness * WarpRoom;
 
     BRANCH
 
@@ -1181,7 +1231,7 @@ TRFieldSample TR_Field(
 	// noise's effect and leaves its scale alone -- structure stays the same size
 	// as it dims rather than growing.
     const float DetailWeight = saturate(Edge * F.DetailNoiseWeights.w * F.DetailFade);
-    const float StructureWeight = saturate(Edge * F.StructureNoiseWeights.w * F.StructureFade);
+    const float StructureWeight = saturate(Edge * F.StructureNoiseWeights.w);
 
 	// EROSION KEEPS ITS NEUTRAL AT 1, since it multiplies density and may only
 	// remove material. RELIEF is signed about the median, since it moves a
@@ -1371,7 +1421,6 @@ float4 TR_Density(
 void TR_FieldReach(
 	TRFieldParams F,
 	float DetailFade,
-	float StructureFade,
 	out float LiftUp,
 	out float LiftDown,
 	out float Depth)
@@ -1386,12 +1435,15 @@ void TR_FieldReach(
     LiftDown = -F.CloudThickness * dot(LiftLo, 1.0f.xxxx);
 
     float CarveDown, CarveUp;
-    TR_CarveReach(F, DetailFade, StructureFade, CarveDown, CarveUp);
+    TR_CarveReach(F, DetailFade, CarveDown, CarveUp);
 
     const float4 DepthHi = max(max(F.DepthWeights, F.DepthWeights * Gate), 0.0f.xxxx);
 
+	// RampDepth is signed against a signed ramp, so it reaches its own magnitude
+	// upward whichever way it points.
     Depth = F.CloudThickness
-		* (max(F.CloudCover, 0.0f) + dot(DepthHi, 1.0f.xxxx)) + CarveUp;
+		* (max(F.CloudCover, 0.0f) + abs(F.RampDepth) + dot(DepthHi, 1.0f.xxxx))
+		+ CarveUp;
 }
 
 /** The highest any column top can reach, an atmosphere fraction.
@@ -1401,15 +1453,18 @@ void TR_FieldReach(
  *  narrow when the sky is quiet -- the cost of a bound that has to hold
  *  everywhere.
  *
+ *  PLUS TR_BAND_MARGIN, which is somewhere for the first fine step to fall.
+ *
  *  CLAMPED AT THE SHELL: the ceiling fade leaves no density above it. Unclamped,
  *  a tall rare feature would widen the marched band and coarsen every step for
  *  the sake of a few columns. */
-float TR_TopMax(TRFieldParams F, float DetailFade, float StructureFade)
+float TR_TopMax(TRFieldParams F, float DetailFade)
 {
     float LiftUp, LiftDown, Depth;
-    TR_FieldReach(F, DetailFade, StructureFade, LiftUp, LiftDown, Depth);
+    TR_FieldReach(F, DetailFade, LiftUp, LiftDown, Depth);
 
-    return min(F.CloudBase + LiftUp + Depth, 1.0f);
+    return min(F.CloudBase + LiftUp + Depth
+		+ TR_BAND_MARGIN * F.CloudThickness, 1.0f);
 }
 
 /** How much depth the noise can add to a column on its own, an atmosphere
@@ -1418,7 +1473,7 @@ float TR_TopMax(TRFieldParams F, float DetailFade, float StructureFade)
 float TR_ReliefReach(TRFieldParams F)
 {
     float CarveDown, CarveUp;
-    TR_CarveReach(F, 1.0f, 1.0f, CarveDown, CarveUp);
+    TR_CarveReach(F, 1.0f, CarveDown, CarveUp);
 
     return CarveUp;
 }
@@ -1426,10 +1481,10 @@ float TR_ReliefReach(TRFieldParams F)
 /** The lowest any column base can fall, an atmosphere fraction: WHERE THE
  *  MARCHED BAND ENDS, and the altitude a ray passes beneath without meeting
  *  cloud. Lift alone, since nothing else touches the base. */
-float TR_BaseMin(TRFieldParams F, float DetailFade, float StructureFade)
+float TR_BaseMin(TRFieldParams F, float DetailFade)
 {
     float LiftUp, LiftDown, Depth;
-    TR_FieldReach(F, DetailFade, StructureFade, LiftUp, LiftDown, Depth);
+    TR_FieldReach(F, DetailFade, LiftUp, LiftDown, Depth);
 
-    return F.CloudBase - LiftDown;
+    return F.CloudBase - LiftDown - TR_BAND_MARGIN * F.CloudThickness;
 }

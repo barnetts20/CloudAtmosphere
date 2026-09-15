@@ -411,7 +411,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	 *  thickness. THE ANCHOR: relief moves the band about this rather than about
 	 *  its top, so raising it lifts the whole cloud without reshaping it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float CloudBase = 0.05f;
+	float CloudBase = 0.15f;
 
 	/** Depth of an unrelieved column, as a fraction of atmosphere thickness, and
 	 *  the unit every relief amount is a multiple of. THE GRAIN HANDLE: widen it
@@ -434,12 +434,12 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	/** Shape of the top ramp. PITFALL: below 0.5 the onset loses its C1 join and
 	 *  the surface hardens into an edge -- a legitimate look, not clamped. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001"))
-	float TopCurve = 1.0f;
+	float TopCurve = 2.0f;
 
 	/** Shape of the bottom ramp, as TopCurve is for the top. Above 1 flattens the
 	 *  base, which is what a cumulus field wants. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001"))
-	float BottomCurve = 1.0f;
+	float BottomCurve = 0.75f;
 
 	/** How much of a full column the weather builds before relief. THE MASTER
 	 *  COVER HANDLE: 1 is overcast, 0 is a sky relief alone cannot fill, and a
@@ -447,7 +447,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	 *  that shapes the tops. Remapped to a signed depth in the shader, which is
 	 *  what lets 0 reach far enough below zero to stay clear. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float CloudCover = 0.333f;
+	float CloudCover = 0.235f;
 
 	// -- The four flow signals -----------------------------------------------
 	//
@@ -473,7 +473,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	float ActivityDepth = 0.40f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float ActivityLift = 0.10f;
+	float ActivityLift = 0.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float ActivityRamp = 1.0f;
@@ -512,7 +512,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	float TropicalLift = 0.10f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float TropicalRamp = 0.0f;
+	float TropicalRamp = 0.5f;
 
 	/** Flow speed the ramp crosses zero at, in the sim's own angular velocity
 	 *  units: below it the air is taken as sinking and above it as rising. Dead
@@ -521,13 +521,13 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	 *  MEASURE IT AGAINST THE FLOW RATHER THAN GUESSING. Far too high and every
 	 *  mixed channel carves everywhere; far too low and none of them ever do. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.000001"))
-	float RampSpeed = 0.33f;
+	float RampSpeed = 0.5f;
 
 	/** Slope of the ramp where it crosses. 1 is nearly linear across the working
 	 *  range; raising it tightens the transition toward a soft step, which
 	 *  narrows a hurricane's eyewall and hardens the edge of a clearing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001"))
-	float RampSharpness = 0.5f;
+	float RampSharpness = 1.0f;
 
 	/** How far the ramp stretches the noise VERTICALLY. Rising air draws a
 	 *  feature out taller and sinking air presses the same one into a sheet,
@@ -539,7 +539,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	 *  instead of slid upward unaltered. Touches only the noise between the two
 	 *  surfaces, so it costs the marched band nothing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-0.9"))
-	float RampStretch = 0.0f;
+	float RampStretch = 0.5f;
 
 	/** How far the ramp DISPLACES the noise vertically, a multiple of
 	 *  CloudThickness. Rising air carries a feature up and sinking air carries
@@ -551,6 +551,18 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	 *  and cost the marched band nothing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float RampShift = 0.5f;
+
+	/** How much DEPTH the ramp adds on its own, a multiple of CloudThickness.
+	 *  Signed against a signed ramp, so it deepens rising air and thins sinking
+	 *  air wherever they are, with no presence channel under it.
+	 *
+	 *  THIS IS WHAT THICKENS AN EYEWALL. The channel mixes only gate what a
+	 *  channel already contributes, so they can deepen a wall only where some
+	 *  other signal is also strong. Ascent is not a signal being present, it is
+	 *  the air rising -- and without this term a warped eye reads as a domed
+	 *  sheet rather than as a wall standing around a hole. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float RampDepth = 0.15f;
 
 
 	/** Width of the band under the shell top across which density fades to zero,
@@ -566,13 +578,13 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	 *  over a surface, and the symptom is cloud missing on grazing rays rather
 	 *  than anything that looks like a slope problem. Raise it first. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
-	float CloudSlope = 40.0f;
+	float CloudSlope = 60.0f;
 
 	/** Total optical depth through an unrelieved column, base to top, at any pair
 	 *  of curves. Below about 8 the sky shows through; far above a few hundred the
 	 *  cloud has no bright edge left at any sun angle. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
-	float CloudOpticalDepth = 10.0f;
+	float CloudOpticalDepth = 40.0f;
 
 	/** READOUT, not authored: the highest a column top could reach, before the
 	 *  ceiling. Above 1 - CeilingFalloff the tallest features are being capped. */

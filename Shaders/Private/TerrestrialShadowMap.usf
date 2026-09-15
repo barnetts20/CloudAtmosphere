@@ -73,6 +73,7 @@ float RampSpeed;
 float RampSharpness;
 float RampStretch;
 float RampShift;
+float RampDepth;
 float BandSharpness;
 float BandBias;
 float HemisphereBlend;
@@ -115,16 +116,18 @@ TRFieldParams TRShadow_Field()
 }
 
 /** Per-layer level of detail at a point, from its distance to the camera, in
- *  planet radii. MUST MATCH the view march's expression, or the deck the light
+ *  planet radii. MUST MATCH the view march's expression, or the field the light
  *  sees carries layers the eye has dropped -- lumpy shadows on a smooth surface,
- *  which reads as dirt rather than as under-resolved noise. */
-void TRShadow_Fades(float3 LocalPos, TRFieldParams F, out float OutDetail, out float OutStructure)
+ *  which reads as dirt rather than as under-resolved noise.
+ *
+ *  DETAIL ONLY. The structure layer applies at every range on this model, so
+ *  there is nothing to match on it. */
+float TRShadow_DetailFade(float3 LocalPos, TRFieldParams F)
 {
     const float Distance =
 		length(LocalPos - ShadowCameraLocal) / max(F.PlanetRadius, 1e-4f);
 
-    OutDetail = 1.0f - smoothstep(F.DetailFadeNear, F.DetailFadeFar, Distance);
-    OutStructure = 1.0f - smoothstep(F.StructureFadeNear, F.StructureFadeFar, Distance);
+    return 1.0f - smoothstep(F.DetailFadeNear, F.DetailFadeFar, Distance);
 }
 
 /** Per-band extinction amount, blended by the signed band. Mirrors
@@ -167,11 +170,7 @@ float TRShadow_Sigma(
 	float AbsMax,
 	TRFieldParams F)
 {
-    float FadeDetail, FadeStructure;
-    TRShadow_Fades(Pos, F, FadeDetail, FadeStructure);
-
-    F.DetailFade = FadeDetail;
-    F.StructureFade = FadeStructure;
+    F.DetailFade = TRShadow_DetailFade(Pos, F);
 
     float Density = 0.0f;
 
@@ -229,7 +228,7 @@ float BakeField_CascadeExtent(BakeFieldParams F, int Level)
  *  strength. Bounds the cone trace below. */
 float BakeField_TopBound(BakeFieldParams F)
 {
-    return TR_TopMax(F, 1.0f, 1.0f);
+    return TR_TopMax(F, 1.0f);
 }
 
 /** Where the light ray first reaches the slab. The trace takes either surface,
