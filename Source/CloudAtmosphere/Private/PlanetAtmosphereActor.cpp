@@ -703,67 +703,35 @@ static float SolveTopMaxReadout(float DeckTop, float GradientThickness, float Ba
     return DeckTop + FMath::Max(GradientThickness, 1e-4f) * UpReach;
 }
 
-/** READOUT ONLY, NEVER PUSHED. Mirrors TR_FieldReach: each signal is clamped to
- *  [-1,1] shader-side, so a weight vector's reach is the sum of its magnitudes,
- *  and the detail carve is centred as TR_DETAIL_RELIEF_CENTRED's default has it.
- *  A mismatch misreports the readouts and changes nothing drawn. */
+/** READOUT ONLY, NEVER PUSHED. Mirrors TR_FieldReach: the depth is the headroom
+ *  alone, since growth saturates toward it with the noise already inside, and
+ *  the base moves only with tropicality and pressure. A mismatch misreports the
+ *  readouts and changes nothing drawn. */
 static void SolveTerrestrialBounds(
     const FTerrestrialProfileParams& Profile,
     const FAtmosphereNoiseLayerParams& Structure, const FAtmosphereNoiseLayerParams& Detail,
     float& OutTopMax, float& OutBaseMin, float& OutReliefReach)
 {
-    const float Depth = FMath::Max(Profile.CloudThickness, 1e-4f);
+    const float D = FMath::Max(Profile.CloudThickness, 1e-4f);
 
-    // SIDED, as TR_FieldReach is: the signals are in [0,1], so a weight's range
-    // runs between zero and itself rather than either side of zero.
-    // A channel's gate runs between 1 and 1 - 2*Ramp, and its presence between 0
-    // and 1, so its contribution spans zero, its weight, and its weight times
-    // that floor. Mirrors TR_FieldReach.
-    const float Ramp[4] = {
-        Profile.ActivityRamp, Profile.SystemRamp, 0.0f, Profile.TropicalRamp };
+    // Mirrors TR_BAND_MARGIN, a shader constant rather than a handle: it is
+    // somewhere for the first fine step to land, not a look.
+    const float Margin = D * 0.0f;
 
-    auto SumUp = [&Ramp](const float(&W)[4])
-        {
-            float S = 0.0f;
-            for (int32 i = 0; i < 4; ++i)
-            {
-                S += FMath::Max(FMath::Max(W[i], W[i] * (1.0f - 2.0f * Ramp[i])), 0.0f);
-            }
-            return S;
-        };
+    OutReliefReach =
+        D * 0.5f * (FMath::Abs(Structure.Relief) + FMath::Abs(Detail.Relief));
 
-    auto SumDown = [&Ramp](const float(&W)[4])
-        {
-            float S = 0.0f;
-            for (int32 i = 0; i < 4; ++i)
-            {
-                S -= FMath::Min(FMath::Min(W[i], W[i] * (1.0f - 2.0f * Ramp[i])), 0.0f);
-            }
-            return S;
-        };
+    const float BaseUp = D * (FMath::Max(Profile.BaseTropical, 0.0f)
+        + FMath::Abs(Profile.BasePressure));
 
-    const float DepthW[4] = {
-        Profile.ActivityDepth, Profile.SystemDepth,
-        Profile.JetDepth, Profile.TropicalDepth };
+    const float BaseDown = D * (-FMath::Min(Profile.BaseTropical, 0.0f)
+        + FMath::Abs(Profile.BasePressure));
 
-    const float LiftW[4] = {
-        Profile.ActivityLift, Profile.SystemLift,
-        Profile.JetLift, Profile.TropicalLift };
+    const float Depth = D * FMath::Max(
+        Profile.CeilingDepth * (1.0f + FMath::Abs(Profile.CeilingPressure)), 1e-3f);
 
-    OutReliefReach = Depth
-        * (0.5f * FMath::Abs(Structure.Relief) + 0.5f * FMath::Abs(Detail.Relief));
-
-    const float Reach = Depth * (FMath::Max(Profile.CloudCover * 2.0f - 1.0f, 0.0f)
-        + FMath::Abs(Profile.RampDepth) + SumUp(DepthW)) + OutReliefReach;
-
-    // Mirrors TR_BAND_MARGIN, which is a shader constant rather than a handle:
-    // it is somewhere for the first fine step to land, not a look.
-    const float Margin = Depth * 0.05f;
-
-    OutTopMax = FMath::Min(
-        Profile.CloudBase + Depth * SumUp(LiftW) + Reach + Margin, 1.0f);
-
-    OutBaseMin = Profile.CloudBase - Depth * SumDown(LiftW) - Margin;
+    OutTopMax = FMath::Min(Profile.CloudBase + BaseUp + Depth + Margin, 1.0f);
+    OutBaseMin = Profile.CloudBase - BaseDown - Margin;
 }
 
 void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir)
@@ -973,22 +941,18 @@ void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
     SetScalarChecked(MID_Atmosphere, TEXT("TopCurve"), TerrestrialProfile.TopCurve);
     SetScalarChecked(MID_Atmosphere, TEXT("BottomCurve"), TerrestrialProfile.BottomCurve);
     SetScalarChecked(MID_Atmosphere, TEXT("CloudCover"), TerrestrialProfile.CloudCover);
-    SetScalarChecked(MID_Atmosphere, TEXT("ActivityDepth"), TerrestrialProfile.ActivityDepth);
-    SetScalarChecked(MID_Atmosphere, TEXT("ActivityLift"), TerrestrialProfile.ActivityLift);
-    SetScalarChecked(MID_Atmosphere, TEXT("ActivityRamp"), TerrestrialProfile.ActivityRamp);
-    SetScalarChecked(MID_Atmosphere, TEXT("SystemDepth"), TerrestrialProfile.SystemDepth);
-    SetScalarChecked(MID_Atmosphere, TEXT("SystemLift"), TerrestrialProfile.SystemLift);
-    SetScalarChecked(MID_Atmosphere, TEXT("SystemRamp"), TerrestrialProfile.SystemRamp);
-    SetScalarChecked(MID_Atmosphere, TEXT("JetDepth"), TerrestrialProfile.JetDepth);
-    SetScalarChecked(MID_Atmosphere, TEXT("JetLift"), TerrestrialProfile.JetLift);
-    SetScalarChecked(MID_Atmosphere, TEXT("TropicalDepth"), TerrestrialProfile.TropicalDepth);
-    SetScalarChecked(MID_Atmosphere, TEXT("TropicalLift"), TerrestrialProfile.TropicalLift);
-    SetScalarChecked(MID_Atmosphere, TEXT("TropicalRamp"), TerrestrialProfile.TropicalRamp);
-    SetScalarChecked(MID_Atmosphere, TEXT("RampSpeed"), TerrestrialProfile.RampSpeed);
-    SetScalarChecked(MID_Atmosphere, TEXT("RampSharpness"), TerrestrialProfile.RampSharpness);
-    SetScalarChecked(MID_Atmosphere, TEXT("RampStretch"), TerrestrialProfile.RampStretch);
-    SetScalarChecked(MID_Atmosphere, TEXT("RampShift"), TerrestrialProfile.RampShift);
-    SetScalarChecked(MID_Atmosphere, TEXT("RampDepth"), TerrestrialProfile.RampDepth);
+    SetScalarChecked(MID_Atmosphere, TEXT("OrganisationBoost"), TerrestrialProfile.OrganisationBoost);
+    SetScalarChecked(MID_Atmosphere, TEXT("AscentDepth"), TerrestrialProfile.AscentDepth);
+    SetScalarChecked(MID_Atmosphere, TEXT("AscentSpeed"), TerrestrialProfile.AscentSpeed);
+    SetScalarChecked(MID_Atmosphere, TEXT("PressureScale"), TerrestrialProfile.PressureScale);
+    SetScalarChecked(MID_Atmosphere, TEXT("AscentSubsidence"), TerrestrialProfile.AscentSubsidence);
+    SetScalarChecked(MID_Atmosphere, TEXT("SubsidenceSpeed"), TerrestrialProfile.SubsidenceSpeed);
+    SetScalarChecked(MID_Atmosphere, TEXT("CeilingDepth"), TerrestrialProfile.CeilingDepth);
+    SetScalarChecked(MID_Atmosphere, TEXT("CeilingPressure"), TerrestrialProfile.CeilingPressure);
+    SetScalarChecked(MID_Atmosphere, TEXT("BaseTropical"), TerrestrialProfile.BaseTropical);
+    SetScalarChecked(MID_Atmosphere, TEXT("BasePressure"), TerrestrialProfile.BasePressure);
+    SetScalarChecked(MID_Atmosphere, TEXT("WarpStretch"), TerrestrialProfile.WarpStretch);
+    SetScalarChecked(MID_Atmosphere, TEXT("WarpShift"), TerrestrialProfile.WarpShift);
     SetScalarChecked(MID_Atmosphere, TEXT("CloudSlope"), TerrestrialProfile.CloudSlope);
     SetScalarChecked(MID_Atmosphere, TEXT("CloudOpticalDepth"), TerrestrialProfile.CloudOpticalDepth);
 
@@ -1819,22 +1783,18 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.TopCurve = TerrestrialProfile.TopCurve;
         Params.BottomCurve = TerrestrialProfile.BottomCurve;
         Params.CloudCover = TerrestrialProfile.CloudCover;
-        Params.ActivityDepth = TerrestrialProfile.ActivityDepth;
-        Params.ActivityLift = TerrestrialProfile.ActivityLift;
-        Params.ActivityRamp = TerrestrialProfile.ActivityRamp;
-        Params.SystemDepth = TerrestrialProfile.SystemDepth;
-        Params.SystemLift = TerrestrialProfile.SystemLift;
-        Params.SystemRamp = TerrestrialProfile.SystemRamp;
-        Params.JetDepth = TerrestrialProfile.JetDepth;
-        Params.JetLift = TerrestrialProfile.JetLift;
-        Params.TropicalDepth = TerrestrialProfile.TropicalDepth;
-        Params.TropicalLift = TerrestrialProfile.TropicalLift;
-        Params.TropicalRamp = TerrestrialProfile.TropicalRamp;
-        Params.RampSpeed = TerrestrialProfile.RampSpeed;
-        Params.RampSharpness = TerrestrialProfile.RampSharpness;
-        Params.RampStretch = TerrestrialProfile.RampStretch;
-        Params.RampShift = TerrestrialProfile.RampShift;
-        Params.RampDepth = TerrestrialProfile.RampDepth;
+        Params.OrganisationBoost = TerrestrialProfile.OrganisationBoost;
+        Params.AscentDepth = TerrestrialProfile.AscentDepth;
+        Params.AscentSpeed = TerrestrialProfile.AscentSpeed;
+        Params.PressureScale = TerrestrialProfile.PressureScale;
+        Params.AscentSubsidence = TerrestrialProfile.AscentSubsidence;
+        Params.SubsidenceSpeed = TerrestrialProfile.SubsidenceSpeed;
+        Params.CeilingDepth = TerrestrialProfile.CeilingDepth;
+        Params.CeilingPressure = TerrestrialProfile.CeilingPressure;
+        Params.BaseTropical = TerrestrialProfile.BaseTropical;
+        Params.BasePressure = TerrestrialProfile.BasePressure;
+        Params.WarpStretch = TerrestrialProfile.WarpStretch;
+        Params.WarpShift = TerrestrialProfile.WarpShift;
         Params.CloudSlope = TerrestrialProfile.CloudSlope;
         Params.CloudOpticalDepth = TerrestrialProfile.CloudOpticalDepth;
 

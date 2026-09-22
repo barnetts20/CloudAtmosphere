@@ -449,121 +449,122 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float CloudCover = 0.235f;
 
-	// -- The four flow signals -----------------------------------------------
+	// -- The four flow quantities ---------------------------------------------
 	//
-	// Each answers "how much of a thing is at this column", in [0,1], and each
-	// gets three handles: how much DEPTH it adds, how much LIFT it adds, and how
-	// far the RAMP is allowed to invert it. Depth and lift are multiples of
-	// CloudThickness; ramp is 0 to 1.
+	// Each answers a different question about the air, and each has one job.
+	// Coefficients are multiples of CloudThickness.
 	//
-	// THE RAMP IS THE SECOND DIMENSION. A presence says a thing is here; the
-	// ramp says whether the air there is rising or sinking. At ramp 0 a channel
-	// only ever adds. At 1 it fully inverts wherever the air is slack, so the
-	// same signal builds where air rises and carves where it sinks -- which is
-	// what puts an eye in a hurricane, since a vortex turns hardest at its
-	// centre and moves fastest at its wall.
-	//
-	// A RAMPED CHANNEL COSTS BOUND WIDTH, because it reaches both ways and the
-	// shells have to allow for it. SolvedTopMax and SolvedBaseMin are where that
-	// shows.
+	// PRESSURE IS A LIMIT, NOT A CONTRIBUTION. A high subsides and puts an
+	// inversion over itself, and moisture under a lid spreads into a thin flat
+	// sheet rather than building; a low has no lid and grows until it runs out
+	// of energy. So pressure sets the headroom and the base altitude, and adds
+	// no depth of its own -- which is also why its sign is safe here where it
+	// was not on depth. A ceiling going neutral at the equator is benign.
 
-	/** ACTIVITY: rotation magnitude, the finest scale the flow has. Full ramp is
-	 *  what hollows out the middle of a rotating system. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float ActivityDepth = 0.40f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float ActivityLift = 0.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float ActivityRamp = 1.0f;
-
-	/** SYSTEM STRENGTH: pressure magnitude, and THE ONLY LARGE-SCALE CHANNEL --
-	 *  every derivative of the streamfunction kills the broad scales, so without
-	 *  this a planet has small features and latitude bands and nothing between.
-	 *  It is also the only channel that knows you are inside a strong system when
-	 *  everything local is quiet, which is what the interior of a high is. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float SystemDepth = 0.30f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float SystemLift = 0.10f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float SystemRamp = 0.6f;
-
-	/** JET: flow speed, read as a presence. Linear ribbons where two systems
-	 *  meet rather than where either one is. No ramp handle -- gating speed by
-	 *  speed is the same quantity twice. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float JetDepth = 0.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float JetLift = 0.10f;
-
-	/** TROPICAL: 1 at the equator falling to 0 at the poles. The one channel with
-	 *  no flow in it, and the one that reaches the equatorial band -- which on a
-	 *  planet is the cloudiest. Normally wants no ramp: the equator being cloudy
-	 *  is a standing fact, not something the local wind should veto. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float TropicalDepth = 0.10f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float TropicalLift = 0.10f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float TropicalRamp = 0.5f;
-
-	/** Flow speed the ramp crosses zero at, in the sim's own angular velocity
-	 *  units: below it the air is taken as sinking and above it as rising. Dead
-	 *  air reads -1 and about one and a half times this reads +1.
+	/** ORGANISATION: rotation magnitude, the finest scale the flow has. How much
+	 *  it AMPLIFIES ascent.
 	 *
-	 *  MEASURE IT AGAINST THE FLOW RATHER THAN GUESSING. Far too high and every
-	 *  mixed channel carves everywhere; far too low and none of them ever do. */
+	 *  IT MULTIPLIES RATHER THAN ADDS, because rotation makes no cloud on its
+	 *  own -- ascent does, and organisation says where that ascent is
+	 *  concentrated. Added beside ascent it refills every eye instead, since
+	 *  vorticity peaks at a vortex centre exactly where ascent is carving.
+	 *  Multiplied, the same number deepens a wall and hollows an eye. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float OrganisationBoost = 2.0f;
+
+	/** ASCENT: speed signed by pressure. Fast air in a low rises hard, fast air
+	 *  in a high sinks hard, slack air does neither -- monotone in speed, with
+	 *  no crossing point, because speed alone never had a reason to invert.
+	 *
+	 *  ITS GOING TO ZERO AT A VORTEX CENTRE IS WHAT HOLLOWS AN EYE, since a
+	 *  vortex turns hardest at its middle and moves fastest at its wall. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float AscentDepth = 0.50f;
+
+	/** The scale ascent is measured against, in the sim's own units. What that
+	 *  means depends on TR_ASCENT_FROM_TENDENCY: with it on, ascent is vorticity
+	 *  advection and this is the advection that reads full; with it off, ascent
+	 *  is speed about a crossing and this is that crossing speed. THE TWO WANT
+	 *  VERY DIFFERENT NUMBERS.
+	 *
+	 *  Measure it against the flow rather than guessing: too high and ascent
+	 *  never leaves its floor, too low and it saturates everywhere and stops
+	 *  distinguishing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.000001"))
-	float RampSpeed = 0.5f;
+	float AscentSpeed = 0.5f;
 
-	/** Slope of the ramp where it crosses. 1 is nearly linear across the working
-	 *  range; raising it tightens the transition toward a soft step, which
-	 *  narrows a hurricane's eyewall and hardens the edge of a clearing. */
+	/** How hard a system overturns within itself: slack air inside it sinks, fast
+	 *  air inside it rises. ORGANISATION GATES IT, SPEED SIGNS IT.
+	 *
+	 *  THIS IS WHAT MAKES AN EYE, and advection cannot. A symmetric vortex does
+	 *  not advect its own vorticity -- the flow is tangential, the gradient is
+	 *  radial, and their dot product is zero -- so advection is blind to
+	 *  cyclones and only sees asymmetric systems like troughs and fronts. Speed
+	 *  is the one quantity that varies radially inside a vortex: zero at the
+	 *  centre, peak at the wall.
+	 *
+	 *  Outside a system organisation is near zero and this vanishes, so quiet
+	 *  air stays neutral rather than being declared to be sinking. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float AscentSubsidence = 0.6f;
+
+	/** Speed the overturning crosses zero at, in the sim's own units: below it
+	 *  the air inside a system sinks, above it rises. Sets an eye's radius
+	 *  against its wall -- lower for a tighter eye and a wider wall. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.000001"))
+	float SubsidenceSpeed = 0.5f;
+
+	/** The streamfunction that reads as a full high or low, in the sim's own
+	 *  units. HOW FAR THE PRESSURE GRADIENT SPREADS: the field is already
+	 *  soft-saturated sim-side, so too small a scale bounds it again into two
+	 *  flat levels with a seam between them -- a high side and a low side rather
+	 *  than a gradient. Raise it until the ceiling varies across a system rather
+	 *  than switching at its edge. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.000001"))
+	float PressureScale = 2.0f;
+
+	/** How deep a column may get before the inversion resists it, and how far
+	 *  pressure moves that lid -- positive gives a low more headroom than a high.
+	 *
+	 *  IT RESISTS RATHER THAN CUTS. Growth saturates toward the headroom instead
+	 *  of clamping at it, so a capped column flattens by squashing and keeps the
+	 *  variance it came with. Flat-topped, not a sheet with an edge -- which is
+	 *  what a real anvil is, air running out of buoyancy rather than hitting a
+	 *  wall. THE MARCHED BAND IS BOUNDED BY THIS ALONE, noise included, so it is
+	 *  also the one number that sets how much of the shell gets fine-stepped. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001"))
-	float RampSharpness = 1.0f;
+	float CeilingDepth = 0.7f;
 
-	/** How far the ramp stretches the noise VERTICALLY. Rising air draws a
-	 *  feature out taller and sinking air presses the same one into a sheet,
-	 *  which is the tower-against-stratus distinction coming out of the signal
-	 *  that already puts the eye in a hurricane.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-0.99", ClampMax = "0.99"))
+	float CeilingPressure = 0.5f;
+
+	/** Where the base sits. TROPICALITY is the condensation level standing in for
+	 *  moisture until there is moisture; PRESSURE lowers it under a low and
+	 *  raises it under a high, which is the subsidence inversion doing its other
+	 *  job. Nothing else moves the base -- no flow energy, no noise -- which is
+	 *  what makes it exactly known per column. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float BaseTropical = -0.10f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float BasePressure = -0.10f;
+
+	/** How far ascent stretches the noise VERTICALLY. Rising air draws a feature
+	 *  out taller, sinking air presses it into a sheet.
 	 *
-	 *  A SHAPE CHANGE, NOT A DISPLACEMENT: it divides the vertical frequency
-	 *  rather than offsetting the coordinate, so a feature is redrawn taller
-	 *  instead of slid upward unaltered. Touches only the noise between the two
-	 *  surfaces, so it costs the marched band nothing. */
+	 *  TEXTURE, NOT WEATHER: it divides the vertical frequency rather than
+	 *  offsetting the coordinate, so a feature is redrawn taller instead of slid
+	 *  upward unaltered. Touches only the noise between the two surfaces, so it
+	 *  costs the marched band nothing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-0.9"))
-	float RampStretch = 0.5f;
+	float WarpStretch = 0.5f;
 
-	/** How far the ramp DISPLACES the noise vertically, a multiple of
-	 *  CloudThickness. Rising air carries a feature up and sinking air carries
-	 *  it down, unaltered in shape -- where RampStretch redraws the same feature
-	 *  taller or flatter.
-	 *
-	 *  The two are alternative readings of the same signal and compose, so zero
-	 *  one to isolate the other. Both touch only the noise between the surfaces
-	 *  and cost the marched band nothing. */
+	/** How far ascent DISPLACES the noise vertically, a multiple of
+	 *  CloudThickness. Rising air carries a feature up and sinking air carries it
+	 *  down, unaltered in shape -- where WarpStretch redraws the same feature
+	 *  taller or flatter. The two compose; zero one to isolate the other. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float RampShift = 0.5f;
-
-	/** How much DEPTH the ramp adds on its own, a multiple of CloudThickness.
-	 *  Signed against a signed ramp, so it deepens rising air and thins sinking
-	 *  air wherever they are, with no presence channel under it.
-	 *
-	 *  THIS IS WHAT THICKENS AN EYEWALL. The channel mixes only gate what a
-	 *  channel already contributes, so they can deepen a wall only where some
-	 *  other signal is also strong. Ascent is not a signal being present, it is
-	 *  the air rising -- and without this term a warped eye reads as a domed
-	 *  sheet rather than as a wall standing around a hole. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float RampDepth = 0.15f;
-
+	float WarpShift = 0.5f;
 
 	/** Width of the band under the shell top across which density fades to zero,
 	 *  as a fraction of atmosphere thickness. WHAT LETS RARE FEATURES REACH THE

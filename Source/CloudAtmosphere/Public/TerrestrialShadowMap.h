@@ -61,22 +61,18 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	float TopCurve = 0.0f;
 	float BottomCurve = 0.0f;
 	float CloudCover = 0.0f;
-	float ActivityDepth = 0.0f;
-	float ActivityLift = 0.0f;
-	float ActivityRamp = 0.0f;
-	float SystemDepth = 0.0f;
-	float SystemLift = 0.0f;
-	float SystemRamp = 0.0f;
-	float JetDepth = 0.0f;
-	float JetLift = 0.0f;
-	float TropicalDepth = 0.0f;
-	float TropicalLift = 0.0f;
-	float TropicalRamp = 0.0f;
-	float RampSpeed = 1.0f;
-	float RampSharpness = 2.0f;
-	float RampStretch = 0.0f;
-	float RampShift = 0.5f;
-	float RampDepth = 0.15f;
+	float OrganisationBoost = 0.0f;
+	float PressureScale = 1.0f;
+	float AscentDepth = 0.0f;
+	float AscentSpeed = 0.0f;
+	float AscentSubsidence = 0.0f;
+	float SubsidenceSpeed = 1.0f;
+	float CeilingDepth = 0.0f;
+	float CeilingPressure = 0.0f;
+	float BaseTropical = 0.0f;
+	float BasePressure = 0.0f;
+	float WarpStretch = 0.0f;
+	float WarpShift = 0.0f;
 	float BandSharpness = 0.0f;
 	float BandBias = 0.0f;
 	float HemisphereBlend = 0.0f;
@@ -204,22 +200,18 @@ SHADER_PARAMETER(float, SurfaceSoftness)
 SHADER_PARAMETER(float, TopCurve)
 SHADER_PARAMETER(float, BottomCurve)
 SHADER_PARAMETER(float, CloudCover)
-SHADER_PARAMETER(float, ActivityDepth)
-SHADER_PARAMETER(float, ActivityLift)
-SHADER_PARAMETER(float, ActivityRamp)
-SHADER_PARAMETER(float, SystemDepth)
-SHADER_PARAMETER(float, SystemLift)
-SHADER_PARAMETER(float, SystemRamp)
-SHADER_PARAMETER(float, JetDepth)
-SHADER_PARAMETER(float, JetLift)
-SHADER_PARAMETER(float, TropicalDepth)
-SHADER_PARAMETER(float, TropicalLift)
-SHADER_PARAMETER(float, TropicalRamp)
-SHADER_PARAMETER(float, RampSpeed)
-SHADER_PARAMETER(float, RampSharpness)
-SHADER_PARAMETER(float, RampStretch)
-SHADER_PARAMETER(float, RampShift)
-SHADER_PARAMETER(float, RampDepth)
+SHADER_PARAMETER(float, OrganisationBoost)
+SHADER_PARAMETER(float, PressureScale)
+SHADER_PARAMETER(float, AscentDepth)
+SHADER_PARAMETER(float, AscentSpeed)
+SHADER_PARAMETER(float, AscentSubsidence)
+SHADER_PARAMETER(float, SubsidenceSpeed)
+SHADER_PARAMETER(float, CeilingDepth)
+SHADER_PARAMETER(float, CeilingPressure)
+SHADER_PARAMETER(float, BaseTropical)
+SHADER_PARAMETER(float, BasePressure)
+SHADER_PARAMETER(float, WarpStretch)
+SHADER_PARAMETER(float, WarpShift)
 SHADER_PARAMETER(float, BandSharpness)
 SHADER_PARAMETER(float, BandBias)
 SHADER_PARAMETER(float, HemisphereBlend)

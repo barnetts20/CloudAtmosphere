@@ -38,23 +38,22 @@
 #define TR_ShadowCascadeCentre(Level, CameraLocal, U, V, Extent, MapSize) \
 	AtmoShadow_CascadeCentre(Level, CameraLocal, U, V, Extent, MapSize)
 
-/** The radius the map covers: the cull radius at UNFADED bounds.
+/** The radius the map covers: the field-wide top bound, the same radius the
+ *  march plans against as cloudOuterRadius.
  *
- *  PITFALL: not planetParams.cloudOuterRadius, which carries the camera's layer
- *  fades and shrinks as the structure layer fades out. A map written against one
- *  radius and read against another samples at the wrong scale, sliding the whole
- *  shadow toward the limb. */
+ *  PITFALL: a map written against one radius and read against another samples
+ *  at the wrong scale, sliding the whole shadow toward the limb. */
 float TR_ShadowCullRadius(TRFieldParams F)
 {
-    return F.PlanetRadius + F.Thickness * TR_TopMax(F, 1.0f);
+    return F.PlanetRadius + F.Thickness * TR_TopMax(F);
 }
 
-/** Half-width of a cascade. DERIVED FROM THE FADES, NOT AUTHORED SEPARATELY:
- *  level 1 reaches as far as structure is drawn, level 2 as far as detail, so
- *  inside a level both the map and the eye carry that layer and outside neither
- *  does. Any other sizing makes the two LODs disagree somewhere.
+/** Half-width of a cascade: level 1 reaches StructureFadeFar and level 2
+ *  DetailFadeFar, in planet radii. RESOLUTION TIERS ONLY -- both layers are
+ *  baked into every level, so a finer level resolves the same field more finely
+ *  around the camera rather than adding a layer the coarse one lacks.
  *
- *  STRICTLY ORDERED, because nothing makes the authored fades so: a detail range
+ *  STRICTLY ORDERED, because nothing makes the authored ranges so: a detail range
  *  wider than the structure range would put the coarse slice inside the fine
  *  one, which reads as the fine slice not working. A zero extent collapses that
  *  level and the walk skips it. */

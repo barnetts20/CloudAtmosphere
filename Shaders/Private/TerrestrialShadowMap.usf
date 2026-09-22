@@ -8,9 +8,9 @@
 // THE MARCH IS NOT HERE. The ray setup, the step lattice, the crossing
 // accumulation and the occluder band live in AtmosphereShadowBake.ush and
 // AtmosphereShadowBakeLoop.ush, which any bake writing this format shares. What
-// remains below is the deck's own -- its uniforms, its extinction, its fades,
-// where a ray enters it -- exposed to that loop through the BakeField_ hooks at
-// the bottom of the file.
+// remains below is the deck's own -- its uniforms, its extinction, where a ray
+// enters it -- exposed to that loop through the BakeField_ hooks at the bottom
+// of the file.
 //
 // THE FIELD THE LIGHT SEES MUST BE THE FIELD THE EYE SEES. Every derived
 // quantity here comes from TR_BuildField, TR_Density and TR_CloudBeta, the same
@@ -58,22 +58,18 @@ float SurfaceSoftness;
 float TopCurve;
 float BottomCurve;
 float CloudCover;
-float ActivityDepth;
-float ActivityLift;
-float ActivityRamp;
-float SystemDepth;
-float SystemLift;
-float SystemRamp;
-float JetDepth;
-float JetLift;
-float TropicalDepth;
-float TropicalLift;
-float TropicalRamp;
-float RampSpeed;
-float RampSharpness;
-float RampStretch;
-float RampShift;
-float RampDepth;
+float OrganisationBoost;
+float PressureScale;
+float AscentDepth;
+float AscentSpeed;
+float AscentSubsidence;
+float SubsidenceSpeed;
+float CeilingDepth;
+float CeilingPressure;
+float BaseTropical;
+float BasePressure;
+float WarpStretch;
+float WarpShift;
 float BandSharpness;
 float BandBias;
 float HemisphereBlend;
@@ -115,21 +111,6 @@ TRFieldParams TRShadow_Field()
     return TR_BUILD_FIELD();
 }
 
-/** Per-layer level of detail at a point, from its distance to the camera, in
- *  planet radii. MUST MATCH the view march's expression, or the field the light
- *  sees carries layers the eye has dropped -- lumpy shadows on a smooth surface,
- *  which reads as dirt rather than as under-resolved noise.
- *
- *  DETAIL ONLY. The structure layer applies at every range on this model, so
- *  there is nothing to match on it. */
-float TRShadow_DetailFade(float3 LocalPos, TRFieldParams F)
-{
-    const float Distance =
-		length(LocalPos - ShadowCameraLocal) / max(F.PlanetRadius, 1e-4f);
-
-    return 1.0f - smoothstep(F.DetailFadeNear, F.DetailFadeFar, Distance);
-}
-
 /** Per-band extinction amount, blended by the signed band. Mirrors
  *  TR_BandRamp and TR_BandTint on the a channel instead of rgb: sign
  *  picks the family, the ramp runs from Base at zero to that family at full
@@ -156,11 +137,10 @@ float TRShadow_BandAlpha(float Band)
  *  part of the reconstruction through the mean and reintroduce the bias the map
  *  exists to remove.
  *
- *  BOTH LAYERS, BOTH FADES. Detail is erosion -- TR_Density applies it as a
- *  carve, lowering mean density rather than only adding variation -- so dropping
- *  it would leave the shadow deck uniformly denser than the visible one. A layer
- *  may only be dropped from the map if it moves the variance and not the mean.
- *  The fades vary over planet radii, so they are evaluated once per step. */
+ *  BOTH LAYERS, IN EVERY CASCADE. Detail is erosion -- TR_Density applies it as
+ *  a carve, lowering mean density rather than only adding variation -- so
+ *  dropping it would leave the shadow deck uniformly denser than the visible
+ *  one. The subsamples band-limit it against the texel instead. */
 float TRShadow_Sigma(
 	float3 Pos,
 	float3 BasisU,
@@ -170,8 +150,6 @@ float TRShadow_Sigma(
 	float AbsMax,
 	TRFieldParams F)
 {
-    F.DetailFade = TRShadow_DetailFade(Pos, F);
-
     float Density = 0.0f;
 
     UNROLL
@@ -212,8 +190,7 @@ BakeFieldParams BakeField_Params()
     return TRShadow_Field();
 }
 
-/** The shell the map covers, at UNFADED bounds: the map is shared by every pixel
- *  so no one camera's fades may narrow it. */
+/** The shell the map covers: the field-wide bound, shared by every pixel. */
 float BakeField_CullRadius(BakeFieldParams F)
 {
     return TR_ShadowCullRadius(F);
@@ -224,11 +201,10 @@ float BakeField_CascadeExtent(BakeFieldParams F, int Level)
     return TR_ShadowCascadeExtent(F, Level);
 }
 
-/** Highest the field can reach, in thicknesses, with both layers at full
- *  strength. Bounds the cone trace below. */
+/** Highest the field can reach, in thicknesses. Bounds the cone trace below. */
 float BakeField_TopBound(BakeFieldParams F)
 {
-    return TR_TopMax(F, 1.0f);
+    return TR_TopMax(F);
 }
 
 /** Where the light ray first reaches the slab. The trace takes either surface,
