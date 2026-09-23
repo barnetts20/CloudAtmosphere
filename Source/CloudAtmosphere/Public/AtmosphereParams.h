@@ -452,7 +452,9 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	// -- The four flow quantities ---------------------------------------------
 	//
 	// Each answers a different question about the air, and each has one job.
-	// Coefficients are multiples of CloudThickness.
+	// Coefficients are multiples of CloudThickness. Ascent is the sim's cloud
+	// tracer (FlowSimConfig's Cloud group): cloud where air has been rising,
+	// carried by the wind.
 	//
 	// PRESSURE IS A LIMIT, NOT A CONTRIBUTION. A high subsides and puts an
 	// inversion over itself, and moisture under a lid spreads into a thin flat
@@ -462,49 +464,30 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	// was not on depth. A ceiling going neutral at the equator is benign.
 
 	/** ORGANISATION: rotation magnitude, the finest scale the flow has. How much
-	 *  it AMPLIFIES ascent.
-	 *
-	 *  IT MULTIPLIES RATHER THAN ADDS, because rotation makes no cloud on its
-	 *  own -- ascent does, and organisation says where that ascent is
-	 *  concentrated. Added beside ascent it refills every eye instead, since
-	 *  vorticity peaks at a vortex centre exactly where ascent is carving.
-	 *  Multiplied, the same number deepens a wall and hollows an eye. */
+	 *  it AMPLIFIES ascent. Multiplies rather than adds, because rotation makes
+	 *  no cloud on its own: it concentrates what the cloud signal is already
+	 *  doing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float OrganisationBoost = 2.0f;
 
-	/** ASCENT: speed signed by pressure. Fast air in a low rises hard, fast air
-	 *  in a high sinks hard, slack air does neither -- monotone in speed, with
-	 *  no crossing point, because speed alone never had a reason to invert.
-	 *
-	 *  ITS GOING TO ZERO AT A VORTEX CENTRE IS WHAT HOLLOWS AN EYE, since a
-	 *  vortex turns hardest at its middle and moves fastest at its wall. */
+	/** ASCENT: how much depth the sim's cloud adds, signed about half cover --
+	 *  a clouded column builds, a clear one thins. THE MASTER SHAPE HANDLE:
+	 *  with the noise relief at zero, this and CloudCover are the whole
+	 *  shape. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float AscentDepth = 0.50f;
 
-	/** The scale ascent is measured against, in the sim's own units. What that
-	 *  means depends on TR_ASCENT_FROM_TENDENCY: with it on, ascent is vorticity
-	 *  advection and this is the advection that reads full; with it off, ascent
-	 *  is speed about a crossing and this is that crossing speed. THE TWO WANT
-	 *  VERY DIFFERENT NUMBERS.
-	 *
-	 *  Measure it against the flow rather than guessing: too high and ascent
-	 *  never leaves its floor, too low and it saturates everywhere and stops
-	 *  distinguishing. */
+	/** Edge softness of the cloud signal: how much cloud fraction either side
+	 *  of a half it takes to read as fully clouded or fully clear. Small gives
+	 *  hard-edged cloud, large a gradual thinning. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.000001"))
 	float AscentSpeed = 0.5f;
 
-	/** How hard a system overturns within itself: slack air inside it sinks, fast
-	 *  air inside it rises. ORGANISATION GATES IT, SPEED SIGNS IT.
-	 *
-	 *  THIS IS WHAT MAKES AN EYE, and advection cannot. A symmetric vortex does
-	 *  not advect its own vorticity -- the flow is tangential, the gradient is
-	 *  radial, and their dot product is zero -- so advection is blind to
-	 *  cyclones and only sees asymmetric systems like troughs and fronts. Speed
-	 *  is the one quantity that varies radially inside a vortex: zero at the
-	 *  centre, peak at the wall.
-	 *
-	 *  Outside a system organisation is near zero and this vanishes, so quiet
-	 *  air stays neutral rather than being declared to be sinking. */
+	/** How hard a system overturns within itself, added to the cloud signal:
+	 *  slack air inside it sinks, fast air inside it rises -- the one signal
+	 *  that varies radially inside a vortex, so it hollows an eye and builds a
+	 *  wall. Organisation gates it, so quiet air is untouched. 0 leaves the
+	 *  shape to the sim alone. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float AscentSubsidence = 0.6f;
 

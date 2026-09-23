@@ -23,15 +23,14 @@
 // known per column rather than bounded, which the entry search and the empty-air
 // early-out both spend.
 //
-// FOUR QUANTITIES OUT OF ONE FLOW TAP, each answering a different question
-// about the air, and each with one job:
+// FOUR QUANTITIES OUT OF TWO TAPS, the flow slice and the weather slice, each
+// answering a different question about the air, and each with one job:
 //
 //   ORGANISATION, rotation magnitude. Where weather is organised at all -- the
 //     finest scale the flow has, since vorticity is the streamfunction
 //     differentiated twice. AMPLIFIES ASCENT RATHER THAN ADDING TO IT: rotation
-//     makes no cloud of its own, and adding depth beside ascent refills every
-//     eye, since vorticity peaks at a vortex centre exactly where ascent is
-//     carving. Multiplying deepens a wall and hollows an eye with one term.
+//     makes no cloud of its own, so multiplying concentrates what the cloud
+//     signal is already doing.
 //
 //   PRESSURE, signed, lows positive. NOT A CONTRIBUTION BUT A LIMIT. A high
 //     subsides and puts an inversion over itself, and moisture below a lid
@@ -40,11 +39,9 @@
 //     HEADROOM, and it sets where the base sits, and it decides which way the
 //     air is going vertically. It contributes no depth of its own.
 //
-//     ASCENT, speed signed about its own crossing. Rising air is compensated by
-//     sinking air wherever the wind is slack, so below the crossing this goes
-//     negative and carves. This is what grows a column and what warps the noise,
-//     and its going negative at a vortex centre -- highest rotation, lowest
-//     wind -- is what hollows an eye while its wall towers.
+//   ASCENT, the sim's cloud tracer signed about a half: positive where air has
+//     been rising, negative where it has been sinking or the cloud has decayed.
+//     THE MASTER SHAPE. It grows or carves the column and warps the noise.
 //
 //   TROPICALITY, 1 at the equator falling to 0 at the poles. The condensation
 //     level, standing in for moisture until there is moisture.
@@ -174,16 +171,17 @@ struct TRFieldParams
     float CloudCover;
 
 	/** How much organisation AMPLIFIES ascent. Rotation makes no cloud of its
-	 *  own -- ascent does -- so this concentrates what ascent is already doing
-	 *  rather than adding beside it. */
+	 *  own, so this concentrates what the cloud signal is already doing. */
     float OrganisationBoost;
 
-	/** How much depth ascent adds, signed with it: rising air builds and sinking
-	 *  air thins. */
+	/** How much depth the cloud signal adds, signed with it: a clouded column
+	 *  builds and a clear one thins. */
     float AscentDepth;
 
-	/** The scale ascent is measured against, squared. */
-    float AscentSpeedSq;
+	/** 1 / AscentSpeed: how sharply the cloud tracer turns into a signal. The
+	 *  authored AscentSpeed is the edge softness -- small gives hard-edged
+	 *  cloud, large a gradual thinning. */
+    float CloudEdgeGain;
 
 	/** The streamfunction that reads as a full high or low. Sets how far the
 	 *  pressure gradient spreads before it saturates. */
@@ -386,7 +384,7 @@ TRFieldParams TR_BuildField(
     F.OrganisationBoost = OrganisationBoost;
     F.PressureScale = max(PressureScale, 1e-6f);
     F.AscentDepth = AscentDepth;
-    F.AscentSpeedSq = max(AscentSpeed * AscentSpeed, 1e-12f);
+    F.CloudEdgeGain = 1.0f / max(AscentSpeed, 1e-4f);
     F.AscentSubsidence = AscentSubsidence;
     F.SubsidenceSpeedSq = max(SubsidenceSpeed * SubsidenceSpeed, 1e-12f);
 
@@ -608,111 +606,28 @@ float TR_BandCoarse(Texture2DArray FlowField, SamplerState FlowSampler, float3 L
 		FlowField.SampleLevel(FlowSampler, float3(U, V, TR_FLOW_LAYER), 0.0f), N, F.FlowRead);
 }
 
-/** Where ascent comes from. 1 reads it as VORTICITY ADVECTION, the leading term
- *  of the quasi-geostrophic omega equation and the diagnostic a forecaster reads
- *  off a chart: positive advection is ascent, negative is subsidence. It is also
- *  exactly what the barotropic sim computes each step to advance vorticity and
- *  then discards, so nothing here is invented -- only recomputed, at four extra
- *  flow taps per sample for the gradient.
+/** The four quantities at a column, from its flow sample and one weather tap.
  *
- *  0 reads it as SPEED about a crossing, on the argument that ascent has to be
- *  compensated wherever the air is slack. Cheaper by four taps and cruder: it
- *  cannot produce the asymmetry that puts a cloud shield AHEAD of a trough
- *  rather than on it, because speed knows nothing about which way the system is
- *  moving. */
-#ifndef TR_ASCENT_FROM_TENDENCY
-#define TR_ASCENT_FROM_TENDENCY 1
-#endif
-
-#if TR_ASCENT_FROM_TENDENCY
-
-/** Vorticity advection at a column, -u . grad(zeta), from four neighbour taps.
- *
- *  THE OFFSET IS A DIRECTION, NOT A UV. Stepping the unit direction along the
- *  local east and north basis and renormalising keeps the difference on the
- *  sphere, where a UV step would shear toward the poles and wrap at the seam. */
-float TR_VorticityAdvection(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	float3 N,
-	float4 Flow)
-{
-    uint Width, Height, Slices, Levels;
-    FlowField.GetDimensions(0, Width, Height, Slices, Levels);
-
-	// One texel of arc, as an angle: the finest the stored field can resolve.
-    const float Delta = 6.2831853f / float(max(Width, 1u));
-
-    const float Cos = max(length(N.xy), 1e-4f);
-
-    const float3 East = float3(-N.y, N.x, 0.0f) / Cos;
-    const float3 North = float3(-N.z * N.x / Cos, -N.z * N.y / Cos, Cos);
-
-    const float EastPlus =
-		Flow_Sample(FlowField, FlowSampler, normalize(N + East * Delta), TR_FLOW_LAYER).w;
-
-    const float EastMinus =
-		Flow_Sample(FlowField, FlowSampler, normalize(N - East * Delta), TR_FLOW_LAYER).w;
-
-    const float NorthPlus =
-		Flow_Sample(FlowField, FlowSampler, normalize(N + North * Delta), TR_FLOW_LAYER).w;
-
-    const float NorthMinus =
-		Flow_Sample(FlowField, FlowSampler, normalize(N - North * Delta), TR_FLOW_LAYER).w;
-
-    const float2 GradZeta =
-		float2(EastPlus - EastMinus, NorthPlus - NorthMinus) / (2.0f * Delta);
-
-    return -dot(Flow.xy, GradZeta);
-}
-
-#endif
-
-/** The four quantities at a column, from one flow sample.
- *
- *  BOUNDED IS WHAT MAKES THE COEFFICIENTS MEAN SOMETHING. Rotation overshoots
- *  one in an eddy core and the streamfunction carries its own gain, so without a
- *  bound one of them would swamp the rest and every reach derived from them
- *  would be wrong. The sigmoid is strictly inside its range and smooth
- *  everywhere, where a clamp would flatten an overshooting core into a plateau
- *  and leave a slope break around its edge.
+ *  BOUNDED IS WHAT MAKES THE COEFFICIENTS MEAN SOMETHING. The sigmoid is
+ *  strictly inside its range and smooth everywhere, where a clamp would flatten
+ *  an overshooting core into a plateau and leave a slope break around its edge.
  *
  *  ORGANISATION TAKES THE MAGNITUDE AND NO HEMISPHERE, so a system straddling
  *  the equator stays one system rather than reversing across its own middle.
  *
- *  PRESSURE KEEPS BOTH. Its sign is what a high and a low differ by, and the
- *  hemisphere is what turns a streamfunction extremum into one or the other --
- *  geostrophic balance flips with Coriolis, and at the equator there is neither,
- *  so a system crossing it loses its lid rather than inverting. A ceiling that
- *  goes neutral is benign; a depth that changes sign is not.
+ *  PRESSURE IS THE SIM'S GEOPOTENTIAL LESS ITS ZONAL MEAN, highs positive in
+ *  both hemispheres, negated here so lows are positive. It sets the ceiling and
+ *  the base and nothing else.
  *
- *  ASCENT IS SPEED ALONE, SIGNED ABOUT ITS OWN CROSSING. Rising air has to be
- *  compensated by sinking air somewhere, and the somewhere is wherever the air
- *  is not moving -- so below-average wind is descending air. That is why an eye
- *  subsides while its wall towers, why the middle of a high clears, and why the
- *  dead water between jets clears with it.
+ *  ASCENT IS THE CLOUD TRACER, which already integrates vertical motion along
+ *  the wind: cloud where air has been rising, clear where it has been sinking.
+ *  Reading the tracer rather than instantaneous W keeps gravity-wave flicker
+ *  and one-cell convergence lines out of the shape.
  *
- *  ADVECTION IS BLIND TO A SYMMETRIC VORTEX, and that is not a shortcoming to
- *  work around but a theorem: the flow is tangential, the vorticity gradient is
- *  radial, and their dot product is zero. A cyclone does not advect its own
- *  vorticity. So advection gives troughs and fronts, which are asymmetric, and
- *  says nothing at all about a hurricane.
- *
- *  OVERTURNING IS WHAT SAYS SOMETHING. Inside a system, slack air sinks and fast
- *  air rises -- speed is the only quantity that varies radially in a vortex,
- *  zero at the centre and peak at the wall, which is the eye and its eyewall.
- *  ORGANISATION GATES IT AND SPEED SIGNS IT: outside a system organisation is
- *  near zero and the whole term vanishes, so quiet air stays neutral rather than
- *  being declared to be sinking.
- *
- *  PRESSURE DOES NOT MULTIPLY ANY OF IT. Signing ascent by pressure makes a vortex
- *  centre NEUTRAL rather than sinking, since speed goes to zero there -- and
- *  organisation, which peaks at that same centre, then fills the eye back in.
- *  Pressure's jobs are the ceiling and the base; the vertical direction is
- *  speed's.
- *
- *  Taken squared, since a magnitude has a corner wherever the flow passes
- *  through zero and a barotropic field is full of stagnation points.
+ *  OVERTURNING stays as an optional term: inside an organised system slack air
+ *  sinks and fast air rises, which is the one signal that varies radially in a
+ *  vortex. Gated by organisation, so quiet air is untouched; AscentSubsidence 0
+ *  removes it.
  *
  *  Returns (organisation, ascent, pressure, tropicality). */
 float4 TR_Signals(
@@ -726,31 +641,17 @@ float4 TR_Signals(
 
     const float Organisation = Vorticity * rsqrt(1.0f + Vorticity * Vorticity);
 
-	// SCALED BEFORE THE SIGMOID. The streamfunction is already soft-saturated
-	// sim-side, so bounding it again with no scale reads as two levels and a
-	// seam rather than as a gradient -- a swap between a high side and a low
-	// side. The scale is what spreads the transition over the range the field
-	// actually occupies.
+	// SCALED BEFORE THE SIGMOID. The field is already soft-saturated sim-side,
+	// so bounding it again with no scale reads as two levels and a seam rather
+	// than as a gradient.
     const float Low = -Flow_Pressure(Flow, N, F.FlowRead) / F.PressureScale;
 
     const float Pressure = Low * rsqrt(1.0f + Low * Low);
 
-#if TR_ASCENT_FROM_TENDENCY
-	// Already signed and already zero where nothing is changing, so it needs a
-	// scale and no offset. AscentSpeed is that scale here, and it is a very
-	// different number from the crossing speed the other branch wants.
-    const float Excess =
-		TR_VorticityAdvection(FlowField, FlowSampler, N, Flow) / F.AscentSpeedSq;
-#else
-	// -1 in dead air, 0 at the crossing speed, asymptotic beyond it. Steepest
-	// where it crosses, which is where the transition it describes actually is,
-	// and it never flattens -- so the eyewall, the fastest air on the planet,
-	// still has curve left to resolve it.
-    const float Excess = dot(Flow.xy, Flow.xy) / F.AscentSpeedSq - 1.0f;
-#endif
+    const float Cloud = Flow_SampleWeather(FlowField, FlowSampler, N, TR_FLOW_LAYER).y;
 
-	// Bounded before it is weighted, so the overturning reaches its coefficient
-	// and no further whatever the flow is doing.
+    const float Excess = (2.0f * Cloud - 1.0f) * F.CloudEdgeGain;
+
     const float Radial = dot(Flow.xy, Flow.xy) / F.SubsidenceSpeedSq - 1.0f;
 
     const float Overturn = Radial * rsqrt(1.0f + Radial * Radial);

@@ -10,9 +10,6 @@ namespace FlowSimShader
 {
 	bool ShouldCompile(const FGlobalShaderPermutationParameters& Parameters)
 	{
-		// SM5 and up. Everything here is a plain compute dispatch with typed
-		// UAV loads on R32F and RGBA16F, which is baseline for that feature
-		// level and above.
 		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
 	}
 
@@ -21,34 +18,35 @@ namespace FlowSimShader
 		OutEnvironment.SetDefine(TEXT("GG_SIM_THREADS_2D"), ThreadGroupSize2D);
 		OutEnvironment.SetDefine(TEXT("GG_SIM_THREADS_1D"), ThreadGroupSize1D);
 		OutEnvironment.SetDefine(TEXT("GG_SIM_THREADS_LAYERS"), ThreadGroupSizeLayers);
+		OutEnvironment.SetDefine(TEXT("GG_SIM_THREADS_LINE"), ThreadGroupSizeLine);
+		OutEnvironment.SetDefine(TEXT("GG_SIM_LINE_MAX"), MaxGridLongitude);
+		OutEnvironment.SetDefine(TEXT("GG_SIM_COLUMN_MAX"), MaxGridLatitude);
 
-		// The SOR sweep reads its own UAV, and the polar filter and the cubic
-		// interpolator both index far enough from the thread's own texel that
-		// the compiler cannot prove the accesses are in range. Neither is a
-		// correctness problem -- SimWrapCoord folds every index -- but the
-		// bounds analysis is what would otherwise force scalarisation.
+		// The Rhs pass reads the R32F UAV it also writes. R32F is in the
+		// guaranteed typed-UAV-load set; every other UAV here is write-only, which
+		// is why the column solve reads one spectrum and writes another.
 		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
 	}
 }
 
-// Entry point names must match the [numthreads] functions in FlowSim.usf.
-// A mismatch here fails at cook time as a missing entry point rather than
-// anywhere useful, so they are listed adjacent for comparison.
+// Entry point names must match FlowSim.usf. A mismatch fails at cook time as a
+// missing entry point.
 
 #define GG_IMPLEMENT_SIM_SHADER(ClassName, EntryPoint) \
 	IMPLEMENT_GLOBAL_SHADER(ClassName, "/Plugin/CloudAtmosphere/Private/FlowSim.usf", EntryPoint, SF_Compute)
 
-GG_IMPLEMENT_SIM_SHADER(FFlowSimInitZonalPotentialCS, "MainInitZonalPotentialCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimInitPotentialCS, "MainInitPotentialCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimInitVorticityCS, "MainInitVorticityCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimVelocityCS, "MainVelocityCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimAdvectCS, "MainAdvectCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimInitBalanceCS, "MainInitBalanceCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimInitStateCS, "MainInitStateCS")
 GG_IMPLEMENT_SIM_SHADER(FFlowSimReduceRowsCS, "MainReduceRowsCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimReducePsiRowsCS, "MainReducePsiRowsCS")
 GG_IMPLEMENT_SIM_SHADER(FFlowSimReduceGlobalCS, "MainReduceGlobalCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimForceCS, "MainForceCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimPolarFilterCS, "MainPolarFilterCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimPoissonCS, "MainPoissonCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimReconstructCS, "MainReconstructCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimPredictCS, "MainPredictCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimFilterCS, "MainFilterCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimRhsCS, "MainRhsCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimHelmholtzForwardCS, "MainHelmholtzForwardCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimHelmholtzColumnCS, "MainHelmholtzColumnCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimHelmholtzInverseCS, "MainHelmholtzInverseCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimCorrectCS, "MainCorrectCS")
 GG_IMPLEMENT_SIM_SHADER(FFlowSimCaptureCS, "MainCaptureCS")
 GG_IMPLEMENT_SIM_SHADER(FFlowSimRestoreCS, "MainRestoreCS")
 GG_IMPLEMENT_SIM_SHADER(FFlowSimDebugVisCS, "MainDebugVisCS")

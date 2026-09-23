@@ -6,13 +6,11 @@
 
 /** The profile a snapshot was captured under.
  *
- *  PROVENANCE IS RECORDED RATHER THAN ASSUMED because a snapshot's eddies sit on
- *  the jets that existed when it was taken. Restored under a different BandCount
- *  or JetStrength they sit on jets that are not there, and since the nudge
- *  re-registers the zonal mean over a few hundred steps the field quietly
- *  corrects itself -- looking wrong in the meantime, then settling subtly
- *  different from what was captured. Silent and slow is the worst combination,
- *  so this is reported at load instead. */
+ *  RECORDED RATHER THAN ASSUMED because a snapshot's eddies sit on the jets that
+ *  existed when it was taken. Restored under a different profile they sit on
+ *  jets that are not there, and the nudge re-registers the zonal mean over a few
+ *  hundred steps -- quietly, looking wrong in the meantime. So it is reported at
+ *  load instead. */
 USTRUCT(BlueprintType)
 struct FFlowSnapshotProvenance
 {
@@ -37,14 +35,8 @@ struct FFlowSnapshotProvenance
 	float PlanetaryVorticity = 0.0f;
 
 	/** True when this profile would draw the same jets at the same latitudes.
-	 *
-	 *  Only the parameters that place the jets are compared. PlanetaryVorticity is
-	 *  recorded but NOT compared, along with DragRate, NudgeRate and the forcing,
-	 *  which are not recorded: all of them change how the field EVOLVES rather
-	 *  than where its structure sits. A snapshot restored under different rotation
-	 *  or dissipation is still registered correctly on its jets, it just relaxes
-	 *  toward a different equilibrium -- a legitimate thing to do deliberately,
-	 *  and the recorded value is there to make it visible. */
+	 *  Only the parameters that place the jets are compared; the rest change how
+	 *  the field evolves, not where its structure sits. */
 	bool MatchesShape(const FFlowSnapshotProvenance& Other) const
 	{
 		const float Tol = 1e-3f;
@@ -57,21 +49,15 @@ struct FFlowSnapshotProvenance
 	}
 };
 
-/** A captured simulation state: the whole thing, in two float arrays.
+/** A captured simulation state, as raw floats.
  *
- *  RAW FLOATS AND NOT A TEXTURE ASSET. A UTexture2DArray carries compression
- *  settings, an sRGB flag and mip generation, and any one applied to a physical
- *  field destroys it -- block compression on a vorticity field presents as the
- *  sim misbehaving rather than as an import setting, and nothing about a
- *  wrong-looking flow points at a texture group. A float array round-trips
- *  exactly, so the class of bug is unreachable rather than avoided. At 512x256x3
- *  the pair is about 3 MB uncompressed, small enough to ship a library.
+ *  RAW FLOATS AND NOT A TEXTURE ASSET. A texture carries compression, sRGB and
+ *  mip settings, and any one applied to a physical field destroys it in a way
+ *  that presents as the sim misbehaving. A float array round-trips exactly.
  *
- *  BOTH FIELDS, NOT JUST VORTICITY. Psi is recoverable by inverting the
- *  Laplacian, but recovering it means the cold-start Poisson solve at load:
- *  slow, keeping InitPoissonIterations alive as a runtime concern, and
- *  reproducing the captured psi only to solver tolerance. Doubling the file
- *  removes all three. */
+ *  THE LAYOUT IS THE SOLVER'S STATE: u faces, then v faces, then the
+ *  geopotential, each layer-major, then row, then column. See
+ *  FFlowSimulation::StateFloatsPerCell. */
 UCLASS(BlueprintType)
 class CLOUDATMOSPHERE_API UFlowSnapshot : public UDataAsset
 {
@@ -79,36 +65,34 @@ class CLOUDATMOSPHERE_API UFlowSnapshot : public UDataAsset
 
 public:
 	/** Grid this was captured at. A restore onto a different grid is refused
-	 *  rather than resampled: there is no way to resample a vorticity field
-	 *  that is cheaper or more faithful than re-running the spin-up. */
+	 *  rather than resampled. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Snapshot")
 	FIntVector Grid = FIntVector::ZeroValue;
 
-	/** Layer-major, then row, then column. Length Grid.X * Grid.Y * Grid.Z. */
+	/** Length Grid.X * Grid.Y * Grid.Z * 3. */
 	UPROPERTY()
-	TArray<float> Vorticity;
-
-	UPROPERTY()
-	TArray<float> Psi;
+	TArray<float> State;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Snapshot")
 	FFlowSnapshotProvenance Provenance;
 
-	/** Simulated time and step count when captured. Carried so a restored run
-	 *  continues the forcing drift from where it left off rather than jumping
-	 *  back to zero, which would otherwise snap the forcing pattern. */
+	/** Simulated time and step count when captured, so a restored run continues
+	 *  the forcing drift rather than snapping it back to zero. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Snapshot")
 	float SimulatedTime = 0.0f;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Snapshot")
 	int32 StepsCompleted = 0;
 
-	int32 ExpectedCount() const { return Grid.X * Grid.Y * Grid.Z; }
+	/** Floats per cell the current solver stores. Matches
+	 *  FFlowSimulation::StateFloatsPerCell; duplicated so this header stays free
+	 *  of the render-side one. */
+	static constexpr int32 FloatsPerCell = 3;
 
 	bool IsValidFor(const FIntVector& InGrid) const
 	{
 		const int32 N = InGrid.X * InGrid.Y * InGrid.Z;
 
-		return Grid == InGrid && N > 0 && Vorticity.Num() == N && Psi.Num() == N;
+		return Grid == InGrid && N > 0 && State.Num() == N * FloatsPerCell;
 	}
 };

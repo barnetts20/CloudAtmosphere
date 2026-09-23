@@ -1,19 +1,16 @@
 #pragma once
 
-// The zonal jet profile and everything derived from it. READ ONLY BY
-// GasGiantSim.usf: the sim evaluates the rate for its nudging target and the
-// DERIVATIVE for the initial vorticity field. The material draws its bands from
-// the vorticity channel the sim transports, not from this profile, so nothing
-// here reaches the material path.
+// The zonal jet profile and everything derived from it. READ BY FlowSim.usf:
+// the sim evaluates the rate for its nudging target and for the balanced
+// initial state. The material draws its bands from the vorticity channel the
+// sim writes, not from this profile.
 //
 // EVERYTHING HERE IS A FUNCTION OF S = sin(latitude), NOT LATITUDE. Jets come
 // out equal AREA rather than equal angle, so they stop crowding into the poles,
 // and S is already the sim's grid coordinate -- no transcendental to get here.
 //
-// RATES ARE ANGULAR, IN RADIANS PER UNIT TIME, ON A UNIT SPHERE. No planet
-// radius appears here or in the sim: linear speed would have to be divided by
-// cos(latitude) to become an angle, singular at the poles for no benefit, and a
-// radius carried through the sim is a units mismatch waiting to happen.
+// RATES ARE ANGULAR, IN RADIANS PER UNIT TIME, ON A UNIT SPHERE. The eastward
+// speed of the zonal flow is R(S) * cos(latitude).
 
 /** The raw alternating shape, roughly [-1.45, 1.45]. EVEN in S, so mirrored
  *  latitudes rotate the same way -- an odd form counter-rotates the hemispheres
@@ -76,18 +73,13 @@ float GG_JetScaled(float S, float BandCount, float Asymmetry, float WidthBias)
  *      zeta(S) = 2 S R(S) - (1 - S^2) R'(S)
  *
  *  so a step in R' is a STEP IN VORTICITY. Kelvin-Helmholtz makes a vortex sheet
- *  unstable at every wavenumber with a growth rate rising with wavenumber, so no
- *  rotation rate stabilises one -- the Rayleigh-Kuo requirement at the corner is
- *  unbounded, d(zeta)/dS being a delta function rather than a large number.
- *  Measured on a representative profile a hard clamp is active on about 3% of
- *  latitudes and raises the required PlanetaryVorticity from 28 to over 1400: the
- *  profile looks stable everywhere you would think to check and is catastrophic
- *  on a few rows, showing as bands that hold, perturb at the jet cores, roll up
- *  and merge.
+ *  unstable at every wavenumber, so no rotation rate stabilises one. The profile
+ *  looks stable everywhere you would think to check and is catastrophic on a few
+ *  rows, showing as bands that hold, perturb at the jet cores, roll up and
+ *  merge.
  *
- *  C2 IS THE REQUIREMENT, NOT MERELY C1. zeta depends on R', so continuous R'
- *  removes the sheet, but Rayleigh-Kuo tests d(zeta)/dS, which depends on R'' --
- *  a C1 saturation leaves a finite jump there and still needs beta near 100. The
+ *  C2 IS THE REQUIREMENT, NOT MERELY C1. Rayleigh-Kuo tests d(zeta)/dS, which
+ *  depends on R'', so a C1 saturation still leaves a finite jump there. The
  *  quintic below is continuous in value, slope AND curvature. */
 float GG_JetSaturate(float X)
 {
@@ -136,23 +128,12 @@ float GG_JetSaturateSlope(float X)
     return 1.0f - (6.0f * U3 * U2 - 15.0f * U3 * U + 10.0f * U3);
 }
 
-/** d(GG_JetScaled)/dS, THROUGH THE SATURATION. The saturation does bite --
- *  Asymmetry and WidthBias both push the sum past unity at ordinary settings --
- *  so the unsaturated derivative is wrong in exactly those regions, which are
- *  the jet peaks.
- *
- *  PITFALL: this IS the zonal vorticity. A nonzero slope where the rate is
- *  constant tells the sim there is shear where there is none, so the initial
- *  condition carries vorticity sheets along every jet core that the flow does
- *  not support. The sim spends its spin-up dismantling them, which reads as the
- *  seeding not having taken. */
+/** d(GG_JetScaled)/dS, THROUGH THE SATURATION, which does bite at ordinary
+ *  settings -- so the unsaturated derivative is wrong exactly at the jet peaks. */
 float GG_JetScaledSlope(float S, float BandCount, float Asymmetry, float WidthBias)
 {
     const float Scaled = GG_JetScaled(S, BandCount, Asymmetry, WidthBias);
 
-	// Chain rule through the saturation, evaluated at the same expression
-	// GG_ZonalRate saturates, so the two cannot disagree about where the knee
-	// is.
     return GG_JetSaturateSlope(Scaled) * GG_JetRawSlope(S, BandCount, Asymmetry) * GG_JET_NORM;
 }
 
@@ -172,8 +153,7 @@ float GG_EquatorialBoostSlope(float S, float EquatorialBoost)
 
 /** Angular rate. Radians per unit time, positive prograde (eastward). What makes
  *  STRUCTURE is dRate/dS, not Rate: a constant added to every latitude is a rigid
- *  spin producing no shear, and only the differences between latitudes wind
- *  anything. */
+ *  spin producing no shear. */
 float GG_ZonalRate(
 	float S,
 	float BandCount,
@@ -187,9 +167,8 @@ float GG_ZonalRate(
     return JetStrength * (Raw + GG_EquatorialBoost(S, EquatorialBoost));
 }
 
-/** d(GG_ZonalRate)/dS, term for term including the saturation, which is why
- *  GG_JetScaledSlope exists. The local shear rate, and what the zonal vorticity
- *  below is built from. */
+/** d(GG_ZonalRate)/dS, term for term including the saturation. The local shear
+ *  rate. */
 float GG_ZonalRateSlope(
 	float S,
 	float BandCount,
@@ -203,25 +182,17 @@ float GG_ZonalRateSlope(
     return JetStrength * (RawSlope + GG_EquatorialBoostSlope(S, EquatorialBoost));
 }
 
-/** RELATIVE VORTICITY OF THE PRESCRIBED ZONAL FLOW, as a function of S. THE
- *  INITIAL CONDITION AND THE NUDGING TARGET: everything the sim does to maintain
- *  jets comes through this one function.
+/** Relative vorticity of the prescribed zonal flow. Not called by the sim; the
+ *  quantity to compare its vorticity output against when checking the profile.
  *
- *  The general form for a zonal flow is
- *
- *      zeta = -(1 / (a cos(phi))) d(u cos(phi)) / d(phi)
- *
- *  which is where a radius, two cosines and a pole singularity appear. None of
- *  that survives the change of variable: on a unit sphere with an ANGULAR rate
- *  R(S) the eastward speed is u = R cos(phi), so u cos(phi) = R (1 - S^2), and
- *  since d/d(phi) = cos(phi) d/dS the cosines cancel against the prefactor:
+ *  On a unit sphere with an ANGULAR rate R(S) the eastward speed is
+ *  u = R cos(phi), so u cos(phi) = R (1 - S^2), and since d/d(phi) =
+ *  cos(phi) d/dS the cosines cancel against the prefactor:
  *
  *      zeta(S) = -d/dS[ (1 - S^2) R(S) ] = 2 S R(S) - (1 - S^2) R'(S)
  *
  *  No radius, no division, no singularity, and finite at S = +-1 where it
- *  reduces to 2 R(+-1) -- solid-body rotation about the pole, which is what a
- *  smooth field must do there. The same collapse that makes the Laplacian clean
- *  in this coordinate, and the main reason the grid is in sin(latitude). */
+ *  reduces to 2 R(+-1) -- solid-body rotation about the pole. */
 float GG_ZonalVorticity(
 	float S,
 	float BandCount,

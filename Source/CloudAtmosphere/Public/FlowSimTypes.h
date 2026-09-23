@@ -9,33 +9,39 @@ class UFlowSnapshot;
 class UTextureRenderTarget2D;
 class UTextureRenderTarget2DArray;
 
-/** Which field the debug view renders. Mirrors GG_DEBUG_* in FlowSim.usf. */
+/** Which field the debug view renders. Mirrors SIM_DEBUG_* in FlowSim.usf. */
 UENUM(BlueprintType)
 enum class EFlowDebugMode : uint8
 {
 	Vorticity   UMETA(DisplayName = "Vorticity"),
-	Psi         UMETA(DisplayName = "Streamfunction"),
+
+	/** Geopotential less its zonal mean. Positive in highs in both hemispheres. */
+	Pressure    UMETA(DisplayName = "Pressure"),
+
 	Speed       UMETA(DisplayName = "Speed"),
 	East        UMETA(DisplayName = "Eastward velocity"),
 	North       UMETA(DisplayName = "Northward velocity"),
 
-	/** Laplacian(psi) - omega, featureless once converged. MainDebugVisCS has the
+	/** Rhs - (I - sL) phi, featureless once converged. MainDebugVisCS has the
 	 *  note on reading one that is not. */
-	Residual    UMETA(DisplayName = "Poisson residual"),
+	Residual    UMETA(DisplayName = "Helmholtz residual"),
 
-	/** Zonal mean vorticity minus the prescribed target: whether the nudge is
-	 *  winning against the drag. */
+	/** Zonal-mean eastward velocity minus the profile: whether the nudge holds. */
 	ZonalError  UMETA(DisplayName = "Zonal profile error"),
+
+	/** -divergence: red rising, blue sinking. */
+	Vertical    UMETA(DisplayName = "Vertical motion"),
+
+	/** Speed over gravity-wave speed. */
+	Froude      UMETA(DisplayName = "Froude number"),
+
+	/** The cloud tracer, 0 to 1. */
+	Cloud       UMETA(DisplayName = "Cloud"),
 };
 
-/** Per-layer multipliers on the shared jet profile. THIS IS THE VERTICAL WIND
- *  SHEAR and the reason the stack exists: Taylor-Proudman makes the flow
- *  invariant along the rotation axis, so a full 3D solve is mostly wasted work
- *  and what a stack of 2D layers buys is layers that DISAGREE.
- *
- *  Multipliers rather than independent profiles: independent ones would put each
- *  layer's jets at different latitudes, and the bands the material draws come
- *  from the shared profile, so they would register with none of them. */
+/** Per-layer multipliers on the shared jet profile: the vertical wind shear.
+ *  Multipliers rather than independent profiles, so every layer's jets sit at
+ *  the same latitudes. */
 USTRUCT(BlueprintType)
 struct FFlowLayerProfile
 {
@@ -53,44 +59,42 @@ struct FFlowLayerProfile
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer")
 	float ForcingScale = 1.0f;
 
-	/** Scales the eddy drag. */
+	/** Scales the drag. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer")
 	float DragScale = 1.0f;
 };
 
-/** Everything the sim needs, authored. Every value is re-read at the top of each
- *  frame, so the asset can be edited while the sim runs; nothing is latched at
- *  start except the grid dimensions.
+/** Everything the sim needs, authored. Re-read at the top of each frame, so the
+ *  asset can be edited while the sim runs; only the grid dimensions are latched.
  *
- *  The two render targets are AUTHORED ASSETS rather than transient textures, so
- *  a material can reference the flow target by asset path and the debug target
- *  can be watched in the content browser while the sim runs. */
+ *  THE REGIME IS SET BY THREE RATIOS, and every look control sits inside it:
+ *    Rossby   JetStrength / PlanetaryVorticity. Low is Earth-like: flow slow
+ *             against rotation, large balanced systems.
+ *    Froude   peak speed / gravity-wave speed. Must stay below about 0.5, or the
+ *             flow forms hydraulic jumps.
+ *    Size     DeformationRadius. The eddy scale: small gives many narrow bands
+ *             and small vortices, large a few big systems.
+ *  The start log reports all three. */
 UCLASS(BlueprintType)
 class CLOUDATMOSPHERE_API UFlowSimConfig : public UDataAsset
 {
 	GENERATED_BODY()
 
 public:
-	// THE PARAMETERS INTERACT. The jet profile sets a growth rate that NudgeRate,
-	// DragRate and ForcingAmplitude are all scaled against, and the rotation rate
-	// bounds how fine a banding that profile can hold. Retuning one of the four
-	// usually means revisiting the others.
-
 	// -- Grid ---------------------------------------------------------------
 
-	/** Longitude columns. MUST BE EVEN: the polar fold in SimWrapCoord offsets by
-	 *  exactly half the width, and an odd width lands the reflection half a texel
-	 *  off, showing as a faint discontinuity through both poles. */
+	/** Longitude columns. Rounded down to a power of two, which the Helmholtz
+	 *  transform needs and which also keeps the width even for the polar fold. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (ClampMin = "32", ClampMax = "2048"))
 	int32 GridLongitude = 512;
 
 	/** Latitude rows, in sin(latitude). Half the longitude count gives roughly
-	 *  square cells in the tropics, where the visible structure is. */
+	 *  square cells in the tropics. At most 1024, the tallest column the
+	 *  Helmholtz solve holds. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (ClampMin = "16", ClampMax = "1024"))
 	int32 GridLatitude = 256;
 
-	/** Stack depth. One layer works and has no vertical shear; two is the
-	 *  smallest that produces any, which is what the deck reads. */
+	/** Stack depth. Two is the smallest with any vertical shear. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (ClampMin = "1", ClampMax = "8"))
 	int32 LayerCount = 3;
 
@@ -99,18 +103,15 @@ public:
 
 	// -- Jet profile --------------------------------------------------------
 	//
-	// The SAME parameters the material's band profile uses, and they must match:
-	// GasGiantJets.ush is shared, and the bands are drawn from the same shape the
-	// jets are maintained at. Divergence means bands that do not sit on their
-	// jets.
+	// The zonal flow the nudge maintains, and the one the sim starts balanced
+	// on. See GasGiantJets.ush.
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile", meta = (ClampMin = "1.0"))
 	float BandCount = 3.0f;
 
-	/** Peak angular rate, radians per unit time on a unit sphere. Everything in
-	 *  the sim is scaled against this. */
+	/** Peak angular rate, radians per unit time on a unit sphere. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile")
-	float JetStrength = 2.0f;
+	float JetStrength = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile")
 	float EquatorialBoost = 0.5f;
@@ -118,210 +119,190 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile")
 	float Asymmetry = 0.5f;
 
-	/** Offsets the jet profile so zones and belts need not be the same width.
-	 *  Positive widens the prograde zones. */
+	/** Positive widens the prograde zones. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile")
 	float WidthBias = 0.0f;
 
 	// -- Physics ------------------------------------------------------------
 
-	/** 2 * Omega. BETA IS NOT OPTIONAL and this supplies it: at zero the inverse
-	 *  cascade is isotropic and merges eddies into one hemispheric vortex rather
-	 *  than into jets. With NudgeRate high the profile still looks correct while
-	 *  the nudge maintains it alone, so the failure hides until the nudge drops.
+	/** 2 * Omega. Sets the Rossby number against JetStrength and, through its
+	 *  variation with latitude, the beta effect that arrests the inverse cascade
+	 *  into jets.
 	 *
-	 *  PITFALL: the requirement rises with the SQUARE of BandCount, not with
-	 *  JetStrength alone. Too low and the jets go barotropically unstable,
-	 *  meander, roll up and merge -- bands appear, hold, then collapse. */
+	 *  PITFALL: also the explicit Coriolis step. Its peak rotation per substep is
+	 *  this times the step size; above about 0.5 radians the split between
+	 *  explicit rotation and implicit pressure starts radiating gravity waves. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics")
-	float PlanetaryVorticity = 4.0f;
+	float PlanetaryVorticity = 24.0f;
+
+	/** Rossby deformation radius at 45 degrees, in planet radii: the scale where
+	 *  rotation and stratification balance, and so the size eddies settle at.
+	 *  The gravity-wave speed follows as c = Ld * PlanetaryVorticity * sin(45).
+	 *  Large reduces the model to non-divergent flow. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.01"))
+	float DeformationRadius = 0.2f;
 
 	/** Simulated time per second of real time. THE SPEED CONTROL, AND ONLY THAT:
-	 *  the substep count per frame is unaffected, since the step size scales with
-	 *  it. Zero freezes the sim without tearing it down. */
+	 *  the substep count per frame is unaffected, since the step size scales
+	 *  with it. Zero freezes the sim without tearing it down. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.0"))
-	float TimeScale = 1.0f;
+	float TimeScale = 2.0f;
 
-	/** Step size as a FRACTION OF TIMESCALE: Step = TimeScale * StepRatio. Substeps
-	 *  per frame come to DeltaTime / StepRatio with no TimeScale in it, so the
-	 *  count is identical at every speed and the per-frame cost is pinned.
-	 *
-	 *  AUTHORED RATHER THAN DERIVED FROM A COURANT TARGET, which would invert the
-	 *  dependency and move the frame cost whenever the profile was touched. Cost
-	 *  is a budget, Courant a consequence: GetCourant() reports it, and above 0.33
-	 *  it becomes a real dissipation term rather than an accuracy figure. */
+	/** Step size as a FRACTION OF TIMESCALE: Step = TimeScale * StepRatio, so the
+	 *  substep count per frame is DeltaTime / StepRatio at every speed and the
+	 *  frame cost is pinned. The Courant numbers are consequences, reported at
+	 *  start. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.00001", ClampMax = "0.1"))
 	float StepRatio = 0.0043f;
 
-	/** Cap on substeps per frame, so a hitch does not cascade into a longer one.
-	 *  Time beyond this is DISCARDED rather than carried: carrying it means a
-	 *  stall is followed by a burst of steps that makes the next frame worse. */
+	/** Cap on substeps per frame. Time beyond it is DISCARDED rather than
+	 *  carried, so a stall is not followed by a burst that makes the next frame
+	 *  worse. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "1", ClampMax = "64"))
 	int32 MaxSubstepsPerFrame = 8;
 
 	// -- Forcing ------------------------------------------------------------
 
-	/** Relaxation of the ZONAL MEAN toward the prescribed profile, per unit time.
-	 *  Not of the field: nudging the field erases every eddy each step. High holds
-	 *  the profile still, which is what lets advection and the Poisson solve be
-	 *  checked separately against known answers; walk it down afterwards. */
+	/** Relaxation of the ZONAL-MEAN eastward velocity toward the profile, per
+	 *  unit time. Not of the field, which would erase every eddy each step.
+	 *  PITFALL: every nudge is an unbalanced push that the flow answers with
+	 *  gravity waves, so strong nudging reads as ripples. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
 	float NudgeRate = 1.0f;
 
-	/** EQUILIBRIUM eddy vorticity sustained by the stochastic forcing, and what
-	 *  stops a well-damped run going laminar. Drag arrests the inverse cascade,
-	 *  which keeps bands intact, but drag with nothing opposing it removes the
-	 *  eddies too and leaves clean bands with no weather on them.
-	 *
-	 *  An equilibrium rather than a rate, so it does not move when DragRate is
-	 *  tuned. Raise it toward the zonal vorticity scale and the bands start to
-	 *  break up. See MainForceCS. */
+	/** Equilibrium eddy speed the stochastic forcing sustains against the drag,
+	 *  per unit slope of the forcing noise. Divergence-free, so it stirs without
+	 *  pumping mass. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
-	float ForcingAmplitude = 2.5f;
+	float ForcingAmplitude = 0.3f;
 
+	/** Forcing noise frequency, in volume UVW per unit sphere. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
 	float ForcingScale = 0.25f;
 
-	/** Drift through the forcing volume, in UVW per unit time: what decorrelates
-	 *  the forcing so it is stochastic rather than static.
-	 *
-	 *  MUST BE COMPARED AGAINST THE EDDY TURNOVER TIME, not chosen small because
-	 *  it is a drift. Refresh much slower than the flow evolves is
-	 *  indistinguishable from frozen -- the sim converges to a fixed point with
-	 *  every structure pinned to a longitude, and reads as laminar however strong
-	 *  the forcing is. Components are mutually incommensurate so the path through
-	 *  the tiling volume does not close and repeat. */
+	/** Drift through the forcing volume, UVW per unit time. Must be comparable to
+	 *  the eddy turnover rate, or the forcing is effectively frozen and the field
+	 *  settles to a fixed pattern. Components are mutually incommensurate so the
+	 *  path through the tiling volume does not repeat. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
 	FVector ForcingDrift = FVector(0.001, 0.001, 0.0005);
 
-	/** Linear drag on the eddy vorticity, per unit time. THE ONLY LARGE-SCALE
-	 *  ENERGY SINK IN THE MODEL, and it has to be the same order as the
-	 *  instability growth rate to arrest anything.
-	 *
-	 *  The nudge cannot substitute for it: the nudge controls the ZONAL MEAN, and
-	 *  a field that is mostly one large eddy can carry a perfectly correct zonal
-	 *  mean while looking nothing like bands. Eddy energy needs its own sink. */
+	/** Linear drag on the eddy part of the eastward velocity and all of the
+	 *  northward, per unit time. The large-scale energy sink that arrests the
+	 *  cascade, AND what turns flow into lows and out of highs: the Ekman
+	 *  convergence the vertical motion output reads. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
 	float DragRate = 1.5f;
 
 	/** Relaxation between vertically adjacent layers. Weak on purpose: strong
-	 *  coupling is the Taylor-Proudman limit, where the stack collapses to one
-	 *  layer and buys nothing. */
+	 *  coupling collapses the stack to one layer. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
 	float LayerCoupling = 0.1f;
 
+	/** Fraction of grid-scale divergence removed per substep: damps
+	 *  gravity-wave noise and leaves the rotational flow alone. Scaled per row
+	 *  against the grid spacing there, so it is stable at every latitude and
+	 *  step size; larger features are damped in proportion to the square of
+	 *  their wavenumber. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing", meta = (ClampMin = "0.0", ClampMax = "0.5"))
+	float DivergenceDamping = 0.05f;
+
+	/** Relaxation of the geopotential toward the profile's balanced state, per
+	 *  unit time: jets maintained through their pressure gradient rather than
+	 *  pushed directly, as a temperature contrast maintains them. Zero leaves the
+	 *  nudge as the only driver. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing", meta = (ClampMin = "0.0"))
+	float ThermalRelaxation = 0.0f;
+
+	// -- Cloud --------------------------------------------------------------
+	//
+	// An advected cloud fraction standing in for moisture: it forms where air
+	// rises, clears where air sinks, and is carried by the wind in between.
+	// Rates are per unit time against vertical motion normalised to (-1, 1).
+	// Written to the weather slice's second channel.
+
+	/** How fast rising air fills a column with cloud. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud", meta = (ClampMin = "0.0"))
+	float CondensationRate = 5.0f;
+
+	/** How fast sinking air clears it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud", meta = (ClampMin = "0.0"))
+	float EvaporationRate = 3.0f;
+
+	/** How long cloud survives in still air before decaying, in sim time. Longer
+	 *  carries cloud further from where it formed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud", meta = (ClampMin = "0.001"))
+	float CloudLifetime = 2.0f;
+
 	// -- Polar filter -------------------------------------------------------
 
-	/** cos(latitude) below which the longitudinal filter engages, so higher
-	 *  filters more of the grid: 0.9 reaches to about 26 degrees of latitude,
-	 *  0.35 only to 70. Above it nothing is filtered. */
+	/** cos(latitude) below which the longitudinal filter engages: 0.9 reaches
+	 *  to about 26 degrees of latitude, 0.35 only to 70. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Polar Filter", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float FilterLatitude = 0.9f;
 
-	/** Bound on the filter width, so the innermost polar rows do not turn into
-	 *  a loop over the whole grid. */
+	/** Bound on the filter width, so the innermost polar rows do not turn into a
+	 *  loop over the whole grid. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Polar Filter", meta = (ClampMin = "1", ClampMax = "256"))
-	int32 FilterMaxHalfWidth = 1;
-
+	int32 FilterMaxHalfWidth = 8;
 
 	// -- Solver -------------------------------------------------------------
 
-	/** Red-black sweeps per substep, each two dispatches. Small because the solve
-	 *  is WARM STARTED from the previous step's psi, a near-solution. If the
-	 *  residual view shows structure spread evenly rather than concentrated at the
-	 *  poles, this is the number to raise. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "1", ClampMax = "128"))
-	int32 PoissonIterations = 8;
-
-	/** Sweeps for the one cold start at init, which has no previous psi to warm
-	 *  start from. Off the frame budget, so it can be generous. Ignored once
-	 *  InitialState is bound: a restored snapshot carries psi already consistent
-	 *  with its vorticity, which is most of why both fields are stored. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "1", ClampMax = "4096"))
-	int32 InitPoissonIterations = 256;
-
-	/** Over-relaxation. LEAVE AT 0 TO DERIVE IT FROM THE GRID, since the optimum
-	 *  is a function of resolution rather than a constant and approaches 2 as the
-	 *  grid grows. Set a positive value only to override deliberately.
-	 *
-	 *  PITFALL: the sensitivity is not intuitive. A hand-picked value that is a
-	 *  fine rule of thumb for a small grid leaves the smoothest mode's error
-	 *  decaying an order of magnitude slower here, and the accumulated
-	 *  streamfunction error is a large-scale spurious VELOCITY that advects
-	 *  everything into the lowest wavenumber available. It presents as the field
-	 *  collapsing to a single hemispheric mode, which by eye is indistinguishable
-	 *  from an inverse cascade that failed to arrest. AT OR ABOVE 2 THE ITERATION
-	 *  DIVERGES immediately, so a psi view that saturates on frame one is almost
-	 *  always this. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "0.0", ClampMax = "1.99"))
-	float Relaxation = 0.0f;
+	/** Weight of the implicit half of the gravity-wave terms. 0.5 is neutral;
+	 *  above it gravity waves are damped, more strongly the higher. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "0.5", ClampMax = "1.0"))
+	float ImplicitWeight = 0.6f;
 
 	// -- Forcing volume -----------------------------------------------------
 
-	/** Band-limited tiling noise supplying the stochastic forcing. Optional: with
-	 *  none bound the forcing evaluates to exactly zero, which is the correct
-	 *  state when the nudge is the energy source. */
+	/** Band-limited tiling noise, read as a forcing streamfunction. Optional:
+	 *  with none bound the forcing is exactly zero. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing Volume")
 	TObjectPtr<UVolumeTexture> ForcingVolume;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing Volume", meta = (ClampMin = "0", ClampMax = "3"))
 	int32 ForcingChannel = 1;
 
-	/** True when the channel was baked with bBipolarOutput. MUST MATCH THE RECIPE:
-	 *  a unipolar decode on a signed bake maps [-1,1] to [-3,1], which as forcing
-	 *  is a constant vorticity source with noise riding on it. */
+	/** True when the channel was baked signed. MUST MATCH THE RECIPE: a unipolar
+	 *  decode of a signed bake biases the forcing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing Volume")
 	bool bForcingBipolar = true;
 
 	// -- Start state --------------------------------------------------------
 
-	/** A captured state to start from. Empty means seed and spin up.
-	 *
-	 *  Set and matching the grid, the seeding path is skipped entirely: vorticity
-	 *  and streamfunction upload directly and the sim runs from the first frame,
-	 *  with SpinUpSteps and InitPoissonIterations both ignored. This is what makes
-	 *  one sim serve many planets -- bake a library of states, pick one at random,
-	 *  and a generated planet starts fully developed with no two alike.
-	 *
-	 *  A grid mismatch is REFUSED and falls back to seeding, with a warning. No
-	 *  resampling of a vorticity field is cheaper or more faithful than re-running
-	 *  the spin-up. */
+	/** A captured state to start from. Empty means seed and spin up. A grid
+	 *  mismatch is refused and falls back to seeding. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Start State")
 	TObjectPtr<UFlowSnapshot> InitialState;
 
 	// -- Spin-up ------------------------------------------------------------
 
-	/** Substeps to run before the sim is considered ready. AN AUTHORING PARAMETER,
-	 *  NOT A RUNTIME ONE: it produces the states that get captured into snapshots,
-	 *  and is skipped once InitialState is bound. Small because the expensive part
-	 *  of a real spin-up -- the cascade organising jets out of isotropic forcing --
-	 *  does not happen here, the jets being prescribed. */
+	/** Substeps to run before the sim is considered ready. Skipped once
+	 *  InitialState is bound. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spin Up", meta = (ClampMin = "0", ClampMax = "8192"))
 	int32 SpinUpSteps = 300;
 
-	/** Spin-up substeps per frame. Spread over frames rather than run in one
-	 *  graph: a three-hundred-step graph is three thousand passes and will hitch,
-	 *  and spreading it makes the spin-up WATCHABLE in the debug view, where
-	 *  seeing the seed organise or fail to says more than the converged state. */
+	/** Spin-up substeps per frame. Spread over frames so the spin-up neither
+	 *  hitches nor hides: watching the seed organise says more than the
+	 *  converged state. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spin Up", meta = (ClampMin = "1", ClampMax = "64"))
 	int32 MaxSpinUpStepsPerFrame = 8;
 
 	// -- Targets ------------------------------------------------------------
 
-	/** RGBA16F 2D array, sized (GridLongitude, GridLatitude, LayerCount).
-	 *  RGB is tangent velocity as an angular rate, A is the streamfunction.
-	 *  This is what the material samples. */
+	/** RGBA16F 2D array, sized (GridLongitude, GridLatitude, 2 * LayerCount).
+	 *  Slices [0, L) are flow, [L, 2L) weather; see FlowField.ush. This is what
+	 *  the material samples. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Targets")
 	TObjectPtr<UTextureRenderTarget2DArray> FlowTarget;
 
-	/** Any 2D render target. Sized to the grid it is one texel per cell, which
-	 *  is the intended setup. */
+	/** Any 2D render target. Sized to the grid it is one texel per cell. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Targets")
 	TObjectPtr<UTextureRenderTarget2D> DebugTarget;
 
-	/** Reconfigure the targets to match the grid if they do not already. On by
-	 *  default: a mismatched target is refused, and a refused sim looks exactly
-	 *  like a sim that is running and producing nothing. */
+	/** Reconfigure the targets to match the grid if they do not already. A
+	 *  mismatched target is refused, and a refused sim looks exactly like one
+	 *  that runs and produces nothing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Targets")
 	bool bAutoResizeTargets = true;
 
@@ -333,62 +314,67 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (ClampMin = "0", ClampMax = "7"))
 	int32 DebugLayer = 0;
 
-	/** Value mapped to full colour. ZERO DERIVES IT PER MODE, which is usually
-	 *  what is wanted: the seven fields differ in magnitude by two orders, so one
-	 *  authored number is right for one of them and renders the rest black. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (ClampMin = "0.0001"))
+	/** Value mapped to full colour. ZERO DERIVES IT PER MODE: the fields differ
+	 *  in magnitude by orders, so one number is right for one of them. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (ClampMin = "0.0"))
 	float DebugScale = 0.0f;
 
 	/** Halt stepping without tearing the state down. The debug view keeps
-	 *  updating, so a frozen field can still be inspected in every mode. */
+	 *  updating. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
 	bool bPaused = false;
 };
 
-/** Flat, POD-ish snapshot handed to the render thread. Captured BY VALUE into a
- *  render command, so it holds no UObject: touching one from the render thread
- *  is a crash waiting for a garbage collection to schedule itself badly.
- *  Everything needed is copied here on the game thread, RHI references
- *  included. */
+/** Flat snapshot handed to the render thread. Captured BY VALUE into a render
+ *  command, so it holds no UObject; RHI references are copied on the game
+ *  thread. */
 struct FFlowSimParams
 {
 	FIntVector GridSize = FIntVector(512, 256, 3);
 
-	FVector4f JetParams = FVector4f(3.0f, 2.0f, 0.5f, 0.5f);
+	FVector4f JetParams = FVector4f(3.0f, 1.0f, 0.5f, 0.5f);
 	float WidthBias = 0.0f;
 	FVector4f LayerProfile[8] = {
 		FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(),
 		FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero() };
 
-	float DeltaTime = 0.0043f;
+	float DeltaTime = 0.0086f;
 	float Time = 0.0f;
-	float PlanetaryVorticity = 4.0f;
+	float PlanetaryVorticity = 24.0f;
+
+	/** c^2, and the derived solver constants. */
+	float WaveSpeedSq = 1.0f;
+	float ImplicitWeight = 0.6f;
+	float HelmholtzScale = 0.0f;
 
 	int32 ForcingChannel = 1;
 	bool bForcingBipolar = true;
 
 	float NudgeRate = 1.0f;
-	float ForcingAmplitude = 2.5f;
+	float ForcingAmplitude = 0.3f;
 	float ForcingScale = 0.25f;
 	FVector3f ForcingDrift = FVector3f(0.001f, 0.001f, 0.0005f);
 	float DragRate = 1.5f;
 	float LayerCoupling = 0.1f;
+	float DivergenceDamping = 0.05f;
+	float ThermalRelaxation = 0.0f;
+
+	float CondensationRate = 5.0f;
+	float EvaporationRate = 3.0f;
+	float CloudLifetime = 2.0f;
 
 	float FilterLatitude = 0.9f;
-	int32 FilterMaxHalfWidth = 1;
+	int32 FilterMaxHalfWidth = 8;
 
-	int32 PoissonIterations = 8;
-	int32 InitPoissonIterations = 256;
-	float Relaxation = 1.98f;
+	/** Output normalisation: x pressure, y vorticity, z divergence. */
+	FVector3f OutputScales = FVector3f(1.0f, 1.0f, 1.0f);
 
 	int32 DebugMode = 0;
 	int32 DebugLayer = 0;
-	float DebugScale = 0.0f;
+	float DebugScale = 1.0f;
 	FIntPoint DebugSize = FIntPoint::ZeroValue;
 
-	/** RHI references, so the render thread never dereferences a UObject. A null
-	 *  forcing texture is legal and evaluates as zero, which is a valid if
-	 *  uninteresting state and better than refusing to run. */
+	/** A null forcing texture is legal and evaluates as zero. */
 	FTextureRHIRef ForcingTexture;
 	FTextureRHIRef FlowTexture;
 	FTextureRHIRef DebugTexture;

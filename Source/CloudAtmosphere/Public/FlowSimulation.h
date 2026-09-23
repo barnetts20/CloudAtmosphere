@@ -7,52 +7,49 @@
 class FRDGBuilder;
 
 /** The sim's log channel, shared by the solver and the subsystem that drives it.
- *  ONE CHANNEL FOR ONE SUBSYSTEM: a reader chasing why a step went wrong does
- *  not care which of the two files reported it, and two channels means two
- *  verbosity settings to remember. Defined in FlowSimulation.cpp. */
+ *  Defined in FlowSimulation.cpp. */
 DECLARE_LOG_CATEGORY_EXTERN(LogFlowSim, Log, All);
 
 /** The sim's persistent GPU state and the passes that advance it. Render thread
- *  only: everything arrives through FFlowSimParams, a flat copy made on the
- *  game thread, and this class never touches a UObject.
+ *  only: everything arrives through FFlowSimParams, and this class never touches
+ *  a UObject.
  *
  *  POOLED RATHER THAN TRANSIENT, because RDG resources live for one graph and a
- *  simulation is defined by state that survives between them. The vorticity, the
- *  streamfunction and the reduction buffers are allocated once and re-registered
- *  into each frame's graph; rebuilding from scratch each frame is not a
- *  simulation but an expensive procedural texture.
+ *  simulation is defined by state that survives between them.
  *
- *  THE PING-PONG IS TRACKED RATHER THAN INFERRED. Advect, force and filter each
- *  read the whole vorticity field and write the whole vorticity field, so
- *  vorticity is two textures with an index that flips three times per substep.
- *  An ODD number of flips means the live buffer alternates between substeps,
- *  which is why the index is a member rather than recomputed from the frame
- *  number, and why every early-out path has to leave it consistent.
+ *  THE STATE is the face velocities and the geopotential. Everything else is
+ *  rebuilt within a substep.
  *
- *  The streamfunction needs no ping-pong: red-black SOR updates in place, no
- *  thread in a sweep reading a texel another thread in that sweep writes. */
+ *  THE FACE PING-PONG IS TRACKED RATHER THAN INFERRED. Predict, Filter and
+ *  Correct each read every face and write every face, so the faces are two
+ *  textures with an index that flips three times per substep. An ODD number of
+ *  flips means the live buffer alternates between substeps, which is why the
+ *  index is a member and every early-out path has to leave it consistent.
+ *
+ *  The geopotential needs no ping-pong: the Helmholtz inverse transform writes
+ *  it once per substep. */
 class CLOUDATMOSPHERE_API FFlowSimulation
 {
 public:
+	/** Floats per cell in a snapshot: u, v, phi. */
+	static constexpr int32 StateFloatsPerCell = 3;
+
 	/** Discard all state. The next Enqueue rebuilds and re-seeds. */
 	void RequestReset();
 
-	/** Hand the next initialisation a captured state to upload instead of seeding.
-	 *  Consumed once, then dropped. Deliberately NOT routed through
-	 *  FFlowSimParams, which is copied into a render command every frame: a
-	 *  few megabytes used once at init would be paid for on every frame. */
+	/** Hand the next initialisation a captured state to upload instead of
+	 *  seeding. Consumed once. Not routed through FFlowSimParams, which is
+	 *  copied into a render command every frame. */
 	void QueueRestore_RenderThread(TArray<float>&& InData);
 
-	/** Adds a pass copying the live state into Buffer, and enqueues a readback.
-	 *  Editor-side capture path; the caller flushes and reads. */
+	/** Adds a pass copying the live state into a buffer, and enqueues a
+	 *  readback. Editor-side capture path; the caller flushes and reads. */
 	void AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, class FRHIGPUBufferReadback* Readback);
 
-	/** True once the initial condition has been constructed. */
 	bool IsInitialised() const { return bInitialised; }
 
-	/** Adds this frame's passes to the graph. NumSubsteps of zero is legal and
-	 *  useful: it still runs the velocity pass and the debug view, so a paused sim
-	 *  can be inspected in every mode without advancing it. */
+	/** Adds this frame's passes to the graph. Zero substeps is legal: the output
+	 *  and debug passes still run, so a paused sim can be inspected. */
 	void Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, int32 NumSubsteps);
 
 	/** Drops the pooled allocations. Called from the subsystem's teardown. */
@@ -60,27 +57,37 @@ public:
 
 private:
 	/** Allocates the pooled state, or reallocates it if the grid changed.
-	 *  Returns true when the caller must also run the seeding passes. */
+	 *  Returns true when the caller must also seed. */
 	bool EnsureResources(const FFlowSimParams& Params);
 
-	void AddInitPasses(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
+	void AddBalancePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
+	void AddInitPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	void AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
+	void AddReducePasses(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
+	void AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	void AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, struct FFlowSimResources& R);
-	void AddPoissonSolve(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R, int32 Iterations);
 	void AddDebugPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 
-	TRefCountPtr<IPooledRenderTarget> PooledVorticity[2];
-	TRefCountPtr<IPooledRenderTarget> PooledPsi;
+	TRefCountPtr<IPooledRenderTarget> PooledFace[2];
+	TRefCountPtr<IPooledRenderTarget> PooledCentre;
+	TRefCountPtr<IPooledRenderTarget> PooledExplicit;
+	TRefCountPtr<IPooledRenderTarget> PooledPhi;
+	TRefCountPtr<IPooledRenderTarget> PooledPhiStar;
+	TRefCountPtr<IPooledRenderTarget> PooledRhs;
+	TRefCountPtr<IPooledRenderTarget> PooledSpectrum[2];
+	TRefCountPtr<IPooledRenderTarget> PooledCloud[2];
 	TRefCountPtr<IPooledRenderTarget> PooledRowMean;
-	TRefCountPtr<IPooledRenderTarget> PooledPsiRowMean;
+	TRefCountPtr<IPooledRenderTarget> PooledPhiEq;
 	TRefCountPtr<IPooledRenderTarget> PooledGlobalMean;
 
-	/** Which of PooledVorticity holds the live field. */
-	int32 CurrentVorticity = 0;
+	/** Which of PooledFace holds the live faces. */
+	int32 CurrentFace = 0;
 
-	/** Grid the pooled state was allocated for. A change reallocates and re-seeds:
-	 *  no resampling of a vorticity field onto a different grid is cheaper or more
-	 *  faithful than starting over. */
+	/** Which of PooledCloud holds the live tracer. Flips once per substep. */
+	int32 CurrentCloud = 0;
+
+	/** Grid the pooled state was allocated for. A change reallocates and
+	 *  re-seeds. */
 	FIntVector AllocatedGrid = FIntVector::ZeroValue;
 
 	/** Consumed by the next initialisation, then emptied. */

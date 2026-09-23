@@ -1,49 +1,59 @@
-// Gas giant flow sim. Vorticity-streamfunction on a sphere, in sin(latitude).
+// Flow sim: rotating shallow water on a sphere, one layer per slice, on a
+// longitude by sin(latitude) grid.
 //
-// A VORTICITY SOLVE RATHER THAN WOUND NOISE, because two-dimensional turbulence
-// cascades energy UPWARD in scale: eddies merge and grow instead of shredding,
-// and vortices persist because they are fed rather than because they were
-// excluded from the shear.
+// SEMI-LAGRANGIAN, SEMI-IMPLICIT. Advection is an exact great-circle backtrace.
+// The two linear gravity-wave terms -- the pressure gradient and c^2 times the
+// mass divergence -- are implicit with off-centring weight alpha, which leaves a
+// constant-coefficient Helmholtz problem per substep. Coriolis is explicit, as
+// an exact rotation of the velocity about the local vertical.
 //
-// THE STEP ORDER, WHICH IS NOT ARBITRARY.
+// THE STEP ORDER.
 //
-//   Velocity   u = N x grad(psi) from the current psi. Also writes the texture
-//              the material samples, so this pass serves both.
-//   Advect     Semi-Lagrangian on ABSOLUTE vorticity.
-//   Reduce     Row means, then the global mean.
-//   Force      Nudge the zonal mean, force the eddies, drag, layer coupling,
-//              and project out the global mean.
-//   Filter     Longitudinal box filter in the polar rows.
-//   Poisson    Red-black SOR for the new psi, warm-started from the old one.
+//   Reduce       Zonal means of u and phi, then the global mean of phi.
+//   Reconstruct  Faces -> centre Cartesian velocity and divergence, and the
+//                explicit half of the step as a field. Also writes the texture
+//                the material samples.
+//   Predict      The explicit field sampled at departure points, plus forcing:
+//                V* on faces, phi* at centres. Advances the cloud tracer.
+//   Filter       Longitudinal box filter in the polar rows.
+//   Rhs          phi* - alpha dt c^2 div V*.
+//   Helmholtz    Direct solve for phi^{n+1}: FFT along rows, tridiagonal in
+//                latitude per wavenumber, inverse FFT.
+//   Correct      V^{n+1} = V* - alpha dt grad phi^{n+1}.
 //
-// Velocity comes first because advection needs a velocity consistent with the
-// vorticity it is advecting; reduce comes after advect because the forcing
-// nudges what the flow has become, not what it was at the top of the step.
+// C-GRID FOR THE GRAVITY STEP, CARTESIAN FOR ADVECTION. u on west faces, v on
+// south faces, phi at centres, so div(grad) is exactly SimLaplacian. Advection
+// samples the reconstructed centre velocity as a 3D vector, which crosses the
+// poles without the sign reversal east/north components take there.
 //
-// EVERYTHING IS NON-DIMENSIONAL ON A UNIT SPHERE. No planet radius appears
-// anywhere, and velocities are angular rates in radians per unit time -- the
-// same unit GG_ZonalRate produces, so the sim's output and the material's jet
-// profile are commensurate by construction and there is no conversion to get
-// wrong. One unit of time is whatever those radians are per.
+// THE EXPLICIT HALF TRAVELS WITH THE PARCEL. The (1-alpha) gravity terms are
+// built as a field at time n and sampled at the departure point, like the
+// velocity and phi they belong to. PITFALL: evaluated at the arrival point
+// instead, the scheme amplifies gravity waves whenever the flow is faster than
+// about (2 alpha - 1) / (2 (1 - alpha)) of the wave speed -- a quarter at
+// alpha = 0.6 -- and the field grows into a sloshing pool and then NaNs, faster
+// the longer the step.
+//
+// PITFALL: A COLLOCATED GRAVITY STEP HAS A CHECKERBOARD MODE. Centred gradient
+// and divergence at cell centres compose into a Laplacian of spacing 2 dx that
+// cannot see red-black alternation, and phi decouples into two interleaved
+// grids.
+//
+// NON-DIMENSIONAL ON A UNIT SPHERE. Velocities are physical speeds on that
+// sphere, so the east component of a zonal flow of angular rate R is
+// R cos(latitude). phi is the geopotential anomaly and c^2 the mean
+// geopotential, so the layer is c^2 + phi deep in geopotential units.
 
 #include "/Engine/Public/Platform.ush"
 #include "/Engine/Private/Common.ush"
 #include "/Plugin/CloudAtmosphere/Private/GasGiantJets.ush"
 #include "/Plugin/CloudAtmosphere/Private/FlowSimCommon.ush"
 
-// THREAD GROUP SIZES COME FROM C++. FlowSimShaders.cpp pushes all three as
-// defines and FlowSimulation.cpp sizes every dispatch from the same
-// constants, so a group size and its group count cannot disagree. PITFALL: a
-// literal here instead would leave the two linked only by coincidence, and a
-// mismatch under-covers the grid silently.
+// Group sizes arrive as defines from FlowSimShaders.cpp, which FlowSimulation.cpp
+// also sizes every dispatch from. PITFALL: a literal here instead leaves the two
+// linked only by coincidence, and a mismatch under-covers the grid silently.
 
-// -- Shared parameters ------------------------------------------------------
-//
-// Declared at file scope and consumed by whichever kernels need them. Each
-// kernel's C++ FParameters struct should declare only the subset it actually
-// binds; anything declared there and unused here is stripped by the compiler
-// and shows up as an unbound parameter warning, which is the signal that the
-// struct and the kernel have drifted apart.
+// -- Parameters -------------------------------------------------------------
 
 /** x BandCount, y JetStrength, z EquatorialBoost, w Asymmetry. */
 float4 SimJetParams;
@@ -51,105 +61,119 @@ float4 SimJetParams;
 /** Offsets the jet profile so zones and belts need not be the same width. */
 float SimWidthBias;
 
-/** Per layer: x JetScale, y BoostScale, z ForcingScale, w DragScale.
- *
- *  THIS IS THE VERTICAL WIND SHEAR. Taylor-Proudman makes the flow invariant
- *  along the rotation axis, so a 3D solve is mostly wasted -- columns move
- *  together. What a stack of 2D layers buys that a single layer does not is
- *  layers that disagree, and JetScale is how they disagree: a deeper layer with
- *  a weaker or wider profile produces genuine shear against the layer above it,
- *  and the material reads the difference as depth.
- *
- *  All four are MULTIPLIERS on the shared profile rather than independent
- *  profiles. Independent profiles would let the layers' jets sit at different
- *  latitudes, and then the bands drawn from the shared profile would register
- *  with none of them. */
+/** Per layer: x JetScale, y BoostScale, z ForcingScale, w DragScale. The
+ *  vertical shear: multipliers on the shared profile, so every layer's jets sit
+ *  at the same latitudes and disagree only in strength. */
 float4 SimLayerProfile[8];
 
 float SimDeltaTime;
 float SimTime;
 
-/** 2 * Omega, the planetary vorticity coefficient. f = SimPlanetaryVorticity * mu.
- *
- *  BETA IS NOT OPTIONAL, and it is this one number. Jets exist because the
- *  Coriolis parameter VARIES with latitude, which makes the inverse cascade
- *  anisotropic -- north-south motion radiates Rossby waves and east-west motion
- *  does not -- so energy feeds preferentially into zonal modes and the cascade
- *  arrests at the Rhines scale instead of running to the domain scale.
- *
- *  PITFALL: at zero the cascade is isotropic. Eddies still merge, but into one
- *  planet-sized vortex rather than into jets, and no amount of forcing produces
- *  banding. With prescribed jets the nudge papers over it and the field looks
- *  roughly right while being driven entirely by the nudge, which is the version
- *  of this failure that survives review. */
+/** 2 * Omega; f = SimPlanetaryVorticity * mu. Its variation with latitude is
+ *  beta, which is what arrests the inverse cascade into jets. */
 float SimPlanetaryVorticity;
+
+/** c^2: the mean geopotential, and the square of the gravity-wave speed. */
+float SimWaveSpeedSq;
+
+/** Off-centring of the implicit terms. 0.5 is Crank-Nicolson; above it the
+ *  scheme damps gravity waves, and below it is unstable. */
+float SimImplicitWeight;
+
+/** (alpha dt c)^2: the Helmholtz coefficient on the Laplacian. */
+float SimHelmholtzScale;
+
+float SimNudgeRate;
+float SimForcingAmplitude;
+float SimForcingScale;
+float3 SimForcingDrift;
+float SimDragRate;
+float SimLayerCoupling;
+/** Fraction of grid-scale divergence removed per substep, in [0, 0.5]. */
+float SimDivergenceDamping;
+float SimThermalRelaxation;
+
+/** Cloud tracer rates, per unit time, against normalised vertical motion W in
+ *  (-1, 1): condensation in rising air, evaporation in sinking air, and the
+ *  inverse lifetime every cloud decays at. */
+float SimCondensationRate;
+float SimEvaporationRate;
+float SimCloudDecay;
+
+int SimForcingChannel;
+int SimForcingBipolar;
+int SimHasForcing;
+
+float SimFilterLatitude;
+int SimFilterMaxHalfWidth;
+
+/** Normalisation for the output channels: x pressure, y vorticity, z divergence. */
+float3 SimOutputScales;
 
 // -- Resources --------------------------------------------------------------
 
-Texture2DArray<float> SimVorticitySRV;
-Texture2DArray<float> SimPsiSRV;
-Texture2DArray<float4> SimVelocitySRV;
+/** x = u on the west face, y = v on the south face. Row 0's v is the south
+ *  polar face and is always zero. */
+Texture2DArray<float2> SimFaceSRV;
+RWTexture2DArray<float2> SimFaceUAV;
 
-RWTexture2DArray<float> SimVorticityUAV;
-RWTexture2DArray<float> SimPsiUAV;
-RWTexture2DArray<float4> SimVelocityUAV;
+/** Reconstructed centre velocity as a Cartesian vector in xyz, divergence in w. */
+Texture2DArray<float4> SimCentreSRV;
+RWTexture2DArray<float4> SimCentreUAV;
 
-/** Zonal mean of vorticity, (row, layer). */
-Texture2D<float> SimRowMeanSRV;
-RWTexture2D<float> SimRowMeanUAV;
+/** The explicit half of the step at every centre, sampled at departure points:
+ *  xyz = V - (1-alpha) dt grad phi as a Cartesian vector, w = phi -
+ *  (1-alpha) dt c^2 div V - dt phi div V. */
+Texture2DArray<float4> SimExplicitSRV;
+RWTexture2DArray<float4> SimExplicitUAV;
 
-/** Zonal mean of the streamfunction, (row, layer). EXISTS SO THAT ALPHA CAN
- *  CARRY THE EDDY FIELD RATHER THAN RAW PSI: psi for the mean flow is the
- *  integral of the jet profile, a large smooth function of latitude that swamps
- *  the eddy part, so a material reading raw psi as pressure gets a latitude ramp
- *  with the storms buried in it -- lifting cloud tops by it raises whole bands
- *  rather than vortices. Subtracting the row mean leaves the departure from
- *  zonal symmetry: zero in undisturbed flow, positive in anticyclones, negative
- *  in cyclones. */
-Texture2D<float> SimPsiRowMeanSRV;
-RWTexture2D<float> SimPsiRowMeanUAV;
+/** Geopotential anomaly. Written by the Helmholtz inverse transform. */
+Texture2DArray<float> SimPhiSRV;
+RWTexture2DArray<float> SimPhiUAV;
 
-/** Area mean of vorticity over the whole sphere, (0, layer). */
+/** phi*, before the polar filter. */
+Texture2DArray<float> SimPhiStarSRV;
+RWTexture2DArray<float> SimPhiStarUAV;
+
+/** Helmholtz right-hand side. Holds filtered phi* until the Rhs pass. */
+Texture2DArray<float> SimRhsSRV;
+RWTexture2DArray<float> SimRhsUAV;
+
+/** Cloud fraction in [0, 1] at centres; ping-pong, advanced by Predict. */
+Texture2DArray<float> SimCloudSRV;
+RWTexture2DArray<float> SimCloudUAV;
+
+/** Row spectra of the Helmholtz problem, (wavenumber, row, layer), complex.
+ *  Two textures: the column solve reads one and writes the other. */
+Texture2DArray<float2> SimSpectrumSRV;
+RWTexture2DArray<float2> SimSpectrumUAV;
+
+/** (row, layer): x zonal mean of u, y zonal mean of phi. */
+Texture2D<float2> SimRowMeanSRV;
+RWTexture2D<float2> SimRowMeanUAV;
+
+/** (row, layer): the geopotential in gradient-wind balance with the jet
+ *  profile, global mean removed. */
+Texture2D<float> SimPhiEqSRV;
+RWTexture2D<float> SimPhiEqUAV;
+
+/** (0, layer): area mean of phi. */
 Texture2D<float> SimGlobalMeanSRV;
 RWTexture2D<float> SimGlobalMeanUAV;
 
-/** Band-limited tiling noise, sampled once per texel per step as the stochastic
- *  forcing. A baked volume rather than inline FBM: a 3D fetch is roughly four
- *  times cheaper than two octaves of Perlin, and this runs at every sim texel
- *  every step. */
+/** The texture the material samples. Slices [0, L) are flow, [L, 2L) weather. */
+RWTexture2DArray<float4> SimOutputUAV;
+
+/** Band-limited tiling noise, read as a forcing streamfunction. */
 Texture3D<float4> SimForcingNoise;
 SamplerState SimForcingNoiseSampler;
 
-/** Which channel of the volume carries the forcing. */
-int SimForcingChannel;
-
-/** 1 when the channel is stored SIGNED, 0 when unipolar [0,1]. Must match the
- *  bake: a unipolar decode on a signed channel maps [-1,1] onto [-3,1], biased
- *  and double amplitude, which as forcing is a constant vorticity source with
- *  noise riding on it. */
-int SimForcingBipolar;
-
-/** Snapshot transfer buffers: vorticity for the whole grid, then psi, each
- *  layer-major then row then column. One allocation because the two are always
- *  transferred together.
- *
- *  A structured buffer rather than an RHI texture update in either direction,
- *  since buffer readback needs no per-slice handling and a compute pass keeps
- *  both directions inside the RDG graph the sim already builds -- so state is
- *  captured at a defined point in the step order rather than whenever a copy
- *  happened to land. */
+/** Snapshot transfer: u, then v, then phi, each layer-major, row, column. */
 StructuredBuffer<float> SimRestoreBuffer;
 RWStructuredBuffer<float> SimCaptureBuffer;
 
-/** Zero when no volume is bound. PITFALL: the decode recentres a unipolar bake,
- *  and a missing volume binds black, which decodes to a CONSTANT -1 rather than
- *  to nothing -- a uniform vorticity source rather than an absent one, which the
- *  solvability projection only removes a step late. */
-int SimHasForcing;
-
 // -- Helpers ----------------------------------------------------------------
 
-/** Per-layer jet profile. Layer 0 is the visible top deck. */
 void SimLayerJets(uint Layer, out float BandCount, out float JetStrength, out float Boost, out float Asymmetry)
 {
     const float4 Profile = SimLayerProfile[min(Layer, 7u)];
@@ -160,12 +184,28 @@ void SimLayerJets(uint Layer, out float BandCount, out float JetStrength, out fl
     Asymmetry = SimJetParams.w;
 }
 
-/** Planetary vorticity at this latitude. */
-float SimPlanetary(float Mu)
+/** Angular rate of the prescribed zonal flow for a layer. */
+float SimZonalRate(float Mu, uint Layer)
 {
-    return SimPlanetaryVorticity * Mu;
+    float BandCount, JetStrength, Boost, Asymmetry;
+    SimLayerJets(Layer, BandCount, JetStrength, Boost, Asymmetry);
+
+    return GG_ZonalRate(Mu, BandCount, JetStrength, Boost, Asymmetry, SimWidthBias);
 }
 
+bool SimOutOfBounds(uint3 Id)
+{
+    return any(int3(Id) >= SimGridSize);
+}
+
+/** Linear near zero, asymptotic to +-1: bounds a channel without clipping it. */
+float SimSoftSat(float X)
+{
+    return X * rsqrt(1.0f + X * X);
+}
+
+/** PITFALL: a missing volume binds black, and a unipolar decode of black is a
+ *  constant -1 -- a uniform source rather than an absent one. Hence the flag. */
 float SimSampleForcing(float3 UVW)
 {
     if (SimHasForcing == 0)
@@ -179,89 +219,278 @@ float SimSampleForcing(float3 UVW)
 		: (SimForcingChannel == 1) ? S.g
 		: (SimForcingChannel == 2) ? S.b : S.a;
 
-	// Both branches centre on zero. Forcing with a DC offset is a uniform
-	// vorticity source, which the solvability projection then has to remove
-	// every step.
     return (SimForcingBipolar != 0) ? Raw : (Raw * 2.0f - 1.0f);
 }
 
-bool SimOutOfBounds(uint3 Id)
+/** Slope of the forcing streamfunction along Dir at P, divided by the forcing
+ *  scale so the amplitude reads as a velocity whatever the noise frequency. The
+ *  forcing velocity is Up x grad(psi): east is -slope along north, north is
+ *  +slope along east, which keeps it divergence-free. */
+float SimForcingSlope(float3 P, float3 Dir, uint Layer)
 {
-    return any(int3(Id) >= SimGridSize);
+    if (SimHasForcing == 0)
+    {
+        return 0.0f;
+    }
+
+    const float Eps = SimInvGridSize.y;
+
+    const float3 Offset = SimForcingDrift * SimTime + float3(0.13f, 0.29f, 0.71f) * (float) Layer;
+
+    const float A = SimSampleForcing((P + Dir * Eps) * SimForcingScale + Offset);
+    const float B = SimSampleForcing((P - Dir * Eps) * SimForcingScale + Offset);
+
+    return (A - B) / (2.0f * Eps * max(SimForcingScale, 1e-4f));
 }
 
-// INITIALISATION, CONSTRUCTED RATHER THAN SPUN UP FROM REST. The expensive part
-// of a real spin-up is the inverse cascade organising jets out of isotropic
-// forcing, and the jets here are prescribed, so that phase is skipped entirely.
-// What remains is eddies finding a self-consistent relationship with jets that
-// already exist, which is tens of turnovers rather than thousands.
-//
-// That makes baking the converged state OPTIONAL: worth doing at ship time if a
-// planet must look identical every session, but running it at load keeps the
-// profile parameters live rather than things that need a re-bake to be seen.
-
-/** Zonal streamfunction per row, by quadrature. Dispatch (N_lat, LayerCount, 1).
- *
- *  psi_zonal(mu) = -integral of R(mu') dmu' from -1 to mu, since for a zonal
- *  flow of angular rate R, u_east = -cos(phi) dpsi/dmu with u_east = R cos(phi)
- *  gives dpsi/dmu = -R directly. A per-row 1D pass, since computing a 1D
- *  integral for every column is N_lon times the work for an identical answer.
- *
- *  Midpoint rule on the grid's own rows, so the discrete psi is consistent with
- *  the discrete Laplacian that will invert it. Consistency matters more than
- *  order of accuracy here: the first Poisson solve should have almost nothing
- *  to do. */
-[numthreads(GG_SIM_THREADS_1D, 1, 1)]
-void MainInitZonalPotentialCS(uint3 Id : SV_DispatchThreadID)
+/** Normalised vertical motion from divergence: positive rising, in (-1, 1). */
+float SimVerticalMotion(float Divergence)
 {
-    const int Row = (int) Id.x;
-    const uint Layer = Id.y;
+    return SimSoftSat(-Divergence / SimOutputScales.z);
+}
 
-    if (Row >= SimGridSize.y || (int) Layer >= SimGridSize.z)
+/** Cubic sample clamped to the range of the four nearest centres. Keeps a
+ *  bounded tracer bounded: Catmull-Rom overshoots at sharp edges, and an
+ *  overshoot below zero is negative cloud. */
+float SimSampleBounded(Texture2DArray<float> Field, float2 Grid, uint Layer)
+{
+    const int2 Base = (int2) floor(Grid);
+
+    const float A = SimLoad(Field, Base, Layer);
+    const float B = SimLoad(Field, Base + int2(1, 0), Layer);
+    const float C = SimLoad(Field, Base + int2(0, 1), Layer);
+    const float D = SimLoad(Field, Base + int2(1, 1), Layer);
+
+    return clamp(SimSampleCubic(Field, Grid, Layer), min(min(A, B), min(C, D)), max(max(A, B), max(C, D)));
+}
+
+// -- Face access ------------------------------------------------------------
+
+/** Face velocities at (I, J), longitude wrapped, row assumed in range. */
+float2 SimFace(int I, int J, uint Layer)
+{
+    return SimFaceSRV.Load(int4(SimWrapColumn(I), J, Layer, 0));
+}
+
+/** v on the north face of row J, which is the south face of row J+1 -- or the
+ *  north pole, where it is zero. */
+float SimFaceNorthV(int I, int J, uint Layer)
+{
+    return (J + 1 < SimGridSize.y) ? SimFace(I, J + 1, Layer).y : 0.0f;
+}
+
+/** East and north components averaged to the cell centre. */
+float2 SimCentreComponents(int I, int J, uint Layer)
+{
+    const float2 F = SimFace(I, J, Layer);
+
+    const float UEast = SimFace(I + 1, J, Layer).x;
+    const float VSouth = (J > 0) ? F.y : 0.0f;
+
+    return float2(0.5f * (F.x + UEast), 0.5f * (VSouth + SimFaceNorthV(I, J, Layer)));
+}
+
+/** Divergence at a centre from the four face fluxes. The polar faces carry
+ *  cos = 0, so no row outside the grid is read. */
+float SimFaceDivergence(int I, int J, uint Layer)
+{
+    const float2 F = SimFace(I, J, Layer);
+
+    const float UEast = SimFace(I + 1, J, Layer).x;
+    const float VSouth = (J > 0) ? F.y : 0.0f;
+    const float VNorth = SimFaceNorthV(I, J, Layer);
+
+    return (UEast - F.x) / (SimRowCos(J) * SimDLon())
+		+ (SimFaceCos(J + 1) * VNorth - SimFaceCos(J) * VSouth) / SimDMu();
+}
+
+/** Relative vorticity at a centre, as -div(Up x V) with the rotated field's
+ *  face components averaged from the neighbouring centres. Exactly
+ *  (1/cos) dv/dlambda - d(u cos)/dmu in the continuum, and like the divergence
+ *  it needs no polar special case. */
+float SimFaceVorticity(int I, int J, uint Layer)
+{
+    const float VWest = SimCentreComponents(I - 1, J, Layer).y;
+    const float VEast = SimCentreComponents(I + 1, J, Layer).y;
+
+    const float UHere = SimCentreComponents(I, J, Layer).x;
+
+    const float USouth = (J > 0) ? 0.5f * (SimCentreComponents(I, J - 1, Layer).x + UHere) : 0.0f;
+    const float UNorth = (J + 1 < SimGridSize.y) ? 0.5f * (SimCentreComponents(I, J + 1, Layer).x + UHere) : 0.0f;
+
+    return (VEast - VWest) / (2.0f * SimRowCos(J) * SimDLon())
+		- (SimFaceCos(J + 1) * UNorth - SimFaceCos(J) * USouth) / SimDMu();
+}
+
+/** A centre scalar's gradient at the west face of (I, J), east component. */
+float SimGradEastPhi(int2 C, uint Layer)
+{
+    return (SimLoad(SimPhiSRV, C, Layer) - SimLoad(SimPhiSRV, C + int2(-1, 0), Layer))
+		/ (SimRowCos(C.y) * SimDLon());
+}
+
+/** A centre scalar's gradient at the south face of (I, J), north component.
+ *  C.y >= 1: the polar face has no gradient to take. */
+float SimGradNorthPhi(int2 C, uint Layer)
+{
+    return SimFaceCos(C.y) * (SimLoad(SimPhiSRV, C, Layer) - SimLoad(SimPhiSRV, C + int2(0, -1), Layer))
+		/ SimDMu();
+}
+
+/** |diagonal| of the Laplacian on a row: the largest rate at which anything
+ *  diffuses on that row, per unit coefficient. */
+float SimRowStiffness(int Row)
+{
+    float CLon, ALo, AHi;
+    SimLaplacianCoeffs(Row, CLon, ALo, AHi);
+
+    return 2.0f * CLon + ALo + AHi;
+}
+
+/** Divergence damping at a u face, per step: grad(div V) scaled so the
+ *  grid-scale mode on this row loses SimDivergenceDamping of itself.
+ *
+ *  PER ROW, BECAUSE AN EXPLICIT DIFFUSION IS STABLE ONLY BELOW A RATE THE GRID
+ *  SETS. A single coefficient tuned at the equator is thousands of times too
+ *  strong for the polar rows, whose longitudinal spacing is that much finer,
+ *  and blows up there first. */
+float SimDampEast(int2 C, uint Layer)
+{
+    const float Gradient = (SimLoad4(SimCentreSRV, C, Layer).w - SimLoad4(SimCentreSRV, C + int2(-1, 0), Layer).w)
+		/ (SimRowCos(C.y) * SimDLon());
+
+    return SimDivergenceDamping * Gradient / SimRowStiffness(C.y);
+}
+
+/** As SimDampEast at a v face, against the stiffer of the two rows it joins. */
+float SimDampNorth(int2 C, uint Layer)
+{
+    const float Gradient = SimFaceCos(C.y) * (SimLoad4(SimCentreSRV, C, Layer).w - SimLoad4(SimCentreSRV, C + int2(0, -1), Layer).w)
+		/ SimDMu();
+
+    return SimDivergenceDamping * Gradient / max(SimRowStiffness(C.y), SimRowStiffness(C.y - 1));
+}
+
+/** Mean of a face component over the genuine vertical neighbours, minus this
+ *  layer's own value. Zero on a single-layer stack. */
+float SimCouplingDelta(int2 C, uint Layer, int Component)
+{
+    if (SimLayerCoupling <= 0.0f || SimGridSize.z < 2)
+    {
+        return 0.0f;
+    }
+
+    const int Self = (int) Layer;
+    const int I = SimWrapColumn(C.x);
+
+    float Sum = 0.0f;
+    float Count = 0.0f;
+
+	// Only genuine neighbours: clamping the index would average an end layer
+	// with itself and halve its coupling rate.
+    if (Self > 0)
+    {
+        Sum += SimFaceSRV.Load(int4(I, C.y, Self - 1, 0))[Component];
+        Count += 1.0f;
+    }
+
+    if (Self < SimGridSize.z - 1)
+    {
+        Sum += SimFaceSRV.Load(int4(I, C.y, Self + 1, 0))[Component];
+        Count += 1.0f;
+    }
+
+    return Sum / Count - SimFaceSRV.Load(int4(I, C.y, Self, 0))[Component];
+}
+
+/** The explicit momentum at the departure point, transported to P and rotated
+ *  by Coriolis, as a tangent Cartesian vector. VArrival is the velocity at P
+ *  that sets the trajectory; it need not be exactly tangent. */
+float3 SimAdvectVelocity(float3 P, float3 VArrival, uint Layer)
+{
+    VArrival -= P * dot(P, VArrival);
+
+    const SimTrajectory T = SimBacktrace(P, VArrival, SimDeltaTime);
+
+    const float3 Departed = SimSampleCubic4(SimExplicitSRV, SimDirectionToGrid(T.Departure), Layer).xyz;
+
+    float3 V = SimTransport(Departed, T);
+
+    V -= P * dot(P, V);
+
+	// Coriolis as an exact rotation about the local vertical by -f dt:
+	// dV/dt = -f Up x V. Energy-conserving at any f dt.
+    float SinF, CosF;
+    sincos(SimPlanetaryVorticity * P.z * SimDeltaTime, SinF, CosF);
+
+    return V * CosF - cross(P, V) * SinF;
+}
+
+// ---------------------------------------------------------------------------
+// Initialisation
+// ---------------------------------------------------------------------------
+
+/** The balanced zonal geopotential, one thread per layer. Dispatch
+ *  (LayerCount, 1, 1).
+ *
+ *  GRADIENT-WIND BALANCE ON THE C-GRID'S OWN FACES. For a zonal flow of angular
+ *  rate R the meridional balance (f + u tan) u = -dphi/dlat gives
+ *
+ *      phi_j - phi_{j-1} = -dmu * mu_f * R(mu_f) * (P + R(mu_f))
+ *
+ *  at the face between the rows, which is exactly what the discrete north
+ *  gradient in the Correct pass measures. Consistency matters more than order:
+ *  the initial state then holds with nothing to adjust.
+ *
+ *  Run every frame, so the thermal relaxation target follows a live profile
+ *  edit. Two passes over the rows: the mean, then the values less it. */
+[numthreads(GG_SIM_THREADS_LAYERS, 1, 1)]
+void MainInitBalanceCS(uint3 Id : SV_DispatchThreadID)
+{
+    const uint Layer = Id.x;
+
+    if ((int) Layer >= SimGridSize.z)
     {
         return;
     }
 
-    float BandCount, JetStrength, Boost, Asymmetry;
-    SimLayerJets(Layer, BandCount, JetStrength, Boost, Asymmetry);
+    const float DMu = SimDMu();
 
-    const float DMu = 2.0f * SimInvGridSize.y;
-
-    float Psi = 0.0f;
+    float Phi = 0.0f;
+    float Sum = 0.0f;
 
 	[loop]
-    for (int J = 0; J <= Row; J++)
+    for (int J = 1; J < SimGridSize.y; J++)
     {
-        const float Mu = SimRowToMu((float) J);
-        const float R = GG_ZonalRate(Mu, BandCount, JetStrength, Boost, Asymmetry, SimWidthBias);
+        const float MuF = SimFaceToMu((float) J);
+        const float R = SimZonalRate(MuF, Layer);
 
-		// Half weight on the row being written, so the accumulated value lands
-		// at the texel CENTRE rather than at its upper face. Getting this wrong
-		// offsets psi by half a row, which puts the jets half a band off the
-		// vorticity that is supposed to be producing them.
-        const float Weight = (J == Row) ? 0.5f : 1.0f;
-
-        Psi -= R * DMu * Weight;
+        Phi -= DMu * MuF * R * (SimPlanetaryVorticity + R);
+        Sum += Phi;
     }
 
-	// Written into the row-mean buffer, which is idle at init and has exactly
-	// the right shape. Called out because a per-row streamfunction living in
-	// something named RowMean reads as a copy-paste error otherwise; it is not,
-	// and the alternative is a second (N_lat x Layers) resource allocated for
-	// the lifetime of the sim to be used once.
-    SimRowMeanUAV[int2(Row, Layer)] = Psi;
+    const float Mean = Sum * SimInvGridSize.y;
+
+    Phi = 0.0f;
+    SimPhiEqUAV[int2(0, Layer)] = -Mean;
+
+	[loop]
+    for (int K = 1; K < SimGridSize.y; K++)
+    {
+        const float MuF = SimFaceToMu((float) K);
+        const float R = SimZonalRate(MuF, Layer);
+
+        Phi -= DMu * MuF * R * (SimPlanetaryVorticity + R);
+
+        SimPhiEqUAV[int2(K, Layer)] = Phi - Mean;
+    }
 }
 
-/** Broadcast the per-row zonal streamfunction across longitude. Dispatch
- *  (N_lon, N_lat, LayerCount).
- *
- *  PURELY ZONAL, with no eddy seed. Held sub-marginal the jets are
- *  barotropically unstable and grow their own eddies from round-off within tens
- *  of turnovers; held super-marginal they are stable and a seed grows nothing
- *  either, the stochastic forcing being the eddy source there. Neither regime
- *  needs one. */
+/** Zonal flow on the faces, balanced geopotential at the centres, no eddies.
+ *  Dispatch (N_lon, N_lat, LayerCount). The jets' own instability and the
+ *  stochastic forcing supply the eddies. */
 [numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
-void MainInitPotentialCS(uint3 Id : SV_DispatchThreadID)
+void MainInitStateCS(uint3 Id : SV_DispatchThreadID)
 {
     if (SimOutOfBounds(Id))
     {
@@ -271,210 +500,16 @@ void MainInitPotentialCS(uint3 Id : SV_DispatchThreadID)
     const int2 C = int2(Id.xy);
     const uint Layer = Id.z;
 
-    SimPsiUAV[int3(C, Layer)] = SimRowMeanSRV.Load(int3(C.y, Layer, 0));
-}
-
-/** Vorticity from the zonal streamfunction, through the SAME discrete operator
- *  the solver will invert. Dispatch (N_lon, N_lat, LayerCount).
- *
- *  Not the analytic vorticity: the grid Laplacian of the grid streamfunction
- *  lands exactly in the RANGE of the discrete operator, so the first Poisson
- *  solve reproduces the seed psi to round-off and the sim starts in equilibrium
- *  with itself. The continuum expression leaves a truncation-sized residual
- *  everywhere, which the solver radiates away over its first several steps --
- *  at high latitude, where the operator is stiffest, a ring of spurious
- *  circulation appearing and then decaying. */
-[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
-void MainInitVorticityCS(uint3 Id : SV_DispatchThreadID)
-{
-    if (SimOutOfBounds(Id))
-    {
-        return;
-    }
-
-    float Diagonal;
-    SimVorticityUAV[int3(Id)] = SimLaplacian(SimPsiSRV, int2(Id.xy), Id.z, Diagonal);
-}
-
-// ---------------------------------------------------------------------------
-// Velocity, and the texture the material reads
-// ---------------------------------------------------------------------------
-
-/** Writes float4(u_east, u_north, psi_eddy, zeta_normalized). RGBA16F, which is
- *  ample: everything here is O(1) after normalization. Dispatch
- *  (N_lon, N_lat, LayerCount).
- *
- *  TANGENT COMPONENTS RATHER THAN A 3D VECTOR, WHICH BUYS A CHANNEL. A tangent
- *  vector on a sphere has two degrees of freedom, and the material rebuilds the
- *  third from the direction it already has with no trig -- about ten ALU against
- *  a whole channel.
- *
- *  THE CHANNEL GOES TO VORTICITY, which is what the bands are. Drawing them
- *  analytically from latitude instead puts them off the flow that makes them,
- *  since zeta and the rate profile do not share zero crossings; sampling zeta
- *  removes the second definition, and because the sim TRANSPORTS zeta the bands
- *  arrive already meandering and wrapped around vortices.
- *
- *  NORMALIZED HERE, NOT IN THE MATERIAL. Zeta scales with
- *  JetStrength * BandCount, so a raw value would need both threaded into the
- *  material purely to divide by them. Dividing here makes the channel a signed
- *  band signal near [-1,1] and lets the material forget the jet profile exists.
- *  Psi in z is the EDDY field, zonal mean removed; see SimPsiRowMeanSRV. */
-[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
-void MainVelocityCS(uint3 Id : SV_DispatchThreadID)
-{
-    if (SimOutOfBounds(Id))
-    {
-        return;
-    }
-
-    const int2 C = int2(Id.xy);
-    const uint Layer = Id.z;
-
-    const float DLon = (2.0f * PI) * SimInvGridSize.x;
-    const float DMu = 2.0f * SimInvGridSize.y;
-
-    const float Lon = SimColumnToLon((float) C.x);
     const float Mu = SimRowToMu((float) C.y);
-    const float CosPhi = sqrt(1.0f - Mu * Mu);
 
-	// Taps inline: there is exactly one consumer of the streamfunction gradient,
-	// so a helper in the common header would be an entry point nothing calls.
-    const float Psi = SimLoad(SimPsiSRV, C, Layer);
-
-    const float West = SimLoad(SimPsiSRV, C + int2(-1, 0), Layer);
-    const float East = SimLoad(SimPsiSRV, C + int2(1, 0), Layer);
-    const float South = SimLoad(SimPsiSRV, C + int2(0, -1), Layer);
-    const float North = SimLoad(SimPsiSRV, C + int2(0, 1), Layer);
-
-	// u = N x grad(psi), which on the sphere gives
-	//     u_east  = -cos(phi) dpsi/dmu
-	//     u_north =  (1/cos(phi)) dpsi/dlambda
-	//
-	// Centred differences, both through SimWrapCoord, so the longitude one is
-	// correct at the seam and the mu one crosses the pole by the mirror -- right
-	// there, since the mirrored value is the real field on the far side rather
-	// than a boundary approximation. The 1/cos(phi) on the north component is the
-	// one genuinely singular term, bounded by the cell-centred grid and by the
-	// zonal filter, which is what keeps it off the CFL at high latitude.
-    const float UEast = -CosPhi * ((North - South) / (2.0f * DMu));
-    const float UNorth = ((East - West) / (2.0f * DLon)) / CosPhi;
-
-	// The zonal part removed, so z is the EDDY streamfunction. Applied only to
-	// the value written out: the row mean varies with latitude, so subtracting it
-	// before differencing would corrupt the zonal velocity it must leave alone.
-    const float PsiMean = SimPsiRowMeanSRV.Load(int3(C.y, Layer, 0));
-
-	// Zonal vorticity scale: the peak of |2 mu R - (1-mu^2) R'|, dominated by
-	// the R' term, which is what carries the band wavenumber. Per layer, so a
-	// layer running a weaker profile normalizes against its own contrast rather
-	// than the top deck's.
-    float BandCount, JetStrength, Boost, Asymmetry;
-    SimLayerJets(Layer, BandCount, JetStrength, Boost, Asymmetry);
-
-    const float ZetaScale = max(JetStrength * 0.6897f * BandCount * PI, 1e-4f);
-
-    const float Vorticity = SimLoad(SimVorticitySRV, C, Layer);
-
-	// Psi scale. Psi is velocity times length, so an eddy of speed ~JetStrength
-	// at the band scale ~1/(BandCount*pi) gives this. Approximate, which is
-	// fine: the soft saturation below is what actually bounds the channel.
-    const float PsiScale = max(JetStrength / max(BandCount * PI, 1e-3f), 1e-5f);
-
-    const float PsiNorm = (Psi - PsiMean) / PsiScale;
-
-	// SOFT SATURATION, so the channel is GUARANTEED to lie in [-1,1]. Not
-	// cosmetic: GG_TopBounds bounds the marched span in closed form from the
-	// relief amounts, and that bound assumes this channel is bounded. Unbounded,
-	// a strong vortex pushes its cloud top above the computed outer radius and
-	// the march clips it -- a storm with its top sliced flat, which reads as a
-	// geometry bug rather than a bounds one. x / sqrt(1 + x^2) is linear near
-	// zero, asymptotes to +-1, costs one rsqrt, and compresses rather than
-	// clips.
-    const float PsiSat = PsiNorm * rsqrt(1.0f + PsiNorm * PsiNorm);
-
-    SimVelocityUAV[int3(C, Layer)] = float4(UEast, UNorth, PsiSat, Vorticity / ZetaScale);
+    SimFaceUAV[int3(C, Layer)] = float2(SimZonalRate(Mu, Layer) * SimRowCos(C.y), 0.0f);
+    SimPhiUAV[int3(C, Layer)] = SimPhiEqSRV.Load(int3(C.y, Layer, 0));
+    SimCloudUAV[int3(C, Layer)] = 0.0f;
 }
 
 // ---------------------------------------------------------------------------
-// Advection
+// Reductions. Plain means, because the grid is equal-area.
 // ---------------------------------------------------------------------------
-
-/** Semi-Lagrangian advection of ABSOLUTE vorticity q = omega + f. Dispatch
- *  (N_lon, N_lat, LayerCount).
- *
- *  ABSOLUTE RATHER THAN RELATIVE, AND THIS IS WHERE BETA ENTERS. Relative
- *  vorticity is not materially conserved on a rotating sphere; absolute
- *  vorticity is. Advecting omega alone loses the Rossby wave restoring force
- *  entirely, and with it the arrest of the cascade. Sample q at the departure
- *  point, subtract f at the ARRIVAL point: a parcel that moved poleward arrives
- *  with the f it had where it came from, so its relative vorticity drops to
- *  compensate, and that difference IS the beta effect.
- *
- *  THE BACKTRACE IS AN EXACT GREAT-CIRCLE ROTATION, not normalize(N - u dt).
- *  PITFALL: displacing along the tangent and renormalizing moves along a CHORD,
- *  short by cos(theta), dragging the departure point toward its starting
- *  latitude. Third order in one step and tolerable in isolation, but systematic,
- *  and it accumulates over hundreds of steps into a slow poleward or
- *  equatorward creep of everything the flow carries. With a = N x u_hat the
- *  frame {N, u_hat, a} is orthonormal and a x N is u_hat, so Rodrigues collapses
- *  to two terms and one sincos. */
-[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
-void MainAdvectCS(uint3 Id : SV_DispatchThreadID)
-{
-    if (SimOutOfBounds(Id))
-    {
-        return;
-    }
-
-    const int2 C = int2(Id.xy);
-    const uint Layer = Id.z;
-
-    const float Lon = SimColumnToLon((float) C.x);
-    const float Mu = SimRowToMu((float) C.y);
-    const float3 N = SimDirection(Lon, Mu);
-
-	// RECONSTRUCTED, not read as .xyz. PITFALL: the velocity texture stores
-	// east/north COMPONENTS in xy with psi and vorticity in zw, so reading .xyz
-	// treats the streamfunction as a third velocity component and advects along a
-	// vector that is not tangent, not divergence-free and not the flow. The sim
-	// collapses to a lopsided blob within a few hundred steps while every
-	// diagnostic still reports plausible numbers.
-    const float4 Flow = SimVelocitySRV.Load(int4(C.x, C.y, Layer, 0));
-
-    const float3 Velocity = Flow_TangentVelocity(N, Flow.xy);
-
-    const float Speed = length(Velocity);
-
-    float3 Departure = N;
-
-    if (Speed > 1e-8f)
-    {
-        const float3 UHat = Velocity / Speed;
-        const float Theta = Speed * SimDeltaTime;
-
-        float SinT, CosT;
-        sincos(Theta, SinT, CosT);
-
-		// Backward along the great circle: forward is N cos + UHat sin.
-        Departure = normalize(N * CosT - UHat * SinT);
-    }
-
-    const float2 Grid = SimDirectionToGrid(Departure);
-
-	// mu at the departure point is just its z component. No asin, and no
-	// dependence on the interpolation, so the planetary vorticity being
-	// subtracted is exact rather than reconstructed.
-    const float QDeparture = SimSampleCubic(SimVorticitySRV, Grid, Layer) + SimPlanetary(Departure.z);
-
-    SimVorticityUAV[int3(C, Layer)] = QDeparture - SimPlanetary(Mu);
-}
-
-// REDUCTIONS. Both are trivially cheap because the grid is equal-area: a zonal
-// mean is a plain row mean, the global mean a plain mean of those, no area
-// weights anywhere. On any other spherical grid both carry a cos(phi) or a
-// Jacobian, and getting one slightly wrong produces a slightly nonzero global
-// mean that the Poisson solve cannot satisfy.
 
 /** Dispatch (N_lat, LayerCount, 1). */
 [numthreads(GG_SIM_THREADS_1D, 1, 1)]
@@ -488,44 +523,17 @@ void MainReduceRowsCS(uint3 Id : SV_DispatchThreadID)
         return;
     }
 
-    float Sum = 0.0f;
+    float SumU = 0.0f;
+    float SumPhi = 0.0f;
 
 	[loop]
     for (int I = 0; I < SimGridSize.x; I++)
     {
-        Sum += SimVorticitySRV.Load(int4(I, Row, Layer, 0));
+        SumU += SimFaceSRV.Load(int4(I, Row, Layer, 0)).x;
+        SumPhi += SimPhiSRV.Load(int4(I, Row, Layer, 0));
     }
 
-    SimRowMeanUAV[int2(Row, Layer)] = Sum * SimInvGridSize.x;
-}
-
-/** Zonal mean of the streamfunction, one value per row.
- *
- *  Separate from MainReduceRowsCS because the two are needed at different
- *  points in the step: the vorticity mean feeds the nudge, which runs after
- *  advection, while this feeds the velocity pass, which runs before it.
- *
- *  Dispatch (N_lat, LayerCount, 1). */
-[numthreads(GG_SIM_THREADS_1D, 1, 1)]
-void MainReducePsiRowsCS(uint3 Id : SV_DispatchThreadID)
-{
-    const int Row = (int) Id.x;
-    const uint Layer = Id.y;
-
-    if (Row >= SimGridSize.y || (int) Layer >= SimGridSize.z)
-    {
-        return;
-    }
-
-    float Sum = 0.0f;
-
-	[loop]
-    for (int I = 0; I < SimGridSize.x; I++)
-    {
-        Sum += SimPsiSRV.Load(int4(I, Row, Layer, 0));
-    }
-
-    SimPsiRowMeanUAV[int2(Row, Layer)] = Sum * SimInvGridSize.x;
+    SimRowMeanUAV[int2(Row, Layer)] = float2(SumU, SumPhi) * SimInvGridSize.x;
 }
 
 /** Dispatch (LayerCount, 1, 1). */
@@ -544,60 +552,33 @@ void MainReduceGlobalCS(uint3 Id : SV_DispatchThreadID)
 	[loop]
     for (int J = 0; J < SimGridSize.y; J++)
     {
-        Sum += SimRowMeanSRV.Load(int3(J, Layer, 0));
+        Sum += SimRowMeanSRV.Load(int3(J, Layer, 0)).y;
     }
 
     SimGlobalMeanUAV[int2(0, Layer)] = Sum * SimInvGridSize.y;
 }
 
 // ---------------------------------------------------------------------------
-// Forcing
+// Reconstruct, and the texture the material reads
 // ---------------------------------------------------------------------------
 
-/** Nudging strength toward the prescribed zonal profile, per unit time.
+/** Centre velocity and divergence, the explicit field, and the material's
+ *  output. Dispatch (N_lon, N_lat, LayerCount).
  *
- *  PRESCRIBED AND EMERGENT ARE NOT A FORK: both are a source term on omega
- *  differing only in what is added, so both are written here with independent
- *  coefficients rather than as two code paths. High here with
- *  SimForcingAmplitude at zero holds the profile still, which is what lets
- *  advection and the Poisson solve be checked separately against known answers.
+ *  EXPLICIT FIELD: the centre average of each face's V - (1-alpha) dt grad phi,
+ *  so the pressure gradient is the C-grid's own, and the mass term with its
+ *  nonlinear part. Polar faces carry neither velocity nor gradient.
  *
- *  Note what is nudged: the zonal MEAN, not the field. Nudging the field erases
- *  every eddy each step and makes the sim an expensive way to evaluate
- *  GG_ZonalRate. */
-float SimNudgeRate;
-
-/** Stochastic small-scale forcing. A tiling band-limited noise volume sampled at
- *  a drifting position is isotropic, band-limited at a chosen wavenumber, and
- *  temporally decorrelating for free. */
-float SimForcingAmplitude;
-float SimForcingScale;
-float3 SimForcingDrift;
-
-/** Linear drag on the EDDY part of the vorticity, per unit time. Two-dimensional
- *  turbulence needs a large-scale sink or energy accumulates at the domain scale
- *  and the field ends as one hemispheric vortex. Damping all vorticity scales
- *  equally is weighted as 1/k^2 in ENERGY, so it bites hardest at the largest
- *  scales, which is where the arrest is wanted. Eddy part only: the zonal mean
- *  has its own nudge, and dragging it too would fight that. */
-float SimDragRate;
-
-/** Relaxation between vertically adjacent layers, per unit time. Weak
- *  deliberately: Taylor-Proudman says columns move together, so strong coupling
- *  is the correct limit and also the one where the stack collapses to a single
- *  layer and buys nothing. The useful regime is weak enough that layers keep
- *  distinct jets and real vertical shear, but not zero, so a vortex in one layer
- *  leaves an impression in the next and the stack reads as one atmosphere rather
- *  than as separate transparencies.
+ *  FLOW SLICE: (u_east, u_north, pressure, vorticity). Pressure is phi less its
+ *  zonal mean, soft-saturated: positive in highs in BOTH hemispheres, since a
+ *  geopotential has no rotation sense. Vorticity is normalised and signed
+ *  counterclockwise, a rotation sense that FlowField.ush still flips by
+ *  hemisphere for the band signal.
  *
- *  A crude stand-in for the interface term of a two-layer quasi-geostrophic
- *  model, which would couple layers through the Poisson solve itself and give
- *  baroclinic instability as a genuine eddy source. */
-float SimLayerCoupling;
-
-/** Dispatch (N_lon, N_lat, LayerCount). */
+ *  WEATHER SLICE: (W, cloud, spare, spare). W is -divergence soft-saturated,
+ *  positive where air converges and rises; cloud is the tracer, in [0, 1]. */
 [numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
-void MainForceCS(uint3 Id : SV_DispatchThreadID)
+void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
 {
     if (SimOutOfBounds(Id))
     {
@@ -607,122 +588,178 @@ void MainForceCS(uint3 Id : SV_DispatchThreadID)
     const int2 C = int2(Id.xy);
     const uint Layer = Id.z;
 
-    const float Lon = SimColumnToLon((float) C.x);
-    const float Mu = SimRowToMu((float) C.y);
+    const float3 N = SimDirection(SimColumnToLon((float) C.x), SimRowToMu((float) C.y));
 
-    const float4 Profile = SimLayerProfile[min(Layer, 7u)];
+    const float2 Components = SimCentreComponents(C.x, C.y, Layer);
 
-    float Omega = SimVorticitySRV.Load(int4(C.x, C.y, Layer, 0));
+    const float3 Velocity = SimEast(N) * Components.x + SimNorth(N) * Components.y;
 
-    const float ZonalMean = SimRowMeanSRV.Load(int3(C.y, Layer, 0));
-    const float Eddy = Omega - ZonalMean;
+    const float Divergence = SimFaceDivergence(C.x, C.y, Layer);
 
-	// -- Zonal nudge --------------------------------------------------------
+    SimCentreUAV[int3(C, Layer)] = float4(Velocity, Divergence);
 
-    float BandCount, JetStrength, Boost, Asymmetry;
-    SimLayerJets(Layer, BandCount, JetStrength, Boost, Asymmetry);
+    const float Phi = SimPhiSRV.Load(int4(C.x, C.y, Layer, 0));
 
-    const float Target = GG_ZonalVorticity(Mu, BandCount, JetStrength, Boost, Asymmetry, SimWidthBias);
+    const float Explicit = (1.0f - SimImplicitWeight) * SimDeltaTime;
 
-    Omega += SimNudgeRate * SimDeltaTime * (Target - ZonalMean);
+    const float GradEast = 0.5f * (SimGradEastPhi(C, Layer) + SimGradEastPhi(C + int2(1, 0), Layer));
 
-	// -- Stochastic forcing -------------------------------------------------
+    const float GradSouth = (C.y > 0) ? SimGradNorthPhi(C, Layer) : 0.0f;
+    const float GradNorth = (C.y + 1 < SimGridSize.y) ? SimGradNorthPhi(C + int2(0, 1), Layer) : 0.0f;
 
-    const float3 N = SimDirection(Lon, Mu);
-    const float3 ForcingUVW = N * SimForcingScale
-		+ SimForcingDrift * SimTime
-		+ float3(0.13f, 0.29f, 0.71f) * (float) Layer;
+    const float3 Gradient = SimEast(N) * GradEast + SimNorth(N) * (0.5f * (GradSouth + GradNorth));
 
-	// FORCING AMPLITUDE IS AN EQUILIBRIUM, NOT A RATE. With forcing F and linear
-	// drag, d(omega)/dt = F - Drag*omega settles at omega = F/Drag, so a raw
-	// amplitude sets eddy strength only in combination with the drag -- and drag
-	// is the primary handle for arresting the cascade, so touching it would
-	// silently retune the eddies. Multiplying by the drag rate here makes the
-	// parameter the equilibrium eddy vorticity directly.
-	//
-	// Consequence: at DragRate zero there is no forcing, because there is no
-	// equilibrium to aim at. Unforced and undamped is a different model.
-    const float ForcingRate = SimForcingAmplitude * SimDragRate * Profile.z;
+    SimExplicitUAV[int3(C, Layer)] = float4(
+		Velocity - Explicit * Gradient,
+		Phi - Explicit * SimWaveSpeedSq * Divergence - SimDeltaTime * Phi * Divergence);
 
-    Omega += ForcingRate * SimDeltaTime * SimSampleForcing(ForcingUVW);
+    const float PhiMean = SimRowMeanSRV.Load(int3(C.y, Layer, 0)).y;
 
-	// -- Vertical coupling --------------------------------------------------
+    SimOutputUAV[int3(C, Layer)] = float4(
+		Components.x,
+		Components.y,
+		SimSoftSat((Phi - PhiMean) / SimOutputScales.x),
+		SimFaceVorticity(C.x, C.y, Layer) / SimOutputScales.y);
 
-    if (SimLayerCoupling > 0.0f && SimGridSize.z > 1)
+    SimOutputUAV[int3(C, Layer + (uint) SimGridSize.z)] = float4(
+		SimVerticalMotion(Divergence), SimCloudSRV.Load(int4(C.x, C.y, Layer, 0)), 0.0f, 0.0f);
+}
+
+// ---------------------------------------------------------------------------
+// Predict
+// ---------------------------------------------------------------------------
+
+/** The explicit half of the step for this cell's west face, south face and
+ *  centre. Dispatch (N_lon, N_lat, LayerCount).
+ *
+ *  Momentum: the explicit field at the departure point, transported and rotated
+ *  by Coriolis, then the face-normal component plus divergence damping, the
+ *  zonal nudge, drag, stochastic forcing and layer coupling at the arrival
+ *  point. Those are forcing and damping rather than wave terms, and are stable
+ *  there.
+ *
+ *  Mass: the explicit field at the departure point, plus thermal relaxation,
+ *  less the global-mean drift.
+ *
+ *  Cloud: the tracer at the same departure point, then condensation where the
+ *  air rises, evaporation where it sinks, and decay. Stands in for moisture:
+ *  cloud is where air HAS BEEN rising, carried with the wind, rather than
+ *  where it is rising this instant -- which filters gravity-wave flicker and
+ *  draws the trailing shapes W alone cannot.
+ *
+ *  DRAG ON THE EDDY PART OF u AND ALL OF v. The zonal mean of u belongs to the
+ *  nudge, and dragging it too makes the two settle at a compromise below the
+ *  profile. Drag on the eddies is what turns flow into lows and out of highs --
+ *  the Ekman convergence W reads. */
+[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
+void MainPredictCS(uint3 Id : SV_DispatchThreadID)
+{
+    if (SimOutOfBounds(Id))
     {
-		// AVERAGE ONLY GENUINE NEIGHBOURS.
-		//
-		// Clamping the neighbour index at the ends makes an end layer average
-		// with ITSELF, and the self term cancels half of (Neighbour - Omega).
-		// So layer 0 and the deepest layer relax at half the authored rate
-		// while the interior relaxes at the full rate -- a vertical asymmetry
-		// that is invisible in the parameter and shows up as the top and bottom
-		// of the stack behaving differently from the middle for no stated
-		// reason. Layer 0 is the visible deck, so it is the one that is wrong.
-        const int Last = SimGridSize.z - 1;
-        const int Self = (int) Layer;
-
-        float Sum = 0.0f;
-        float Count = 0.0f;
-
-        if (Self > 0)
-        {
-            Sum += SimVorticitySRV.Load(int4(C.x, C.y, Self - 1, 0));
-            Count += 1.0f;
-        }
-
-        if (Self < Last)
-        {
-            Sum += SimVorticitySRV.Load(int4(C.x, C.y, Self + 1, 0));
-            Count += 1.0f;
-        }
-
-		// Count is at least one, since the enclosing branch guarantees more
-		// than one layer exists.
-        const float Neighbour = Sum / Count;
-
-        Omega += SimLayerCoupling * SimDeltaTime * (Neighbour - Omega);
+        return;
     }
 
-	// -- Drag ---------------------------------------------------------------
+    const int2 C = int2(Id.xy);
+    const uint Layer = Id.z;
 
-    Omega -= SimDragRate * Profile.w * SimDeltaTime * Eddy;
+    const float Dt = SimDeltaTime;
 
-	// -- Solvability --------------------------------------------------------
+    const float4 Profile = SimLayerProfile[min(Layer, 7u)];
+    const float Drag = SimDragRate * Profile.w;
+    const float ForcingRate = SimForcingAmplitude * SimDragRate * Profile.z;
 
-	// The Poisson problem on a CLOSED surface is solvable only if the source
-	// integrates to zero: the integral of a Laplacian over a closed manifold is
-	// identically zero, so no psi can produce a source that is not.
-	//
-	// PITFALL: analytically the vorticity does integrate to zero, but numerically
-	// it drifts, interpolation not being conservative and the forcing terms not
-	// mean-free. A nonzero mean does not crash the solver, it makes it fail to
-	// converge slowly, and the residual shows up as psi growing without bound
-	// over minutes of runtime. Projecting the mean out costs one subtraction.
-    Omega -= SimGlobalMeanSRV.Load(int3(0, Layer, 0));
+    const float2 RowMean = SimRowMeanSRV.Load(int3(C.y, Layer, 0));
 
-    SimVorticityUAV[int3(C, Layer)] = Omega;
+	// -- u on the west face -------------------------------------------------
+
+    float U;
+    {
+        const float Mu = SimRowToMu((float) C.y);
+        const float3 P = SimDirection(SimColumnToLon((float) C.x - 0.5f), Mu);
+
+        const float3 Arrival = 0.5f * (
+			SimLoad4(SimCentreSRV, C + int2(-1, 0), Layer).xyz
+			+ SimLoad4(SimCentreSRV, C, Layer).xyz);
+
+        U = dot(SimAdvectVelocity(P, Arrival, Layer), SimEast(P));
+
+        const float Target = SimZonalRate(Mu, Layer) * SimRowCos(C.y);
+
+        U += SimDampEast(C, Layer)
+			+ SimNudgeRate * Dt * (Target - RowMean.x)
+			- Drag * Dt * (U - RowMean.x)
+			- ForcingRate * Dt * SimForcingSlope(P, SimNorth(P), Layer)
+			+ SimLayerCoupling * Dt * SimCouplingDelta(C, Layer, 0);
+    }
+
+	// -- v on the south face ------------------------------------------------
+
+    float V = 0.0f;
+
+    if (C.y > 0)
+    {
+        const float3 P = SimDirection(SimColumnToLon((float) C.x), SimFaceToMu((float) C.y));
+
+        const float3 Arrival = 0.5f * (
+			SimLoad4(SimCentreSRV, C + int2(0, -1), Layer).xyz
+			+ SimLoad4(SimCentreSRV, C, Layer).xyz);
+
+        V = dot(SimAdvectVelocity(P, Arrival, Layer), SimNorth(P));
+
+        V += SimDampNorth(C, Layer)
+			- Drag * Dt * V
+			+ ForcingRate * Dt * SimForcingSlope(P, SimEast(P), Layer)
+			+ SimLayerCoupling * Dt * SimCouplingDelta(C, Layer, 1);
+    }
+
+    SimFaceUAV[int3(C, Layer)] = float2(U, V);
+
+	// -- phi at the centre --------------------------------------------------
+
+    {
+        const float3 P = SimDirection(SimColumnToLon((float) C.x), SimRowToMu((float) C.y));
+
+        const float4 Centre = SimCentreSRV.Load(int4(C.x, C.y, Layer, 0));
+
+        const SimTrajectory T = SimBacktrace(P, Centre.xyz - P * dot(P, Centre.xyz), Dt);
+
+        const float Departed = SimSampleCubic4(SimExplicitSRV, SimDirectionToGrid(T.Departure), Layer).w;
+
+        const float Phi = SimPhiSRV.Load(int4(C.x, C.y, Layer, 0));
+        const float PhiEq = SimPhiEqSRV.Load(int3(C.y, Layer, 0));
+
+        float PhiStar = Departed
+			+ SimThermalRelaxation * Dt * (PhiEq - Phi)
+			- SimGlobalMeanSRV.Load(int3(0, Layer, 0));
+
+		// The layer is c^2 + phi deep; it may thin but never invert.
+        PhiStar = max(PhiStar, -0.9f * SimWaveSpeedSq);
+
+        SimPhiStarUAV[int3(C, Layer)] = PhiStar;
+
+        const float Cloud = SimSampleBounded(SimCloudSRV, SimDirectionToGrid(T.Departure), Layer);
+        const float W = SimVerticalMotion(Centre.w);
+
+        const float Rate = SimCondensationRate * max(W, 0.0f) * (1.0f - Cloud)
+			- (SimEvaporationRate * max(-W, 0.0f) + SimCloudDecay) * Cloud;
+
+        SimCloudUAV[int3(C, Layer)] = saturate(Cloud + Dt * Rate);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Polar filter
 // ---------------------------------------------------------------------------
 
-float SimFilterLatitude;
-int SimFilterMaxHalfWidth;
-
-
-/** Longitudinal box filter on VORTICITY -- not on psi, which inherits the
- *  smoothing through the Poisson solve. Widens toward the poles; see
- *  SimFilterHalfWidth for why it exists. Dispatch (N_lon, N_lat, LayerCount).
+/** Longitudinal box filter on u, v and phi*, widening toward the poles; see
+ *  SimFilterHalfWidth. Dispatch (N_lon, N_lat, LayerCount).
  *
- *  A box rather than a Gaussian: the cutoff is crude in wavenumber, but what is
- *  being enforced is a resolution limit rather than a spectrum, and a box of
- *  width 1/cos(phi) restores uniform effective spacing exactly. Being a running
- *  mean it is exactly conservative in the row, so it cannot perturb the zonal
- *  mean the nudge just set. */
+ *  Each quantity filters at its own latitude -- v sits on the south face, half
+ *  a row poleward of the centre. A running mean is exactly conservative in the
+ *  row, so it cannot perturb the zonal means the nudge acts on. Rows that need
+ *  no filtering are still written: this pass ping-pongs. */
 [numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
-void MainPolarFilterCS(uint3 Id : SV_DispatchThreadID)
+void MainFilterCS(uint3 Id : SV_DispatchThreadID)
 {
     if (SimOutOfBounds(Id))
     {
@@ -732,55 +769,43 @@ void MainPolarFilterCS(uint3 Id : SV_DispatchThreadID)
     const int2 C = int2(Id.xy);
     const uint Layer = Id.z;
 
-    const float Mu = SimRowToMu((float) C.y);
+    const int HalfRow = SimFilterHalfWidth(SimRowToMu((float) C.y), SimFilterLatitude, SimFilterMaxHalfWidth);
+    const int HalfFace = (C.y > 0)
+		? SimFilterHalfWidth(SimFaceToMu((float) C.y), SimFilterLatitude, SimFilterMaxHalfWidth)
+		: 0;
 
-    const int Half = SimFilterHalfWidth(Mu, SimFilterLatitude, SimFilterMaxHalfWidth);
-
-    if (Half <= 0)
-    {
-		// Untouched, but still written: this pass ping-pongs, so a row that
-		// skips the filter must still be copied or it reverts to whatever the
-		// destination held two steps ago.
-        SimVorticityUAV[int3(C, Layer)] = SimVorticitySRV.Load(int4(C.x, C.y, Layer, 0));
-        return;
-    }
-
-    float Sum = 0.0f;
+    float SumU = 0.0f;
+    float SumPhi = 0.0f;
 
 	[loop]
-    for (int K = -Half; K <= Half; K++)
+    for (int K = -HalfRow; K <= HalfRow; K++)
     {
-        Sum += SimLoad(SimVorticitySRV, C + int2(K, 0), Layer);
+        SumU += SimFace(C.x + K, C.y, Layer).x;
+        SumPhi += SimLoad(SimPhiStarSRV, C + int2(K, 0), Layer);
     }
 
-    SimVorticityUAV[int3(C, Layer)] = Sum / (float) (2 * Half + 1);
+    float SumV = 0.0f;
+
+	[loop]
+    for (int M = -HalfFace; M <= HalfFace; M++)
+    {
+        SumV += SimFace(C.x + M, C.y, Layer).y;
+    }
+
+    const float RowCount = (float) (2 * HalfRow + 1);
+
+    SimFaceUAV[int3(C, Layer)] = float2(SumU / RowCount, SumV / (float) (2 * HalfFace + 1));
+    SimRhsUAV[int3(C, Layer)] = SumPhi / RowCount;
 }
 
-// POISSON SOLVE, RED-BLACK SOR. Multigrid or a Fourier transform in longitude
-// are better in the worst case and the Fourier one is exact in a single pass,
-// but this is not the worst case: the field changes very little in one step, so
-// the PREVIOUS step's psi is an excellent initial guess and a warm-started
-// iterative solver converges in a handful of sweeps. The one cold start is at
-// init, off the frame budget, and can simply run more. If that stops holding --
-// much higher resolution, or a much larger timestep -- the Fourier route is a
-// drop-in replacement for this pass alone.
-//
-// RED-BLACK, so each sweep is two dispatches of opposite parity. Every thread
-// reads only texels of the other colour, which no thread in that dispatch
-// writes, so the update is in place with no ping-pong and no hazard.
+// ---------------------------------------------------------------------------
+// Helmholtz
 // ---------------------------------------------------------------------------
 
-/** Over-relaxation factor. 1 is plain Gauss-Seidel. The optimum for a Poisson
- *  problem of this size is somewhere near 1.8, and above 2 the iteration
- *  diverges -- not slowly, immediately. */
-float SimRelaxation;
-
-/** 0 updates texels where (i+j) is even, 1 where it is odd. */
-int SimRedBlackParity;
-
-/** Dispatch (N_lon, N_lat, LayerCount). */
+/** Completes the right-hand side in place: filtered phi* less the implicit
+ *  share of c^2 div V*. Dispatch (N_lon, N_lat, LayerCount). */
 [numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
-void MainPoissonCS(uint3 Id : SV_DispatchThreadID)
+void MainRhsCS(uint3 Id : SV_DispatchThreadID)
 {
     if (SimOutOfBounds(Id))
     {
@@ -790,56 +815,276 @@ void MainPoissonCS(uint3 Id : SV_DispatchThreadID)
     const int2 C = int2(Id.xy);
     const uint Layer = Id.z;
 
-    if ((((C.x + C.y) & 1) != SimRedBlackParity))
+    SimRhsUAV[int3(C, Layer)] = SimRhsUAV[int3(C, Layer)]
+		- SimImplicitWeight * SimDeltaTime * SimWaveSpeedSq * SimFaceDivergence(C.x, C.y, Layer);
+}
+
+// THE SOLVE IS DIRECT, NOT ITERATIVE. Every coefficient of I - s L depends on
+// latitude alone, so a Fourier transform along each row turns the 2D problem
+// into one independent tridiagonal system in latitude per zonal wavenumber m:
+//
+//   -s ALo p_{j-1} + (1 + s (ALo + AHi) + s CLon 4 sin^2(pi m / N)) p_j
+//     - s AHi p_{j+1} = R_j
+//
+// Three dispatches: forward transform per row, tridiagonal solve per
+// wavenumber, inverse transform per row. Exact to float precision at any c dt.
+//
+// PITFALL: AN UNCONVERGED ITERATIVE SOLVE IS AN EXPLICIT GRAVITY STEP. Whatever
+// part of phi a fixed sweep count leaves unsolved propagates at the explicit
+// rate, which is unstable once c dt exceeds the grid spacing. The strongest
+// coupling (longitude near the poles, latitude near the equator) grows with
+// c dt, so any fixed sweep count fails past some wave speed, timestep or
+// resolution.
+
+/** One row's spectrum. Radix-2, so N_lon is a power of two. */
+groupshared float2 SimFft[GG_SIM_LINE_MAX];
+
+float2 SimComplexMul(float2 A, float2 B)
+{
+    return float2(A.x * B.x - A.y * B.y, A.x * B.y + A.y * B.x);
+}
+
+/** Bit-reversed index, the load order of an in-place Cooley-Tukey transform. */
+uint SimBitReverse(uint I, uint N)
+{
+    return reversebits(I) >> (32u - firstbithigh(N));
+}
+
+/** In-place transform of SimFft[0, N), loaded in bit-reversed order. Sign -1 is
+ *  forward, +1 inverse (unnormalised). Butterflies within a stage touch disjoint
+ *  pairs, so one barrier per stage suffices. */
+void SimFftInPlace(uint Thread, uint N, float Sign)
+{
+	[loop]
+    for (uint Half = 1u; Half < N; Half *= 2u)
+    {
+		[loop]
+        for (uint B = Thread; B < N / 2u; B += GG_SIM_THREADS_LINE)
+        {
+            const uint Pos = B & (Half - 1u);
+            const uint I0 = (B - Pos) * 2u + Pos;
+            const uint I1 = I0 + Half;
+
+            float SinW, CosW;
+            sincos(Sign * PI * (float) Pos / (float) Half, SinW, CosW);
+
+            const float2 T = SimComplexMul(float2(CosW, SinW), SimFft[I1]);
+            const float2 U = SimFft[I0];
+
+            SimFft[I0] = U + T;
+            SimFft[I1] = U - T;
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+    }
+}
+
+/** Rhs rows to spectra. Dispatch (N_lat, LayerCount, 1), one group per row. */
+[numthreads(GG_SIM_THREADS_LINE, 1, 1)]
+void MainHelmholtzForwardCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_GroupThreadID)
+{
+    const int Row = (int) GroupId.x;
+    const uint Layer = GroupId.y;
+    const uint N = (uint) SimGridSize.x;
+
+	[loop]
+    for (uint I = ThreadId.x; I < N; I += GG_SIM_THREADS_LINE)
+    {
+        SimFft[SimBitReverse(I, N)] = float2(SimRhsSRV.Load(int4(I, Row, Layer, 0)), 0.0f);
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    SimFftInPlace(ThreadId.x, N, -1.0f);
+
+	[loop]
+    for (uint K = ThreadId.x; K < N; K += GG_SIM_THREADS_LINE)
+    {
+        SimSpectrumUAV[int3(K, Row, Layer)] = SimFft[K];
+    }
+}
+
+/** Rows each thread of the column solve owns. */
+#define SIM_COLUMN_PER_THREAD (GG_SIM_COLUMN_MAX / GG_SIM_THREADS_LINE)
+
+groupshared float SimColA[GG_SIM_COLUMN_MAX];
+groupshared float SimColB[GG_SIM_COLUMN_MAX];
+groupshared float SimColC[GG_SIM_COLUMN_MAX];
+groupshared float2 SimColD[GG_SIM_COLUMN_MAX];
+
+/** One wavenumber's tridiagonal system in latitude, from one spectrum texture
+ *  into the other. Dispatch (N_lon, LayerCount, 1), one group per wavenumber.
+ *
+ *  Parallel cyclic reduction: each level eliminates the neighbours at distance
+ *  d, coupling rows 2d apart, until no row couples to anything. Stable without
+ *  pivoting because I - s L is strictly diagonally dominant. Each level reads
+ *  into registers, then writes after a barrier, so one buffer serves. */
+[numthreads(GG_SIM_THREADS_LINE, 1, 1)]
+void MainHelmholtzColumnCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_GroupThreadID)
+{
+    const int M = (int) GroupId.x;
+    const uint Layer = GroupId.y;
+    const int NLat = SimGridSize.y;
+    const float S = SimHelmholtzScale;
+
+	// The row operator's eigenvalue for this wavenumber: 2 - 2 cos(2 pi m / N),
+	// written as a square so the smooth modes keep their precision.
+    const float SinHalf = sin(PI * (float) M * SimInvGridSize.x);
+    const float Eigen = 4.0f * SinHalf * SinHalf;
+
+	[unroll]
+    for (int Fill = 0; Fill < SIM_COLUMN_PER_THREAD; Fill++)
+    {
+        const int J = (int) ThreadId.x + Fill * GG_SIM_THREADS_LINE;
+
+        if (J < NLat)
+        {
+            float CLon, ALo, AHi;
+            SimLaplacianCoeffs(J, CLon, ALo, AHi);
+
+			// ALo is exactly zero on the southern polar row and AHi on the
+			// northern, so neither end couples outside the column.
+            SimColA[J] = -S * ALo;
+            SimColB[J] = 1.0f + S * (ALo + AHi + CLon * Eigen);
+            SimColC[J] = -S * AHi;
+            SimColD[J] = SimSpectrumSRV.Load(int4(M, J, Layer, 0));
+        }
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+	[loop]
+    for (int D = 1; D < NLat; D *= 2)
+    {
+        float NewA[SIM_COLUMN_PER_THREAD];
+        float NewB[SIM_COLUMN_PER_THREAD];
+        float NewC[SIM_COLUMN_PER_THREAD];
+        float2 NewD[SIM_COLUMN_PER_THREAD];
+
+		[unroll]
+        for (int Read = 0; Read < SIM_COLUMN_PER_THREAD; Read++)
+        {
+            const int J = (int) ThreadId.x + Read * GG_SIM_THREADS_LINE;
+
+            NewA[Read] = 0.0f;
+            NewB[Read] = 1.0f;
+            NewC[Read] = 0.0f;
+            NewD[Read] = 0.0f;
+
+            if (J < NLat)
+            {
+                float B = SimColB[J];
+                float2 Value = SimColD[J];
+
+				// A neighbour past either end is the identity row, which
+				// contributes nothing.
+                if (J - D >= 0)
+                {
+                    const float K1 = SimColA[J] / SimColB[J - D];
+                    NewA[Read] = -SimColA[J - D] * K1;
+                    B -= SimColC[J - D] * K1;
+                    Value -= SimColD[J - D] * K1;
+                }
+
+                if (J + D < NLat)
+                {
+                    const float K2 = SimColC[J] / SimColB[J + D];
+                    NewC[Read] = -SimColC[J + D] * K2;
+                    B -= SimColA[J + D] * K2;
+                    Value -= SimColD[J + D] * K2;
+                }
+
+                NewB[Read] = B;
+                NewD[Read] = Value;
+            }
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+
+		[unroll]
+        for (int Write = 0; Write < SIM_COLUMN_PER_THREAD; Write++)
+        {
+            const int J = (int) ThreadId.x + Write * GG_SIM_THREADS_LINE;
+
+            if (J < NLat)
+            {
+                SimColA[J] = NewA[Write];
+                SimColB[J] = NewB[Write];
+                SimColC[J] = NewC[Write];
+                SimColD[J] = NewD[Write];
+            }
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+	[unroll]
+    for (int Store = 0; Store < SIM_COLUMN_PER_THREAD; Store++)
+    {
+        const int J = (int) ThreadId.x + Store * GG_SIM_THREADS_LINE;
+
+        if (J < NLat)
+        {
+            SimSpectrumUAV[int3(M, J, Layer)] = SimColD[J] / SimColB[J];
+        }
+    }
+}
+
+/** Solved spectra back to phi. Dispatch (N_lat, LayerCount, 1). */
+[numthreads(GG_SIM_THREADS_LINE, 1, 1)]
+void MainHelmholtzInverseCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_GroupThreadID)
+{
+    const int Row = (int) GroupId.x;
+    const uint Layer = GroupId.y;
+    const uint N = (uint) SimGridSize.x;
+
+	[loop]
+    for (uint K = ThreadId.x; K < N; K += GG_SIM_THREADS_LINE)
+    {
+        SimFft[SimBitReverse(K, N)] = SimSpectrumSRV.Load(int4(K, Row, Layer, 0));
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    SimFftInPlace(ThreadId.x, N, 1.0f);
+
+	[loop]
+    for (uint I = ThreadId.x; I < N; I += GG_SIM_THREADS_LINE)
+    {
+        SimPhiUAV[int3(I, Row, Layer)] = SimFft[I].x * SimInvGridSize.x;
+    }
+}
+
+/** The implicit pressure gradient, completing the step. Dispatch (N_lon, N_lat,
+ *  LayerCount). */
+[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
+void MainCorrectCS(uint3 Id : SV_DispatchThreadID)
+{
+    if (SimOutOfBounds(Id))
     {
         return;
     }
 
-	// Read back through the UAV rather than through a second view of the same
-	// resource. Legal here precisely because of the red-black ordering: every
-	// tap below is the opposite colour to this texel, so no thread in this
-	// dispatch is writing any of them.
-    const int2 W = SimWrapCoord(C + int2(-1, 0));
-    const int2 E = SimWrapCoord(C + int2(1, 0));
-    const int2 S = SimWrapCoord(C + int2(0, -1));
-    const int2 N = SimWrapCoord(C + int2(0, 1));
+    const int2 C = int2(Id.xy);
+    const uint Layer = Id.z;
 
-    const float Centre = SimPsiUAV[int3(C, Layer)];
+    const float Step = SimImplicitWeight * SimDeltaTime;
 
-    float Diagonal;
-    const float Applied = SimLaplacianFromTaps(
-		C.y,
-		Centre,
-		SimPsiUAV[int3(W, Layer)],
-		SimPsiUAV[int3(E, Layer)],
-		SimPsiUAV[int3(S, Layer)],
-		SimPsiUAV[int3(N, Layer)],
-		Diagonal);
+    float2 F = SimFaceSRV.Load(int4(C.x, C.y, Layer, 0));
 
-    const float Source = SimVorticitySRV.Load(int4(C.x, C.y, Layer, 0));
+    F.x -= Step * SimGradEastPhi(C, Layer);
+    F.y = (C.y > 0) ? F.y - Step * SimGradNorthPhi(C, Layer) : 0.0f;
 
-	// Residual correction. Diagonal is strictly negative, so no guard is needed
-	// and none is written; a guard here would mask a grid or coefficient error
-	// rather than fix one.
-    SimPsiUAV[int3(C, Layer)] = Centre + SimRelaxation * (Source - Applied) / Diagonal;
+    SimFaceUAV[int3(C, Layer)] = F;
 }
 
 // ---------------------------------------------------------------------------
 // Snapshot capture and restore
 //
-// WHY THE STATE IS EXACTLY THESE TWO FIELDS.
-//
-// Everything else the sim holds is derived within a step: velocity comes from
-// psi, the row means come from vorticity, the global mean from the row means.
-// So vorticity and psi together are the complete state, and restoring them puts
-// the sim precisely where it was rather than somewhere statistically similar.
-//
-// Psi is stored rather than recovered because recovering it means running the
-// cold-start Poisson solve at load -- slow, and correct only to solver
-// tolerance. Doubling three megabytes is the cheaper trade by a wide margin.
+// Faces and phi are the complete state: everything else is derived within a
+// step. Capturing them restores the sim precisely rather than statistically.
 // ---------------------------------------------------------------------------
 
-/** Flat index into the transfer buffer. Layer-major, then row, then column. */
 int SimFlatIndex(uint3 Id)
 {
     return (int) Id.z * SimGridSize.x * SimGridSize.y
@@ -859,15 +1104,15 @@ void MainCaptureCS(uint3 Id : SV_DispatchThreadID)
     const int Index = SimFlatIndex(Id);
     const int Total = SimGridSize.x * SimGridSize.y * SimGridSize.z;
 
-    SimCaptureBuffer[Index] = SimVorticitySRV.Load(int4(Id.x, Id.y, Id.z, 0));
-    SimCaptureBuffer[Total + Index] = SimPsiSRV.Load(int4(Id.x, Id.y, Id.z, 0));
+    const float2 F = SimFaceSRV.Load(int4(Id, 0));
+
+    SimCaptureBuffer[Index] = F.x;
+    SimCaptureBuffer[Total + Index] = F.y;
+    SimCaptureBuffer[2 * Total + Index] = SimPhiSRV.Load(int4(Id, 0));
 }
 
-/** Dispatch (N_lon, N_lat, LayerCount).
- *
- *  Replaces the seeding passes entirely when a snapshot is bound. No Poisson
- *  solve follows it: psi arrives already consistent with the vorticity it was
- *  captured alongside, so solving would only move it. */
+/** Dispatch (N_lon, N_lat, LayerCount). Replaces the seeding passes when a
+ *  snapshot is bound. */
 [numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
 void MainRestoreCS(uint3 Id : SV_DispatchThreadID)
 {
@@ -879,55 +1124,41 @@ void MainRestoreCS(uint3 Id : SV_DispatchThreadID)
     const int Index = SimFlatIndex(Id);
     const int Total = SimGridSize.x * SimGridSize.y * SimGridSize.z;
 
-    SimVorticityUAV[int3(Id)] = SimRestoreBuffer[Index];
-    SimPsiUAV[int3(Id)] = SimRestoreBuffer[Total + Index];
+    SimFaceUAV[int3(Id)] = float2(SimRestoreBuffer[Index], SimRestoreBuffer[Total + Index]);
+    SimPhiUAV[int3(Id)] = SimRestoreBuffer[2 * Total + Index];
+
+	// Not in the snapshot: cloud re-forms from the flow within a lifetime.
+    SimCloudUAV[int3(Id)] = 0.0f;
 }
 
-// DEBUG VISUALISATION. Every field here is a signed scalar on a grid and every
-// failure mode is a shape in one of them: a nudge fighting the drag is banded
-// residual, a wrong Laplacian coefficient is a ring at fixed latitude, an
-// under-converged solve is residual that never goes grey, an over-aggressive
-// polar filter is a smeared cap. None of that is diagnosable through the
-// finished material, where the field has been warped, composited, turned into
-// cloud-top altitude and raymarched.
+// ---------------------------------------------------------------------------
+// Debug visualisation
 //
-// POINT SAMPLED DELIBERATELY, at grid resolution: what is on screen is texels
-// rather than a smoothed impression of them. Aliasing IS the signal -- a
-// checkerboard in the residual is a red-black solver bug, and a filtered view
-// would hide it.
+// POINT SAMPLED at grid resolution: aliasing is the signal. A checkerboard in
+// the pressure or the residual is the decoupled-grid mode or a solver bug,
+// and a filtered view would hide it.
+// ---------------------------------------------------------------------------
 
 RWTexture2D<float4> SimDebugUAV;
 
-/** See GG_DEBUG_* below. */
 int SimDebugMode;
-
-/** Which layer of the stack to show. */
 int SimDebugLayer;
-
-/** Value mapped to full saturation. Everything is signed and O(JetStrength),
- *  so this usually wants to be a small multiple of it. */
 float SimDebugScale;
-
 int2 SimDebugSize;
 
-#define GG_DEBUG_VORTICITY   0
-#define GG_DEBUG_PSI         1
-#define GG_DEBUG_SPEED       2
-#define GG_DEBUG_EAST        3
-#define GG_DEBUG_NORTH       4
-#define GG_DEBUG_RESIDUAL    5
-#define GG_DEBUG_ZONAL_ERROR 6
+#define SIM_DEBUG_VORTICITY   0
+#define SIM_DEBUG_PRESSURE    1
+#define SIM_DEBUG_SPEED       2
+#define SIM_DEBUG_EAST        3
+#define SIM_DEBUG_NORTH       4
+#define SIM_DEBUG_RESIDUAL    5
+#define SIM_DEBUG_ZONAL_ERROR 6
+#define SIM_DEBUG_VERTICAL    7
+#define SIM_DEBUG_FROUDE      8
+#define SIM_DEBUG_CLOUD       9
 
-/** Diverging ramp. Blue negative, near-black zero, red positive.
- *
- *  Diverging rather than a heat ramp because every quantity here is SIGNED and
- *  the sign is the information -- cyclonic against anticyclonic, prograde
- *  against retrograde. A heat ramp puts zero at one end and makes the two
- *  circulation senses look like different magnitudes of the same thing.
- *
- *  Deliberately dark at zero, so that a field which has collapsed to nothing
- *  reads as an obviously empty frame rather than as a uniform mid-grey that
- *  could be mistaken for a working sim at low contrast. */
+/** Diverging ramp, blue negative, red positive, dark at zero so a collapsed
+ *  field reads as an empty frame rather than a plausible mid-grey. */
 float3 SimSignedRamp(float V)
 {
     const float T = clamp(V, -1.0f, 1.0f);
@@ -949,68 +1180,70 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
 
     const uint Layer = (uint) clamp(SimDebugLayer, 0, SimGridSize.z - 1);
 
-	// Nearest-neighbour into the grid. If the debug target is sized to the grid
-	// this is exactly 1:1, which is the intended setup.
     const int2 C = int2(
 		(int) ((float) Id.x / (float) SimDebugSize.x * SimGridSize.x),
 		(int) ((float) Id.y / (float) SimDebugSize.y * SimGridSize.y));
 
-    const float Mu = SimRowToMu((float) C.y);
+    const float2 Components = SimCentreComponents(C.x, C.y, Layer);
 
     float Value = 0.0f;
 
-    if (SimDebugMode == GG_DEBUG_VORTICITY)
+    if (SimDebugMode == SIM_DEBUG_VORTICITY)
     {
-        Value = SimVorticitySRV.Load(int4(C.x, C.y, Layer, 0));
+        Value = SimFaceVorticity(C.x, C.y, Layer);
     }
-    else if (SimDebugMode == GG_DEBUG_PSI)
+    else if (SimDebugMode == SIM_DEBUG_PRESSURE)
     {
-        Value = SimPsiSRV.Load(int4(C.x, C.y, Layer, 0));
+        Value = SimPhiSRV.Load(int4(C.x, C.y, Layer, 0)) - SimRowMeanSRV.Load(int3(C.y, Layer, 0)).y;
     }
-    else if (SimDebugMode == GG_DEBUG_SPEED)
+    else if (SimDebugMode == SIM_DEBUG_SPEED)
     {
-		// Unsigned, so it is shown on the positive half of the ramp only.
-		// Components are already east and north, so the magnitude is a plain
-		// length of the pair -- no basis reconstruction needed.
-        Value = length(SimVelocitySRV.Load(int4(C.x, C.y, Layer, 0)).xy);
+        Value = length(Components);
     }
-    else if (SimDebugMode == GG_DEBUG_EAST)
+    else if (SimDebugMode == SIM_DEBUG_EAST)
     {
-        Value = SimVelocitySRV.Load(int4(C.x, C.y, Layer, 0)).x;
+        Value = Components.x;
     }
-    else if (SimDebugMode == GG_DEBUG_NORTH)
+    else if (SimDebugMode == SIM_DEBUG_NORTH)
     {
-        Value = SimVelocitySRV.Load(int4(C.x, C.y, Layer, 0)).y;
+        Value = Components.y;
     }
-    else if (SimDebugMode == GG_DEBUG_RESIDUAL)
+    else if (SimDebugMode == SIM_DEBUG_RESIDUAL)
     {
-		// THE CONVERGENCE DIAGNOSTIC. Laplacian(psi) - omega should be
-		// featureless. Structure here means the solve has not converged, and
-		// WHERE the structure is says why: concentrated at high latitude means
-		// the operator is too stiff and the filter is not doing enough, spread
-		// evenly means too few iterations, and a checkerboard means the
-		// red-black parity is wrong.
+		// Float noise only, since the solve is direct, and loudest at the stiff
+		// polar rows. Coherent structure means the transform or column solve is
+		// broken. Meaningless before the first substep.
         float Diagonal;
-        const float Applied = SimLaplacian(SimPsiSRV, C, Layer, Diagonal);
+        const float Applied = SimLaplacian(SimPhiSRV, C, Layer, Diagonal);
 
-        Value = Applied - SimVorticitySRV.Load(int4(C.x, C.y, Layer, 0));
+        Value = SimRhsSRV.Load(int4(C.x, C.y, Layer, 0))
+			- (SimPhiSRV.Load(int4(C.x, C.y, Layer, 0)) - SimHelmholtzScale * Applied);
     }
-    else if (SimDebugMode == GG_DEBUG_ZONAL_ERROR)
+    else if (SimDebugMode == SIM_DEBUG_ZONAL_ERROR)
     {
-		// Is the nudge winning? This should sit near zero once spun up. A
-		// persistent offset means NudgeRate is losing to DragRate, and a
-		// pattern that alternates with the bands means the two are fighting at
-		// the jet cores specifically -- which is the signature of the clamped
-		// slope being wrong, so check GG_JetScaledSlope first.
-        float BandCount, JetStrength, Boost, Asymmetry;
-        SimLayerJets(Layer, BandCount, JetStrength, Boost, Asymmetry);
+		// Zonal-mean u against the profile. A persistent offset is the nudge
+		// losing to something; a pattern alternating with the bands is the
+		// profile being unstable faster than the nudge restores it.
+        const float Mu = SimRowToMu((float) C.y);
 
-        const float Target = GG_ZonalVorticity(Mu, BandCount, JetStrength, Boost, Asymmetry, SimWidthBias);
-
-        Value = SimRowMeanSRV.Load(int3(C.y, Layer, 0)) - Target;
+        Value = SimRowMeanSRV.Load(int3(C.y, Layer, 0)).x - SimZonalRate(Mu, Layer) * SimRowCos(C.y);
+    }
+    else if (SimDebugMode == SIM_DEBUG_VERTICAL)
+    {
+		// W: red rising, blue sinking. With drag on, red in lows and blue in
+		// highs in both hemispheres.
+        Value = -SimFaceDivergence(C.x, C.y, Layer);
+    }
+    else if (SimDebugMode == SIM_DEBUG_FROUDE)
+    {
+		// Speed over wave speed. Past about 0.5 the flow approaches hydraulic
+		// jumps; the ramp saturates at the debug scale.
+        Value = length(Components) * rsqrt(max(SimWaveSpeedSq, 1e-8f));
+    }
+    else if (SimDebugMode == SIM_DEBUG_CLOUD)
+    {
+        Value = SimCloudSRV.Load(int4(C.x, C.y, Layer, 0));
     }
 
-    const float3 Colour = SimSignedRamp(Value / max(SimDebugScale, 1e-6f));
-
-    SimDebugUAV[int2(Id.xy)] = float4(Colour, 1.0f);
+    SimDebugUAV[int2(Id.xy)] = float4(SimSignedRamp(Value / max(SimDebugScale, 1e-6f)), 1.0f);
 }

@@ -12,6 +12,10 @@
 // a unit direction with no transcendental beyond the one atan2. Sampler state
 // must be WRAP on U and CLAMP on V: the grid is a cylinder, and wrapping V joins
 // the north pole to the south.
+//
+// TWO SLICE RANGES. For a sim of L layers the texture holds 2L slices: [0, L)
+// are FLOW, [L, 2L) are WEATHER, layer for layer. L is Slices / 2, so no reader
+// needs it passed.
 
 /** What the interpretation functions read. A FIELD SUPPLIES IT RATHER THAN
  *  EMBEDDING THE MATH: the sense of a rotation and the width of the band where
@@ -30,30 +34,35 @@ struct FlowReadParams
 };
 
 /** Flow field reconstruction: 0 hardware bilinear, one tap, C0; 1 cubic
- *  B-spline, four taps, C2. A performance handle, three taps wide. Nothing
- *  between them is worth carrying, and neither adds information: if blocks
- *  survive at 1 the band edge is a genuine step in the sim data, and the answer
- *  is sim resolution or a softer BandSharpness. */
+ *  B-spline, four taps, C2. A performance handle. If blocks survive at 1 the
+ *  edge is a genuine step in the sim data, and the answer is sim resolution or
+ *  a softer BandSharpness. */
 #ifndef FLOW_FIELD_FILTER
 #define FLOW_FIELD_FILTER 1
 #endif
 
-/** Samples the simulated flow field by direction. The grid is longitude by
- *  sin(latitude), so both coordinates are cheap from a unit vector. Sampler
- *  state must be wrap on U and clamp on V.
+/** Layers the sim runs: half the texture's slices. */
+float Flow_LayerCount(Texture2DArray FlowField)
+{
+    uint Width, Height, Slices, Levels;
+    FlowField.GetDimensions(0, Width, Height, Slices, Levels);
+
+    return (float) (Slices / 2u);
+}
+
+/** Samples one slice of the sim's output by direction. Sampler state must be
+ *  wrap on U and clamp on V.
  *
- *  Returns (u_east, u_north, psi_eddy, band):
- *    xy  Tangent velocity, radians per unit time; rebuild the 3D vector with
- *        Flow_TangentVelocity.
- *    z   The eddy streamfunction, psi with its zonal mean removed: zero in
- *        undisturbed flow, positive for clockwise rotation seen from outside.
+ *  Returns (u_east, u_north, pressure, vorticity) for a flow slice:
+ *    xy  Tangent velocity, physical speed on the unit sphere; rebuild the 3D
+ *        vector with Flow_TangentVelocity.
+ *    z   Pressure: the geopotential less its zonal mean, soft-saturated into
+ *        (-1, 1). Positive in highs in BOTH hemispheres.
  *    w   Normalized vorticity, near [-1,1], positive counterclockwise. The band
- *        signal, arriving already meandering and wrapped around vortices, since
- *        the sim transports vorticity.
+ *        signal.
  *
- *  PITFALL: z and w are rotation senses, not cyclone or anticyclone -- which one
- *  a sense is flips at the equator. Read them through Flow_Pressure and
- *  Flow_Band, never raw. */
+ *  PITFALL: w is a rotation sense, not cyclone or anticyclone -- which one a
+ *  sense is flips at the equator. Read it through Flow_Band, never raw. */
 float4 Flow_Sample(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
 {
     const float U = frac(atan2(N.y, N.x) * (0.5f / PI));
@@ -65,13 +74,12 @@ float4 Flow_Sample(Texture2DArray FlowField, SamplerState FlowSampler, float3 N,
 
 #else
 
-	// Bilinear is continuous in value but not in gradient, and the deck top is a
-	// direct function of this field while shading responds to its slope, so the
-	// slope jumps surface as faceting along the lat/lon grid. The cubic is
-	// approximating rather than interpolating: it does not pass through the
-	// texel values, so a one-texel step in the field stops being one in the
-	// surface. Four bilinear taps, each placed at the offset that reproduces a
-	// pair's weights.
+	// Bilinear is continuous in value but not in gradient, and anything built
+	// on this field responds to its slope, so the slope jumps surface as
+	// faceting along the lat/lon grid. The cubic is approximating: it does not
+	// pass through the texel values, so a one-texel step in the field stops
+	// being one in the surface. Four bilinear taps, each placed at the offset
+	// that reproduces a pair's weights.
     uint Width, Height, Slices, Levels;
     FlowField.GetDimensions(0, Width, Height, Slices, Levels);
 
@@ -105,21 +113,28 @@ float4 Flow_Sample(Texture2DArray FlowField, SamplerState FlowSampler, float3 N,
 #endif
 }
 
+/** Samples a layer's weather slice. Returns (W, cloud, spare, spare):
+ *    x  Vertical motion from convergence, soft-saturated into (-1, 1), positive
+ *       rising. No hemisphere interpretation.
+ *    y  Cloud fraction in [0, 1]: where air has been rising, carried by the
+ *       wind. */
+float4 Flow_SampleWeather(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
+{
+    return Flow_Sample(FlowField, FlowSampler, N, Layer + Flow_LayerCount(FlowField));
+}
+
 /** +1 in the northern hemisphere, -1 in the southern, smoothly through zero at
  *  the equator. N is a unit direction in the field's frame, Flow its sample.
  *
- *  THE SIGN FLIP IS EXACTLY A LATITUDE CIRCLE and carries no variance: the
- *  Coriolis parameter is 2 omega sin(latitude), with no longitude term, so which
- *  rotation sense is cyclonic really does change at latitude zero everywhere.
- *  What varies is the WIDTH of the indifferent band either side, because what
- *  the eye reads is where rotation stops organizing the weather -- roughly where
- *  local vorticity rivals the planetary term. HemisphereBlend sets the quiet-air
- *  width and HemisphereVariance widens it with |zeta|.
+ *  THE SIGN FLIP IS EXACTLY A LATITUDE CIRCLE: the Coriolis parameter is
+ *  2 omega sin(latitude), with no longitude term, so which rotation sense is
+ *  cyclonic changes at latitude zero everywhere. What varies is the WIDTH of the
+ *  indifferent band either side. HemisphereBlend sets the quiet-air width and
+ *  HemisphereVariance widens it with |zeta|.
  *
  *  PITFALL: a constant width makes the band a perfect annulus, and a vortex
  *  straddling the equator is then bisected along a fixed latitude however strong
- *  it is. Widening with the flow lets a strong feature carry its own neutral
- *  band across and survive as one feature. */
+ *  it is. */
 float Flow_Hemisphere(float4 Flow, float3 N, FlowReadParams P)
 {
     const float HalfWidth = P.HemisphereHalfWidth * (1.0f + P.HemisphereVariance * abs(Flow.w));
@@ -127,11 +142,12 @@ float Flow_Hemisphere(float4 Flow, float3 N, FlowReadParams P)
     return tanh(N.z / HalfWidth);
 }
 
-/** Pressure from a flow sample: the eddy streamfunction times the hemisphere.
- *  Positive in anticyclones (high pressure) in both hemispheres. */
+/** Pressure from a flow sample: positive in highs, in both hemispheres. The sim
+ *  writes a geopotential, which carries no rotation sense, so nothing is
+ *  flipped. */
 float Flow_Pressure(float4 Flow, float3 N, FlowReadParams P)
 {
-    return Flow.z * Flow_Hemisphere(Flow, N, P);
+    return Flow.z;
 }
 
 /** The band value from a flow sample: vorticity made anticyclonic-positive in
@@ -143,11 +159,8 @@ float Flow_Band(float4 Flow, float3 N, FlowReadParams P)
 }
 
 /** Arc length of one flow texel at a given radius, in world units: the finest
- *  thing the deck top can vary over. A ray stepping further than this in one go
- *  samples one column out of the several it crossed, and the jitter picks which
- *  -- not an estimate with noise on it but a choice. It is why a shadow ray
- *  needs a step bounded by a length rather than a budget divided into a span.
- *  Longitude is the tighter axis, so the width alone bounds it. */
+ *  thing a field built on the flow can vary over. Longitude is the tighter axis,
+ *  so the width alone bounds it. */
 float Flow_TexelArc(Texture2DArray FlowField, float Radius)
 {
     uint Width, Height, Slices, Levels;

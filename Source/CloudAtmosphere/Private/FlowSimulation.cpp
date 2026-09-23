@@ -1,6 +1,7 @@
 #include "FlowSimulation.h"
 
 #include "FlowSimShaders.h"
+#include "FlowSnapshot.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
 #include "RenderTargetPool.h"
@@ -8,32 +9,45 @@
 #include "GlobalShader.h"
 #include "ShaderParameterStruct.h"
 
-// GBlackVolumeTexture, the fallback bound when no seed volume is set.
+// GBlackVolumeTexture, the fallback bound when no forcing volume is set.
 #include "RenderUtils.h"
 
-// TStaticSamplerState, for the wrapped trilinear seed sampler.
+// TStaticSamplerState, for the wrapped trilinear forcing sampler.
 #include "RHIStaticStates.h"
 
 DEFINE_LOG_CATEGORY(LogFlowSim);
 
+static_assert(UFlowSnapshot::FloatsPerCell == FFlowSimulation::StateFloatsPerCell,
+	"Snapshot layout and solver state disagree about floats per cell.");
+
 /** Everything registered into this frame's graph. Bundled so the pass helpers
- *  take one argument rather than nine, and so that the ping-pong swap is a
- *  single Swap() rather than three call sites that must agree. */
+ *  take one argument, and so the ping-pong swap is a single Swap(). */
 struct FFlowSimResources
 {
-	FRDGTextureRef Vorticity[2] = { nullptr, nullptr };
-	FRDGTextureRef Psi = nullptr;
+	FRDGTextureRef Face[2] = { nullptr, nullptr };
+	FRDGTextureRef Centre = nullptr;
+	FRDGTextureRef Explicit = nullptr;
+	FRDGTextureRef Phi = nullptr;
+	FRDGTextureRef PhiStar = nullptr;
+	FRDGTextureRef Rhs = nullptr;
+	FRDGTextureRef Spectrum[2] = { nullptr, nullptr };
+	FRDGTextureRef Cloud[2] = { nullptr, nullptr };
 	FRDGTextureRef RowMean = nullptr;
-	FRDGTextureRef PsiRowMean = nullptr;
+	FRDGTextureRef PhiEq = nullptr;
 	FRDGTextureRef GlobalMean = nullptr;
-	FRDGTextureRef Velocity = nullptr;
+	FRDGTextureRef Output = nullptr;
 	FRDGTextureRef Debug = nullptr;
 
 	int32 Current = 0;
+	int32 CloudCurrent = 0;
 
-	FRDGTextureRef Source() const { return Vorticity[Current]; }
-	FRDGTextureRef Dest() const { return Vorticity[1 - Current]; }
+	FRDGTextureRef Source() const { return Face[Current]; }
+	FRDGTextureRef Dest() const { return Face[1 - Current]; }
 	void Swap() { Current = 1 - Current; }
+
+	FRDGTextureRef CloudSource() const { return Cloud[CloudCurrent]; }
+	FRDGTextureRef CloudDest() const { return Cloud[1 - CloudCurrent]; }
+	void SwapCloud() { CloudCurrent = 1 - CloudCurrent; }
 };
 
 namespace
@@ -48,12 +62,18 @@ namespace
 			GridSize.Z);
 	}
 
+	FIntVector GroupCountRows(const FIntVector& GridSize)
+	{
+		return FIntVector(FMath::DivideAndRoundUp(GridSize.Y, ThreadGroupSize1D), GridSize.Z, 1);
+	}
+
+	FIntVector GroupCountLayers(const FIntVector& GridSize)
+	{
+		return FIntVector(FMath::DivideAndRoundUp(GridSize.Z, ThreadGroupSizeLayers), 1, 1);
+	}
+
 	/** Fills every scalar parameter. Resources are attached per pass afterwards.
-	 *
-	 *  Written once and shared, which is the point of the single parameter
-	 *  struct: there is exactly one place where a config value becomes a shader
-	 *  value, so a parameter cannot be threaded through to some passes and
-	 *  quietly dropped from others. */
+	 *  The one place a config value becomes a shader value. */
 	void FillCommonParameters(FFlowSimParameters& P, const FFlowSimParams& Params)
 	{
 		P.SimGridSize = Params.GridSize;
@@ -73,6 +93,9 @@ namespace
 		P.SimDeltaTime = Params.DeltaTime;
 		P.SimTime = Params.Time;
 		P.SimPlanetaryVorticity = Params.PlanetaryVorticity;
+		P.SimWaveSpeedSq = Params.WaveSpeedSq;
+		P.SimImplicitWeight = Params.ImplicitWeight;
+		P.SimHelmholtzScale = Params.HelmholtzScale;
 
 		P.SimForcingChannel = Params.ForcingChannel;
 		P.SimForcingBipolar = Params.bForcingBipolar ? 1 : 0;
@@ -84,30 +107,30 @@ namespace
 		P.SimForcingDrift = Params.ForcingDrift;
 		P.SimDragRate = Params.DragRate;
 		P.SimLayerCoupling = Params.LayerCoupling;
+		P.SimDivergenceDamping = Params.DivergenceDamping;
+		P.SimThermalRelaxation = Params.ThermalRelaxation;
+
+		P.SimCondensationRate = Params.CondensationRate;
+		P.SimEvaporationRate = Params.EvaporationRate;
+		P.SimCloudDecay = 1.0f / FMath::Max(Params.CloudLifetime, 1e-3f);
 
 		P.SimFilterLatitude = Params.FilterLatitude;
 		P.SimFilterMaxHalfWidth = Params.FilterMaxHalfWidth;
 
-		P.SimRelaxation = Params.Relaxation;
-		P.SimRedBlackParity = 0;
+		P.SimOutputScales = Params.OutputScales;
 
 		P.SimDebugMode = Params.DebugMode;
 		P.SimDebugLayer = Params.DebugLayer;
 		P.SimDebugScale = Params.DebugScale;
 		P.SimDebugSize = Params.DebugSize;
 
-		// The seed volume is optional. A null texture bound as black evaluates
-		// the seed as zero, which gives a purely zonal initial condition -- a
-		// legitimate state, and a far better failure than refusing to run,
-		// because a running sim with no eddies is diagnosable from the debug
-		// view in one glance and a sim that never started is not.
+		// A null forcing texture binds black and SimHasForcing gates it to zero.
 		P.SimForcingNoise = Params.ForcingTexture.IsValid()
 			? Params.ForcingTexture
 			: GBlackVolumeTexture->TextureRHI;
 
-		// Wrap on all three axes. The forcing volume is a tiling bake and reading
-		// it clamped puts a stretched band of constant value along each face,
-		// which seeds a spurious vorticity sheet there.
+		// Wrap on all three axes: the forcing volume is a tiling bake, and a
+		// clamped read puts a band of constant value along each face.
 		P.SimForcingNoiseSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
 	}
 
@@ -127,6 +150,13 @@ namespace
 			Parameters,
 			Groups);
 	}
+
+	FFlowSimParameters* NewParameters(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params)
+	{
+		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
+		FillCommonParameters(*P, Params);
+		return P;
+	}
 }
 
 void FFlowSimulation::RequestReset()
@@ -140,34 +170,35 @@ void FFlowSimulation::QueueRestore_RenderThread(TArray<float>&& InData)
 
 	PendingRestore = MoveTemp(InData);
 
-	// Force the next Enqueue through initialisation so the upload actually
-	// happens, rather than being stranded behind an already-initialised sim.
+	// Force the next Enqueue through initialisation so the upload happens.
 	bResetRequested = true;
 }
 
 void FFlowSimulation::Release_RenderThread()
 {
-	PooledVorticity[0].SafeRelease();
-	PooledVorticity[1].SafeRelease();
-	PooledPsi.SafeRelease();
-
-	// PendingRestore is DELIBERATELY NOT cleared here.
-	//
-	// QueueRestore_RenderThread sets bResetRequested so the upload is
-	// guaranteed to run, and EnsureResources answers that flag by calling this
-	// function -- so clearing the payload here destroys it with the very reset
-	// that was supposed to apply it. The restore then silently falls through to
-	// seeding, and the only symptom is a planet that does not look like the one
-	// that was saved.
-	//
-	// The payload is owned by the initialisation branch in Enqueue, which
-	// either consumes it or reports it as mismatched and empties it there.
+	PooledFace[0].SafeRelease();
+	PooledFace[1].SafeRelease();
+	PooledCentre.SafeRelease();
+	PooledExplicit.SafeRelease();
+	PooledPhi.SafeRelease();
+	PooledPhiStar.SafeRelease();
+	PooledRhs.SafeRelease();
+	PooledSpectrum[0].SafeRelease();
+	PooledSpectrum[1].SafeRelease();
+	PooledCloud[0].SafeRelease();
+	PooledCloud[1].SafeRelease();
 	PooledRowMean.SafeRelease();
-	PooledPsiRowMean.SafeRelease();
+	PooledPhiEq.SafeRelease();
 	PooledGlobalMean.SafeRelease();
 
+	// PendingRestore is DELIBERATELY NOT cleared. A queued restore sets the reset
+	// flag, and EnsureResources answers that flag by calling this function --
+	// clearing the payload here would destroy it with the very reset that was
+	// meant to apply it. The initialisation branch in Enqueue owns it.
+
 	AllocatedGrid = FIntVector::ZeroValue;
-	CurrentVorticity = 0;
+	CurrentFace = 0;
+	CurrentCloud = 0;
 	bInitialised = false;
 	bResetRequested = false;
 }
@@ -176,118 +207,111 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 {
 	const bool bGridChanged = (AllocatedGrid != Params.GridSize);
 
-	if (bGridChanged || bResetRequested || !PooledPsi.IsValid())
+	if (!bGridChanged && !bResetRequested && PooledPhi.IsValid())
 	{
-		Release_RenderThread();
-
-		const FIntPoint Size(Params.GridSize.X, Params.GridSize.Y);
-		const uint16 Slices = (uint16)FMath::Max(Params.GridSize.Z, 1);
-
-		// R32F rather than R16F for the state. Vorticity spans several orders
-		// of magnitude between a jet core and a quiet zone interior, and the
-		// Poisson residual is a small difference of two larger numbers -- half
-		// precision there loses the residual entirely and the solve stalls at a
-		// floor it cannot see below. The output texture the material reads is
-		// RGBA16F, and that is fine, because by then the differencing is done.
-		const FRDGTextureDesc StateDesc = FRDGTextureDesc::Create2DArray(
-			Size, PF_R32_FLOAT, FClearValueBinding::Black,
-			TexCreate_ShaderResource | TexCreate_UAV, Slices);
-
-		PooledVorticity[0] = AllocatePooledTexture(StateDesc, TEXT("FlowSim.VorticityA"));
-		PooledVorticity[1] = AllocatePooledTexture(StateDesc, TEXT("FlowSim.VorticityB"));
-		PooledPsi = AllocatePooledTexture(StateDesc, TEXT("FlowSim.Psi"));
-
-		// (row, layer). Also carries the zonal streamfunction during init; see
-		// MainInitZonalPotentialCS for why it is reused rather than duplicated.
-		const FRDGTextureDesc RowDesc = FRDGTextureDesc::Create2D(
-			FIntPoint(Params.GridSize.Y, Slices), PF_R32_FLOAT, FClearValueBinding::Black,
-			TexCreate_ShaderResource | TexCreate_UAV);
-
-		PooledRowMean = AllocatePooledTexture(RowDesc, TEXT("FlowSim.RowMean"));
-		PooledPsiRowMean = AllocatePooledTexture(RowDesc, TEXT("FlowSim.PsiRowMean"));
-
-		const FRDGTextureDesc GlobalDesc = FRDGTextureDesc::Create2D(
-			FIntPoint(1, Slices), PF_R32_FLOAT, FClearValueBinding::Black,
-			TexCreate_ShaderResource | TexCreate_UAV);
-
-		PooledGlobalMean = AllocatePooledTexture(GlobalDesc, TEXT("FlowSim.GlobalMean"));
-
-		AllocatedGrid = Params.GridSize;
-		CurrentVorticity = 0;
-		bInitialised = false;
-		bResetRequested = false;
-
-		UE_LOG(LogFlowSim, Log, TEXT("Allocated sim state at %dx%d x %d layers."),
-			Params.GridSize.X, Params.GridSize.Y, Params.GridSize.Z);
-
-		return true;
+		return false;
 	}
 
-	return false;
+	Release_RenderThread();
+
+	const FIntPoint Size(Params.GridSize.X, Params.GridSize.Y);
+	const uint16 Slices = (uint16)FMath::Max(Params.GridSize.Z, 1);
+	const ETextureCreateFlags Flags = TexCreate_ShaderResource | TexCreate_UAV;
+
+	// 32-bit throughout. The Helmholtz operator is a small difference of larger
+	// numbers and the geopotential anomaly rides on c^2; half precision loses
+	// both. The output texture the material reads is 16-bit, which is fine once
+	// the differencing is done.
+	const FRDGTextureDesc FaceDesc = FRDGTextureDesc::Create2DArray(
+		Size, PF_G32R32F, FClearValueBinding::Black, Flags, Slices);
+
+	const FRDGTextureDesc CentreDesc = FRDGTextureDesc::Create2DArray(
+		Size, PF_A32B32G32R32F, FClearValueBinding::Black, Flags, Slices);
+
+	const FRDGTextureDesc ScalarDesc = FRDGTextureDesc::Create2DArray(
+		Size, PF_R32_FLOAT, FClearValueBinding::Black, Flags, Slices);
+
+	PooledFace[0] = AllocatePooledTexture(FaceDesc, TEXT("FlowSim.FaceA"));
+	PooledFace[1] = AllocatePooledTexture(FaceDesc, TEXT("FlowSim.FaceB"));
+	PooledCentre = AllocatePooledTexture(CentreDesc, TEXT("FlowSim.Centre"));
+	PooledExplicit = AllocatePooledTexture(CentreDesc, TEXT("FlowSim.Explicit"));
+	PooledPhi = AllocatePooledTexture(ScalarDesc, TEXT("FlowSim.Phi"));
+	PooledPhiStar = AllocatePooledTexture(ScalarDesc, TEXT("FlowSim.PhiStar"));
+	PooledRhs = AllocatePooledTexture(ScalarDesc, TEXT("FlowSim.Rhs"));
+
+	// Complex row spectra, (wavenumber, row, layer).
+	const FRDGTextureDesc SpectrumDesc = FRDGTextureDesc::Create2DArray(
+		Size, PF_G32R32F, FClearValueBinding::Black, Flags, Slices);
+
+	PooledSpectrum[0] = AllocatePooledTexture(SpectrumDesc, TEXT("FlowSim.SpectrumA"));
+	PooledSpectrum[1] = AllocatePooledTexture(SpectrumDesc, TEXT("FlowSim.SpectrumB"));
+
+	PooledCloud[0] = AllocatePooledTexture(ScalarDesc, TEXT("FlowSim.CloudA"));
+	PooledCloud[1] = AllocatePooledTexture(ScalarDesc, TEXT("FlowSim.CloudB"));
+
+	// (row, layer).
+	const FIntPoint RowSize(Params.GridSize.Y, Slices);
+
+	PooledRowMean = AllocatePooledTexture(
+		FRDGTextureDesc::Create2D(RowSize, PF_G32R32F, FClearValueBinding::Black, Flags),
+		TEXT("FlowSim.RowMean"));
+
+	PooledPhiEq = AllocatePooledTexture(
+		FRDGTextureDesc::Create2D(RowSize, PF_R32_FLOAT, FClearValueBinding::Black, Flags),
+		TEXT("FlowSim.PhiEq"));
+
+	PooledGlobalMean = AllocatePooledTexture(
+		FRDGTextureDesc::Create2D(FIntPoint(1, Slices), PF_R32_FLOAT, FClearValueBinding::Black, Flags),
+		TEXT("FlowSim.GlobalMean"));
+
+	AllocatedGrid = Params.GridSize;
+	CurrentFace = 0;
+	CurrentCloud = 0;
+	bInitialised = false;
+	bResetRequested = false;
+
+	UE_LOG(LogFlowSim, Log, TEXT("Allocated sim state at %dx%d x %d layers."),
+		Params.GridSize.X, Params.GridSize.Y, Params.GridSize.Z);
+
+	return true;
 }
 
-void FFlowSimulation::AddInitPasses(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
+void FFlowSimulation::AddBalancePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
 {
-	const FIntVector Groups2D = GroupCount2D(Params.GridSize);
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+	P->SimPhiEqUAV = GraphBuilder.CreateUAV(R.PhiEq);
 
-	// Rows, then layers. One thread per row.
-	const FIntVector GroupsRows(
-		FMath::DivideAndRoundUp(Params.GridSize.Y, ThreadGroupSize1D),
-		Params.GridSize.Z,
-		1);
+	AddSimPass<FFlowSimInitBalanceCS>(GraphBuilder, TEXT("FlowSim.Balance"), P, GroupCountLayers(Params.GridSize));
+}
 
-	// -- Zonal streamfunction, by quadrature, one value per row -------------
+void FFlowSimulation::AddInitPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
+{
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+	P->SimPhiEqSRV = GraphBuilder.CreateSRV(R.PhiEq);
+	P->SimFaceUAV = GraphBuilder.CreateUAV(R.Source());
+	P->SimPhiUAV = GraphBuilder.CreateUAV(R.Phi);
+	P->SimCloudUAV = GraphBuilder.CreateUAV(R.CloudSource());
 
-	{
-		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-		FillCommonParameters(*P, Params);
-		P->SimRowMeanUAV = GraphBuilder.CreateUAV(R.RowMean);
-
-		AddSimPass<FFlowSimInitZonalPotentialCS>(GraphBuilder, TEXT("FlowSim.InitZonalPotential"), P, GroupsRows);
-	}
-
-	// -- Full streamfunction: zonal plus seeded eddies ----------------------
-
-	{
-		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-		FillCommonParameters(*P, Params);
-		P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
-		P->SimPsiUAV = GraphBuilder.CreateUAV(R.Psi);
-
-		AddSimPass<FFlowSimInitPotentialCS>(GraphBuilder, TEXT("FlowSim.InitPotential"), P, Groups2D);
-	}
-
-	// -- Vorticity, through the same discrete operator the solver inverts ---
-
-	{
-		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-		FillCommonParameters(*P, Params);
-		P->SimPsiSRV = GraphBuilder.CreateSRV(R.Psi);
-		P->SimVorticityUAV = GraphBuilder.CreateUAV(R.Vorticity[R.Current]);
-
-		AddSimPass<FFlowSimInitVorticityCS>(GraphBuilder, TEXT("FlowSim.InitVorticity"), P, Groups2D);
-	}
+	AddSimPass<FFlowSimInitStateCS>(GraphBuilder, TEXT("FlowSim.InitState"), P, GroupCount2D(Params.GridSize));
 }
 
 void FFlowSimulation::AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
 {
 	const int32 Total = Params.GridSize.X * Params.GridSize.Y * Params.GridSize.Z;
 
-	// CreateStructuredBuffer uploads the initial data as part of graph setup,
-	// so the pass below reads it without a separate transfer step.
 	FRDGBufferRef Upload = CreateStructuredBuffer(
 		GraphBuilder,
 		TEXT("FlowSim.RestoreUpload"),
 		sizeof(float),
-		Total * 2,
+		Total * StateFloatsPerCell,
 		PendingRestore.GetData(),
 		PendingRestore.Num() * sizeof(float));
 
-	FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-	FillCommonParameters(*P, Params);
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
 	P->SimRestoreBuffer = GraphBuilder.CreateSRV(Upload);
-	P->SimVorticityUAV = GraphBuilder.CreateUAV(R.Vorticity[R.Current]);
-	P->SimPsiUAV = GraphBuilder.CreateUAV(R.Psi);
+	P->SimFaceUAV = GraphBuilder.CreateUAV(R.Source());
+	P->SimPhiUAV = GraphBuilder.CreateUAV(R.Phi);
+	P->SimCloudUAV = GraphBuilder.CreateUAV(R.CloudSource());
 
 	AddSimPass<FFlowSimRestoreCS>(GraphBuilder, TEXT("FlowSim.Restore"), P, GroupCount2D(Params.GridSize));
 }
@@ -296,7 +320,7 @@ void FFlowSimulation::AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, con
 {
 	check(IsInRenderingThread());
 
-	if (!Readback || !PooledPsi.IsValid())
+	if (!Readback || !PooledPhi.IsValid())
 	{
 		return;
 	}
@@ -308,154 +332,150 @@ void FFlowSimulation::AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, con
 		return;
 	}
 
-	FRDGTextureRef Vorticity = GraphBuilder.RegisterExternalTexture(PooledVorticity[CurrentVorticity]);
-	FRDGTextureRef Psi = GraphBuilder.RegisterExternalTexture(PooledPsi);
+	FRDGTextureRef Face = GraphBuilder.RegisterExternalTexture(PooledFace[CurrentFace]);
+	FRDGTextureRef Phi = GraphBuilder.RegisterExternalTexture(PooledPhi);
 
 	FRDGBufferRef Capture = GraphBuilder.CreateBuffer(
-		FRDGBufferDesc::CreateStructuredDesc(sizeof(float), Total * 2),
+		FRDGBufferDesc::CreateStructuredDesc(sizeof(float), Total * StateFloatsPerCell),
 		TEXT("FlowSim.Capture"));
 
-	FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-	FillCommonParameters(*P, Params);
-	P->SimVorticitySRV = GraphBuilder.CreateSRV(Vorticity);
-	P->SimPsiSRV = GraphBuilder.CreateSRV(Psi);
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+	P->SimFaceSRV = GraphBuilder.CreateSRV(Face);
+	P->SimPhiSRV = GraphBuilder.CreateSRV(Phi);
 	P->SimCaptureBuffer = GraphBuilder.CreateUAV(Capture);
 
 	AddSimPass<FFlowSimCaptureCS>(GraphBuilder, TEXT("FlowSim.Capture"), P, GroupCount2D(AllocatedGrid));
 
-	AddEnqueueCopyPass(GraphBuilder, Readback, Capture, Total * 2 * sizeof(float));
+	AddEnqueueCopyPass(GraphBuilder, Readback, Capture, Total * StateFloatsPerCell * sizeof(float));
 }
 
-void FFlowSimulation::AddPoissonSolve(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R, int32 Iterations)
+void FFlowSimulation::AddReducePasses(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
 {
-	const FIntVector Groups2D = GroupCount2D(Params.GridSize);
-
-	// Two dispatches per sweep, opposite parity. The parity split is what makes
-	// the in-place update safe: every tap a thread reads is the other colour,
-	// so nothing in the dispatch is writing it.
-	for (int32 Sweep = 0; Sweep < Iterations; ++Sweep)
 	{
-		for (int32 Parity = 0; Parity < 2; ++Parity)
-		{
-			FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-			FillCommonParameters(*P, Params);
-			P->SimRedBlackParity = Parity;
-			P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
-			P->SimPsiUAV = GraphBuilder.CreateUAV(R.Psi);
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		P->SimFaceSRV = GraphBuilder.CreateSRV(R.Source());
+		P->SimPhiSRV = GraphBuilder.CreateSRV(R.Phi);
+		P->SimRowMeanUAV = GraphBuilder.CreateUAV(R.RowMean);
 
-			AddSimPass<FFlowSimPoissonCS>(GraphBuilder, TEXT("FlowSim.Poisson"), P, Groups2D);
-		}
+		AddSimPass<FFlowSimReduceRowsCS>(GraphBuilder, TEXT("FlowSim.ReduceRows"), P, GroupCountRows(Params.GridSize));
 	}
+
+	{
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
+		P->SimGlobalMeanUAV = GraphBuilder.CreateUAV(R.GlobalMean);
+
+		AddSimPass<FFlowSimReduceGlobalCS>(GraphBuilder, TEXT("FlowSim.ReduceGlobal"), P, GroupCountLayers(Params.GridSize));
+	}
+}
+
+void FFlowSimulation::AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
+{
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+	P->SimFaceSRV = GraphBuilder.CreateSRV(R.Source());
+	P->SimPhiSRV = GraphBuilder.CreateSRV(R.Phi);
+	P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
+	P->SimCloudSRV = GraphBuilder.CreateSRV(R.CloudSource());
+	P->SimCentreUAV = GraphBuilder.CreateUAV(R.Centre);
+	P->SimExplicitUAV = GraphBuilder.CreateUAV(R.Explicit);
+	P->SimOutputUAV = GraphBuilder.CreateUAV(R.Output);
+
+	AddSimPass<FFlowSimReconstructCS>(GraphBuilder, TEXT("FlowSim.Reconstruct"), P, GroupCount2D(Params.GridSize));
 }
 
 void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, FFlowSimResources& R)
 {
 	const FIntVector Groups2D = GroupCount2D(Params.GridSize);
 
-	const FIntVector GroupsRows(
-		FMath::DivideAndRoundUp(Params.GridSize.Y, ThreadGroupSize1D),
-		Params.GridSize.Z,
-		1);
+	// -- 1. Means and centre fields of the current state ------------------
 
-	const FIntVector GroupsLayers(
-		FMath::DivideAndRoundUp(Params.GridSize.Z, ThreadGroupSizeLayers),
-		1,
-		1);
+	AddReducePasses(GraphBuilder, Params, R);
+	AddReconstructPass(GraphBuilder, Params, R);
 
-	// -- 1. Velocity from the current streamfunction ------------------------
-	//
-	// First, because advection needs a velocity consistent with the vorticity
-	// it is about to move. This also writes the texture the material samples,
-	// so the two uses are one pass rather than two.
+	// -- 2. Predict: advection and every explicit term --------------------
 
 	{
-		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-		FillCommonParameters(*P, Params);
-		P->SimPsiSRV = GraphBuilder.CreateSRV(R.Psi);
-		P->SimPsiRowMeanUAV = GraphBuilder.CreateUAV(R.PsiRowMean);
-
-		AddSimPass<FFlowSimReducePsiRowsCS>(GraphBuilder, TEXT("FlowSim.ReducePsiRows"), P, GroupsRows);
-	}
-
-	{
-		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-		FillCommonParameters(*P, Params);
-		P->SimPsiSRV = GraphBuilder.CreateSRV(R.Psi);
-		P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
-		P->SimPsiRowMeanSRV = GraphBuilder.CreateSRV(R.PsiRowMean);
-		P->SimVelocityUAV = GraphBuilder.CreateUAV(R.Velocity);
-
-		AddSimPass<FFlowSimVelocityCS>(GraphBuilder, TEXT("FlowSim.Velocity"), P, Groups2D);
-	}
-
-	// -- 2. Advect absolute vorticity ---------------------------------------
-
-	{
-		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-		FillCommonParameters(*P, Params);
-		P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
-		P->SimVelocitySRV = GraphBuilder.CreateSRV(R.Velocity);
-		P->SimVorticityUAV = GraphBuilder.CreateUAV(R.Dest());
-
-		AddSimPass<FFlowSimAdvectCS>(GraphBuilder, TEXT("FlowSim.Advect"), P, Groups2D);
-	}
-	R.Swap();
-
-	// -- 3. Reductions ------------------------------------------------------
-	//
-	// After advection rather than before, so the forcing nudges what the flow
-	// has actually become rather than what it was at the top of the step.
-
-	{
-		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-		FillCommonParameters(*P, Params);
-		P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
-		P->SimRowMeanUAV = GraphBuilder.CreateUAV(R.RowMean);
-
-		AddSimPass<FFlowSimReduceRowsCS>(GraphBuilder, TEXT("FlowSim.ReduceRows"), P, GroupsRows);
-	}
-
-	{
-		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-		FillCommonParameters(*P, Params);
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		P->SimFaceSRV = GraphBuilder.CreateSRV(R.Source());
+		P->SimCentreSRV = GraphBuilder.CreateSRV(R.Centre);
+		P->SimExplicitSRV = GraphBuilder.CreateSRV(R.Explicit);
+		P->SimPhiSRV = GraphBuilder.CreateSRV(R.Phi);
 		P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
-		P->SimGlobalMeanUAV = GraphBuilder.CreateUAV(R.GlobalMean);
-
-		AddSimPass<FFlowSimReduceGlobalCS>(GraphBuilder, TEXT("FlowSim.ReduceGlobal"), P, GroupsLayers);
-	}
-
-	// -- 4. Forcing ---------------------------------------------------------
-
-	{
-		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-		FillCommonParameters(*P, Params);
-		P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
-		P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
+		P->SimPhiEqSRV = GraphBuilder.CreateSRV(R.PhiEq);
 		P->SimGlobalMeanSRV = GraphBuilder.CreateSRV(R.GlobalMean);
-		P->SimVorticityUAV = GraphBuilder.CreateUAV(R.Dest());
+		P->SimCloudSRV = GraphBuilder.CreateSRV(R.CloudSource());
+		P->SimFaceUAV = GraphBuilder.CreateUAV(R.Dest());
+		P->SimPhiStarUAV = GraphBuilder.CreateUAV(R.PhiStar);
+		P->SimCloudUAV = GraphBuilder.CreateUAV(R.CloudDest());
 
-		AddSimPass<FFlowSimForceCS>(GraphBuilder, TEXT("FlowSim.Force"), P, Groups2D);
+		AddSimPass<FFlowSimPredictCS>(GraphBuilder, TEXT("FlowSim.Predict"), P, Groups2D);
 	}
 	R.Swap();
+	R.SwapCloud();
 
-	// -- 5. Polar filter ----------------------------------------------------
+	// -- 3. Polar filter; filtered phi* lands in Rhs -----------------------
 
 	{
-		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-		FillCommonParameters(*P, Params);
-		P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
-		P->SimVorticityUAV = GraphBuilder.CreateUAV(R.Dest());
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		P->SimFaceSRV = GraphBuilder.CreateSRV(R.Source());
+		P->SimPhiStarSRV = GraphBuilder.CreateSRV(R.PhiStar);
+		P->SimFaceUAV = GraphBuilder.CreateUAV(R.Dest());
+		P->SimRhsUAV = GraphBuilder.CreateUAV(R.Rhs);
 
-		AddSimPass<FFlowSimPolarFilterCS>(GraphBuilder, TEXT("FlowSim.PolarFilter"), P, Groups2D);
+		AddSimPass<FFlowSimFilterCS>(GraphBuilder, TEXT("FlowSim.Filter"), P, Groups2D);
 	}
 	R.Swap();
 
-	// -- 6. Poisson ---------------------------------------------------------
-	//
-	// Warm started: psi still holds last substep's solution, which is a near
-	// solution to this one. That is what pays for an iterative solver here.
+	// -- 4. Right-hand side -------------------------------------------------
 
-	AddPoissonSolve(GraphBuilder, Params, R, Params.PoissonIterations);
+	{
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		P->SimFaceSRV = GraphBuilder.CreateSRV(R.Source());
+		P->SimRhsUAV = GraphBuilder.CreateUAV(R.Rhs);
+
+		AddSimPass<FFlowSimRhsCS>(GraphBuilder, TEXT("FlowSim.Rhs"), P, Groups2D);
+	}
+
+	// -- 5. Helmholtz, direct: row FFT, latitude solve, inverse FFT --------
+
+	const FIntVector GroupsRows(Params.GridSize.Y, Params.GridSize.Z, 1);
+	const FIntVector GroupsWavenumbers(Params.GridSize.X, Params.GridSize.Z, 1);
+
+	{
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		P->SimRhsSRV = GraphBuilder.CreateSRV(R.Rhs);
+		P->SimSpectrumUAV = GraphBuilder.CreateUAV(R.Spectrum[0]);
+
+		AddSimPass<FFlowSimHelmholtzForwardCS>(GraphBuilder, TEXT("FlowSim.HelmholtzForward"), P, GroupsRows);
+	}
+
+	{
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		P->SimSpectrumSRV = GraphBuilder.CreateSRV(R.Spectrum[0]);
+		P->SimSpectrumUAV = GraphBuilder.CreateUAV(R.Spectrum[1]);
+
+		AddSimPass<FFlowSimHelmholtzColumnCS>(GraphBuilder, TEXT("FlowSim.HelmholtzColumn"), P, GroupsWavenumbers);
+	}
+
+	{
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		P->SimSpectrumSRV = GraphBuilder.CreateSRV(R.Spectrum[1]);
+		P->SimPhiUAV = GraphBuilder.CreateUAV(R.Phi);
+
+		AddSimPass<FFlowSimHelmholtzInverseCS>(GraphBuilder, TEXT("FlowSim.HelmholtzInverse"), P, GroupsRows);
+	}
+
+	// -- 6. Correct: the implicit pressure gradient -------------------------
+
+	{
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		P->SimFaceSRV = GraphBuilder.CreateSRV(R.Source());
+		P->SimPhiSRV = GraphBuilder.CreateSRV(R.Phi);
+		P->SimFaceUAV = GraphBuilder.CreateUAV(R.Dest());
+
+		AddSimPass<FFlowSimCorrectCS>(GraphBuilder, TEXT("FlowSim.Correct"), P, Groups2D);
+	}
+	R.Swap();
 }
 
 void FFlowSimulation::AddDebugPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
@@ -470,12 +490,12 @@ void FFlowSimulation::AddDebugPass(FRDGBuilder& GraphBuilder, const FFlowSimPara
 		FMath::DivideAndRoundUp(Params.DebugSize.Y, ThreadGroupSize2D),
 		1);
 
-	FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-	FillCommonParameters(*P, Params);
-	P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
-	P->SimPsiSRV = GraphBuilder.CreateSRV(R.Psi);
-	P->SimVelocitySRV = GraphBuilder.CreateSRV(R.Velocity);
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+	P->SimFaceSRV = GraphBuilder.CreateSRV(R.Source());
+	P->SimPhiSRV = GraphBuilder.CreateSRV(R.Phi);
+	P->SimRhsSRV = GraphBuilder.CreateSRV(R.Rhs);
 	P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
+	P->SimCloudSRV = GraphBuilder.CreateSRV(R.CloudSource());
 	P->SimDebugUAV = GraphBuilder.CreateUAV(R.Debug);
 
 	AddSimPass<FFlowSimDebugVisCS>(GraphBuilder, TEXT("FlowSim.DebugVis"), P, Groups);
@@ -487,9 +507,6 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 
 	if (!Params.FlowTexture.IsValid())
 	{
-		// Without somewhere to put the velocity there is nothing worth
-		// computing. Refused loudly rather than silently, since a sim that
-		// runs and writes nowhere is indistinguishable from a broken one.
 		return;
 	}
 
@@ -498,15 +515,24 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	RDG_EVENT_SCOPE(GraphBuilder, "FlowSim");
 
 	FFlowSimResources R;
-	R.Vorticity[0] = GraphBuilder.RegisterExternalTexture(PooledVorticity[0]);
-	R.Vorticity[1] = GraphBuilder.RegisterExternalTexture(PooledVorticity[1]);
-	R.Psi = GraphBuilder.RegisterExternalTexture(PooledPsi);
+	R.Face[0] = GraphBuilder.RegisterExternalTexture(PooledFace[0]);
+	R.Face[1] = GraphBuilder.RegisterExternalTexture(PooledFace[1]);
+	R.Centre = GraphBuilder.RegisterExternalTexture(PooledCentre);
+	R.Explicit = GraphBuilder.RegisterExternalTexture(PooledExplicit);
+	R.Phi = GraphBuilder.RegisterExternalTexture(PooledPhi);
+	R.PhiStar = GraphBuilder.RegisterExternalTexture(PooledPhiStar);
+	R.Rhs = GraphBuilder.RegisterExternalTexture(PooledRhs);
+	R.Spectrum[0] = GraphBuilder.RegisterExternalTexture(PooledSpectrum[0]);
+	R.Spectrum[1] = GraphBuilder.RegisterExternalTexture(PooledSpectrum[1]);
+	R.Cloud[0] = GraphBuilder.RegisterExternalTexture(PooledCloud[0]);
+	R.Cloud[1] = GraphBuilder.RegisterExternalTexture(PooledCloud[1]);
 	R.RowMean = GraphBuilder.RegisterExternalTexture(PooledRowMean);
-	R.PsiRowMean = GraphBuilder.RegisterExternalTexture(PooledPsiRowMean);
+	R.PhiEq = GraphBuilder.RegisterExternalTexture(PooledPhiEq);
 	R.GlobalMean = GraphBuilder.RegisterExternalTexture(PooledGlobalMean);
-	R.Current = CurrentVorticity;
+	R.Current = CurrentFace;
+	R.CloudCurrent = CurrentCloud;
 
-	R.Velocity = GraphBuilder.RegisterExternalTexture(
+	R.Output = GraphBuilder.RegisterExternalTexture(
 		CreateRenderTarget(Params.FlowTexture, TEXT("FlowSim.Flow")));
 
 	if (Params.DebugTexture.IsValid() && Params.DebugSize.X > 0 && Params.DebugSize.Y > 0)
@@ -515,19 +541,19 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 			CreateRenderTarget(Params.DebugTexture, TEXT("FlowSim.Debug")));
 	}
 
+	// Every frame: the thermal relaxation target and the initial state both
+	// read it, and a live profile edit should reach both.
+	AddBalancePass(GraphBuilder, Params, R);
+
 	if (bNeedsSeeding || !bInitialised)
 	{
-		if (PendingRestore.Num() == Params.GridSize.X * Params.GridSize.Y * Params.GridSize.Z * 2)
+		const int32 Expected = Params.GridSize.X * Params.GridSize.Y * Params.GridSize.Z * StateFloatsPerCell;
+
+		if (PendingRestore.Num() == Expected)
 		{
-			// Restored, not seeded. No Poisson solve follows: psi arrives
-			// already consistent with the vorticity it was captured beside, so
-			// solving could only move it away from the captured state.
 			AddRestorePass(GraphBuilder, Params, R);
 
 			UE_LOG(LogFlowSim, Log, TEXT("Restored state from snapshot."));
-
-			PendingRestore.Empty();
-			bInitialised = true;
 		}
 		else
 		{
@@ -535,32 +561,16 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 			{
 				UE_LOG(LogFlowSim, Warning,
 					TEXT("Snapshot has %d floats, grid needs %d. Seeding instead."),
-					PendingRestore.Num(),
-					Params.GridSize.X * Params.GridSize.Y * Params.GridSize.Z * 2);
-
-				PendingRestore.Empty();
+					PendingRestore.Num(), Expected);
 			}
 
-			AddInitPasses(GraphBuilder, Params, R);
-
-			// The one cold start. No previous psi to warm start from, so this
-			// runs many more sweeps than a substep does, and it is off the
-			// frame budget so it can afford to.
-			//
-			// It is not truly cold either: psi already holds the zonal
-			// streamfunction and the vorticity was built by applying the
-			// discrete Laplacian to exactly that, which puts the source in the
-			// range of the operator. So it should converge almost immediately,
-			// and a residual view that is not featureless on frame one means
-			// the discretisation and the seeding disagree -- a far more
-			// specific bug than "the sim looks wrong".
-			//
-			// The restore branch above skips this entirely, which is most of
-			// why storing psi alongside vorticity is worth the extra megabytes.
-			AddPoissonSolve(GraphBuilder, Params, R, FMath::Max(Params.InitPoissonIterations, 1));
-
-			bInitialised = true;
+			// Balanced by construction, so there is no cold solve: the
+			// geopotential already matches the flow it starts under.
+			AddInitPass(GraphBuilder, Params, R);
 		}
+
+		PendingRestore.Empty();
+		bInitialised = true;
 	}
 
 	for (int32 Step = 0; Step < NumSubsteps; ++Step)
@@ -568,35 +578,15 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 		AddSubstep(GraphBuilder, Params, R);
 	}
 
-	// Final velocity pass so the texture the material reads matches the psi the
-	// last substep produced rather than the one it started from. One extra
-	// dispatch; without it the flow the material sees is always one substep
-	// stale, which is invisible at four substeps a frame and confusing at one.
-	{
-		const FIntVector GroupsRows(
-			FMath::DivideAndRoundUp(Params.GridSize.Y, ThreadGroupSize1D), Params.GridSize.Z, 1);
-
-		FFlowSimParameters* PR = GraphBuilder.AllocParameters<FFlowSimParameters>();
-		FillCommonParameters(*PR, Params);
-		PR->SimPsiSRV = GraphBuilder.CreateSRV(R.Psi);
-		PR->SimPsiRowMeanUAV = GraphBuilder.CreateUAV(R.PsiRowMean);
-
-		AddSimPass<FFlowSimReducePsiRowsCS>(GraphBuilder, TEXT("FlowSim.ReducePsiRowsFinal"), PR, GroupsRows);
-
-		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-		FillCommonParameters(*P, Params);
-		P->SimPsiSRV = GraphBuilder.CreateSRV(R.Psi);
-		P->SimVorticitySRV = GraphBuilder.CreateSRV(R.Source());
-		P->SimPsiRowMeanSRV = GraphBuilder.CreateSRV(R.PsiRowMean);
-		P->SimVelocityUAV = GraphBuilder.CreateUAV(R.Velocity);
-
-		AddSimPass<FFlowSimVelocityCS>(GraphBuilder, TEXT("FlowSim.VelocityFinal"), P, GroupCount2D(Params.GridSize));
-	}
+	// Final reduce and reconstruct, so the texture the material reads matches
+	// the state the last substep produced rather than the one it started from.
+	AddReducePasses(GraphBuilder, Params, R);
+	AddReconstructPass(GraphBuilder, Params, R);
 
 	AddDebugPass(GraphBuilder, Params, R);
 
-	// Carry the ping-pong index across the frame boundary. An odd number of
-	// swaps per substep means this genuinely alternates, so losing it would
-	// silently advance the sim from a two-substeps-stale buffer.
-	CurrentVorticity = R.Current;
+	// Carry both ping-pong indices across the frame boundary. The faces swap
+	// three times per substep and the cloud once, so both genuinely alternate.
+	CurrentFace = R.Current;
+	CurrentCloud = R.CloudCurrent;
 }

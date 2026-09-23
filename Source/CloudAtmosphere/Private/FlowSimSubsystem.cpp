@@ -2,6 +2,7 @@
 
 #include "GasGiantShadowMap.h"
 #include "FlowSimulation.h"
+#include "FlowSimShaders.h"
 #include "FlowSimSettings.h"
 #include "FlowSnapshot.h"
 #include "RHIGPUReadback.h"
@@ -9,7 +10,6 @@
 #include "Engine/VolumeTexture.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/TextureRenderTarget2DArray.h"
-#include "RenderGraphBuilder.h"
 #include "RenderingThread.h"
 
 // TAutoConsoleVariable and FAutoConsoleCommandWithWorldAndArgs.
@@ -20,17 +20,16 @@
 #include "Engine/World.h"
 
 // ---------------------------------------------------------------------------
-// Console commands. Present because the fastest debugging loop for a field
-// like this is: change one thing, look, change it back. Going through a
-// blueprint or a details panel for that is enough friction to discourage it.
+// Console variables. The fastest debugging loop for a field like this is:
+// change one thing, look, change it back.
 // ---------------------------------------------------------------------------
 
 static TAutoConsoleVariable<int32> CVarGasGiantDebugMode(
 	TEXT("r.GasGiant.DebugMode"),
 	-1,
 	TEXT("Override the config's debug view. -1 uses the config.\n")
-	TEXT("0 Vorticity, 1 Streamfunction, 2 Speed, 3 East, 4 North,\n")
-	TEXT("5 Poisson residual, 6 Zonal profile error."),
+	TEXT("0 Vorticity, 1 Pressure, 2 Speed, 3 East, 4 North,\n")
+	TEXT("5 Helmholtz residual, 6 Zonal profile error, 7 Vertical motion, 8 Froude, 9 Cloud."),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarGasGiantDebugLayer(
@@ -54,11 +53,9 @@ static TAutoConsoleVariable<int32> CVarGasGiantPaused(
 // ---------------------------------------------------------------------------
 // Console commands.
 //
-// FConsoleCommandWithWorldAndArgsDelegate rather than a plain command, because
-// the subsystem is per world and a static command has no other way to find the
-// right one. The world it hands back is the one the command was issued in,
-// which is the editor world when typed into the editor console and the PIE
-// world when typed during play -- exactly the disambiguation wanted.
+// FConsoleCommandWithWorldAndArgsDelegate, because the subsystem is per world
+// and the world handed back is the one the command was issued in -- the editor
+// world from the editor console, the PIE world during play.
 // ---------------------------------------------------------------------------
 
 namespace
@@ -118,7 +115,7 @@ static FAutoConsoleCommandWithWorldAndArgs GFlowSimStartCmd(
 
 static FAutoConsoleCommandWithWorldAndArgs GFlowSimStopCmd(
 	TEXT("FlowSim.Stop"),
-	TEXT("Stop stepping. State is kept, so GasGiant.Start resumes rather than reseeds."),
+	TEXT("Stop stepping. State is kept, so FlowSim.Start resumes rather than reseeds."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
 		[](const TArray<FString>&, UWorld* World)
 		{
@@ -131,7 +128,7 @@ static FAutoConsoleCommandWithWorldAndArgs GFlowSimStopCmd(
 static FAutoConsoleCommandWithWorldAndArgs GFlowSimResetCmd(
 	TEXT("FlowSim.Reset"),
 	TEXT("Discard the field and reseed from the current config. Also the way to ")
-	TEXT("pick up a changed grid size or seed volume."),
+	TEXT("pick up a changed grid size."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
 		[](const TArray<FString>&, UWorld* World)
 		{
@@ -205,14 +202,34 @@ static FAutoConsoleCommandWithWorldAndArgs GFlowSimStatusCmd(
 
 // ---------------------------------------------------------------------------
 
-/** Peak angular rate the profile can reach.
- *
- *  The saturation caps the shaped term at 1, and the equatorial boost is added
- *  AFTER it and so is not bounded by it. Conservative when the profile does not
- *  fully saturate, exact when it does -- which it does at the defaults. */
-static float GasGiantPeakRate(const UFlowSimConfig& Config)
+/** Peak angular rate the profile can reach in the fastest layer. The saturation
+ *  caps the shaped term at 1 and the equatorial boost rides on top of it; each
+ *  layer scales both. PITFALL: reading the shared profile alone under-reports a
+ *  layer with JetScale above 1, and the Froude check then passes a regime the
+ *  sim cannot balance. */
+static float PeakRate(const UFlowSimConfig& Config)
 {
-	return FMath::Max(Config.JetStrength * (1.0f + Config.EquatorialBoost), 1e-6f);
+	const int32 Layers = FMath::Clamp(Config.LayerCount, 1, 8);
+
+	float Peak = 0.0f;
+
+	for (int32 i = 0; i < Layers; ++i)
+	{
+		const FFlowLayerProfile P = Config.LayerProfiles.IsValidIndex(i)
+			? Config.LayerProfiles[i]
+			: FFlowLayerProfile();
+
+		Peak = FMath::Max(Peak, FMath::Abs(Config.JetStrength * P.JetScale)
+			* (1.0f + FMath::Max(Config.EquatorialBoost * P.BoostScale, 0.0f)));
+	}
+
+	return FMath::Max(Peak, 1e-6f);
+}
+
+/** Gravity-wave speed from the deformation radius at 45 degrees. */
+static float WaveSpeed(const UFlowSimConfig& Config)
+{
+	return FMath::Max(Config.DeformationRadius * Config.PlanetaryVorticity * 0.70710678f, 1e-3f);
 }
 
 void UFlowSimSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -227,13 +244,11 @@ void UFlowSimSubsystem::Deinitialize()
 	if (Simulation)
 	{
 		// The render thread owns the pooled allocations, so they are released
-		// there and the flush is what makes deleting the object afterwards
-		// safe. Deleting from the game thread without this races a frame that
-		// is already referencing them.
+		// there, and the flush is what makes deleting the object afterwards safe.
 		FFlowSimulation* Sim = Simulation;
 		Simulation = nullptr;
 
-		ENQUEUE_RENDER_COMMAND(GasGiantRelease)(
+		ENQUEUE_RENDER_COMMAND(FlowSimRelease)(
 			[Sim](FRHICommandListImmediate&)
 			{
 				Sim->Release_RenderThread();
@@ -277,9 +292,8 @@ void UFlowSimSubsystem::StartSimulation(UFlowSimConfig* InConfig)
 	ReportCourant();
 	ReportInertSettings();
 
-	// ResetSimulation owns the restore-or-seed decision, so starting and resetting
-	// cannot diverge. PITFALL: a reset that only clears the field reseeds even
-	// with a snapshot bound.
+	// ResetSimulation owns the restore-or-seed decision, so starting and
+	// resetting cannot diverge.
 	ResetSimulation();
 }
 
@@ -290,10 +304,10 @@ float UFlowSimSubsystem::GetCourant() const
 		return 0.0f;
 	}
 
-	const int32 W = FMath::Max(Config->GridLongitude & ~1, 32);
+	const int32 W = FlowSimShader::GridLongitude(Config->GridLongitude);
 	const float Step = Config->TimeScale * Config->StepRatio;
 
-	return GasGiantPeakRate(*Config) * Step * W / (2.0f * UE_PI);
+	return PeakRate(*Config) * Step * W / (2.0f * UE_PI);
 }
 
 void UFlowSimSubsystem::ReportInertSettings() const
@@ -303,24 +317,18 @@ void UFlowSimSubsystem::ReportInertSettings() const
 		return;
 	}
 
-	// Forcing with nowhere to sample from. SimSampleForcing returns exactly
-	// zero when no volume is bound, so the amplitude, scale and drift are all
-	// dormant -- and will all switch on together the moment a volume is
-	// assigned, which is a surprising amount of change from one assignment.
+	// Forcing with nowhere to sample from: amplitude, scale and drift all
+	// dormant, and all switching on together when a volume is assigned.
 	if (Config->ForcingAmplitude > 0.0f && !Config->ForcingVolume)
 	{
 		UE_LOG(LogFlowSim, Warning,
 			TEXT("ForcingAmplitude is %.3f but no ForcingVolume is bound, so the ")
-			TEXT("stochastic forcing is inactive. The nudge is the only energy ")
-			TEXT("source. Assigning a volume will switch amplitude, scale and ")
-			TEXT("drift on all at once."),
+			TEXT("stochastic forcing is inactive. Assigning a volume will switch ")
+			TEXT("amplitude, scale and drift on all at once."),
 			Config->ForcingAmplitude);
 	}
 
-	// Forcing that never refreshes. The pattern has to move by about one
-	// feature per eddy turnover to read as stochastic; far slower than that and
-	// the sim converges to a fixed point with every structure pinned to a fixed
-	// longitude, which looks laminar however strong the forcing is.
+	// Forcing that never refreshes settles the field to a fixed pattern.
 	if (Config->ForcingAmplitude > 0.0f && Config->ForcingVolume)
 	{
 		const float Growth = Config->JetStrength * Config->BandCount * UE_PI;
@@ -336,7 +344,6 @@ void UFlowSimSubsystem::ReportInertSettings() const
 		}
 	}
 
-	// Vertical coupling with nothing to couple to.
 	if (Config->LayerCoupling > 0.0f && Config->LayerCount < 2)
 	{
 		UE_LOG(LogFlowSim, Warning,
@@ -344,49 +351,27 @@ void UFlowSimSubsystem::ReportInertSettings() const
 			Config->LayerCoupling);
 	}
 
-	// Spin-up that will never run, and the solve that goes with it.
 	if (Config->InitialState && Config->SpinUpSteps > 0)
 	{
 		UE_LOG(LogFlowSim, Log,
-			TEXT("InitialState is bound, so SpinUpSteps (%d) and ")
-			TEXT("InitPoissonIterations (%d) are skipped -- a restored state is ")
-			TEXT("already spun up and its psi arrives consistent with its ")
-			TEXT("vorticity. Both still matter when CREATING snapshots."),
-			Config->SpinUpSteps, Config->InitPoissonIterations);
+			TEXT("InitialState is bound, so SpinUpSteps (%d) is skipped. It still ")
+			TEXT("matters when CREATING snapshots."),
+			Config->SpinUpSteps);
 	}
 
-	// The polar filter switched off entirely. Legal, and at a high Courant
-	// number the numerical diffusion covers for it, but worth saying because
-	// FilterMaxHalfWidth then looks like it should be doing something.
 	if (Config->FilterLatitude <= 0.0f)
 	{
 		UE_LOG(LogFlowSim, Log,
 			TEXT("FilterLatitude is 0, so the polar filter is disabled entirely ")
 			TEXT("and FilterMaxHalfWidth has no effect."));
 	}
-	else if (Config->FilterLatitude > 0.5f)
+
+	if (Config->DragRate <= 0.0f)
 	{
-		const float Deg = FMath::RadiansToDegrees(FMath::Acos(Config->FilterLatitude));
-
-		UE_LOG(LogFlowSim, Log,
-			TEXT("FilterLatitude %.2f engages the longitudinal filter poleward of ")
-			TEXT("%.1f degrees, which is most of the visible disc rather than just ")
-			TEXT("the poles."),
-			Config->FilterLatitude, Deg);
-	}
-
-	// The nudge only has leverage in proportion to how supercritical the jets
-	// are. Above marginal there is no instability to maintain against, so
-	// NudgeRate stops mattering -- and that reads as a regression rather than
-	// as the supercriticality going away.
-	const float Growth = Config->JetStrength * Config->BandCount * UE_PI;
-
-	if (Growth > 0.0f && Config->NudgeRate > 0.0f && Config->NudgeRate < Growth * 0.01f)
-	{
-		UE_LOG(LogFlowSim, Log,
-			TEXT("NudgeRate %.3f is under 1%% of the growth rate %.2f, so the ")
-			TEXT("prescribed profile will not hold against the instability."),
-			Config->NudgeRate, Growth);
+		UE_LOG(LogFlowSim, Warning,
+			TEXT("DragRate is 0: no Ekman convergence, so the vertical motion output ")
+			TEXT("carries only gravity waves and the unbalanced flow, and the ")
+			TEXT("stochastic forcing (scaled by drag) is off."));
 	}
 }
 
@@ -397,34 +382,42 @@ void UFlowSimSubsystem::ReportCourant() const
 		return;
 	}
 
-	// A CONSEQUENCE, NOT A CONTROL.
-	//
-	// StepRatio is what is authored, because it pins the substep count and
-	// therefore the frame cost. Courant then falls out of it together with the
-	// peak rate and the grid width, so it moves whenever the profile is
-	// touched -- which is exactly why it is reported rather than authored.
-	//
-	// Semi-Lagrangian does not go UNSTABLE past 0.33, it goes DIFFUSIVE, and
-	// that diffusion is a real energy sink. When DragRate is small it can be
-	// most of the dissipation, which makes it a physics term wearing the
-	// clothes of an accuracy setting. Worth naming at start, because nothing in
-	// the output points back at the timestep.
+	// CONSEQUENCES, NOT CONTROLS. StepRatio pins the frame cost; these fall out
+	// of it with the profile, the rotation and the grid.
+	const int32 W = FlowSimShader::GridLongitude(Config->GridLongitude);
 	const float Step = Config->TimeScale * Config->StepRatio;
-	const float Courant = GetCourant();
+	const float C = WaveSpeed(*Config);
+
+	const float Advective = GetCourant();
+	const float Gravity = C * Step * W / (2.0f * UE_PI);
+	const float Froude = PeakRate(*Config) / C;
+	const float RotationPerStep = Config->PlanetaryVorticity * Step;
 
 	UE_LOG(LogFlowSim, Log,
-		TEXT("StepRatio %.5f -> step %.5f at TimeScale %.2f, Courant %.3f, ")
-		TEXT("%.1f substeps/frame at 60fps."),
-		Config->StepRatio, Step, Config->TimeScale, Courant,
-		(1.0f / 60.0f) / FMath::Max(Config->StepRatio, 1e-9f));
+		TEXT("Step %.5f at TimeScale %.2f, %.1f substeps/frame at 60fps. ")
+		TEXT("Advective Courant %.3f, gravity-wave Courant %.3f (implicit), ")
+		TEXT("Froude %.2f, Coriolis %.3f rad/step, wave speed %.3f."),
+		Step, Config->TimeScale,
+		(1.0f / 60.0f) / FMath::Max(Config->StepRatio, 1e-9f),
+		Advective, Gravity, Froude, RotationPerStep, C);
 
-	if (Courant > 0.33f)
+	if (Froude > 0.5f)
 	{
-		UE_LOG(LogFlowSim, Log,
-			TEXT("Courant is above 0.33, so numerical diffusion is a significant ")
-			TEXT("energy sink and the look is tied to this TimeScale -- Courant ")
-			TEXT("scales with it while DragRate does not. Intended at the defaults; ")
-			TEXT("raise DragRate and lower StepRatio to decouple."));
+		UE_LOG(LogFlowSim, Warning,
+			TEXT("Froude %.2f: the peak flow is too fast for the gravity-wave speed ")
+			TEXT("and will form hydraulic jumps. Raise DeformationRadius or ")
+			TEXT("PlanetaryVorticity, or lower JetStrength."),
+			Froude);
+	}
+
+	if (RotationPerStep > 0.5f)
+	{
+		UE_LOG(LogFlowSim, Warning,
+			TEXT("Coriolis turns the flow %.2f rad per substep; the explicit ")
+			TEXT("rotation and implicit pressure split loses accuracy, weakening ")
+			TEXT("balanced jets and radiating gravity waves. ")
+			TEXT("Lower StepRatio or TimeScale."),
+			RotationPerStep);
 	}
 }
 
@@ -446,19 +439,14 @@ void UFlowSimSubsystem::ResetSimulation()
 
 	FFlowSimulation* Sim = Simulation;
 
-	ENQUEUE_RENDER_COMMAND(GasGiantReset)(
+	ENQUEUE_RENDER_COMMAND(FlowSimReset)(
 		[Sim](FRHICommandListImmediate&)
 		{
 			Sim->RequestReset();
 		});
 
-	// Then hand back the start state, if there is one. Both are render
-	// commands and run in order, so the payload arrives after the reset flag
-	// and survives it.
-	//
-	// A restored state is already spun up by definition, so the spin-up budget
-	// is zero and simulated time continues from where it was captured -- which
-	// keeps the forcing drift continuous rather than snapping it back.
+	// Then hand back the start state, if there is one. Render commands run in
+	// order, so the payload arrives after the reset flag and survives it.
 	const bool bRestored = QueueInitialState();
 
 	SpinUpTarget = (bRestored || !Config) ? 0 : FMath::Max(Config->SpinUpSteps, 0);
@@ -480,29 +468,25 @@ bool UFlowSimSubsystem::QueueInitialState()
 	UFlowSnapshot* Snapshot = Config->InitialState;
 
 	const FIntVector Grid(
-		FMath::Max(Config->GridLongitude & ~1, 32),
-		FMath::Max(Config->GridLatitude, 16),
+		FlowSimShader::GridLongitude(Config->GridLongitude),
+		FlowSimShader::GridLatitude(Config->GridLatitude),
 		FMath::Clamp(Config->LayerCount, 1, 8));
 
 	if (!Snapshot->IsValidFor(Grid))
 	{
 		UE_LOG(LogFlowSim, Warning,
-			TEXT("InitialState '%s' was captured at %dx%dx%d but the config is ")
-			TEXT("%dx%dx%d. Seeding instead -- a vorticity field cannot be ")
-			TEXT("resampled onto a different grid any more cheaply than it can ")
-			TEXT("be re-spun."),
+			TEXT("InitialState '%s' does not match this solver's state at %dx%dx%d ")
+			TEXT("(captured at %dx%dx%d, %d floats). Seeding instead."),
 			*Snapshot->GetName(),
+			Grid.X, Grid.Y, Grid.Z,
 			Snapshot->Grid.X, Snapshot->Grid.Y, Snapshot->Grid.Z,
-			Grid.X, Grid.Y, Grid.Z);
+			Snapshot->State.Num());
 
 		return false;
 	}
 
-	// Shape mismatch is a WARNING, not a refusal. The nudge will re-register
-	// the zonal mean over a few hundred steps, so the state is usable -- it
-	// just is not the state that was captured, and it drifts toward the new
-	// profile while looking like neither. Worth saying out loud, because
-	// nothing about the result points back at the snapshot.
+	// Shape mismatch is a WARNING, not a refusal: the nudge re-registers the
+	// zonal mean over a few hundred steps.
 	FFlowSnapshotProvenance Now;
 	Now.BandCount = Config->BandCount;
 	Now.JetStrength = Config->JetStrength;
@@ -515,20 +499,15 @@ bool UFlowSimSubsystem::QueueInitialState()
 	{
 		UE_LOG(LogFlowSim, Warning,
 			TEXT("InitialState '%s' was captured under a different jet profile. ")
-			TEXT("Its eddies sit on jets this config does not have; the nudge ")
-			TEXT("will re-register them over a few hundred steps."),
+			TEXT("The nudge will re-register it over a few hundred steps."),
 			*Snapshot->GetName());
 	}
 
-	// One flat payload, vorticity then psi, matching the shader's layout.
-	TArray<float> Payload;
-	Payload.Reserve(Snapshot->Vorticity.Num() + Snapshot->Psi.Num());
-	Payload.Append(Snapshot->Vorticity);
-	Payload.Append(Snapshot->Psi);
+	TArray<float> Payload = Snapshot->State;
 
 	FFlowSimulation* Sim = Simulation;
 
-	ENQUEUE_RENDER_COMMAND(GasGiantQueueRestore)(
+	ENQUEUE_RENDER_COMMAND(FlowSimQueueRestore)(
 		[Sim, Payload = MoveTemp(Payload)](FRHICommandListImmediate&) mutable
 		{
 			Sim->QueueRestore_RenderThread(MoveTemp(Payload));
@@ -554,27 +533,21 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 		return false;
 	}
 
-	const int32 Total = Params.GridSize.X * Params.GridSize.Y * Params.GridSize.Z;
+	const int32 Count = Params.GridSize.X * Params.GridSize.Y * Params.GridSize.Z
+		* FFlowSimulation::StateFloatsPerCell;
 
 	FFlowSimulation* Sim = Simulation;
 
-	// THE READBACK MUST BE LOCKED ON THE RENDER THREAD.
-	//
-	// FRHIGPUBufferReadback::Lock goes through RHILockStagingBuffer, which is
-	// render-thread-only on every RHI. Calling it from the game thread after a
-	// flush looks reasonable -- the work is demonstrably finished by then --
-	// and crashes inside the RHI regardless, because the thread is what is
-	// being checked, not the state.
-	//
-	// So the whole capture, wait and copy happens inside one render command,
-	// and only the finished float array crosses back. Result and bSucceeded are
-	// captured by reference, which is safe precisely because the flush below
+	// THE READBACK MUST BE LOCKED ON THE RENDER THREAD. FRHIGPUBufferReadback::Lock
+	// is render-thread-only on every RHI, flush or no flush. So the capture, wait
+	// and copy happen inside one render command, and only the finished array
+	// crosses back; the captures by reference are safe because the flush below
 	// blocks until the command has run.
 	TArray<float> Result;
 	bool bSucceeded = false;
 
-	ENQUEUE_RENDER_COMMAND(GasGiantCapture)(
-		[Sim, Params, Total, &Result, &bSucceeded](FRHICommandListImmediate& RHICmdList)
+	ENQUEUE_RENDER_COMMAND(FlowSimCapture)(
+		[Sim, Params, Count, &Result, &bSucceeded](FRHICommandListImmediate& RHICmdList)
 		{
 			FRHIGPUBufferReadback Readback(TEXT("FlowSim.SnapshotReadback"));
 
@@ -586,10 +559,6 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 				GraphBuilder.Execute();
 			}
 
-			// Submits the command list and waits. Heavy-handed, and correct for
-			// an authoring path: the alternative is polling a fence across
-			// frames, which means the asset write has to survive the world being
-			// torn down underneath it.
 			RHICmdList.BlockUntilGPUIdle();
 
 			if (!Readback.IsReady())
@@ -597,11 +566,11 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 				return;
 			}
 
-			const uint32 Bytes = (uint32)Total * 2u * sizeof(float);
+			const uint32 Bytes = (uint32)Count * sizeof(float);
 
 			if (const void* Data = Readback.Lock(Bytes))
 			{
-				Result.SetNumUninitialized(Total * 2);
+				Result.SetNumUninitialized(Count);
 				FMemory::Memcpy(Result.GetData(), Data, Bytes);
 				bSucceeded = true;
 			}
@@ -611,7 +580,7 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 
 	FlushRenderingCommands();
 
-	if (!bSucceeded || Result.Num() != Total * 2)
+	if (!bSucceeded || Result.Num() != Count)
 	{
 		UE_LOG(LogFlowSim, Error,
 			TEXT("Snapshot readback failed. Is the sim initialised and running?"));
@@ -619,10 +588,7 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 	}
 
 	Target->Grid = Params.GridSize;
-	Target->Vorticity.SetNumUninitialized(Total);
-	Target->Psi.SetNumUninitialized(Total);
-	FMemory::Memcpy(Target->Vorticity.GetData(), Result.GetData(), Total * sizeof(float));
-	FMemory::Memcpy(Target->Psi.GetData(), Result.GetData() + Total, Total * sizeof(float));
+	Target->State = MoveTemp(Result);
 
 	Target->Provenance.BandCount = Config->BandCount;
 	Target->Provenance.JetStrength = Config->JetStrength;
@@ -655,9 +621,11 @@ bool UFlowSimSubsystem::PrepareTargets() const
 		return false;
 	}
 
-	const int32 W = Config->GridLongitude;
-	const int32 H = Config->GridLatitude;
-	const int32 Slices = FMath::Clamp(Config->LayerCount, 1, 8);
+	const int32 W = FlowSimShader::GridLongitude(Config->GridLongitude);
+	const int32 H = FlowSimShader::GridLatitude(Config->GridLatitude);
+
+	// Flow slices then weather slices, one of each per layer.
+	const int32 Slices = 2 * FMath::Clamp(Config->LayerCount, 1, 8);
 
 	// -- Flow target --------------------------------------------------------
 
@@ -691,9 +659,7 @@ bool UFlowSimSubsystem::PrepareTargets() const
 
 		// bCanCreateUAV must be set BEFORE the resource is created, or the
 		// texture comes back without UAV support and every dispatch that writes
-		// it silently does nothing. That failure presents as a black flow
-		// texture with no warning anywhere, which is why it is set here rather
-		// than left to the asset.
+		// it silently does nothing.
 		Flow->bCanCreateUAV = true;
 		Flow->OverrideFormat = PF_FloatRGBA;
 		Flow->ClearColor = FLinearColor::Black;
@@ -733,14 +699,12 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
 		return false;
 	}
 
-	// Longitude must be even: the polar fold in SimWrapCoord offsets by exactly
-	// half the width. Rounded down rather than refused, since the alternative
-	// is a stalled sim over a parameter nobody would think to check.
-	const int32 W = FMath::Max(Config->GridLongitude & ~1, 32);
-	const int32 H = FMath::Max(Config->GridLatitude, 16);
-	const int32 Slices = FMath::Clamp(Config->LayerCount, 1, 8);
+	// Rounded to what the solver supports rather than refused.
+	const int32 W = FlowSimShader::GridLongitude(Config->GridLongitude);
+	const int32 H = FlowSimShader::GridLatitude(Config->GridLatitude);
+	const int32 Layers = FMath::Clamp(Config->LayerCount, 1, 8);
 
-	Out.GridSize = FIntVector(W, H, Slices);
+	Out.GridSize = FIntVector(W, H, Layers);
 
 	Out.JetParams = FVector4f(
 		Config->BandCount,
@@ -752,10 +716,8 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
 
 	for (int32 i = 0; i < 8; ++i)
 	{
-		// Layers past the authored list fall back to an unscaled copy of the
-		// shared profile rather than to zero. Zero would give a layer with no
-		// jets at all, which reads as a bug in the sim rather than as a missing
-		// array entry.
+		// Layers past the authored list take an unscaled copy of the shared
+		// profile rather than zero, which would read as a sim bug.
 		const FFlowLayerProfile P = Config->LayerProfiles.IsValidIndex(i)
 			? Config->LayerProfiles[i]
 			: FFlowLayerProfile();
@@ -763,14 +725,23 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
 		Out.LayerProfile[i] = FVector4f(P.JetScale, P.BoostScale, P.ForcingScale, P.DragScale);
 	}
 
-	// Step = TimeScale * StepRatio. Strictly proportional and deliberately
-	// unclamped: a Courant cap here would make the step proportional below the
-	// cap and constant above it, so the numerical character would change at a
-	// threshold the speed control gives no sign of. Courant is reported at
-	// start and available from GetCourant() instead.
+	// Step = TimeScale * StepRatio, strictly proportional; the Courant numbers
+	// are reported rather than enforced.
 	Out.DeltaTime = FMath::Max(Config->TimeScale * Config->StepRatio, 0.0f);
 	Out.Time = SimulatedTime;
 	Out.PlanetaryVorticity = Config->PlanetaryVorticity;
+
+	// -- Gravity waves and the Helmholtz solve --------------------------------
+
+	const float C = WaveSpeed(*Config);
+
+	Out.WaveSpeedSq = C * C;
+	Out.ImplicitWeight = FMath::Clamp(Config->ImplicitWeight, 0.5f, 1.0f);
+
+	const float ImplicitStep = Out.ImplicitWeight * Out.DeltaTime * C;
+	Out.HelmholtzScale = ImplicitStep * ImplicitStep;
+
+	// -- Forcing ------------------------------------------------------------
 
 	Out.ForcingChannel = FMath::Clamp(Config->ForcingChannel, 0, 3);
 	Out.bForcingBipolar = Config->bForcingBipolar;
@@ -781,54 +752,45 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
 	Out.ForcingDrift = FVector3f(Config->ForcingDrift);
 	Out.DragRate = Config->DragRate;
 	Out.LayerCoupling = Config->LayerCoupling;
+	Out.DivergenceDamping = FMath::Clamp(Config->DivergenceDamping, 0.0f, 0.5f);
+	Out.ThermalRelaxation = FMath::Max(Config->ThermalRelaxation, 0.0f);
+
+	Out.CondensationRate = FMath::Max(Config->CondensationRate, 0.0f);
+	Out.EvaporationRate = FMath::Max(Config->EvaporationRate, 0.0f);
+	Out.CloudLifetime = FMath::Max(Config->CloudLifetime, 1e-3f);
 
 	Out.FilterLatitude = FMath::Clamp(Config->FilterLatitude, 0.0f, 1.0f);
 	Out.FilterMaxHalfWidth = FMath::Clamp(Config->FilterMaxHalfWidth, 1, 256);
 
-	Out.PoissonIterations = FMath::Clamp(Config->PoissonIterations, 1, 128);
-	Out.InitPoissonIterations = FMath::Clamp(Config->InitPoissonIterations, 1, 4096);
-
-	// Optimal over-relaxation, derived from the grid rather than authored.
+	// -- Output normalisation -------------------------------------------------
 	//
-	//   rho_jacobi = (cos(pi/N) + cos(pi/M)) / 2
-	//   w_opt      = 2 / (1 + sqrt(1 - rho^2))
+	// FROM THE PROFILE, NOT A RUNNING MAXIMUM: a scale that chases the field
+	// hides a drifting magnitude. Each channel is soft-saturated or near unit
+	// range at these scales.
 	//
-	// which tends to 2 as the grid grows -- 1.981 at 512x256. Derived because
-	// the value is resolution dependent and a hardcoded one silently detunes
-	// the solver the moment somebody changes the grid, in a way that looks like
-	// a physics failure rather than a solver setting.
-	if (Config->Relaxation <= 0.0f)
-	{
-		const double RhoJacobi = 0.5 * (
-			FMath::Cos(UE_DOUBLE_PI / (double)W) +
-			FMath::Cos(UE_DOUBLE_PI / (double)H));
+	//   Vorticity  the zonal profile's peak shear.
+	//   Pressure   geostrophic: f times a streamfunction of the jet speed over
+	//              the band scale.
+	//   Divergence vorticity times the Rossby number, which is how much of the
+	//              flow is unbalanced.
+	const float Peak = PeakRate(*Config);
+	const float ZetaScale = FMath::Max(Config->JetStrength * 0.6897f * Config->BandCount * UE_PI, 1e-4f);
+	const float PsiScale = Peak / FMath::Max(Config->BandCount * UE_PI, 1.0f);
+	const float PressureScale = FMath::Max(Config->PlanetaryVorticity * 0.70710678f * PsiScale, 1e-5f);
+	const float Rossby = FMath::Clamp(Peak / FMath::Max(Config->PlanetaryVorticity, 1e-4f), 0.01f, 1.0f);
+	const float DivScale = FMath::Max(ZetaScale * Rossby, 1e-4f);
 
-		const double Wopt = 2.0 / (1.0 + FMath::Sqrt(FMath::Max(1.0 - RhoJacobi * RhoJacobi, 0.0)));
+	Out.OutputScales = FVector3f(PressureScale, ZetaScale, DivScale);
 
-		Out.Relaxation = (float)FMath::Clamp(Wopt, 0.1, 1.99);
-	}
-	else
-	{
-		// Hard clamp below 2. At or above it the SOR iteration diverges
-		// immediately, and the symptom -- psi saturating on the first frame --
-		// is far enough from the cause to be worth making unreachable.
-		Out.Relaxation = FMath::Clamp(Config->Relaxation, 0.1f, 1.99f);
-	}
+	// -- Debug --------------------------------------------------------------
 
 	const int32 ModeOverride = CVarGasGiantDebugMode.GetValueOnGameThread();
 	const int32 LayerOverride = CVarGasGiantDebugLayer.GetValueOnGameThread();
 	const float ScaleOverride = CVarGasGiantDebugScale.GetValueOnGameThread();
 
 	Out.DebugMode = (ModeOverride >= 0) ? ModeOverride : (int32)Config->DebugMode;
-	Out.DebugLayer = FMath::Clamp((LayerOverride >= 0) ? LayerOverride : Config->DebugLayer, 0, Slices - 1);
-	// DEBUG SCALE DERIVED PER MODE when left at zero, because the seven fields
-	// differ in magnitude by two orders. Vorticity is O(3), streamfunction
-	// O(0.01), the residual near zero -- so one authored number is right for
-	// one of them and renders a genuine residual failure as solid black.
-	//
-	// From the profile rather than a running maximum: a max that chases the
-	// field hides a drifting magnitude, which is one of the things the view
-	// exists to reveal.
+	Out.DebugLayer = FMath::Clamp((LayerOverride >= 0) ? LayerOverride : Config->DebugLayer, 0, Layers - 1);
+
 	if (ScaleOverride > 0.0f)
 	{
 		Out.DebugScale = ScaleOverride;
@@ -839,24 +801,22 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
 	}
 	else
 	{
-		const float PeakRate = GasGiantPeakRate(*Config);
-		const float ZetaScale = Config->JetStrength * 0.6897f * Config->BandCount * UE_PI;
-		const float PsiScale = PeakRate / FMath::Max(Config->BandCount * UE_PI, 1.0f);
-
-		switch (Config->DebugMode)
+		switch ((EFlowDebugMode)Out.DebugMode)
 		{
-		case EFlowDebugMode::Vorticity:   Out.DebugScale = ZetaScale + Config->ForcingAmplitude; break;
-		case EFlowDebugMode::Psi:         Out.DebugScale = PsiScale * 2.0f; break;
+		case EFlowDebugMode::Vorticity:   Out.DebugScale = ZetaScale; break;
+		case EFlowDebugMode::Pressure:    Out.DebugScale = PressureScale * 2.0f; break;
 		case EFlowDebugMode::Speed:
-		case EFlowDebugMode::East:        Out.DebugScale = PeakRate; break;
-			// Meridional flow is eddy only, with no zonal contribution at all, so
-			// it is far smaller than the eastward component.
-		case EFlowDebugMode::North:       Out.DebugScale = PeakRate * 0.15f; break;
-			// Should be near zero. Scaled hard so a residual that is merely small
-			// still reads, rather than rounding to black alongside a converged one.
-		case EFlowDebugMode::Residual:    Out.DebugScale = ZetaScale * 0.01f; break;
-		case EFlowDebugMode::ZonalError:  Out.DebugScale = ZetaScale * 0.05f; break;
-		default:                              Out.DebugScale = ZetaScale; break;
+		case EFlowDebugMode::East:        Out.DebugScale = Peak; break;
+			// Meridional flow is eddy only, far smaller than the eastward.
+		case EFlowDebugMode::North:       Out.DebugScale = Peak * 0.15f; break;
+			// Scaled hard so a residual that is merely small still reads.
+		case EFlowDebugMode::Residual:    Out.DebugScale = PressureScale * 0.01f; break;
+		case EFlowDebugMode::ZonalError:  Out.DebugScale = Peak * 0.05f; break;
+		case EFlowDebugMode::Vertical:    Out.DebugScale = DivScale; break;
+			// Saturates at Froude 1; the jump threshold is half way up.
+		case EFlowDebugMode::Froude:      Out.DebugScale = 1.0f; break;
+		case EFlowDebugMode::Cloud:       Out.DebugScale = 1.0f; break;
+		default:                          Out.DebugScale = ZetaScale; break;
 		}
 
 		Out.DebugScale = FMath::Max(Out.DebugScale, 1e-6f);
@@ -926,9 +886,8 @@ void UFlowSimSubsystem::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	// Once, on the first tick rather than in Initialize: resolving a soft
-	// object reference during subsystem construction can run before the asset
-	// registry is usable, and a failed load there is silent.
+	// On the first tick rather than in Initialize: resolving a soft reference
+	// during subsystem construction can run before the asset registry is usable.
 	if (!bTriedAutoStart)
 	{
 		bTriedAutoStart = true;
@@ -937,15 +896,9 @@ void UFlowSimSubsystem::Tick(float DeltaTime)
 
 	StepSimulation(DeltaTime);
 
-	// AFTER, AND NOT INSIDE. The bake reads the flow texture the step above
-	// writes, and render commands run in enqueue order, so this ordering is what
-	// keeps the shadow from being cast by a one-frame-stale field -- shadows
-	// beside the lumps that cast them.
-	//
-	// Outside StepSimulation because every early-out in there is a reason the
-	// SIM should not advance, not a reason the deck stops casting. A stopped,
-	// paused or fully spun-up sim still has a deck, and the camera is still
-	// moving, so the fades baked into the map are still changing.
+	// AFTER, AND NOT INSIDE. The bake reads the flow texture the step writes, and
+	// render commands run in enqueue order. Outside StepSimulation because a
+	// stopped or paused sim still has a deck to shadow.
 	BakeShadowMap();
 }
 
@@ -964,26 +917,16 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 	const int32 PauseOverride = CVarGasGiantPaused.GetValueOnGameThread();
 	const bool bPaused = (PauseOverride >= 0) ? (PauseOverride != 0) : Config->bPaused;
 
-	// -- Decide how many substeps this frame --------------------------------
-
 	int32 Substeps = 0;
 
 	// Derived exactly as BuildParams derives it, so the accumulator and the
-	// shader agree about how much time a substep is worth. Computed here rather
-	// than read back from Params because the substep COUNT has to be known
-	// before the params are built.
+	// shader agree about how much time a substep is worth.
 	const float StepSize = FMath::Max(Config->TimeScale * Config->StepRatio, 0.0f);
 
 	if (StepsCompleted < SpinUpTarget)
 	{
-		// SPIN-UP IS SPREAD OVER FRAMES, not run in one graph.
-		//
-		// Three hundred substeps is three thousand passes, which will hitch
-		// visibly and may trip the driver's timeout. Spreading it also makes
-		// the spin-up WATCHABLE, and that is where most of the diagnostic value
-		// is: seeing whether the seed organises tells you more than the
-		// converged state does, because a converged-looking field can be
-		// converged for the wrong reason.
+		// Spread over frames: one graph of hundreds of substeps hitches, and a
+		// watchable spin-up says more than the converged state.
 		Substeps = FMath::Min(
 			FMath::Max(Config->MaxSpinUpStepsPerFrame, 1),
 			SpinUpTarget - StepsCompleted);
@@ -1000,11 +943,8 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 		Substeps = FMath::FloorToInt(StepAccumulator / StepSize);
 		Substeps = FMath::Min(Substeps, FMath::Max(Config->MaxSubstepsPerFrame, 1));
 
-		// Consume only what was taken, then DISCARD the rest of the bank if it
-		// exceeded the cap. Carrying it means a hitch is followed by a burst of
-		// catch-up steps that makes the next frame worse, and on a heavily
-		// loaded frame that spirals. Simulated time falling behind real time
-		// during a stall is the correct behaviour for a visual effect.
+		// Consume what was taken and DISCARD the rest beyond one step: carrying
+		// it turns a hitch into a burst that makes the next frame worse.
 		StepAccumulator -= Substeps * StepSize;
 		StepAccumulator = FMath::Min(StepAccumulator, StepSize);
 	}
@@ -1015,17 +955,14 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 		return;
 	}
 
-	// Time advances on the game thread so the forcing drift is consistent with
-	// the step count regardless of when the render thread gets to it.
 	SimulatedTime += Substeps * StepSize;
 	StepsCompleted += Substeps;
 
 	FFlowSimulation* Sim = Simulation;
 
-	// Zero substeps still enqueues. The debug view must keep updating on a
-	// paused or fully spun-up-and-idle sim, or switching debug modes while
-	// paused would appear to do nothing.
-	ENQUEUE_RENDER_COMMAND(GasGiantStep)(
+	// Zero substeps still enqueues, so the output and debug views keep updating
+	// on a paused sim.
+	ENQUEUE_RENDER_COMMAND(FlowSimStep)(
 		[Sim, Params, Substeps](FRHICommandListImmediate& RHICmdList)
 		{
 			FRDGBuilder GraphBuilder(RHICmdList);
@@ -1049,16 +986,12 @@ void UFlowSimSubsystem::RequestShadowBake(const FTerrestrialShadowParams& InPara
 void UFlowSimSubsystem::BakeShadowMap()
 {
 	// CONSUMED, NOT HELD. A planet that stops asking stops baking on the next
-	// tick, rather than leaving a map frozen at whatever light direction it last
-	// pushed -- which would look like a shadow that works and is wrong.
+	// tick, rather than leaving a map frozen at its last light direction.
 	TArray<FGasGiantShadowParams> Requests = MoveTemp(ShadowRequests);
 	ShadowRequests.Reset();
 
 	for (const FGasGiantShadowParams& Params : Requests)
 	{
-		// Rejected here rather than on the render thread: a params struct is
-		// cheap to refuse on the game thread and expensive to unwind once a
-		// graph is building.
 		if (!Params.IsUsable())
 		{
 			continue;
@@ -1075,10 +1008,6 @@ void UFlowSimSubsystem::BakeShadowMap()
 			});
 	}
 
-
-	// THE SECOND FIELD'S QUEUE, drained identically. Separate because the params
-	// structs are separate types bound to separate shaders; a planet only ever
-	// fills one of the two, so at most one loop does any work.
 	TArray<FTerrestrialShadowParams> TerrestrialRequests = MoveTemp(TerrestrialShadowRequests);
 	TerrestrialShadowRequests.Reset();
 
