@@ -177,6 +177,10 @@ struct TRFieldParams
     float DetailShearInherit;
     float DetailCrossfade;
 
+	/** Each layer's solid-body drift about the spin axis, radians, wrapped. */
+    float StructureDriftAngle;
+    float DetailDriftAngle;
+
 	// -- Derived -------------------------------------------------------------
 
 	/** Atmosphere thickness in world units: the one absolute length here. */
@@ -229,6 +233,7 @@ struct TRFieldParams
  *    <Layer>NoiseWeights  Worley rung weights, layer amount
  *    <Layer>Sampling   Scale, Aspect, Erosion, Crossfade (0 or 1)
  *    <Layer>Warp       FlowInherit, ShearInherit, FadeNear, FadeSpan
+ *    CloudDrift        StructureDriftAngle, DetailDriftAngle, -, -
  *
  *  RotationWeight is the planet's own rotation; the sim runs in the rotating
  *  frame, so it applies to the sampling position, negated because rotating the
@@ -249,7 +254,8 @@ TRFieldParams TR_BuildField(
 	float4 StructureWarp,
 	float4 DetailNoiseWeights,
 	float4 DetailSampling,
-	float4 DetailWarp)
+	float4 DetailWarp,
+	float4 CloudDrift)
 {
     TRFieldParams F;
 
@@ -303,6 +309,9 @@ TRFieldParams TR_BuildField(
     F.DetailFlowInherit = DetailWarp.x;
     F.DetailShearInherit = DetailWarp.y;
 
+    F.StructureDriftAngle = CloudDrift.x;
+    F.DetailDriftAngle = CloudDrift.y;
+
     F.Thickness = max(PlanetRadius * HeightScale, 1e-4f);
 
 	// One share for both ends, capped at half so a full column's ramps meet at
@@ -343,7 +352,7 @@ TRFieldParams TR_BuildField(
 	CloudProfile, CloudCurves, CloudCoverage, CloudType, \
 	CloudLid, CloudLift, CloudMotion, \
 	StructureNoiseWeights, StructureSampling, StructureWarp, \
-	DetailNoiseWeights, DetailSampling, DetailWarp)
+	DetailNoiseWeights, DetailSampling, DetailWarp, CloudDrift)
 
 /** The shell's ceiling: 1 below the falloff band, 0 at the atmosphere top,
  *  smoothstep between, so a tower that would cross it softens into a cap. */
@@ -610,7 +619,11 @@ float TR_SlabEntry(
 /** Samples one noise layer as a Perlin-Worley value in [0, 1], warped laterally
  *  by Warp, sampled in true 3D so the vertical structure the bake put in the
  *  volume survives, and crossfaded between two advection phases when asked.
- *  MIP 0 always: a footprint mip ties the field to camera distance. */
+ *  MIP 0 always: a footprint mip ties the field to camera distance.
+ *
+ *  DRIFT turns the warped position about the spin axis, backwards so the noise
+ *  moves forwards. The warp is turned with it: it is a displacement in the
+ *  noise's frame, not the flow's. */
 float TR_SampleLayer(
 	Texture3D Volume,
 	SamplerState Sampler,
@@ -619,9 +632,13 @@ float TR_SampleLayer(
 	float UVWScale,
 	float4 NoiseWeights,
 	float Crossfade,
+	float DriftAngle,
 	TRFieldParams F)
 {
     float4 S;
+
+    N = Atmo_RotateZ(N, -DriftAngle);
+    Warp = Atmo_RotateZ(Warp, -DriftAngle);
 
     BRANCH
 
@@ -755,7 +772,7 @@ float4 TR_Density(
 			StructureVolume, StructureSampler, N,
 			FlowWarp * F.StructureFlowInherit + DeepShear * F.StructureShearInherit,
 			F.StructureScale + (Height - Shift) * F.StructureVertical / Stretch,
-			F.StructureNoiseWeights, F.StructureCrossfade, F);
+			F.StructureNoiseWeights, F.StructureCrossfade, F.StructureDriftAngle, F);
 
 		// Extrapolated past 1, the factor goes negative wherever the noise sits
 		// below 1 - 1/Erosion, and those holes survive any coverage.
@@ -780,7 +797,7 @@ float4 TR_Density(
 			DetailVolume, DetailSampler, N,
 			FlowWarp * F.DetailFlowInherit + DeepShear * F.DetailShearInherit,
 			F.DetailScale + (Height - Shift) * F.DetailVertical / Stretch,
-			F.DetailNoiseWeights, F.DetailCrossfade, F);
+			F.DetailNoiseWeights, F.DetailCrossfade, F.DetailDriftAngle, F);
 
 		// Wispy at the base, where the noise itself erodes; billowy toward the
 		// top, where its inverse does and rounded lobes remain.

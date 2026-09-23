@@ -66,6 +66,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	FVector4f DetailNoiseWeights = FVector4f::Zero();
 	FVector4f DetailSampling = FVector4f::Zero();
 	FVector4f DetailWarp = FVector4f::Zero();
+	FVector4f CloudDrift = FVector4f::Zero();
 
 	// -- Extinction ---------------------------------------------------------
 	//
@@ -162,6 +163,7 @@ SHADER_PARAMETER(FVector4f, StructureWarp)
 SHADER_PARAMETER(FVector4f, DetailNoiseWeights)
 SHADER_PARAMETER(FVector4f, DetailSampling)
 SHADER_PARAMETER(FVector4f, DetailWarp)
+SHADER_PARAMETER(FVector4f, CloudDrift)
 
 SHADER_PARAMETER(FVector4f, CloudExtinction)
 SHADER_PARAMETER(FVector4f, StormExtinction)

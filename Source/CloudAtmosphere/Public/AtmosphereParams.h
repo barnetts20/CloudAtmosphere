@@ -577,6 +577,17 @@ struct CLOUDATMOSPHERE_API FTerrestrialMotionParams
 	 *  runs in the rotating frame, so this rotates the sampling position. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float RotationWeight = 0.1f;
+
+	/** Each noise layer's solid-body drift about the spin axis, as a fraction of
+	 *  the westerly jet's angular rate (the sim config's JetStrength times layer
+	 *  0's JetScale). Carries the noise east with the mid-latitude weather
+	 *  instead of leaving it to slide under the warp. Solid-body, so it never
+	 *  shears the noise and needs no reset. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float StructureDrift = 0.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float DetailDrift = 0.5f;
 };
 
 /** The clouds' material: fair-weather cloud at type 0, storm cloud at type 1,
