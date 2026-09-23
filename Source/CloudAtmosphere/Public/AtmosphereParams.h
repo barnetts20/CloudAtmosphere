@@ -466,6 +466,20 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float TypeTropical = 0.3f;
 
+	// -- Breakup --------------------------------------------------------------
+
+	/** Multiplier on the structure layer's Erosion. Above 1 the noise cuts holes
+	 *  through fully covered columns, giving broken fields at high coverage;
+	 *  below 1 it smooths toward sheets. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float ErosionGain = 1.0f;
+
+	/** How far vertical motion moves the erosion: positive smooths rising air
+	 *  into sheets and breaks sinking air into patches. The column's erosion is
+	 *  Erosion * ErosionGain * (1 - ErosionAscent * rising air), floored at 0. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float ErosionAscent = 0.0f;
+
 	// -- Pressure -------------------------------------------------------------
 
 	/** The sim pressure that reads as a full low or high. Raise it until the lid

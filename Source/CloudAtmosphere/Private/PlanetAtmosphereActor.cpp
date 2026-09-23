@@ -738,8 +738,8 @@ static FTerrestrialFieldPins PackTerrestrialField(
 
     Out.CloudProfile = FLinearColor(P.CloudBase, P.CloudThickness, P.SurfaceSoftness, P.CeilingFalloff);
     Out.CloudCurves = FLinearColor(P.TopCurve, P.BottomCurve, P.CloudSlope, 0.0f);
-    Out.CloudCoverage = FLinearColor(P.CloudCover, P.CoverageGain, P.StratusDepth, 0.0f);
-    Out.CloudType = FLinearColor(P.TypeBias, P.TypeAscent, P.TypeTropical, 0.0f);
+    Out.CloudCoverage = FLinearColor(P.CloudCover, P.CoverageGain, P.StratusDepth, P.ErosionGain);
+    Out.CloudType = FLinearColor(P.TypeBias, P.TypeAscent, P.TypeTropical, P.ErosionAscent);
     Out.CloudLid = FLinearColor(P.PressureScale, P.CeilingDepth, P.CeilingPressure, 0.0f);
     Out.CloudLift = FLinearColor(P.BaseTropical, P.BasePressure, P.WarpStretch, P.WarpShift);
     Out.CloudMotion = FLinearColor(M.WarpTime, M.DeepShearRatio, M.CrossfadePeriod, M.RotationWeight);

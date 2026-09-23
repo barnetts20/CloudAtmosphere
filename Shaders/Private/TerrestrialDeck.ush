@@ -125,6 +125,10 @@ struct TRFieldParams
     float TypeAscent;
     float TypeTropical;
 
+	/** Column erosion = StructureErosion * ErosionGain * (1 - ErosionAscent * W). */
+    float ErosionGain;
+    float ErosionAscent;
+
 	/** The geopotential anomaly that reads as a full low or high. */
     float PressureScale;
 
@@ -210,8 +214,8 @@ struct TRFieldParams
  *
  *    CloudProfile      CloudBase, CloudThickness, SurfaceSoftness, CeilingFalloff
  *    CloudCurves       TopCurve, BottomCurve, CloudSlope, -
- *    CloudCoverage     CloudCover, CoverageGain, StratusDepth, -
- *    CloudType         TypeBias, TypeAscent, TypeTropical, -
+ *    CloudCoverage     CloudCover, CoverageGain, StratusDepth, ErosionGain
+ *    CloudType         TypeBias, TypeAscent, TypeTropical, ErosionAscent
  *    CloudLid          PressureScale, CeilingDepth, CeilingPressure, -
  *    CloudLift         BaseTropical, BasePressure, WarpStretch, WarpShift
  *    CloudMotion       WarpTime, DeepShearRatio, CrossfadePeriod, RotationWeight
@@ -256,10 +260,12 @@ TRFieldParams TR_BuildField(
     F.CloudCover = CloudCoverage.x;
     F.CoverageGain = CloudCoverage.y;
     F.StratusDepth = saturate(CloudCoverage.z);
+    F.ErosionGain = max(CloudCoverage.w, 0.0f);
 
     F.TypeBias = CloudType.x;
     F.TypeAscent = CloudType.y;
     F.TypeTropical = CloudType.z;
+    F.ErosionAscent = CloudType.w;
 
     F.PressureScale = max(CloudLid.x, 1e-6f);
     F.CeilingDepth = max(CloudLid.y, 1e-3f);
@@ -276,7 +282,7 @@ TRFieldParams TR_BuildField(
 
     F.StructureNoiseWeights = StructureNoiseWeights;
     F.StructureScale = StructureSampling.x;
-    F.StructureErosion = saturate(StructureSampling.z);
+    F.StructureErosion = max(StructureSampling.z, 0.0f);
     F.StructureCrossfade = StructureSampling.w;
     F.StructureFlowInherit = StructureWarp.x;
     F.StructureShearInherit = StructureWarp.y;
@@ -388,6 +394,10 @@ struct TRColumn
 	/** Vertical motion, rising positive, (-1, 1). */
     float Ascent;
 
+	/** How deeply the structure noise erodes the profile. Above 1 it cuts holes
+	 *  through a fully covered column. */
+    float Erosion;
+
 	/** The slab, atmosphere fractions. Exact: nothing outside moves them. */
     float Base;
     float Top;
@@ -402,6 +412,10 @@ struct TRColumn
  *  TYPE IS HOW HARD THE AIR IS RISING, plus the tropics. A towering column is
  *  CloudThickness deep, a stratiform one StratusDepth of that; the pressure lid
  *  then scales both, so highs flatten into sheets and lows build.
+ *
+ *  EROSION IS BREAKUP. Sinking air erodes harder than rising air when
+ *  ErosionAscent is positive, so subsidence breaks into patches and large-scale
+ *  ascent fills into sheets.
  *
  *  THE BASE is the condensation level: tropicality and pressure only, no noise,
  *  which keeps it exact.
@@ -429,6 +443,9 @@ TRColumn TR_ColumnFromFlow(
     Col.Coverage = saturate(F.CloudCover * 2.0f - 1.0f + F.CoverageGain * Weather.y);
 
     Col.Type = saturate(F.TypeBias + F.TypeAscent * Weather.x + F.TypeTropical * Tropical);
+
+    Col.Erosion = F.StructureErosion * F.ErosionGain * max(1.0f - F.ErosionAscent * Weather.x, 0.0f)
+		* saturate(F.StructureNoiseWeights.w);
 
     const float D = F.CloudThickness;
 
@@ -723,7 +740,9 @@ float4 TR_Density(
 			F.StructureScale + (Height - Shift) * F.StructureVertical / Stretch,
 			F.StructureNoiseWeights, F.StructureCrossfade, F);
 
-        Shape *= lerp(1.0f, Noise, F.StructureErosion * saturate(F.StructureNoiseWeights.w));
+		// Extrapolated past 1, the factor goes negative wherever the noise sits
+		// below 1 - 1/Erosion, and those holes survive any coverage.
+        Shape *= saturate(1.0f + Col.Erosion * (Noise - 1.0f));
     }
 
 	// COVERAGE AS A THRESHOLD ON THE SHAPE, then as a scale. At low coverage
