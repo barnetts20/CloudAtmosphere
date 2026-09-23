@@ -22,6 +22,7 @@ SHADER_PARAMETER(FVector3f, SimInvGridSize)
 // -- Profile ------------------------------------------------------------
 SHADER_PARAMETER(FVector4f, SimJetParams)
 SHADER_PARAMETER(float, SimWidthBias)
+SHADER_PARAMETER(int32, SimZonalProfile)
 SHADER_PARAMETER_ARRAY(FVector4f, SimLayerProfile, [8])
 
 // -- Time, rotation and gravity waves -----------------------------------
@@ -41,7 +42,7 @@ SHADER_PARAMETER(int32, SimHasForcing)
 SHADER_PARAMETER(float, SimNudgeRate)
 SHADER_PARAMETER(float, SimForcingAmplitude)
 SHADER_PARAMETER(float, SimForcingScale)
-SHADER_PARAMETER(FVector3f, SimForcingDrift)
+SHADER_PARAMETER(float, SimForcingLifetime)
 SHADER_PARAMETER(float, SimDragRate)
 SHADER_PARAMETER(float, SimLayerCoupling)
 SHADER_PARAMETER(float, SimDivergenceDamping)

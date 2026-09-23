@@ -210,6 +210,7 @@ static FAutoConsoleCommandWithWorldAndArgs GFlowSimStatusCmd(
 static float PeakRate(const UFlowSimConfig& Config)
 {
 	const int32 Layers = FMath::Clamp(Config.LayerCount, 1, 8);
+	const bool bBanded = (Config.ZonalProfile == EFlowZonalProfile::Banded);
 
 	float Peak = 0.0f;
 
@@ -219,11 +220,20 @@ static float PeakRate(const UFlowSimConfig& Config)
 			? Config.LayerProfiles[i]
 			: FFlowLayerProfile();
 
-		Peak = FMath::Max(Peak, FMath::Abs(Config.JetStrength * P.JetScale)
-			* (1.0f + FMath::Max(Config.EquatorialBoost * P.BoostScale, 0.0f)));
+		const float Boost = bBanded ? FMath::Max(Config.EquatorialBoost * P.BoostScale, 0.0f) : 0.0f;
+
+		Peak = FMath::Max(Peak, FMath::Abs(Config.JetStrength * P.JetScale) * (1.0f + Boost));
 	}
 
 	return FMath::Max(Peak, 1e-6f);
+}
+
+/** How many alternating shear zones the profile has from pole to pole: what
+ *  the vorticity and pressure normalisations divide by. The three-cell profile
+ *  has two jets' worth. */
+static float ShearBands(const UFlowSimConfig& Config)
+{
+	return (Config.ZonalProfile == EFlowZonalProfile::Banded) ? Config.BandCount : 2.0f;
 }
 
 /** Gravity-wave speed from the deformation radius at 45 degrees. */
@@ -317,31 +327,15 @@ void UFlowSimSubsystem::ReportInertSettings() const
 		return;
 	}
 
-	// Forcing with nowhere to sample from: amplitude, scale and drift all
+	// Forcing with nowhere to sample from: amplitude, scale and lifetime all
 	// dormant, and all switching on together when a volume is assigned.
 	if (Config->ForcingAmplitude > 0.0f && !Config->ForcingVolume)
 	{
 		UE_LOG(LogFlowSim, Warning,
 			TEXT("ForcingAmplitude is %.3f but no ForcingVolume is bound, so the ")
 			TEXT("stochastic forcing is inactive. Assigning a volume will switch ")
-			TEXT("amplitude, scale and drift on all at once."),
+			TEXT("amplitude, scale and lifetime on all at once."),
 			Config->ForcingAmplitude);
-	}
-
-	// Forcing that never refreshes settles the field to a fixed pattern.
-	if (Config->ForcingAmplitude > 0.0f && Config->ForcingVolume)
-	{
-		const float Growth = Config->JetStrength * Config->BandCount * UE_PI;
-		const float DriftRate = (float)Config->ForcingDrift.Size();
-
-		if (Growth > 0.0f && DriftRate > 0.0f && DriftRate < Growth * 0.05f)
-		{
-			UE_LOG(LogFlowSim, Warning,
-				TEXT("ForcingDrift %.4f is far below the growth rate %.2f, so the ")
-				TEXT("forcing is effectively frozen and the field will settle to a ")
-				TEXT("fixed pattern. Near %.2f puts refresh on the turnover timescale."),
-				DriftRate, Growth, Growth);
-		}
 	}
 
 	if (Config->LayerCoupling > 0.0f && Config->LayerCount < 2)
@@ -713,6 +707,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
 		Config->Asymmetry);
 
 	Out.WidthBias = Config->WidthBias;
+	Out.ZonalProfile = (int32)Config->ZonalProfile;
 
 	for (int32 i = 0; i < 8; ++i)
 	{
@@ -749,7 +744,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
 	Out.NudgeRate = Config->NudgeRate;
 	Out.ForcingAmplitude = Config->ForcingAmplitude;
 	Out.ForcingScale = Config->ForcingScale;
-	Out.ForcingDrift = FVector3f(Config->ForcingDrift);
+	Out.ForcingLifetime = FMath::Max(Config->ForcingLifetime, 0.01f);
 	Out.DragRate = Config->DragRate;
 	Out.LayerCoupling = Config->LayerCoupling;
 	Out.DivergenceDamping = FMath::Clamp(Config->DivergenceDamping, 0.0f, 0.5f);
@@ -774,8 +769,8 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
 	//   Divergence vorticity times the Rossby number, which is how much of the
 	//              flow is unbalanced.
 	const float Peak = PeakRate(*Config);
-	const float ZetaScale = FMath::Max(Config->JetStrength * 0.6897f * Config->BandCount * UE_PI, 1e-4f);
-	const float PsiScale = Peak / FMath::Max(Config->BandCount * UE_PI, 1.0f);
+	const float ZetaScale = FMath::Max(Config->JetStrength * 0.6897f * ShearBands(*Config) * UE_PI, 1e-4f);
+	const float PsiScale = Peak / FMath::Max(ShearBands(*Config) * UE_PI, 1.0f);
 	const float PressureScale = FMath::Max(Config->PlanetaryVorticity * 0.70710678f * PsiScale, 1e-5f);
 	const float Rossby = FMath::Clamp(Peak / FMath::Max(Config->PlanetaryVorticity, 1e-4f), 0.01f, 1.0f);
 	const float DivScale = FMath::Max(ZetaScale * Rossby, 1e-4f);

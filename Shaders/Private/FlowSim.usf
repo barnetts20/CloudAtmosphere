@@ -61,6 +61,12 @@ float4 SimJetParams;
 /** Offsets the jet profile so zones and belts need not be the same width. */
 float SimWidthBias;
 
+/** SIM_PROFILE_BANDED or SIM_PROFILE_THREE_CELL. */
+int SimZonalProfile;
+
+#define SIM_PROFILE_BANDED     0
+#define SIM_PROFILE_THREE_CELL 1
+
 /** Per layer: x JetScale, y BoostScale, z ForcingScale, w DragScale. The
  *  vertical shear: multipliers on the shared profile, so every layer's jets sit
  *  at the same latitudes and disagree only in strength. */
@@ -86,7 +92,9 @@ float SimHelmholtzScale;
 float SimNudgeRate;
 float SimForcingAmplitude;
 float SimForcingScale;
-float3 SimForcingDrift;
+/** How long one forcing pattern lives, in sim time, before a fresh one replaces
+ *  it. */
+float SimForcingLifetime;
 float SimDragRate;
 float SimLayerCoupling;
 /** Fraction of grid-scale divergence removed per substep, in [0, 0.5]. */
@@ -184,11 +192,31 @@ void SimLayerJets(uint Layer, out float BandCount, out float JetStrength, out fl
     Asymmetry = SimJetParams.w;
 }
 
+/** Earth's three cells as an angular rate, peaking at 1: easterly trades to
+ *  about 25 degrees, a westerly jet at 45, polar easterlies past about 65.
+ *  Gaussians in mu, so the vorticity is smooth everywhere; the |mu| terms are
+ *  flat to float precision at the equator. */
+float SimThreeCellRate(float Mu)
+{
+    const float A = abs(Mu);
+
+    const float Jet = (A - 0.71f) / 0.17f;
+    const float Trades = Mu / 0.33f;
+    const float Polar = (A - 0.97f) / 0.09f;
+
+    return exp(-Jet * Jet) - 0.35f * exp(-Trades * Trades) - 0.5f * exp(-Polar * Polar);
+}
+
 /** Angular rate of the prescribed zonal flow for a layer. */
 float SimZonalRate(float Mu, uint Layer)
 {
     float BandCount, JetStrength, Boost, Asymmetry;
     SimLayerJets(Layer, BandCount, JetStrength, Boost, Asymmetry);
+
+    if (SimZonalProfile == SIM_PROFILE_THREE_CELL)
+    {
+        return JetStrength * SimThreeCellRate(Mu);
+    }
 
     return GG_ZonalRate(Mu, BandCount, JetStrength, Boost, Asymmetry, SimWidthBias);
 }
@@ -222,25 +250,69 @@ float SimSampleForcing(float3 UVW)
     return (SimForcingBipolar != 0) ? Raw : (Raw * 2.0f - 1.0f);
 }
 
-/** Slope of the forcing streamfunction along Dir at P, divided by the forcing
- *  scale so the amplitude reads as a velocity whatever the noise frequency. The
- *  forcing velocity is Up x grad(psi): east is -slope along north, north is
- *  +slope along east, which keeps it divergence-free. */
-float SimForcingSlope(float3 P, float3 Dir, uint Layer)
+/** PCG hash. */
+uint SimHash(uint X)
+{
+    X = X * 747796405u + 2891336453u;
+    const uint W = ((X >> ((X >> 28u) + 4u)) ^ X) * 277803737u;
+    return (W >> 22u) ^ W;
+}
+
+float3 SimHash3(uint X)
+{
+    return float3(SimHash(X), SimHash(X ^ 0x68E31DA4u), SimHash(X ^ 0xB5297A4Du)) * (1.0f / 4294967296.0f);
+}
+
+/** One forcing phase's slope along Dir at P: the noise at a random offset for
+ *  this cycle, carried east at the local zonal-mean angular rate for the
+ *  cycle's age. Divided by the forcing scale so the amplitude reads as a
+ *  velocity whatever the noise frequency. */
+float SimForcingPhase(float3 P, float3 Dir, uint Layer, float Rate, float Clock, uint Phase)
+{
+    const float Cycle = floor(Clock);
+    const float Age = (Clock - Cycle) * SimForcingLifetime;
+
+    const float3 Offset = SimHash3(((uint) Cycle * 2u + Phase) * 8u + Layer);
+
+    float SinA, CosA;
+    sincos(-Rate * Age, SinA, CosA);
+
+    const float3 Q = float3(CosA * P.x - SinA * P.y, SinA * P.x + CosA * P.y, P.z);
+    const float3 D = float3(CosA * Dir.x - SinA * Dir.y, SinA * Dir.x + CosA * Dir.y, Dir.z);
+
+    const float Eps = SimInvGridSize.y;
+
+    const float A = SimSampleForcing((Q + D * Eps) * SimForcingScale + Offset);
+    const float B = SimSampleForcing((Q - D * Eps) * SimForcingScale + Offset);
+
+    return (A - B) / (2.0f * Eps * max(SimForcingScale, 1e-4f));
+}
+
+/** Slope of the forcing streamfunction along Dir at P. The forcing velocity is
+ *  Up x grad(psi): east is -slope along north, north is +slope along east,
+ *  which keeps it divergence-free. Rate is the row's zonal-mean angular rate.
+ *
+ *  SHORT-LIVED AND CARRIED WITH THE FLOW. Two phases half a lifetime apart,
+ *  each a fresh random pattern that drifts east with the jets and fades out
+ *  before it resets. PITFALL: a pattern fixed in space, or one that changes
+ *  slowly, pins every eddy it makes to one spot; weather then churns in place
+ *  instead of travelling. Renormalised by the weights so the crossfade does
+ *  not dip the variance. */
+float SimForcingSlope(float3 P, float3 Dir, uint Layer, float Rate)
 {
     if (SimHasForcing == 0)
     {
         return 0.0f;
     }
 
-    const float Eps = SimInvGridSize.y;
+    const float Clock = SimTime / max(SimForcingLifetime, 1e-3f);
 
-    const float3 Offset = SimForcingDrift * SimTime + float3(0.13f, 0.29f, 0.71f) * (float) Layer;
+    const float WeightA = 1.0f - abs(2.0f * frac(Clock) - 1.0f);
+    const float WeightB = 1.0f - WeightA;
 
-    const float A = SimSampleForcing((P + Dir * Eps) * SimForcingScale + Offset);
-    const float B = SimSampleForcing((P - Dir * Eps) * SimForcingScale + Offset);
-
-    return (A - B) / (2.0f * Eps * max(SimForcingScale, 1e-4f));
+    return (WeightA * SimForcingPhase(P, Dir, Layer, Rate, Clock, 0u)
+		+ WeightB * SimForcingPhase(P, Dir, Layer, Rate, Clock + 0.5f, 1u))
+		* rsqrt(WeightA * WeightA + WeightB * WeightB);
 }
 
 /** Normalised vertical motion from divergence: positive rising, in (-1, 1). */
@@ -670,6 +742,9 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
     const float2 RowMean = SimRowMeanSRV.Load(int3(C.y, Layer, 0));
 
+	// The row's zonal-mean angular rate, which carries the forcing pattern.
+    const float ZonalRate = RowMean.x / SimRowCos(C.y);
+
 	// -- u on the west face -------------------------------------------------
 
     float U;
@@ -688,7 +763,7 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
         U += SimDampEast(C, Layer)
 			+ SimNudgeRate * Dt * (Target - RowMean.x)
 			- Drag * Dt * (U - RowMean.x)
-			- ForcingRate * Dt * SimForcingSlope(P, SimNorth(P), Layer)
+			- ForcingRate * Dt * SimForcingSlope(P, SimNorth(P), Layer, ZonalRate)
 			+ SimLayerCoupling * Dt * SimCouplingDelta(C, Layer, 0);
     }
 
@@ -708,7 +783,7 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
         V += SimDampNorth(C, Layer)
 			- Drag * Dt * V
-			+ ForcingRate * Dt * SimForcingSlope(P, SimEast(P), Layer)
+			+ ForcingRate * Dt * SimForcingSlope(P, SimEast(P), Layer, ZonalRate)
 			+ SimLayerCoupling * Dt * SimCouplingDelta(C, Layer, 1);
     }
 

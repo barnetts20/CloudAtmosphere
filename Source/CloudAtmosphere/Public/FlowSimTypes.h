@@ -9,6 +9,20 @@ class UFlowSnapshot;
 class UTextureRenderTarget2D;
 class UTextureRenderTarget2DArray;
 
+/** The zonal flow the nudge maintains. Mirrors SIM_PROFILE_* in FlowSim.usf. */
+UENUM(BlueprintType)
+enum class EFlowZonalProfile : uint8
+{
+	/** Alternating jets and zones, BandCount of them: a gas giant. */
+	Banded      UMETA(DisplayName = "Banded"),
+
+	/** Earth's three cells: easterly trades to about 25 degrees, a westerly jet
+	 *  peaking at 45, polar easterlies past about 65. JetStrength is the jet's
+	 *  peak rate; BandCount, EquatorialBoost, Asymmetry and WidthBias are
+	 *  unused. */
+	ThreeCell   UMETA(DisplayName = "Three cell (terrestrial)"),
+};
+
 /** Which field the debug view renders. Mirrors SIM_DEBUG_* in FlowSim.usf. */
 UENUM(BlueprintType)
 enum class EFlowDebugMode : uint8
@@ -106,6 +120,9 @@ public:
 	// The zonal flow the nudge maintains, and the one the sim starts balanced
 	// on. See GasGiantJets.ush.
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile")
+	EFlowZonalProfile ZonalProfile = EFlowZonalProfile::Banded;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile", meta = (ClampMin = "1.0"))
 	float BandCount = 3.0f;
 
@@ -180,12 +197,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
 	float ForcingScale = 0.25f;
 
-	/** Drift through the forcing volume, UVW per unit time. Must be comparable to
-	 *  the eddy turnover rate, or the forcing is effectively frozen and the field
-	 *  settles to a fixed pattern. Components are mutually incommensurate so the
-	 *  path through the tiling volume does not repeat. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
-	FVector ForcingDrift = FVector(0.001, 0.001, 0.0005);
+	/** How long one forcing pattern lives, in sim time. Each is a fresh random
+	 *  draw carried east with the jets, crossfaded into the next, so eddies are
+	 *  born, released and travel. Short is restless stirring; long lets a
+	 *  pattern hold eddies in place. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing", meta = (ClampMin = "0.01"))
+	float ForcingLifetime = 0.5f;
 
 	/** Linear drag on the eddy part of the eastward velocity and all of the
 	 *  northward, per unit time. The large-scale energy sink that arrests the
@@ -333,6 +350,7 @@ struct FFlowSimParams
 	FIntVector GridSize = FIntVector(512, 256, 3);
 
 	FVector4f JetParams = FVector4f(3.0f, 1.0f, 0.5f, 0.5f);
+	int32 ZonalProfile = 0;
 	float WidthBias = 0.0f;
 	FVector4f LayerProfile[8] = {
 		FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(),
@@ -353,7 +371,7 @@ struct FFlowSimParams
 	float NudgeRate = 1.0f;
 	float ForcingAmplitude = 0.3f;
 	float ForcingScale = 0.25f;
-	FVector3f ForcingDrift = FVector3f(0.001f, 0.001f, 0.0005f);
+	float ForcingLifetime = 0.5f;
 	float DragRate = 1.5f;
 	float LayerCoupling = 0.1f;
 	float DivergenceDamping = 0.05f;

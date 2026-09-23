@@ -84,6 +84,7 @@ namespace
 
 		P.SimJetParams = Params.JetParams;
 		P.SimWidthBias = Params.WidthBias;
+		P.SimZonalProfile = Params.ZonalProfile;
 
 		for (int32 i = 0; i < 8; ++i)
 		{
@@ -104,7 +105,7 @@ namespace
 		P.SimNudgeRate = Params.NudgeRate;
 		P.SimForcingAmplitude = Params.ForcingAmplitude;
 		P.SimForcingScale = Params.ForcingScale;
-		P.SimForcingDrift = Params.ForcingDrift;
+		P.SimForcingLifetime = Params.ForcingLifetime;
 		P.SimDragRate = Params.DragRate;
 		P.SimLayerCoupling = Params.LayerCoupling;
 		P.SimDivergenceDamping = Params.DivergenceDamping;
