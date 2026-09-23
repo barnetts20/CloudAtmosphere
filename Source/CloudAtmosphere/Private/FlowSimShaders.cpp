@@ -50,5 +50,6 @@ GG_IMPLEMENT_SIM_SHADER(FFlowSimCorrectCS, "MainCorrectCS")
 GG_IMPLEMENT_SIM_SHADER(FFlowSimCaptureCS, "MainCaptureCS")
 GG_IMPLEMENT_SIM_SHADER(FFlowSimRestoreCS, "MainRestoreCS")
 GG_IMPLEMENT_SIM_SHADER(FFlowSimDebugVisCS, "MainDebugVisCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimResampleCS, "MainResampleCS")
 
 #undef GG_IMPLEMENT_SIM_SHADER

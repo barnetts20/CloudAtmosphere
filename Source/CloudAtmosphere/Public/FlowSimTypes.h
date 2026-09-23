@@ -433,6 +433,9 @@ struct FFlowSimParams
 	/** Output normalisation: x pressure, y vorticity, z divergence. */
 	FVector3f OutputScales = FVector3f(1.0f, 1.0f, 1.0f);
 
+	/** Face edge of the cube atlas FlowTexture holds, in texels. */
+	int32 AtlasFaceSize = 128;
+
 	int32 DebugMode = 0;
 	int32 DebugLayer = 0;
 	float DebugScale = 1.0f;

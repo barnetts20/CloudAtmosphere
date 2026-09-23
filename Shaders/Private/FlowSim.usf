@@ -190,9 +190,17 @@ RWTexture2D<float> SimPhiEqUAV;
 Texture2D<float> SimGlobalMeanSRV;
 RWTexture2D<float> SimGlobalMeanUAV;
 
-/** The texture the material samples. Slices [0, L) are flow, [L, 2L) weather,
- *  [2L, 3L) noise phase A and [3L, 4L) noise phase B. */
+/** The output on the sim's own grid. Slices [0, L) are flow, [L, 2L)
+ *  weather, [2L, 3L) noise phase A and [3L, 4L) noise phase B. */
+Texture2DArray<float4> SimLatLonSRV;
+RWTexture2DArray<float4> SimLatLonUAV;
+
+/** The texture the material samples: SimLatLon's slices resampled onto the
+ *  cube atlas; see FlowField.ush. */
 RWTexture2DArray<float4> SimOutputUAV;
+
+/** Atlas face edge in texels. */
+int SimAtlasFaceSize;
 
 /** Band-limited tiling noise, read as a forcing streamfunction. */
 Texture3D<float4> SimForcingNoise;
@@ -686,8 +694,8 @@ void MainReduceGlobalCS(uint3 Id : SV_DispatchThreadID)
 // Reconstruct, and the texture the material reads
 // ---------------------------------------------------------------------------
 
-/** Centre velocity and divergence, the explicit field, and the material's
- *  output. Dispatch (N_lon, N_lat, LayerCount).
+/** Centre velocity and divergence, the explicit field, and the output on the
+ *  sim's grid. Dispatch (N_lon, N_lat, LayerCount).
  *
  *  EXPLICIT FIELD: the centre average of each face's V - (1-alpha) dt grad phi,
  *  so the pressure gradient is the C-grid's own, and the mass term with its
@@ -742,7 +750,7 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
 
     const float PhiMean = SimRowMeanSRV.Load(int3(C.y, Layer, 0)).y;
 
-    SimOutputUAV[int3(C, Layer)] = float4(
+    SimLatLonUAV[int3(C, Layer)] = float4(
 		Components.x,
 		Components.y,
 		SimSoftSat((Phi - PhiMean) / SimOutputScales.x),
@@ -750,13 +758,13 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
 
     const float2 Cloud = SimCloudSRV.Load(int4(C.x, C.y, Layer, 0));
 
-    SimOutputUAV[int3(C, Layer + (uint) SimGridSize.z)] = float4(
+    SimLatLonUAV[int3(C, Layer + (uint) SimGridSize.z)] = float4(
 		SimVerticalMotion(Divergence), Cloud.x, SimCloudAscent(Cloud), 0.0f);
 
-    SimOutputUAV[int3(C, Layer + 2u * (uint) SimGridSize.z)] =
+    SimLatLonUAV[int3(C, Layer + 2u * (uint) SimGridSize.z)] =
 		SimNoiseSRV.Load(int4(C.x, C.y, Layer, 0));
 
-    SimOutputUAV[int3(C, Layer + 3u * (uint) SimGridSize.z)] =
+    SimLatLonUAV[int3(C, Layer + 3u * (uint) SimGridSize.z)] =
 		SimNoiseSRV.Load(int4(C.x, C.y, Layer + (uint) SimGridSize.z, 0));
 }
 
@@ -1303,6 +1311,143 @@ void MainRestoreCS(uint3 Id : SV_DispatchThreadID)
     SimCloudUAV[int3(Id)] = float2(0.0f, 0.0f);
     SimNoiseUAV[int3(Id)] = float4(0.0f, 0.0f, 0.0f, 0.0f);
     SimNoiseUAV[int3(Id.xy, Id.z + (uint) SimGridSize.z)] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+// ---------------------------------------------------------------------------
+// Resample onto the cube atlas
+// ---------------------------------------------------------------------------
+
+/** Latitude of a row, in radians, continued past the poles: a row folded over
+ *  the north pole sits at pi minus its mirror's latitude, and the same through
+ *  the south. Along one meridian through the fold, latitude runs smoothly. */
+float SimRowLatitude(int Row)
+{
+    const int Rows = SimGridSize.y;
+
+    if (Row >= Rows)
+    {
+        return PI - asin(SimRowToMu((float) (2 * Rows - 1 - Row)));
+    }
+
+    if (Row < 0)
+    {
+        return -PI - asin(SimRowToMu((float) (-1 - Row)));
+    }
+
+    return asin(SimRowToMu((float) Row));
+}
+
+/** SimSampleCubic4 with the latitude weights taken in latitude, not in mu.
+ *
+ *  PITFALL: A CUBIC IN MU IS WRONG AT THE POLES. Mu is quadratic in angle
+ *  there, so a field varying linearly across a pole is a square root in mu, and
+ *  the uniform cubic leaves a dent at the pole the width of the polar rows.
+ *  Lagrange weights on the rows' true latitudes, folded, reproduce it. */
+float4 SimSampleMeridian4(Texture2DArray<float4> Field, float3 N, uint Layer)
+{
+    const float2 Grid = SimDirectionToGrid(N);
+
+    const float BaseI = floor(Grid.x);
+    const int BaseJ = (int) floor(Grid.y);
+
+    float WX0, WX1, WX2, WX3;
+    SimCubicWeights(Grid.x - BaseI, WX0, WX1, WX2, WX3);
+
+    const float WX[4] = { WX0, WX1, WX2, WX3 };
+
+    float Nodes[4];
+
+	[unroll]
+    for (int K = 0; K < 4; K++)
+    {
+        Nodes[K] = SimRowLatitude(BaseJ - 1 + K);
+    }
+
+    const float Lat = asin(clamp(N.z, -1.0f, 1.0f));
+
+    float WY[4];
+
+	[unroll]
+    for (int A = 0; A < 4; A++)
+    {
+        WY[A] = 1.0f;
+
+		[unroll]
+        for (int B = 0; B < 4; B++)
+        {
+            if (B != A)
+            {
+                WY[A] *= (Lat - Nodes[B]) / (Nodes[A] - Nodes[B]);
+            }
+        }
+    }
+
+    const int2 C0 = int2((int) BaseI - 1, BaseJ - 1);
+
+    float4 Sum = 0.0f;
+
+	[unroll]
+    for (int J = 0; J < 4; J++)
+    {
+		[unroll]
+        for (int I = 0; I < 4; I++)
+        {
+            Sum += WX[I] * WY[J] * SimLoad4(Field, C0 + int2(I, J), Layer);
+        }
+    }
+
+    return Sum;
+}
+
+/** One atlas texel of every slice for a layer. Dispatch (AtlasW, AtlasH,
+ *  LayerCount), after the frame's last Reconstruct.
+ *
+ *  BY DIRECTION, FOLDED OVER THE POLES. Each texel, gutter included, is
+ *  SimSampleMeridian4 of the lat-lon output at its direction, so nothing
+ *  converges on the poles. Velocity comes from the Cartesian centre field
+ *  instead of the stored east/north pair, which flips sign across the fold, and
+ *  is written in the face's basis. The cubic can overshoot, so the weather's
+ *  bounded channels are clamped. */
+[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
+void MainResampleCS(uint3 Id : SV_DispatchThreadID)
+{
+    const float FaceSize = (float) SimAtlasFaceSize;
+    const float Tile = FaceSize + 2.0f * FLOW_ATLAS_GUTTER;
+
+    if ((float) Id.x >= 3.0f * Tile || (float) Id.y >= 2.0f * Tile || (int) Id.z >= SimGridSize.z)
+    {
+        return;
+    }
+
+    const uint Layer = Id.z;
+    const uint L = (uint) SimGridSize.z;
+
+    const uint2 TileIndex = uint2((float2) Id.xy / Tile);
+    const uint Face = TileIndex.x + 3u * TileIndex.y;
+
+    const float2 Local = (float2) Id.xy + 0.5f - (float2) TileIndex * Tile - FLOW_ATLAS_GUTTER;
+    const float3 N = Flow_FaceDirection(Face, Local / FaceSize * 2.0f - 1.0f);
+
+    // -- Flow: velocity in the face basis, pressure and vorticity ------------
+
+    float3 Velocity = SimSampleMeridian4(SimCentreSRV, N, Layer).xyz;
+    Velocity -= N * dot(N, Velocity);
+
+    float3 T1, T2;
+    Flow_FaceBasis(N, Face, T1, T2);
+
+    const float4 Flow = SimSampleMeridian4(SimLatLonSRV, N, Layer);
+
+    SimOutputUAV[int3(Id.xy, Layer)] = float4(dot(Velocity, T1), dot(Velocity, T2), Flow.zw);
+
+    // -- Weather and noise -----------------------------------------------------
+
+    float4 Weather = SimSampleMeridian4(SimLatLonSRV, N, Layer + L);
+    Weather.yz = saturate(Weather.yz);
+
+    SimOutputUAV[int3(Id.xy, Layer + L)] = Weather;
+    SimOutputUAV[int3(Id.xy, Layer + 2u * L)] = SimSampleMeridian4(SimLatLonSRV, N, Layer + 2u * L);
+    SimOutputUAV[int3(Id.xy, Layer + 3u * L)] = SimSampleMeridian4(SimLatLonSRV, N, Layer + 3u * L);
 }
 
 // ---------------------------------------------------------------------------

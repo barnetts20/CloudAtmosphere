@@ -67,6 +67,7 @@ private:
 	void AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	void AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, struct FFlowSimResources& R);
 	void AddDebugPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
+	void AddResamplePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 
 	TRefCountPtr<IPooledRenderTarget> PooledFace[2];
 	TRefCountPtr<IPooledRenderTarget> PooledCentre;
@@ -79,6 +80,9 @@ private:
 
 	/** Noise displacements, phase A slices then phase B. Flips with the cloud. */
 	TRefCountPtr<IPooledRenderTarget> PooledNoise[2];
+	/** The output on the sim's own grid, before the resample onto the atlas. */
+	TRefCountPtr<IPooledRenderTarget> PooledLatLon;
+
 	TRefCountPtr<IPooledRenderTarget> PooledRowMean;
 	TRefCountPtr<IPooledRenderTarget> PooledPhiEq;
 	TRefCountPtr<IPooledRenderTarget> PooledGlobalMean;

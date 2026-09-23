@@ -8,10 +8,16 @@
 // copy would put the clouds on a different flow from the one that made them.
 // Nothing here knows what the field above it looks like.
 //
-// THE GRID IS LONGITUDE BY SIN(LATITUDE), so both texture coordinates come from
-// a unit direction with no transcendental beyond the one atan2. Sampler state
-// must be WRAP on U and CLAMP on V: the grid is a cylinder, and wrapping V joins
-// the north pole to the south.
+// THE OUTPUT IS A CUBE, NOT THE SIM'S GRID. The sim runs on longitude by
+// sin(latitude), whose columns converge at the poles; it resamples its output
+// each frame onto an equi-angular cube, six faces packed 3 x 2 into each slice,
+// each face ringed by a gutter copied from its neighbours. No point on the
+// sphere is singular, and a filtered read never leaves its face's tile.
+//
+// VELOCITY IS STORED IN EACH FACE'S OWN TANGENT BASIS, which is defined
+// everywhere on the face, and Flow_Sample turns it back into east and north.
+// The gutter texels hold the neighbour's data in THIS face's basis, since the
+// resample evaluates every texel by direction.
 //
 // FOUR SLICE RANGES. For a sim of L layers the texture holds 4L slices: [0, L)
 // are FLOW, [L, 2L) WEATHER, [2L, 3L) and [3L, 4L) the two NOISE phases, layer
@@ -41,6 +47,123 @@ struct FlowReadParams
 #define FLOW_FIELD_FILTER 1
 #endif
 
+/** Gutter texels around each face in the atlas: 2 covers the B-spline's
+ *  footprint. PITFALL: FlowSimShader::AtlasGutter sizes the texture in C++ and
+ *  must equal this, or every face reads its neighbour's tile. */
+#ifndef FLOW_ATLAS_GUTTER
+#define FLOW_ATLAS_GUTTER 2
+#endif
+
+// -- Cube atlas ---------------------------------------------------------------
+
+/** A face's frame: M the outward axis, U and V the in-face axes. Any fixed
+ *  choice works, since writer and reader both take it from here. */
+void Flow_FaceFrame(uint Face, out float3 M, out float3 U, out float3 V)
+{
+    V = float3(0.0f, 0.0f, 1.0f);
+
+    if (Face == 0u)
+    {
+        M = float3(1, 0, 0);
+        U = float3(0, 1, 0);
+    }
+    else if (Face == 1u)
+    {
+        M = float3(-1, 0, 0);
+        U = float3(0, -1, 0);
+    }
+    else if (Face == 2u)
+    {
+        M = float3(0, 1, 0);
+        U = float3(-1, 0, 0);
+    }
+    else if (Face == 3u)
+    {
+        M = float3(0, -1, 0);
+        U = float3(1, 0, 0);
+    }
+    else if (Face == 4u)
+    {
+        M = float3(0, 0, 1);
+        U = float3(0, 1, 0);
+        V = float3(-1, 0, 0);
+    }
+    else
+    {
+        M = float3(0, 0, -1);
+        U = float3(0, 1, 0);
+        V = float3(1, 0, 0);
+    }
+}
+
+/** The face a direction falls on: its largest component. */
+uint Flow_Face(float3 N)
+{
+    const float3 A = abs(N);
+
+    if (A.x >= A.y && A.x >= A.z)
+    {
+        return (N.x >= 0.0f) ? 0u : 1u;
+    }
+
+    if (A.y >= A.z)
+    {
+        return (N.y >= 0.0f) ? 2u : 3u;
+    }
+
+    return (N.z >= 0.0f) ? 4u : 5u;
+}
+
+/** Equi-angular face coordinates in [-1, 1]: the angle from the face centre
+ *  along each axis over 45 degrees, so texels subtend near-equal angles. */
+float2 Flow_FaceCoord(float3 N, uint Face)
+{
+    float3 M, U, V;
+    Flow_FaceFrame(Face, M, U, V);
+
+    const float InvMajor = 1.0f / max(dot(N, M), 1e-6f);
+
+    return atan(float2(dot(N, U), dot(N, V)) * InvMajor) * (4.0f / PI);
+}
+
+/** The inverse: a direction from face coordinates, valid past [-1, 1] into the
+ *  gutter. */
+float3 Flow_FaceDirection(uint Face, float2 Coord)
+{
+    float3 M, U, V;
+    Flow_FaceFrame(Face, M, U, V);
+
+    const float2 T = tan(Coord * (0.25f * PI));
+
+    return normalize(M + U * T.x + V * T.y);
+}
+
+/** The tangent basis a face stores velocity in: U projected onto the tangent
+ *  plane, and N cross that. Smooth over the whole face and its gutter. */
+void Flow_FaceBasis(float3 N, uint Face, out float3 T1, out float3 T2)
+{
+    float3 M, U, V;
+    Flow_FaceFrame(Face, M, U, V);
+
+    T1 = normalize(U - N * dot(N, U));
+    T2 = cross(N, T1);
+}
+
+/** Face edge in texels, from the atlas width: 3 * (Face + 2 * Gutter). */
+float Flow_AtlasFaceSize(float AtlasWidth)
+{
+    return AtlasWidth / 3.0f - 2.0f * FLOW_ATLAS_GUTTER;
+}
+
+/** Atlas texel coordinate (texel centres at +0.5) of face coordinates. */
+float2 Flow_AtlasTexel(uint Face, float2 Coord, float FaceSize)
+{
+    const float Tile = FaceSize + 2.0f * FLOW_ATLAS_GUTTER;
+    const float2 Origin = float2((float) (Face % 3u), (float) (Face / 3u)) * Tile;
+
+    return Origin + FLOW_ATLAS_GUTTER + (Coord * 0.5f + 0.5f) * FaceSize;
+}
+
 /** Layers the sim runs: a quarter of the texture's slices, which hold the
  *  flow, the weather, and the two noise phases, L slices each. */
 float Flow_LayerCount(Texture2DArray FlowField)
@@ -51,43 +174,39 @@ float Flow_LayerCount(Texture2DArray FlowField)
     return (float) (Slices / 4u);
 }
 
-/** Samples one slice of the sim's output by direction. Sampler state must be
- *  wrap on U and clamp on V.
- *
- *  Returns (u_east, u_north, pressure, vorticity) for a flow slice:
- *    xy  Tangent velocity, physical speed on the unit sphere; rebuild the 3D
- *        vector with Flow_TangentVelocity.
- *    z   Pressure: the geopotential less its zonal mean, soft-saturated into
- *        (-1, 1). Positive in highs in BOTH hemispheres.
- *    w   Normalized vorticity, near [-1,1], positive counterclockwise. The band
- *        signal.
- *
- *  PITFALL: w is a rotation sense, not cyclone or anticyclone -- which one a
- *  sense is flips at the equator. Read it through Flow_Band, never raw. */
-float4 Flow_Sample(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
+/** Samples one slice of the atlas by direction, raw, and reports the face it
+ *  read. Any sampler state works: every tap stays inside the face's tile. */
+float4 Flow_SampleSlice(
+	Texture2DArray FlowField,
+	SamplerState FlowSampler,
+	float3 N,
+	float Slice,
+	out uint OutFace)
 {
-    const float U = frac(atan2(N.y, N.x) * (0.5f / PI));
-    const float V = 0.5f + 0.5f * N.z;
+    uint Width, Height, Slices, Levels;
+    FlowField.GetDimensions(0, Width, Height, Slices, Levels);
+
+    const float2 InvSize = 1.0f / float2(Width, Height);
+
+    OutFace = Flow_Face(N);
+
+    const float2 Pixel = Flow_AtlasTexel(
+		OutFace, Flow_FaceCoord(N, OutFace), Flow_AtlasFaceSize((float) Width));
 
 #if FLOW_FIELD_FILTER == 0
 
-    return FlowField.SampleLevel(FlowSampler, float3(U, V, Layer), 0.0f);
+    return FlowField.SampleLevel(FlowSampler, float3(Pixel * InvSize, Slice), 0.0f);
 
 #else
 
 	// Bilinear is continuous in value but not in gradient, and anything built
 	// on this field responds to its slope, so the slope jumps surface as
-	// faceting along the lat/lon grid. The cubic is approximating: it does not
+	// faceting along the texel grid. The cubic is approximating: it does not
 	// pass through the texel values, so a one-texel step in the field stops
 	// being one in the surface. Four bilinear taps, each placed at the offset
-	// that reproduces a pair's weights.
-    uint Width, Height, Slices, Levels;
-    FlowField.GetDimensions(0, Width, Height, Slices, Levels);
-
-    const float2 Size = float2(Width, Height);
-    const float2 InvSize = 1.0f / Size;
-
-    const float2 Texel = float2(U, V) * Size - 0.5f;
+	// that reproduces a pair's weights; the footprint is two texels either side,
+	// which is what the gutter covers.
+    const float2 Texel = Pixel - 0.5f;
     const float2 Corner = floor(Texel);
     const float2 Frac = Texel - Corner;
 
@@ -106,12 +225,44 @@ float4 Flow_Sample(Texture2DArray FlowField, SamplerState FlowSampler, float3 N,
     const float2 UV1 = (Corner + 0.5f + (W3 / S1 + 1.0f)) * InvSize;
 
     return
-		  S0.x * S0.y * FlowField.SampleLevel(FlowSampler, float3(UV0.x, UV0.y, Layer), 0.0f)
-		+ S1.x * S0.y * FlowField.SampleLevel(FlowSampler, float3(UV1.x, UV0.y, Layer), 0.0f)
-		+ S0.x * S1.y * FlowField.SampleLevel(FlowSampler, float3(UV0.x, UV1.y, Layer), 0.0f)
-		+ S1.x * S1.y * FlowField.SampleLevel(FlowSampler, float3(UV1.x, UV1.y, Layer), 0.0f);
+		  S0.x * S0.y * FlowField.SampleLevel(FlowSampler, float3(UV0.x, UV0.y, Slice), 0.0f)
+		+ S1.x * S0.y * FlowField.SampleLevel(FlowSampler, float3(UV1.x, UV0.y, Slice), 0.0f)
+		+ S0.x * S1.y * FlowField.SampleLevel(FlowSampler, float3(UV0.x, UV1.y, Slice), 0.0f)
+		+ S1.x * S1.y * FlowField.SampleLevel(FlowSampler, float3(UV1.x, UV1.y, Slice), 0.0f);
 
 #endif
+}
+
+/** Samples a layer's flow slice by direction.
+ *
+ *  Returns (u_east, u_north, pressure, vorticity):
+ *    xy  Tangent velocity, physical speed on the unit sphere; rebuild the 3D
+ *        vector with Flow_TangentVelocity. Stored in the face's basis and
+ *        turned into east and north here; exactly on a pole east is undefined,
+ *        but the round trip through Flow_TangentVelocity still holds.
+ *    z   Pressure: the geopotential less its zonal mean, soft-saturated into
+ *        (-1, 1). Positive in highs in BOTH hemispheres.
+ *    w   Normalized vorticity, near [-1,1], positive counterclockwise. The band
+ *        signal.
+ *
+ *  PITFALL: w is a rotation sense, not cyclone or anticyclone -- which one a
+ *  sense is flips at the equator. Read it through Flow_Band, never raw. */
+float4 Flow_Sample(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
+{
+    uint Face;
+    float4 S = Flow_SampleSlice(FlowField, FlowSampler, N, Layer, Face);
+
+    float3 T1, T2;
+    Flow_FaceBasis(N, Face, T1, T2);
+
+    const float3 Velocity = T1 * S.x + T2 * S.y;
+
+    const float C = max(length(N.xy), 1e-5f);
+
+    S.x = dot(Velocity, float3(-N.y, N.x, 0.0f) / C);
+    S.y = dot(Velocity, float3(-N.z * N.x / C, -N.z * N.y / C, C));
+
+    return S;
 }
 
 /** Samples a layer's weather slice. Returns (W, cloud, ascent, spare):
@@ -123,7 +274,8 @@ float4 Flow_Sample(Texture2DArray FlowField, SamplerState FlowSampler, float3 N,
  *       it. High in updraughts and in what drifts off them; zero in clear air. */
 float4 Flow_SampleWeather(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
 {
-    return Flow_Sample(FlowField, FlowSampler, N, Layer + Flow_LayerCount(FlowField));
+    uint Face;
+    return Flow_SampleSlice(FlowField, FlowSampler, N, Layer + Flow_LayerCount(FlowField), Face);
 }
 
 /** Samples a layer's two noise displacements, phase A then phase B: xyz
@@ -140,8 +292,9 @@ void Flow_SampleNoise(
 {
     const float L = Flow_LayerCount(FlowField);
 
-    OutA = Flow_Sample(FlowField, FlowSampler, N, Layer + 2.0f * L).xyz;
-    OutB = Flow_Sample(FlowField, FlowSampler, N, Layer + 3.0f * L).xyz;
+    uint Face;
+    OutA = Flow_SampleSlice(FlowField, FlowSampler, N, Layer + 2.0f * L, Face).xyz;
+    OutB = Flow_SampleSlice(FlowField, FlowSampler, N, Layer + 3.0f * L, Face).xyz;
 }
 
 /** Phase A's crossfade weight from its phase in [0, 1): zero at the reset,
@@ -187,14 +340,14 @@ float Flow_Band(float4 Flow, float3 N, FlowReadParams P)
 }
 
 /** Arc length of one flow texel at a given radius, in world units: the finest
- *  thing a field built on the flow can vary over. Longitude is the tighter axis,
- *  so the width alone bounds it. */
+ *  thing a field built on the flow can vary over. An equi-angular face spans 90
+ *  degrees in near-equal texels. */
 float Flow_TexelArc(Texture2DArray FlowField, float Radius)
 {
     uint Width, Height, Slices, Levels;
     FlowField.GetDimensions(0, Width, Height, Slices, Levels);
 
-    return (2.0f * PI * Radius) / float(max(Width, 1u));
+    return (0.5f * PI * Radius) / max(Flow_AtlasFaceSize((float) Width), 1.0f);
 }
 
 /** Rebuilds the 3D tangent velocity from the stored east/north components. No

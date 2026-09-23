@@ -36,6 +36,7 @@ struct FFlowSimResources
 	FRDGTextureRef RowMean = nullptr;
 	FRDGTextureRef PhiEq = nullptr;
 	FRDGTextureRef GlobalMean = nullptr;
+	FRDGTextureRef LatLon = nullptr;
 	FRDGTextureRef Output = nullptr;
 	FRDGTextureRef Debug = nullptr;
 
@@ -125,6 +126,7 @@ namespace
 		P.SimFilterMaxHalfWidth = Params.FilterMaxHalfWidth;
 
 		P.SimOutputScales = Params.OutputScales;
+		P.SimAtlasFaceSize = Params.AtlasFaceSize;
 
 		P.SimDebugMode = Params.DebugMode;
 		P.SimDebugLayer = Params.DebugLayer;
@@ -196,6 +198,7 @@ void FFlowSimulation::Release_RenderThread()
 	PooledCloud[1].SafeRelease();
 	PooledNoise[0].SafeRelease();
 	PooledNoise[1].SafeRelease();
+	PooledLatLon.SafeRelease();
 	PooledRowMean.SafeRelease();
 	PooledPhiEq.SafeRelease();
 	PooledGlobalMean.SafeRelease();
@@ -265,6 +268,13 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 
 	PooledNoise[0] = AllocatePooledTexture(NoiseDesc, TEXT("FlowSim.NoiseA"));
 	PooledNoise[1] = AllocatePooledTexture(NoiseDesc, TEXT("FlowSim.NoiseB"));
+
+	// The output on the grid: flow, weather and both noise phases per layer.
+	// 32-bit, so the atlas is the one place the output is quantised.
+	PooledLatLon = AllocatePooledTexture(
+		FRDGTextureDesc::Create2DArray(
+			Size, PF_A32B32G32R32F, FClearValueBinding::Black, Flags, (uint16)(4 * Slices)),
+		TEXT("FlowSim.LatLon"));
 
 	// (row, layer).
 	const FIntPoint RowSize(Params.GridSize.Y, Slices);
@@ -398,7 +408,7 @@ void FFlowSimulation::AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowS
 	P->SimNoiseSRV = GraphBuilder.CreateSRV(R.NoiseSource());
 	P->SimCentreUAV = GraphBuilder.CreateUAV(R.Centre);
 	P->SimExplicitUAV = GraphBuilder.CreateUAV(R.Explicit);
-	P->SimOutputUAV = GraphBuilder.CreateUAV(R.Output);
+	P->SimLatLonUAV = GraphBuilder.CreateUAV(R.LatLon);
 
 	AddSimPass<FFlowSimReconstructCS>(GraphBuilder, TEXT("FlowSim.Reconstruct"), P, GroupCount2D(Params.GridSize));
 }
@@ -500,6 +510,23 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 	R.Swap();
 }
 
+void FFlowSimulation::AddResamplePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
+{
+	const FIntPoint Atlas = AtlasSize(Params.AtlasFaceSize);
+
+	const FIntVector Groups(
+		FMath::DivideAndRoundUp(Atlas.X, ThreadGroupSize2D),
+		FMath::DivideAndRoundUp(Atlas.Y, ThreadGroupSize2D),
+		Params.GridSize.Z);
+
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+	P->SimCentreSRV = GraphBuilder.CreateSRV(R.Centre);
+	P->SimLatLonSRV = GraphBuilder.CreateSRV(R.LatLon);
+	P->SimOutputUAV = GraphBuilder.CreateUAV(R.Output);
+
+	AddSimPass<FFlowSimResampleCS>(GraphBuilder, TEXT("FlowSim.Resample"), P, Groups);
+}
+
 void FFlowSimulation::AddDebugPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
 {
 	if (!R.Debug)
@@ -554,6 +581,7 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	R.RowMean = GraphBuilder.RegisterExternalTexture(PooledRowMean);
 	R.PhiEq = GraphBuilder.RegisterExternalTexture(PooledPhiEq);
 	R.GlobalMean = GraphBuilder.RegisterExternalTexture(PooledGlobalMean);
+	R.LatLon = GraphBuilder.RegisterExternalTexture(PooledLatLon);
 	R.Current = CurrentFace;
 	R.CloudCurrent = CurrentCloud;
 
@@ -609,9 +637,11 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	}
 
 	// Final reduce and reconstruct, so the texture the material reads matches
-	// the state the last substep produced rather than the one it started from.
+	// the state the last substep produced rather than the one it started from,
+	// then the resample onto the atlas the material reads.
 	AddReducePasses(GraphBuilder, Params, R);
 	AddReconstructPass(GraphBuilder, Params, R);
+	AddResamplePass(GraphBuilder, Params, R);
 
 	AddDebugPass(GraphBuilder, Params, R);
 

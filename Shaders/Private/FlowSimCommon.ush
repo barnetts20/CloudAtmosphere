@@ -9,8 +9,8 @@
 // not to each other, and treating this as a torus joins the north pole to the
 // south so material advected out of the arctic arrives in the antarctic. Every
 // read here is an explicit Load through SimWrapCoord, because the pole is a
-// topological fold no address mode expresses -- but the OUTPUT texture the
-// material samples needs WRAP on U and CLAMP on V.
+// topological fold no address mode expresses. The output the materials sample
+// is resampled onto a cube atlas and has no fold; see FlowField.ush.
 //
 // THE LATITUDE COORDINATE IS MU = sin(latitude). The spherical Laplacian in
 // (lambda, mu) has two closed-form coefficients and no cross terms; cells are

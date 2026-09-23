@@ -63,6 +63,7 @@ SHADER_PARAMETER(int32, SimFilterMaxHalfWidth)
 
 // -- Output -------------------------------------------------------------
 SHADER_PARAMETER(FVector3f, SimOutputScales)
+SHADER_PARAMETER(int32, SimAtlasFaceSize)
 
 // -- Debug --------------------------------------------------------------
 SHADER_PARAMETER(int32, SimDebugMode)
@@ -80,6 +81,7 @@ SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float>, SimRhsSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float2>, SimSpectrumSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float2>, SimCloudSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimNoiseSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimLatLonSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float2>, SimRowMeanSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, SimPhiEqSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, SimGlobalMeanSRV)
@@ -93,6 +95,7 @@ SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float>, SimRhsUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float2>, SimSpectrumUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float2>, SimCloudUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimNoiseUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimLatLonUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, SimRowMeanUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, SimPhiEqUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, SimGlobalMeanUAV)
@@ -135,6 +138,25 @@ namespace FlowSimShader
 
 	/** Tallest column the latitude solve holds in group shared memory. */
 	static constexpr int32 MaxGridLatitude = 1024;
+
+	/** Gutter texels around each atlas face. PITFALL: must equal
+	 *  FLOW_ATLAS_GUTTER in FlowField.ush, which the materials read without
+	 *  this define, or every face reads its neighbour's tile. */
+	static constexpr int32 AtlasGutter = 2;
+
+	/** Atlas face edge for a grid width: four faces span the equator, matching
+	 *  the grid's resolution there. */
+	inline int32 AtlasFaceSize(int32 GridLongitude)
+	{
+		return FMath::Max(GridLongitude / 4, 8);
+	}
+
+	/** The atlas: six faces with their gutters, packed 3 x 2. */
+	inline FIntPoint AtlasSize(int32 FaceSize)
+	{
+		const int32 Tile = FaceSize + 2 * AtlasGutter;
+		return FIntPoint(3 * Tile, 2 * Tile);
+	}
 
 	/** Longitude columns for a requested width: the power of two at or below it,
 	 *  within [32, MaxGridLongitude]. The transform is radix-2. */
@@ -185,5 +207,6 @@ GG_DECLARE_SIM_SHADER(FFlowSimCorrectCS)
 GG_DECLARE_SIM_SHADER(FFlowSimCaptureCS)
 GG_DECLARE_SIM_SHADER(FFlowSimRestoreCS)
 GG_DECLARE_SIM_SHADER(FFlowSimDebugVisCS)
+GG_DECLARE_SIM_SHADER(FFlowSimResampleCS)
 
 #undef GG_DECLARE_SIM_SHADER

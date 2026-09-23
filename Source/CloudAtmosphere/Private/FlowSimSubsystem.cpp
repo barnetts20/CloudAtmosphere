@@ -615,8 +615,14 @@ bool UFlowSimSubsystem::PrepareTargets() const
 		return false;
 	}
 
-	const int32 W = FlowSimShader::GridLongitude(Config->GridLongitude);
-	const int32 H = FlowSimShader::GridLatitude(Config->GridLatitude);
+	const int32 GridW = FlowSimShader::GridLongitude(Config->GridLongitude);
+	const int32 GridH = FlowSimShader::GridLatitude(Config->GridLatitude);
+
+	// The cube atlas the sim resamples its output onto; see FlowField.ush.
+	const FIntPoint Atlas = FlowSimShader::AtlasSize(FlowSimShader::AtlasFaceSize(GridW));
+
+	const int32 W = Atlas.X;
+	const int32 H = Atlas.Y;
 
 	// Flow, weather, noise phase A and noise phase B slices, one of each per
 	// layer.
@@ -669,18 +675,18 @@ bool UFlowSimSubsystem::PrepareTargets() const
 	if (UTextureRenderTarget2D* Debug = Config->DebugTarget)
 	{
 		const bool bDebugMismatch =
-			Debug->SizeX != W ||
-			Debug->SizeY != H ||
+			Debug->SizeX != GridW ||
+			Debug->SizeY != GridH ||
 			!Debug->bCanCreateUAV;
 
 		if (bDebugMismatch && Config->bAutoResizeTargets)
 		{
 			Debug->bCanCreateUAV = true;
 			Debug->ClearColor = FLinearColor::Black;
-			Debug->InitCustomFormat(W, H, PF_FloatRGBA, /*bForceLinearGamma*/ true);
+			Debug->InitCustomFormat(GridW, GridH, PF_FloatRGBA, /*bForceLinearGamma*/ true);
 			Debug->UpdateResourceImmediate(true);
 
-			UE_LOG(LogFlowSim, Log, TEXT("Resized DebugTarget to %dx%d."), W, H);
+			UE_LOG(LogFlowSim, Log, TEXT("Resized DebugTarget to %dx%d."), GridW, GridH);
 		}
 	}
 
@@ -780,6 +786,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
 	const float DivScale = FMath::Max(ZetaScale * Rossby, 1e-4f);
 
 	Out.OutputScales = FVector3f(PressureScale, ZetaScale, DivScale);
+	Out.AtlasFaceSize = FlowSimShader::AtlasFaceSize(W);
 
 	// -- Debug --------------------------------------------------------------
 
