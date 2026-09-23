@@ -26,7 +26,8 @@
 //   BakeField_HeightStep(F)                 radial advance a step may take
 //   BakeField_LateralArc(Radius)            finest lateral feature at a radius
 //   BakeField_FoldConstant(F)               folded into every stored depth
-//   BakeField_Sigma(...)                    extinction over the texel footprint
+//   BakeField_Sigma(...)                    extinction over the texel footprint,
+//                                           given as two world vectors per texel
 //
 // plus a Thickness member on BakeFieldParams, the one field the loop reads
 // directly, since every stored depth is expressed in it.
@@ -83,8 +84,25 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 		Level, ShadowCameraLocal, ShadowBasisU, ShadowBasisV,
 		ShadowExtent, float2(ShadowMapSize));
 
-    const float2 UV = (float2(Texel.xy) + 0.5f) * ShadowInvMapSize;
-    const float2 Plane = ShadowCentre + (UV * 2.0f - 1.0f) * ShadowExtent;
+    const float2 Q = (float2(Texel.xy) + 0.5f) * ShadowInvMapSize * 2.0f - 1.0f;
+
+	// CASCADE 0 IS WARPED, by the same functions the reader inverts. Its texels
+	// are then ellipses on the plane, so the footprint the subsamples cover is
+	// carried as the two vectors one texel moves along each map axis.
+    float2 JacobianX = float2(1.0f, 0.0f);
+    float2 JacobianY = float2(0.0f, 1.0f);
+
+    float2 Plane;
+
+    if (Level == 0)
+    {
+        Plane = ShadowCentre + AtmoShadow_DiscToPlane(Q) * ShadowExtent;
+        AtmoShadow_DiscJacobian(Q, JacobianX, JacobianY);
+    }
+    else
+    {
+        Plane = ShadowCentre + Q * ShadowExtent;
+    }
 
 	// Still the ray's closest approach to the planet centre: the map plane moved
 	// but the shell did not, so the intersection below is unchanged.
@@ -130,7 +148,16 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 			OccluderStrength, OccluderFalloff));
     }
 
-    const float TexelWorld = 2.0f * ShadowExtent / float(max(ShadowMapSize.x, 1));
+    const float TexelScale = 2.0f * ShadowExtent / float(max(ShadowMapSize.x, 1));
+
+	// The footprint, world vectors per texel along each map axis. The field's
+	// Sigma offsets along them with a unit TexelWorld, so the subsamples cover
+	// the warped texel and not a square of the planar one.
+    const float3 FootprintU = (ShadowBasisU * JacobianX.x + ShadowBasisV * JacobianX.y) * TexelScale;
+    const float3 FootprintV = (ShadowBasisU * JacobianY.x + ShadowBasisV * JacobianY.y) * TexelScale;
+
+	// The texel's longer axis, where a single length is wanted.
+    const float TexelWorld = max(length(FootprintU), length(FootprintV));
 
     float TEntry = BakeField_Entry(Origin, Dir, RayLength, TopMax, F);
 
@@ -195,7 +222,7 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
     const float SeedRate = abs(dot(Dir, SeedPos / max(length(SeedPos), 1e-4f)));
 
     float SigmaPrev = BakeField_Sigma(
-		SeedPos, ShadowBasisU, ShadowBasisV, TexelWorld,
+		SeedPos, FootprintU, FootprintV, 1.0f,
 		SeedRate * 0.5f * CellSize / F.Thickness, AbsMax, F);
 
     LOOP
@@ -268,7 +295,7 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
         const float StepHalfHeight = RadialRate * Step * 0.5f / F.Thickness;
 
         const float SigmaNext = BakeField_Sigma(
-			Far, ShadowBasisU, ShadowBasisV, TexelWorld, StepHalfHeight, AbsMax, F);
+			Far, FootprintU, FootprintV, 1.0f, StepHalfHeight, AbsMax, F);
 
 		// TRAPEZOID, NOT MIDPOINT. Sampling the boundaries makes sigma linear
 		// across the step, which makes optical depth quadratic and the crossings

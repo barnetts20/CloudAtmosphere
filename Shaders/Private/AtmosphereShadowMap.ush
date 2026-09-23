@@ -106,6 +106,20 @@
 #define ATMO_SHADOW_LOOKUP_JITTER 1.0f
 #endif
 
+/** Angular warp on cascade 0, as a fraction of a quarter turn: 1 stores the
+ *  disc against the angle from the sub-light point, 0 against the planar
+ *  offset. BAKE AND READ BOTH TAKE IT FROM HERE, and a map read with a warp it
+ *  was not baked with lands every shadow at the wrong radius.
+ *
+ *  WHY. A planar texel covers 1 / cos(angle) of ground along the light, so
+ *  toward the terminator each texel's error is drawn out into a streak along
+ *  the light. At 1 the ground resolution is uniform across the lit hemisphere:
+ *  7 times finer at 85 degrees and 18 at 88, pi/2 coarser under the light.
+ *  The price is bake time: more texels land on the long grazing chords. */
+#ifndef ATMO_SHADOW_DISC_WARP
+#define ATMO_SHADOW_DISC_WARP 1.0f
+#endif
+
 /** Cascade count. Level 0 covers the whole disc; each inner level is sized by
  *  the model to match the radius a layer is drawn to, so shadow resolution steps
  *  up where the field gains a layer. Adding one costs a slice and a case in
@@ -220,6 +234,81 @@ void AtmoShadow_Basis(float3 L, out float3 OutU, out float3 OutV)
 
     OutV = normalize(V);
     OutU = cross(OutV, L);
+}
+
+/** The warp's angle: how far round the sphere the edge of the disc map sits. */
+float AtmoShadow_WarpAngle()
+{
+    return saturate(ATMO_SHADOW_DISC_WARP) * (0.5f * PI);
+}
+
+/** Cascade 0's map coordinate, [-1, 1] across the map, to its plane offset over
+ *  the extent. Radius sin(A S) / sin(A) at map radius S: the planar projection
+ *  of a sphere sampled evenly in angle. Past S = 1 it holds the edge, which is
+ *  outside the shell. */
+float2 AtmoShadow_DiscToPlane(float2 Q)
+{
+    const float A = AtmoShadow_WarpAngle();
+    const float S = length(Q);
+
+    if (A < 1e-3f)
+    {
+        return Q;
+    }
+
+    if (S < 1e-6f)
+    {
+        return Q * (A / sin(A));
+    }
+
+    return Q * (sin(A * min(S, 1.0f)) / (S * sin(A)));
+}
+
+/** The inverse: plane offset over the extent to cascade 0's map coordinate. */
+float2 AtmoShadow_PlaneToDisc(float2 P)
+{
+    const float A = AtmoShadow_WarpAngle();
+    const float R = length(P);
+
+    if (A < 1e-3f)
+    {
+        return P;
+    }
+
+    if (R < 1e-6f)
+    {
+        return P * (sin(A) / A);
+    }
+
+    return P * (asin(min(R * sin(A), 1.0f)) / (A * R));
+}
+
+/** The plane offset one map-coordinate step moves along each map axis, over
+ *  the extent: the columns of AtmoShadow_DiscToPlane's Jacobian. Radial and
+ *  tangential scales differ, so a texel's footprint is an ellipse. */
+void AtmoShadow_DiscJacobian(float2 Q, out float2 OutX, out float2 OutY)
+{
+    const float A = AtmoShadow_WarpAngle();
+    const float S = length(Q);
+
+    if (A < 1e-3f)
+    {
+        OutX = float2(1.0f, 0.0f);
+        OutY = float2(0.0f, 1.0f);
+        return;
+    }
+
+    const float InvSinA = 1.0f / sin(A);
+    const float Clamped = min(S, 1.0f);
+
+    const float Radial = A * cos(A * Clamped) * InvSinA;
+    const float Tangential = (S < 1e-6f) ? A * InvSinA : sin(A * Clamped) / S * InvSinA;
+
+    const float2 N = (S < 1e-6f) ? float2(1.0f, 0.0f) : Q / S;
+    const float Cross = Radial - Tangential;
+
+    OutX = float2(Tangential + Cross * N.x * N.x, Cross * N.x * N.y);
+    OutY = float2(Cross * N.x * N.y, Tangential + Cross * N.y * N.y);
 }
 
 /** Centre of a cascade in the map plane, snapped to its own texel grid. Level 0
@@ -341,7 +430,10 @@ float AtmoShadow_TauSlice(
 	float BlurWorld,
 	bool bHasOccluders)
 {
-    const float2 UV = (Plane - Centre) / Extent * 0.5f + 0.5f;
+	// Cascade 0 is stored warped; see ATMO_SHADOW_DISC_WARP.
+    const float2 Relative = (Plane - Centre) / Extent;
+
+    const float2 UV = ((Level == 0) ? AtmoShadow_PlaneToDisc(Relative) : Relative) * 0.5f + 0.5f;
 
     const float2 InvSize = 1.0f / MapSize;
 
@@ -384,6 +476,8 @@ float AtmoShadow_TauSlice(
 	// The blur width is a distance, so it becomes a UV radius against this
 	// level's own half-width. Floored at half a texel: below that the taps land
 	// inside one texel and the bilinear ramp is the only edge there is anyway.
+	// On cascade 0 the radius ignores the warp, so the blur narrows toward the
+	// terminator by the warp's radial scale.
     const float OccluderRadius = max(
 		BlurWorld / max(2.0f * Extent, 1e-4f), 0.5f * InvSize.x);
 

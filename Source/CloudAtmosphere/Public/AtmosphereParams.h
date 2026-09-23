@@ -440,15 +440,21 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 
 	// -- Coverage and type ------------------------------------------------------
 
-	/** Global coverage. 0.5 leaves the sim's weather as it is; lower clears the
-	 *  sky, higher closes it. */
+	/** How much of the sim's cloud field counts as cloud. Sets a threshold at
+	 *  1 - CloudCover on the scaled field: lower keeps only the cores of the
+	 *  systems, higher spreads them. Clear sky stays clear at any value. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float CloudCover = 0.5f;
 
-	/** How strongly the sim's cloud field maps to coverage. Raise it until the
-	 *  sim's cloudiest systems read as overcast. */
+	/** Scales the sim's cloud field, whose typical range is 0 to 0.4, onto about
+	 *  0 to 1 before the threshold. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float CoverageGain = 2.5f;
+
+	/** Half-width of the threshold on the scaled field: how far a system's edge
+	 *  ramps from clear to fully covered. Lower is crisper. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "1.0"))
+	float CoverageSoftness = 0.2f;
 
 	/** Depth of a stratiform column as a fraction of a towering one. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
@@ -931,6 +937,13 @@ struct CLOUDATMOSPHERE_API FAtmosphereNoiseLayerParams
 	/** Fade width, added to FadeNear. The layer is skipped entirely beyond. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float FadeSpan = 0.5f;
+
+	/** The noise's mean value, what the terrestrial detail layer settles to as
+	 *  it fades, so distant cloud keeps the same average erosion. PITFALL: if
+	 *  cloud thickens or thins across the fade band, this is off from the
+	 *  volume's real mean. Terrestrial detail only. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float FadeMean = 0.6f;
 
 	/** How far the layer's shapes carry material across a band boundary; at 1 a
 	 *  full-strength shape moves the boundary by about its own width. SIGNED:

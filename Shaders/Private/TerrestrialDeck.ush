@@ -29,8 +29,11 @@
 // both are exact per column, which the entry search and the empty-air early-out
 // spend. Outside the slab density is exactly zero.
 //
-// NO DISTANCE LEVEL OF DETAIL. Both noise layers apply at every range, so a
-// sample's density depends only on where it is.
+// THE DETAIL LAYER FADES WITH DISTANCE, TO ITS MEAN. It erodes, so dropping it
+// would thicken distant cloud; settling on the noise's mean value keeps the
+// average erosion and removes only the grain. The structure layer draws the
+// cloud shapes and applies at every range. The shadow bake keeps full detail,
+// band-limited by its subsamples, so its mean matches either way.
 //
 // UNITS. CloudBase and CloudThickness are atmosphere fractions; every other
 // height is a multiple of CloudThickness. Space is planet-local, spin axis on
@@ -106,6 +109,7 @@ struct TRFieldParams
 	 *  maps to coverage. */
     float CloudCover;
     float CoverageGain;
+    float CoverageSoftness;
 
 	/** Depth of a stratiform column as a fraction of a towering one. */
     float StratusDepth;
@@ -165,6 +169,9 @@ struct TRFieldParams
     float DetailErosion;
     float DetailFlowInherit;
 
+	/** The detail noise's mean value, which it settles to as it fades. */
+    float DetailFadeMean;
+
 	// -- Derived -------------------------------------------------------------
 
 	/** Atmosphere thickness in world units: the one absolute length here. */
@@ -193,8 +200,9 @@ struct TRFieldParams
 
 	// -- Per sample ----------------------------------------------------------
 
-	/** Per-layer level of detail, written per sample through the march's shared
-	 *  interface. UNREAD ON THIS FIELD. */
+	/** Per-layer level of detail, 1 near and 0 far, written per sample by the
+	 *  march; left at 1 by TR_BuildField, which is what the bake reads. Only
+	 *  DetailFade is read here. */
     float StructureFade;
     float DetailFade;
 };
@@ -205,13 +213,13 @@ struct TRFieldParams
  *
  *    CloudProfile      CloudBase, CloudThickness, SurfaceSoftness, CeilingFalloff
  *    CloudCurves       TopCurve, BottomCurve, CloudSlope, WarpStretch
- *    CloudCoverage     CloudCover, CoverageGain, StratusDepth, ErosionGain
+ *    CloudCoverage     CloudCover, CoverageGain, CoverageSoftness, ErosionGain
  *    CloudType         TypeBias, TypeAscent, TypeTropical, ErosionAscent
- *    CloudLid          PressureScale, CeilingDepth, CeilingPressure, WarpShift
+ *    CloudLid          PressureScale, CeilingDepth, CeilingPressure, StratusDepth
  *    CloudLift         BaseTropical, BasePressure, AltitudeGain, AltitudeLift
- *    CloudMotion       DriftAngle, NoisePhase, -, RotationWeight
+ *    CloudMotion       DriftAngle, NoisePhase, WarpShift, RotationWeight
  *    <Layer>NoiseWeights  Worley rung weights, layer amount
- *    <Layer>Sampling   Scale, Aspect, Erosion, -
+ *    <Layer>Sampling   Scale, Aspect, Erosion, FadeMean
  *    <Layer>Warp       FlowInherit, -, FadeNear, FadeSpan
  *
  *  RotationWeight is the planet's own rotation; the sim runs in the rotating
@@ -251,7 +259,7 @@ TRFieldParams TR_BuildField(
 
     F.CloudCover = CloudCoverage.x;
     F.CoverageGain = CloudCoverage.y;
-    F.StratusDepth = saturate(CloudCoverage.z);
+    F.CoverageSoftness = max(CloudCoverage.z, 1e-3f);
     F.ErosionGain = max(CloudCoverage.w, 0.0f);
 
     F.TypeBias = CloudType.x;
@@ -262,7 +270,7 @@ TRFieldParams TR_BuildField(
     F.PressureScale = max(CloudLid.x, 1e-6f);
     F.CeilingDepth = max(CloudLid.y, 1e-3f);
     F.CeilingPressure = clamp(CloudLid.z, -0.99f, 0.99f);
-    F.WarpShift = CloudLid.w;
+    F.StratusDepth = saturate(CloudLid.w);
 
     F.BaseTropical = CloudLift.x;
     F.BasePressure = CloudLift.y;
@@ -271,6 +279,7 @@ TRFieldParams TR_BuildField(
 
     F.DriftAngle = CloudMotion.x;
     F.NoisePhase = CloudMotion.y;
+    F.WarpShift = CloudMotion.z;
     F.RotationWeight = CloudMotion.w;
 
     F.StructureNoiseWeights = StructureNoiseWeights;
@@ -281,6 +290,7 @@ TRFieldParams TR_BuildField(
     F.DetailNoiseWeights = DetailNoiseWeights;
     F.DetailScale = DetailSampling.x;
     F.DetailErosion = saturate(DetailSampling.z);
+    F.DetailFadeMean = saturate(DetailSampling.w);
     F.DetailFlowInherit = DetailWarp.x;
 
     F.Thickness = max(PlanetRadius * HeightScale, 1e-4f);
@@ -391,9 +401,16 @@ struct TRColumn
 
 /** The column at a spun direction N from its flow sample.
  *
- *  COVERAGE IS THE SIM'S CLOUD FIELD, scaled and offset. CoverageGain maps the
- *  field's typical range onto [0, 1] and CloudCover shifts the whole sky; 0.5
- *  leaves the sim's weather as it is.
+ *  COVERAGE IS THE SIM'S CLOUD FIELD, THRESHOLDED. CoverageGain maps the
+ *  field's typical range onto [0, 1]; CloudCover sets the threshold, at 1 -
+ *  CloudCover, and CoverageSoftness the width either side. A threshold rather
+ *  than an offset: clear sky stays clear at any CloudCover, and a system keeps
+ *  a defined edge whatever the global amount. Inside it coverage reaches 1 and
+ *  erosion breaks it up.
+ *
+ *  PITFALL: an additive CloudCover lifts every column by the same amount, so
+ *  raising it to recover cloud flattens the sim's contrast until the noise,
+ *  not the weather, decides where the gaps are.
  *
  *  TYPE IS HOW HARD THE AIR IS RISING, plus the tropics. A towering column is
  *  CloudThickness deep, a stratiform one StratusDepth of that; the pressure lid
@@ -430,7 +447,10 @@ TRColumn TR_ColumnFromFlow(
     Col.Ascent = Weather.x;
     Col.Altitude = saturate(F.AltitudeGain * Weather.z);
 
-    Col.Coverage = saturate(F.CloudCover * 2.0f - 1.0f + F.CoverageGain * Weather.y);
+    const float Threshold = 1.0f - F.CloudCover;
+
+    Col.Coverage = smoothstep(
+		Threshold - F.CoverageSoftness, Threshold + F.CoverageSoftness, F.CoverageGain * Weather.y);
 
     Col.Type = saturate(F.TypeBias + F.TypeAscent * Weather.x + F.TypeTropical * Tropical);
 
@@ -713,11 +733,20 @@ float4 TR_Density(
 
     if (F.DetailNoiseWeights.w > 0.0f && Density > 0.0f)
     {
-        const float Detail = TR_SampleLayer(
-			DetailVolume, DetailSampler, N,
-			DisplacementA, DisplacementB, F.DetailFlowInherit,
-			F.DetailScale + (Height - Shift) * F.DetailVertical / Stretch,
-			F.DetailNoiseWeights, F);
+		// Faded toward the mean rather than off: see the header. Past the far
+		// edge the fetch is skipped.
+        float Detail = F.DetailFadeMean;
+
+        BRANCH
+
+        if (F.DetailFade > 0.0f)
+        {
+            Detail = lerp(F.DetailFadeMean, TR_SampleLayer(
+				DetailVolume, DetailSampler, N,
+				DisplacementA, DisplacementB, F.DetailFlowInherit,
+				F.DetailScale + (Height - Shift) * F.DetailVertical / Stretch,
+				F.DetailNoiseWeights, F), F.DetailFade);
+        }
 
 		// Wispy at the base, where the noise itself erodes; billowy toward the
 		// top, where its inverse does and rounded lobes remain.
