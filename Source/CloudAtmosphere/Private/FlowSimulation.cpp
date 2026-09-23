@@ -32,6 +32,7 @@ struct FFlowSimResources
 	FRDGTextureRef Rhs = nullptr;
 	FRDGTextureRef Spectrum[2] = { nullptr, nullptr };
 	FRDGTextureRef Cloud[2] = { nullptr, nullptr };
+	FRDGTextureRef Noise[2] = { nullptr, nullptr };
 	FRDGTextureRef RowMean = nullptr;
 	FRDGTextureRef PhiEq = nullptr;
 	FRDGTextureRef GlobalMean = nullptr;
@@ -47,6 +48,8 @@ struct FFlowSimResources
 
 	FRDGTextureRef CloudSource() const { return Cloud[CloudCurrent]; }
 	FRDGTextureRef CloudDest() const { return Cloud[1 - CloudCurrent]; }
+	FRDGTextureRef NoiseSource() const { return Noise[CloudCurrent]; }
+	FRDGTextureRef NoiseDest() const { return Noise[1 - CloudCurrent]; }
 	void SwapCloud() { CloudCurrent = 1 - CloudCurrent; }
 };
 
@@ -114,6 +117,9 @@ namespace
 		P.SimCondensationRate = Params.CondensationRate;
 		P.SimEvaporationRate = Params.EvaporationRate;
 		P.SimCloudDecay = 1.0f / FMath::Max(Params.CloudLifetime, 1e-3f);
+
+		P.SimNoiseDriftRate = Params.NoiseDriftRate;
+		P.SimNoiseResetTime = FMath::Max(Params.NoiseResetTime, 1e-3f);
 
 		P.SimFilterLatitude = Params.FilterLatitude;
 		P.SimFilterMaxHalfWidth = Params.FilterMaxHalfWidth;
@@ -188,6 +194,8 @@ void FFlowSimulation::Release_RenderThread()
 	PooledSpectrum[1].SafeRelease();
 	PooledCloud[0].SafeRelease();
 	PooledCloud[1].SafeRelease();
+	PooledNoise[0].SafeRelease();
+	PooledNoise[1].SafeRelease();
 	PooledRowMean.SafeRelease();
 	PooledPhiEq.SafeRelease();
 	PooledGlobalMean.SafeRelease();
@@ -251,6 +259,13 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 	PooledCloud[0] = AllocatePooledTexture(FaceDesc, TEXT("FlowSim.CloudA"));
 	PooledCloud[1] = AllocatePooledTexture(FaceDesc, TEXT("FlowSim.CloudB"));
 
+	// Noise displacement, xyz; phase A in slices [0, L), phase B in [L, 2L).
+	const FRDGTextureDesc NoiseDesc = FRDGTextureDesc::Create2DArray(
+		Size, PF_A32B32G32R32F, FClearValueBinding::Black, Flags, (uint16)(2 * Slices));
+
+	PooledNoise[0] = AllocatePooledTexture(NoiseDesc, TEXT("FlowSim.NoiseA"));
+	PooledNoise[1] = AllocatePooledTexture(NoiseDesc, TEXT("FlowSim.NoiseB"));
+
 	// (row, layer).
 	const FIntPoint RowSize(Params.GridSize.Y, Slices);
 
@@ -293,6 +308,7 @@ void FFlowSimulation::AddInitPass(FRDGBuilder& GraphBuilder, const FFlowSimParam
 	P->SimFaceUAV = GraphBuilder.CreateUAV(R.Source());
 	P->SimPhiUAV = GraphBuilder.CreateUAV(R.Phi);
 	P->SimCloudUAV = GraphBuilder.CreateUAV(R.CloudSource());
+	P->SimNoiseUAV = GraphBuilder.CreateUAV(R.NoiseSource());
 
 	AddSimPass<FFlowSimInitStateCS>(GraphBuilder, TEXT("FlowSim.InitState"), P, GroupCount2D(Params.GridSize));
 }
@@ -314,6 +330,7 @@ void FFlowSimulation::AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimPa
 	P->SimFaceUAV = GraphBuilder.CreateUAV(R.Source());
 	P->SimPhiUAV = GraphBuilder.CreateUAV(R.Phi);
 	P->SimCloudUAV = GraphBuilder.CreateUAV(R.CloudSource());
+	P->SimNoiseUAV = GraphBuilder.CreateUAV(R.NoiseSource());
 
 	AddSimPass<FFlowSimRestoreCS>(GraphBuilder, TEXT("FlowSim.Restore"), P, GroupCount2D(Params.GridSize));
 }
@@ -378,6 +395,7 @@ void FFlowSimulation::AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowS
 	P->SimPhiSRV = GraphBuilder.CreateSRV(R.Phi);
 	P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
 	P->SimCloudSRV = GraphBuilder.CreateSRV(R.CloudSource());
+	P->SimNoiseSRV = GraphBuilder.CreateSRV(R.NoiseSource());
 	P->SimCentreUAV = GraphBuilder.CreateUAV(R.Centre);
 	P->SimExplicitUAV = GraphBuilder.CreateUAV(R.Explicit);
 	P->SimOutputUAV = GraphBuilder.CreateUAV(R.Output);
@@ -406,9 +424,11 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 		P->SimPhiEqSRV = GraphBuilder.CreateSRV(R.PhiEq);
 		P->SimGlobalMeanSRV = GraphBuilder.CreateSRV(R.GlobalMean);
 		P->SimCloudSRV = GraphBuilder.CreateSRV(R.CloudSource());
+		P->SimNoiseSRV = GraphBuilder.CreateSRV(R.NoiseSource());
 		P->SimFaceUAV = GraphBuilder.CreateUAV(R.Dest());
 		P->SimPhiStarUAV = GraphBuilder.CreateUAV(R.PhiStar);
 		P->SimCloudUAV = GraphBuilder.CreateUAV(R.CloudDest());
+		P->SimNoiseUAV = GraphBuilder.CreateUAV(R.NoiseDest());
 
 		AddSimPass<FFlowSimPredictCS>(GraphBuilder, TEXT("FlowSim.Predict"), P, Groups2D);
 	}
@@ -498,6 +518,7 @@ void FFlowSimulation::AddDebugPass(FRDGBuilder& GraphBuilder, const FFlowSimPara
 	P->SimRhsSRV = GraphBuilder.CreateSRV(R.Rhs);
 	P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
 	P->SimCloudSRV = GraphBuilder.CreateSRV(R.CloudSource());
+	P->SimNoiseSRV = GraphBuilder.CreateSRV(R.NoiseSource());
 	P->SimDebugUAV = GraphBuilder.CreateUAV(R.Debug);
 
 	AddSimPass<FFlowSimDebugVisCS>(GraphBuilder, TEXT("FlowSim.DebugVis"), P, Groups);
@@ -528,6 +549,8 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	R.Spectrum[1] = GraphBuilder.RegisterExternalTexture(PooledSpectrum[1]);
 	R.Cloud[0] = GraphBuilder.RegisterExternalTexture(PooledCloud[0]);
 	R.Cloud[1] = GraphBuilder.RegisterExternalTexture(PooledCloud[1]);
+	R.Noise[0] = GraphBuilder.RegisterExternalTexture(PooledNoise[0]);
+	R.Noise[1] = GraphBuilder.RegisterExternalTexture(PooledNoise[1]);
 	R.RowMean = GraphBuilder.RegisterExternalTexture(PooledRowMean);
 	R.PhiEq = GraphBuilder.RegisterExternalTexture(PooledPhiEq);
 	R.GlobalMean = GraphBuilder.RegisterExternalTexture(PooledGlobalMean);
@@ -575,9 +598,14 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 		bInitialised = true;
 	}
 
+	// Each substep at its own time: the forcing's phases and the noise resets
+	// are clocked by it.
 	for (int32 Step = 0; Step < NumSubsteps; ++Step)
 	{
-		AddSubstep(GraphBuilder, Params, R);
+		FFlowSimParams StepParams = Params;
+		StepParams.Time = Params.Time + (float)Step * Params.DeltaTime;
+
+		AddSubstep(GraphBuilder, StepParams, R);
 	}
 
 	// Final reduce and reconstruct, so the texture the material reads matches

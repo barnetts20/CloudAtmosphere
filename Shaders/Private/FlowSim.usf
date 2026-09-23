@@ -108,6 +108,12 @@ float SimCondensationRate;
 float SimEvaporationRate;
 float SimCloudDecay;
 
+/** Noise coordinates: the solid-body drift the noise carries on its own,
+ *  radians per unit time, and the sim time a displacement accumulates before it
+ *  resets. Phase B runs half a period behind phase A. */
+float SimNoiseDriftRate;
+float SimNoiseResetTime;
+
 /** Cloud fraction below which the formation ascent fades to zero instead of
  *  being divided out, so the ratio stays smooth where cloud is thin. */
 #ifndef SIM_CLOUD_ASCENT_FLOOR
@@ -160,6 +166,12 @@ RWTexture2DArray<float> SimRhsUAV;
 Texture2DArray<float2> SimCloudSRV;
 RWTexture2DArray<float2> SimCloudUAV;
 
+/** Noise displacement at centres, xyz; ping-pong with the cloud. Phase A in
+ *  slices [0, L), phase B in [L, 2L). The noise is sampled at the centre plus
+ *  its displacement, turned about the axis by the drift angle. */
+Texture2DArray<float4> SimNoiseSRV;
+RWTexture2DArray<float4> SimNoiseUAV;
+
 /** Row spectra of the Helmholtz problem, (wavenumber, row, layer), complex.
  *  Two textures: the column solve reads one and writes the other. */
 Texture2DArray<float2> SimSpectrumSRV;
@@ -178,7 +190,8 @@ RWTexture2D<float> SimPhiEqUAV;
 Texture2D<float> SimGlobalMeanSRV;
 RWTexture2D<float> SimGlobalMeanUAV;
 
-/** The texture the material samples. Slices [0, L) are flow, [L, 2L) weather. */
+/** The texture the material samples. Slices [0, L) are flow, [L, 2L) weather,
+ *  [2L, 3L) noise phase A and [3L, 4L) noise phase B. */
 RWTexture2DArray<float4> SimOutputUAV;
 
 /** Band-limited tiling noise, read as a forcing streamfunction. */
@@ -343,6 +356,27 @@ float2 SimSampleBounded(Texture2DArray<float2> Field, float2 Grid, uint Layer)
     const float2 D = SimLoad2(Field, Base + int2(1, 1), Layer);
 
     return clamp(SimSampleCubic2(Field, Grid, Layer), min(min(A, B), min(C, D)), max(max(A, B), max(C, D)));
+}
+
+/** Rotates about the spin axis. */
+float3 SimRotateZ(float3 V, float Angle)
+{
+    float S, C;
+    sincos(Angle, S, C);
+
+    return float3(V.x * C - V.y * S, V.x * S + V.y * C, V.z);
+}
+
+/** Whether a noise phase resets during the step starting at SimTime. Phase 1
+ *  runs half a period behind phase 0. */
+bool SimNoiseResets(uint Phase)
+{
+    const float Offset = 0.5f * (float) Phase;
+
+    const float Before = SimTime / SimNoiseResetTime + Offset;
+    const float After = (SimTime + SimDeltaTime) / SimNoiseResetTime + Offset;
+
+    return floor(After) != floor(Before);
 }
 
 /** The formation ascent from a tracer sample, in [0, 1]: y over x, faded to
@@ -593,6 +627,8 @@ void MainInitStateCS(uint3 Id : SV_DispatchThreadID)
     SimFaceUAV[int3(C, Layer)] = float2(SimZonalRate(Mu, Layer) * SimRowCos(C.y), 0.0f);
     SimPhiUAV[int3(C, Layer)] = SimPhiEqSRV.Load(int3(C.y, Layer, 0));
     SimCloudUAV[int3(C, Layer)] = float2(0.0f, 0.0f);
+    SimNoiseUAV[int3(C, Layer)] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    SimNoiseUAV[int3(C, Layer + (uint) SimGridSize.z)] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -665,7 +701,9 @@ void MainReduceGlobalCS(uint3 Id : SV_DispatchThreadID)
  *
  *  WEATHER SLICE: (W, cloud, ascent, spare). W is -divergence soft-saturated,
  *  positive where air converges and rises; cloud is the tracer, in [0, 1];
- *  ascent is the W the cloud formed at, in [0, 1], zero where there is none. */
+ *  ascent is the W the cloud formed at, in [0, 1], zero where there is none.
+ *
+ *  NOISE SLICES: phase A's displacement, then phase B's, xyz, in radians. */
 [numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
 void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
 {
@@ -714,6 +752,12 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
 
     SimOutputUAV[int3(C, Layer + (uint) SimGridSize.z)] = float4(
 		SimVerticalMotion(Divergence), Cloud.x, SimCloudAscent(Cloud), 0.0f);
+
+    SimOutputUAV[int3(C, Layer + 2u * (uint) SimGridSize.z)] =
+		SimNoiseSRV.Load(int4(C.x, C.y, Layer, 0));
+
+    SimOutputUAV[int3(C, Layer + 3u * (uint) SimGridSize.z)] =
+		SimNoiseSRV.Load(int4(C.x, C.y, Layer + (uint) SimGridSize.z, 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -739,6 +783,11 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
  *  draws the trailing shapes W alone cannot. New cloud adds its W to the
  *  formation ascent in proportion to how much condensed; losses remove both
  *  channels in proportion, so decay leaves the ascent where it was.
+ *
+ *  Noise: each phase's displacement at the departure point, carried to this
+ *  centre and turned by the drift over the step, so under a flow that is pure
+ *  drift it stays zero. A phase resets to zero at the step its clock wraps,
+ *  which is where the reader's weight for it is zero.
  *
  *  DRAG ON THE EDDY PART OF u AND ALL OF v. The zonal mean of u belongs to the
  *  nudge, and dragging it too makes the two settle at a compromise below the
@@ -819,7 +868,9 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
         const SimTrajectory T = SimBacktrace(P, Centre.xyz - P * dot(P, Centre.xyz), Dt);
 
-        const float Departed = SimSampleCubic4(SimExplicitSRV, SimDirectionToGrid(T.Departure), Layer).w;
+        const float2 DepartureGrid = SimDirectionToGrid(T.Departure);
+
+        const float Departed = SimSampleCubic4(SimExplicitSRV, DepartureGrid, Layer).w;
 
         const float Phi = SimPhiSRV.Load(int4(C.x, C.y, Layer, 0));
         const float PhiEq = SimPhiEqSRV.Load(int3(C.y, Layer, 0));
@@ -833,7 +884,7 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
         SimPhiStarUAV[int3(C, Layer)] = PhiStar;
 
-        const float2 Cloud = SimSampleBounded(SimCloudSRV, SimDirectionToGrid(T.Departure), Layer);
+        const float2 Cloud = SimSampleBounded(SimCloudSRV, DepartureGrid, Layer);
         const float W = SimVerticalMotion(Centre.w);
 
         const float Formed = SimCondensationRate * max(W, 0.0f) * (1.0f - Cloud.x);
@@ -843,6 +894,27 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
         const float QA = Cloud.y + Dt * (Formed * max(W, 0.0f) - Loss * Cloud.y);
 
         SimCloudUAV[int3(C, Layer)] = float2(Q, clamp(QA, 0.0f, Q));
+
+		[unroll]
+        for (uint Phase = 0; Phase < 2; Phase++)
+        {
+            const uint Slice = Layer + Phase * (uint) SimGridSize.z;
+
+            float3 Displacement = float3(0.0f, 0.0f, 0.0f);
+
+            if (!SimNoiseResets(Phase))
+            {
+				// Normalised: the coordinate is a direction, and interpolation
+				// and the rotation both drift it off the sphere.
+                const float3 Coordinate = normalize(SimRotateZ(
+					SimSampleCubic4(SimNoiseSRV, DepartureGrid, Slice).xyz + T.Departure,
+					SimNoiseDriftRate * Dt));
+
+                Displacement = Coordinate - P;
+            }
+
+            SimNoiseUAV[int3(C, Slice)] = float4(Displacement, 0.0f);
+        }
     }
 }
 
@@ -1226,8 +1298,11 @@ void MainRestoreCS(uint3 Id : SV_DispatchThreadID)
     SimFaceUAV[int3(Id)] = float2(SimRestoreBuffer[Index], SimRestoreBuffer[Total + Index]);
     SimPhiUAV[int3(Id)] = SimRestoreBuffer[2 * Total + Index];
 
-	// Not in the snapshot: cloud re-forms from the flow within a lifetime.
+	// Not in the snapshot: cloud re-forms from the flow within a lifetime, and
+	// the noise displacements within a reset period.
     SimCloudUAV[int3(Id)] = float2(0.0f, 0.0f);
+    SimNoiseUAV[int3(Id)] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    SimNoiseUAV[int3(Id.xy, Id.z + (uint) SimGridSize.z)] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -1256,6 +1331,7 @@ int2 SimDebugSize;
 #define SIM_DEBUG_FROUDE      8
 #define SIM_DEBUG_CLOUD       9
 #define SIM_DEBUG_CLOUD_ASCENT 10
+#define SIM_DEBUG_NOISE       11
 
 /** Diverging ramp, blue negative, red positive, dark at zero so a collapsed
  *  field reads as an empty frame rather than a plausible mid-grey. */
@@ -1349,6 +1425,12 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
 		// The W the cloud formed at. Bright in updraughts and in what drifts
 		// away from them; dark in cloud grown under weak lift.
         Value = SimCloudAscent(SimCloudSRV.Load(int4(C.x, C.y, Layer, 0)));
+    }
+    else if (SimDebugMode == SIM_DEBUG_NOISE)
+    {
+		// Phase A's displacement: grows from zero after each reset, fastest
+		// where the flow departs most from the drift.
+        Value = length(SimNoiseSRV.Load(int4(C.x, C.y, Layer, 0)).xyz);
     }
 
     SimDebugUAV[int2(Id.xy)] = float4(SimSignedRamp(Value / max(SimDebugScale, 1e-6f)), 1.0f);

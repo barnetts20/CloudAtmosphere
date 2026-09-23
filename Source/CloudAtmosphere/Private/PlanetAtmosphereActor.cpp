@@ -197,18 +197,15 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     TerrestrialStructureLayer.Scale = 6.0f;
     TerrestrialStructureLayer.Aspect = 2.0f;
     TerrestrialStructureLayer.Erosion = 0.85f;
-    TerrestrialStructureLayer.FlowInherit = 0.6f;
-    TerrestrialStructureLayer.ShearInherit = 0.4f;
+    TerrestrialStructureLayer.FlowInherit = 1.0f;
     TerrestrialStructureLayer.FadeNear = 0.3f;
     TerrestrialStructureLayer.FadeSpan = 0.6f;
-    TerrestrialStructureLayer.bCrossfade = true;
 
     // THE DETAIL LAYER ERODES EDGES: wispy bases, billowy tops.
     TerrestrialDetailLayer.Scale = 30.0f;
     TerrestrialDetailLayer.Aspect = 1.0f;
     TerrestrialDetailLayer.Erosion = 0.6f;
-    TerrestrialDetailLayer.FlowInherit = 0.3f;
-    TerrestrialDetailLayer.ShearInherit = 0.3f;
+    TerrestrialDetailLayer.FlowInherit = 1.0f;
     TerrestrialDetailLayer.FadeSpan = 0.3f;
 
     TerrestrialGeometry.HeightScale = 0.2f;
@@ -728,36 +725,40 @@ struct FTerrestrialFieldPins
     FLinearColor DetailNoiseWeights;
     FLinearColor DetailSampling;
     FLinearColor DetailWarp;
-    FLinearColor CloudDrift;
 };
 
-/** The westerly jet's angular rate: the three-cell profile's peak for the sim
- *  layer the deck reads. */
-static float TerrestrialJetRate(const UFlowSimConfig* Config)
+/** The sim's noise drift angle and phase A's position in its reset cycle, at
+ *  sim time Time. Reduced in double precision, so the shader's trig and its
+ *  crossfade weight stay exact however long the sim has run. THE PHASE MUST BE
+ *  THE SIM'S OWN: it resets each displacement where this puts its weight at
+ *  zero. */
+static void NoiseClock(const UFlowSimConfig* Config, float Time, float& OutDriftAngle, float& OutPhase)
 {
+    OutDriftAngle = 0.0f;
+    OutPhase = 0.0f;
+
     if (!Config)
     {
-        return 0.0f;
+        return;
     }
 
-    const float Scale = Config->LayerProfiles.Num() > 0 ? Config->LayerProfiles[0].JetScale : 1.0f;
+    const double T = (double)Time;
 
-    return Config->JetStrength * Scale;
-}
+    OutDriftAngle = (float)FMath::Fmod((double)Config->GetNoiseDriftRate() * T, 2.0 * UE_DOUBLE_PI);
 
-/** A drift angle wrapped to one turn in double precision, so the shader's trig
- *  stays exact however long the sim has run. */
-static float WrappedDriftAngle(float Drift, float JetRate, float Time)
-{
-    return (float)FMath::Fmod((double)Drift * (double)JetRate * (double)Time, 2.0 * UE_DOUBLE_PI);
+    const double Cycles = T / (double)Config->GetNoiseResetTime();
+    OutPhase = (float)(Cycles - FMath::FloorToDouble(Cycles));
 }
 
 static FTerrestrialFieldPins PackTerrestrialField(
     const FTerrestrialProfileParams& P, const FTerrestrialMotionParams& M,
     const FAtmosphereNoiseLayerParams& Structure, const FAtmosphereNoiseLayerParams& Detail,
-    float JetRate, float Time)
+    const UFlowSimConfig* SimConfig, float Time)
 {
     FTerrestrialFieldPins Out;
+
+    float DriftAngle, NoisePhase;
+    NoiseClock(SimConfig, Time, DriftAngle, NoisePhase);
 
     Out.CloudProfile = FLinearColor(P.CloudBase, P.CloudThickness, P.SurfaceSoftness, P.CeilingFalloff);
     Out.CloudCurves = FLinearColor(P.TopCurve, P.BottomCurve, P.CloudSlope, P.WarpStretch);
@@ -765,16 +766,16 @@ static FTerrestrialFieldPins PackTerrestrialField(
     Out.CloudType = FLinearColor(P.TypeBias, P.TypeAscent, P.TypeTropical, P.ErosionAscent);
     Out.CloudLid = FLinearColor(P.PressureScale, P.CeilingDepth, P.CeilingPressure, P.WarpShift);
     Out.CloudLift = FLinearColor(P.BaseTropical, P.BasePressure, P.AltitudeGain, P.AltitudeLift);
-    Out.CloudMotion = FLinearColor(M.WarpTime, M.DeepShearRatio, M.CrossfadePeriod, M.RotationWeight);
+    Out.CloudMotion = FLinearColor(DriftAngle, NoisePhase, 0.0f, M.RotationWeight);
 
     const auto Sampling = [](const FAtmosphereNoiseLayerParams& L)
         {
-            return FLinearColor(L.Scale, L.Aspect, L.Erosion, L.bCrossfade ? 1.0f : 0.0f);
+            return FLinearColor(L.Scale, L.Aspect, L.Erosion, 0.0f);
         };
 
     const auto Warp = [](const FAtmosphereNoiseLayerParams& L)
         {
-            return FLinearColor(L.FlowInherit, L.ShearInherit, L.FadeNear, L.FadeSpan);
+            return FLinearColor(L.FlowInherit, 0.0f, L.FadeNear, L.FadeSpan);
         };
 
     Out.StructureNoiseWeights = Structure.NoiseWeights;
@@ -784,10 +785,6 @@ static FTerrestrialFieldPins PackTerrestrialField(
     Out.DetailNoiseWeights = Detail.NoiseWeights;
     Out.DetailSampling = Sampling(Detail);
     Out.DetailWarp = Warp(Detail);
-
-    Out.CloudDrift = FLinearColor(
-        WrappedDriftAngle(M.StructureDrift, JetRate, Time),
-        WrappedDriftAngle(M.DetailDrift, JetRate, Time), 0.0f, 0.0f);
 
     return Out;
 }
@@ -997,7 +994,7 @@ void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
 
     const FTerrestrialFieldPins Pins = PackTerrestrialField(
         TerrestrialProfile, TerrestrialMotion, TerrestrialStructureLayer, TerrestrialDetailLayer,
-        TerrestrialJetRate(Simulation.Config), GetGasGiantTime());
+        Simulation.Config, GetGasGiantTime());
 
     SetVectorChecked(MID_Atmosphere, TEXT("CloudProfile"), Pins.CloudProfile);
     SetVectorChecked(MID_Atmosphere, TEXT("CloudCurves"), Pins.CloudCurves);
@@ -1012,7 +1009,6 @@ void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
     SetVectorChecked(MID_Atmosphere, TEXT("DetailNoiseWeights"), Pins.DetailNoiseWeights);
     SetVectorChecked(MID_Atmosphere, TEXT("DetailSampling"), Pins.DetailSampling);
     SetVectorChecked(MID_Atmosphere, TEXT("DetailWarp"), Pins.DetailWarp);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudDrift"), Pins.CloudDrift);
 
     SetScalarChecked(MID_Atmosphere, TEXT("CloudOpticalDepth"), TerrestrialProfile.CloudOpticalDepth);
 
@@ -1824,7 +1820,7 @@ void APlanetAtmosphereActor::RequestShadowBake(
 
         const FTerrestrialFieldPins Pins = PackTerrestrialField(
             TerrestrialProfile, TerrestrialMotion, TerrestrialStructureLayer, TerrestrialDetailLayer,
-            TerrestrialJetRate(Simulation.Config), Params.Time);
+            Simulation.Config, Params.Time);
 
         Params.CloudProfile = ToVector4(Pins.CloudProfile);
         Params.CloudCurves = ToVector4(Pins.CloudCurves);
@@ -1839,7 +1835,6 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.DetailNoiseWeights = ToVector4(Pins.DetailNoiseWeights);
         Params.DetailSampling = ToVector4(Pins.DetailSampling);
         Params.DetailWarp = ToVector4(Pins.DetailWarp);
-        Params.CloudDrift = ToVector4(Pins.CloudDrift);
 
         Params.CloudOpticalDepth = TerrestrialProfile.CloudOpticalDepth;
         Params.CloudExtinction = ToVector4(TerrestrialCloudMaterial.CloudExtinction);

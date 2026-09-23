@@ -70,7 +70,6 @@ namespace TerrestrialShadow
 		P->DetailNoiseWeights = Params.DetailNoiseWeights;
 		P->DetailSampling = Params.DetailSampling;
 		P->DetailWarp = Params.DetailWarp;
-		P->CloudDrift = Params.CloudDrift;
 
 		P->CloudExtinction = Params.CloudExtinction;
 		P->StormExtinction = Params.StormExtinction;

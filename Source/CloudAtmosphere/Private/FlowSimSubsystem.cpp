@@ -29,7 +29,7 @@ static TAutoConsoleVariable<int32> CVarGasGiantDebugMode(
 	-1,
 	TEXT("Override the config's debug view. -1 uses the config.\n")
 	TEXT("0 Vorticity, 1 Pressure, 2 Speed, 3 East, 4 North,\n")
-	TEXT("5 Helmholtz residual, 6 Zonal profile error, 7 Vertical motion, 8 Froude, 9 Cloud, 10 Cloud formation ascent."),
+	TEXT("5 Helmholtz residual, 6 Zonal profile error, 7 Vertical motion, 8 Froude, 9 Cloud, 10 Cloud formation ascent, 11 Noise displacement."),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarGasGiantDebugLayer(
@@ -618,8 +618,9 @@ bool UFlowSimSubsystem::PrepareTargets() const
 	const int32 W = FlowSimShader::GridLongitude(Config->GridLongitude);
 	const int32 H = FlowSimShader::GridLatitude(Config->GridLatitude);
 
-	// Flow slices then weather slices, one of each per layer.
-	const int32 Slices = 2 * FMath::Clamp(Config->LayerCount, 1, 8);
+	// Flow, weather, noise phase A and noise phase B slices, one of each per
+	// layer.
+	const int32 Slices = 4 * FMath::Clamp(Config->LayerCount, 1, 8);
 
 	// -- Flow target --------------------------------------------------------
 
@@ -754,6 +755,9 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
 	Out.EvaporationRate = FMath::Max(Config->EvaporationRate, 0.0f);
 	Out.CloudLifetime = FMath::Max(Config->CloudLifetime, 1e-3f);
 
+	Out.NoiseDriftRate = Config->GetNoiseDriftRate();
+	Out.NoiseResetTime = Config->GetNoiseResetTime();
+
 	Out.FilterLatitude = FMath::Clamp(Config->FilterLatitude, 0.0f, 1.0f);
 	Out.FilterMaxHalfWidth = FMath::Clamp(Config->FilterMaxHalfWidth, 1, 256);
 
@@ -812,6 +816,8 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
 		case EFlowDebugMode::Froude:      Out.DebugScale = 1.0f; break;
 		case EFlowDebugMode::Cloud:
 		case EFlowDebugMode::CloudAscent: Out.DebugScale = 1.0f; break;
+			// A quarter radian, about the displacement at mid-life.
+		case EFlowDebugMode::NoiseDisplacement: Out.DebugScale = 0.25f; break;
 		default:                          Out.DebugScale = ZetaScale; break;
 		}
 

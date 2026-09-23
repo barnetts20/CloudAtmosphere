@@ -13,9 +13,9 @@
 // must be WRAP on U and CLAMP on V: the grid is a cylinder, and wrapping V joins
 // the north pole to the south.
 //
-// TWO SLICE RANGES. For a sim of L layers the texture holds 2L slices: [0, L)
-// are FLOW, [L, 2L) are WEATHER, layer for layer. L is Slices / 2, so no reader
-// needs it passed.
+// FOUR SLICE RANGES. For a sim of L layers the texture holds 4L slices: [0, L)
+// are FLOW, [L, 2L) WEATHER, [2L, 3L) and [3L, 4L) the two NOISE phases, layer
+// for layer. L is Slices / 4, so no reader needs it passed.
 
 /** What the interpretation functions read. A FIELD SUPPLIES IT RATHER THAN
  *  EMBEDDING THE MATH: the sense of a rotation and the width of the band where
@@ -41,13 +41,14 @@ struct FlowReadParams
 #define FLOW_FIELD_FILTER 1
 #endif
 
-/** Layers the sim runs: half the texture's slices. */
+/** Layers the sim runs: a quarter of the texture's slices, which hold the
+ *  flow, the weather, and the two noise phases, L slices each. */
 float Flow_LayerCount(Texture2DArray FlowField)
 {
     uint Width, Height, Slices, Levels;
     FlowField.GetDimensions(0, Width, Height, Slices, Levels);
 
-    return (float) (Slices / 2u);
+    return (float) (Slices / 4u);
 }
 
 /** Samples one slice of the sim's output by direction. Sampler state must be
@@ -123,6 +124,31 @@ float4 Flow_Sample(Texture2DArray FlowField, SamplerState FlowSampler, float3 N,
 float4 Flow_SampleWeather(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
 {
     return Flow_Sample(FlowField, FlowSampler, N, Layer + Flow_LayerCount(FlowField));
+}
+
+/** Samples a layer's two noise displacements, phase A then phase B: xyz
+ *  offsets from N, in radians, to the coordinate the noise is sampled at. Each
+ *  grows from zero as its phase ages and resets where its crossfade weight is
+ *  zero; see Flow_NoiseWeightA. */
+void Flow_SampleNoise(
+	Texture2DArray FlowField,
+	SamplerState FlowSampler,
+	float3 N,
+	float Layer,
+	out float3 OutA,
+	out float3 OutB)
+{
+    const float L = Flow_LayerCount(FlowField);
+
+    OutA = Flow_Sample(FlowField, FlowSampler, N, Layer + 2.0f * L).xyz;
+    OutB = Flow_Sample(FlowField, FlowSampler, N, Layer + 3.0f * L).xyz;
+}
+
+/** Phase A's crossfade weight from its phase in [0, 1): zero at the reset,
+ *  one half a period later. Phase B's is one minus this. */
+float Flow_NoiseWeightA(float PhaseA)
+{
+    return 1.0f - abs(2.0f * frac(PhaseA) - 1.0f);
 }
 
 /** +1 in the northern hemisphere, -1 in the southern, smoothly through zero at

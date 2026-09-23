@@ -553,41 +553,18 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	float SolvedBaseMin = 0.0f;
 };
 
-/** How the noise travels with the flow. */
+/** How the field moves. The noise itself is carried by the sim: its drift and
+ *  reset period are NoiseDrift and NoiseResetPeriod on the sim config, and each
+ *  layer's FlowInherit is how much of the carried displacement it follows. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FTerrestrialMotionParams
 {
 	GENERATED_BODY()
 
-	/** Duration of the short advection through the flow that carries the noise
-	 *  along the current wind. The history lives in the sim. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float WarpTime = 0.2f;
-
-	/** Length of the deep flow layer's step as a fraction of WarpTime: the
-	 *  vertical wind shear each layer's ShearInherit follows. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float DeepShearRatio = 0.5f;
-
-	/** How long a crossfade phase takes, in simulated time. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
-	float CrossfadePeriod = 10.0f;
-
 	/** The planet's own rotation, radians per unit of simulated time. The sim
 	 *  runs in the rotating frame, so this rotates the sampling position. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float RotationWeight = 0.1f;
-
-	/** Each noise layer's solid-body drift about the spin axis, as a fraction of
-	 *  the westerly jet's angular rate (the sim config's JetStrength times layer
-	 *  0's JetScale). Carries the noise east with the mid-latitude weather
-	 *  instead of leaving it to slide under the warp. Solid-body, so it never
-	 *  shears the noise and needs no reset. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float StructureDrift = 0.5f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float DetailDrift = 0.5f;
 };
 
 /** The clouds' material: fair-weather cloud at type 0, storm cloud at type 1,
@@ -887,8 +864,10 @@ struct CLOUDATMOSPHERE_API FAtmosphereCarveParams
  *
  *  THE TERRESTRIAL FIELD READS A SUBSET. Its structure layer is the cloud shape
  *  coverage erodes, with Erosion as how much the noise shapes it; its detail
- *  layer erodes edges, with Erosion as how hard. Relief and BandMix are gas
- *  giant only. */
+ *  layer erodes edges, with Erosion as how hard. FlowInherit is the share of
+ *  the sim's carried noise displacement the layer follows, 1 moving exactly
+ *  with the flow. Relief, BandMix, ShearInherit and bCrossfade are gas giant
+ *  only: the terrestrial layers always crossfade the sim's two phases. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FAtmosphereNoiseLayerParams
 {

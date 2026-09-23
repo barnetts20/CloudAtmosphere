@@ -19,6 +19,11 @@
 // top. The noise draws every cloud; the sim decides where, how much and what
 // kind.
 //
+// THE SIM CARRIES THE NOISE. It advects two displacement fields with the flow,
+// reset half a period apart, and the noise is sampled through both and
+// crossfaded, so it follows the flow's own trajectories, turning inside
+// vortices, on top of a solid-body drift about the axis.
+//
 // A SLAB BETWEEN TWO SURFACES BOUNDS IT. The base is the condensation level
 // and the top is the column's type-dependent depth under the pressure lid;
 // both are exact per column, which the entry search and the empty-air early-out
@@ -31,27 +36,10 @@
 // height is a multiple of CloudThickness. Space is planet-local, spin axis on
 // Z, positions unit directions except in TR_Density.
 
-/** Warp loop length. Each iteration past the first costs a flow fetch. */
-#ifndef TR_WARP_ITERATIONS
-#define TR_WARP_ITERATIONS 4
-#endif
-
-/** Which sim layer the field reads, and which one supplies the vertical wind
- *  shear. Both must be under the sim's LayerCount: a slice past the end reads
- *  clamped rather than failing, and the shear quietly vanishes. */
+/** Which sim layer the field reads. Must be under the sim's LayerCount: a
+ *  slice past the end reads clamped rather than failing. */
 #ifndef TR_FLOW_LAYER
 #define TR_FLOW_LAYER 0
-#endif
-
-#ifndef TR_DEEP_FLOW_LAYER
-#define TR_DEEP_FLOW_LAYER 1
-#endif
-
-/** How far a crossfade phase runs its advection ramp, as a multiple of the
- *  authored warp displacement. 2 so the mean over a cycle is the authored
- *  amount. */
-#ifndef TR_CROSSFADE_SPAN
-#define TR_CROSSFADE_SPAN 2.0f
 #endif
 
 /** How much of the density the detail layer can erode at full DetailErosion.
@@ -158,28 +146,24 @@ struct TRFieldParams
 	 *  the entry search's cone angle. */
     float CloudSlope;
 
-    float WarpTime;
-    float DeepShearRatio;
     float RotationWeight;
 
-	/** Worley rung weights in xyz, the layer's amount in w. */
+	/** The noise's solid-body drift about the spin axis, radians, wrapped, and
+	 *  noise phase A's position in its reset cycle, [0, 1). */
+    float DriftAngle;
+    float NoisePhase;
+
+	/** Worley rung weights in xyz, the layer's amount in w. FlowInherit is the
+	 *  share of the sim's noise displacement the layer follows. */
     float4 StructureNoiseWeights;
     float StructureScale;
     float StructureErosion;
     float StructureFlowInherit;
-    float StructureShearInherit;
-    float StructureCrossfade;
 
     float4 DetailNoiseWeights;
     float DetailScale;
     float DetailErosion;
     float DetailFlowInherit;
-    float DetailShearInherit;
-    float DetailCrossfade;
-
-	/** Each layer's solid-body drift about the spin axis, radians, wrapped. */
-    float StructureDriftAngle;
-    float DetailDriftAngle;
 
 	// -- Derived -------------------------------------------------------------
 
@@ -192,11 +176,7 @@ struct TRFieldParams
     float SpanTop;
     float SpanBase;
 
-    float DeepShearTime;
     float SpinAngle;
-
-	/** Elapsed time in crossfade periods. Only its fraction is read. */
-    float CrossfadeTime;
 
 	/** Noise units the shell spans vertically, per layer: Scale * Aspect *
 	 *  HeightScale, which is what makes the aspect a ratio. */
@@ -229,11 +209,10 @@ struct TRFieldParams
  *    CloudType         TypeBias, TypeAscent, TypeTropical, ErosionAscent
  *    CloudLid          PressureScale, CeilingDepth, CeilingPressure, WarpShift
  *    CloudLift         BaseTropical, BasePressure, AltitudeGain, AltitudeLift
- *    CloudMotion       WarpTime, DeepShearRatio, CrossfadePeriod, RotationWeight
+ *    CloudMotion       DriftAngle, NoisePhase, -, RotationWeight
  *    <Layer>NoiseWeights  Worley rung weights, layer amount
- *    <Layer>Sampling   Scale, Aspect, Erosion, Crossfade (0 or 1)
- *    <Layer>Warp       FlowInherit, ShearInherit, FadeNear, FadeSpan
- *    CloudDrift        StructureDriftAngle, DetailDriftAngle, -, -
+ *    <Layer>Sampling   Scale, Aspect, Erosion, -
+ *    <Layer>Warp       FlowInherit, -, FadeNear, FadeSpan
  *
  *  RotationWeight is the planet's own rotation; the sim runs in the rotating
  *  frame, so it applies to the sampling position, negated because rotating the
@@ -254,8 +233,7 @@ TRFieldParams TR_BuildField(
 	float4 StructureWarp,
 	float4 DetailNoiseWeights,
 	float4 DetailSampling,
-	float4 DetailWarp,
-	float4 CloudDrift)
+	float4 DetailWarp)
 {
     TRFieldParams F;
 
@@ -291,26 +269,19 @@ TRFieldParams TR_BuildField(
     F.AltitudeGain = max(CloudLift.z, 0.0f);
     F.AltitudeLift = CloudLift.w;
 
-    F.WarpTime = CloudMotion.x;
-    F.DeepShearRatio = CloudMotion.y;
+    F.DriftAngle = CloudMotion.x;
+    F.NoisePhase = CloudMotion.y;
     F.RotationWeight = CloudMotion.w;
 
     F.StructureNoiseWeights = StructureNoiseWeights;
     F.StructureScale = StructureSampling.x;
     F.StructureErosion = max(StructureSampling.z, 0.0f);
-    F.StructureCrossfade = StructureSampling.w;
     F.StructureFlowInherit = StructureWarp.x;
-    F.StructureShearInherit = StructureWarp.y;
 
     F.DetailNoiseWeights = DetailNoiseWeights;
     F.DetailScale = DetailSampling.x;
     F.DetailErosion = saturate(DetailSampling.z);
-    F.DetailCrossfade = DetailSampling.w;
     F.DetailFlowInherit = DetailWarp.x;
-    F.DetailShearInherit = DetailWarp.y;
-
-    F.StructureDriftAngle = CloudDrift.x;
-    F.DetailDriftAngle = CloudDrift.y;
 
     F.Thickness = max(PlanetRadius * HeightScale, 1e-4f);
 
@@ -319,13 +290,7 @@ TRFieldParams TR_BuildField(
     F.SpanTop = clamp(F.SurfaceSoftness, 1e-4f, 0.5f) * F.CloudThickness;
     F.SpanBase = F.SpanTop;
 
-    F.DeepShearTime = F.WarpTime * F.DeepShearRatio;
     F.SpinAngle = -F.RotationWeight * Time;
-
-	// Time and period are both simulated time, so the crossfade keeps pace with
-	// the flow at any sim speed. PITFALL: scaling the period by TimeScale too
-	// counts the speed twice.
-    F.CrossfadeTime = Time / max(CloudMotion.z, 1e-3f);
 
     F.StructureVertical = StructureSampling.x * StructureSampling.y * HeightScale;
     F.DetailVertical = DetailSampling.x * DetailSampling.y * HeightScale;
@@ -352,7 +317,7 @@ TRFieldParams TR_BuildField(
 	CloudProfile, CloudCurves, CloudCoverage, CloudType, \
 	CloudLid, CloudLift, CloudMotion, \
 	StructureNoiseWeights, StructureSampling, StructureWarp, \
-	DetailNoiseWeights, DetailSampling, DetailWarp, CloudDrift)
+	DetailNoiseWeights, DetailSampling, DetailWarp)
 
 /** The shell's ceiling: 1 below the falloff band, 0 at the atmosphere top,
  *  smoothstep between, so a tower that would cross it softens into a cap. */
@@ -616,55 +581,31 @@ float TR_SlabEntry(
     return TSearch;
 }
 
-/** Samples one noise layer as a Perlin-Worley value in [0, 1], warped laterally
- *  by Warp, sampled in true 3D so the vertical structure the bake put in the
- *  volume survives, and crossfaded between two advection phases when asked.
- *  MIP 0 always: a footprint mip ties the field to camera distance.
+/** Samples one noise layer as a Perlin-Worley value in [0, 1], in true 3D so
+ *  the vertical structure the bake put in the volume survives. MIP 0 always: a
+ *  footprint mip ties the field to camera distance.
  *
- *  DRIFT turns the warped position about the spin axis, backwards so the noise
- *  moves forwards. The warp is turned with it: it is a displacement in the
- *  noise's frame, not the flow's. */
+ *  THROUGH BOTH NOISE PHASES, crossfaded. Each is N plus Inherit times its
+ *  displacement, turned about the axis by the drift, backwards so the noise
+ *  moves forwards. Each phase resets where its weight is zero. */
 float TR_SampleLayer(
 	Texture3D Volume,
 	SamplerState Sampler,
 	float3 N,
-	float3 Warp,
+	float3 DisplacementA,
+	float3 DisplacementB,
+	float Inherit,
 	float UVWScale,
 	float4 NoiseWeights,
-	float Crossfade,
-	float DriftAngle,
 	TRFieldParams F)
 {
-    float4 S;
+    const float3 PA = Atmo_RotateZ(normalize(N + DisplacementA * Inherit), -F.DriftAngle);
+    const float3 PB = Atmo_RotateZ(normalize(N + DisplacementB * Inherit), -F.DriftAngle);
 
-    N = Atmo_RotateZ(N, -DriftAngle);
-    Warp = Atmo_RotateZ(Warp, -DriftAngle);
-
-    BRANCH
-
-    if (Crossfade > 0.0f)
-    {
-		// ADVECTION HAS NOWHERE TO ACCUMULATE: the volume is resampled from
-		// scratch every frame. Two phases half a period apart, each ramping its
-		// displacement from nothing to TR_CROSSFADE_SPAN and resetting, give
-		// features somewhere to travel to; each resets while its weight is zero.
-        const float PhaseA = frac(F.CrossfadeTime);
-        const float PhaseB = frac(F.CrossfadeTime + 0.5f);
-
-        const float WeightA = 1.0f - abs(2.0f * PhaseA - 1.0f);
-
-        const float3 PA = normalize(N + Warp * (TR_CROSSFADE_SPAN * PhaseA));
-        const float3 PB = normalize(N + Warp * (TR_CROSSFADE_SPAN * PhaseB));
-
-        S = lerp(
-			Volume.SampleLevel(Sampler, PB * UVWScale, 0.0f),
-			Volume.SampleLevel(Sampler, PA * UVWScale, 0.0f),
-			WeightA);
-    }
-    else
-    {
-        S = Volume.SampleLevel(Sampler, normalize(N + Warp) * UVWScale, 0.0f);
-    }
+    const float4 S = lerp(
+		Volume.SampleLevel(Sampler, PB * UVWScale, 0.0f),
+		Volume.SampleLevel(Sampler, PA * UVWScale, 0.0f),
+		Flow_NoiseWeightA(F.NoisePhase));
 
     return AtmoNoise_PerlinWorley(S.r, AtmoNoise_WorleyLadder(S.gba, NoiseWeights.xyz));
 }
@@ -725,31 +666,10 @@ float4 TR_Density(
 
     const float HeightFraction = saturate((Height - Col.Base) / max(Col.Top - Col.Base, 1e-4f));
 
-	// -- Lateral warp: the flow carries the noise ------------------------------
+	// -- Lateral: the sim's noise displacements -------------------------------
 
-    const float StepTime = F.WarpTime / (float) TR_WARP_ITERATIONS;
-
-    float3 Pos = N;
-
-    UNROLL
-
-    for (int It = 0; It < TR_WARP_ITERATIONS; It++)
-    {
-        const float4 Flow = (It == 0) ? Flow0
-			: Flow_Sample(FlowField, FlowSampler, Pos, TR_FLOW_LAYER);
-
-		// Renormalized every step because the displacement leaves the sphere.
-        Pos = normalize(Pos + Flow_TangentVelocity(Pos, Flow.xy) * StepTime);
-    }
-
-    const float3 FlowWarp = Pos - N;
-
-	// DEEP SHEAR, ONE STEP THROUGH THE DEEP FLOW LAYER: a different sim layer,
-	// which is what makes the shear vertical.
-    const float3 PShear = normalize(N + FlowWarp * F.StructureFlowInherit);
-
-    const float3 DeepShear = Flow_TangentVelocity(
-		PShear, Flow_Sample(FlowField, FlowSampler, PShear, TR_DEEP_FLOW_LAYER).xy) * F.DeepShearTime;
+    float3 DisplacementA, DisplacementB;
+    Flow_SampleNoise(FlowField, FlowSampler, N, TR_FLOW_LAYER, DisplacementA, DisplacementB);
 
 	// -- Vertical warp: rising air stretches and lifts the noise ---------------
 	//
@@ -770,9 +690,9 @@ float4 TR_Density(
     {
         const float Noise = TR_SampleLayer(
 			StructureVolume, StructureSampler, N,
-			FlowWarp * F.StructureFlowInherit + DeepShear * F.StructureShearInherit,
+			DisplacementA, DisplacementB, F.StructureFlowInherit,
 			F.StructureScale + (Height - Shift) * F.StructureVertical / Stretch,
-			F.StructureNoiseWeights, F.StructureCrossfade, F.StructureDriftAngle, F);
+			F.StructureNoiseWeights, F);
 
 		// Extrapolated past 1, the factor goes negative wherever the noise sits
 		// below 1 - 1/Erosion, and those holes survive any coverage.
@@ -795,9 +715,9 @@ float4 TR_Density(
     {
         const float Detail = TR_SampleLayer(
 			DetailVolume, DetailSampler, N,
-			FlowWarp * F.DetailFlowInherit + DeepShear * F.DetailShearInherit,
+			DisplacementA, DisplacementB, F.DetailFlowInherit,
 			F.DetailScale + (Height - Shift) * F.DetailVertical / Stretch,
-			F.DetailNoiseWeights, F.DetailCrossfade, F.DetailDriftAngle, F);
+			F.DetailNoiseWeights, F);
 
 		// Wispy at the base, where the noise itself erodes; billowy toward the
 		// top, where its inverse does and rounded lobes remain.

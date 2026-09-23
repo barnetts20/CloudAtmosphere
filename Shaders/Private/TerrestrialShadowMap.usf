@@ -58,7 +58,6 @@ float4 StructureWarp;
 float4 DetailNoiseWeights;
 float4 DetailSampling;
 float4 DetailWarp;
-float4 CloudDrift;
 
 TRFieldParams TRShadow_Field()
 {

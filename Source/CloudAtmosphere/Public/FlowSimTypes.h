@@ -54,6 +54,9 @@ enum class EFlowDebugMode : uint8
 
 	/** The vertical motion the cloud formed at, 0 to 1. */
 	CloudAscent UMETA(DisplayName = "Cloud formation ascent"),
+
+	/** Noise displacement magnitude, phase A, in radians. */
+	NoiseDisplacement UMETA(DisplayName = "Noise displacement"),
 };
 
 /** Per-layer multipliers on the shared jet profile: the vertical wind shear.
@@ -254,6 +257,42 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud", meta = (ClampMin = "0.001"))
 	float CloudLifetime = 2.0f;
 
+	// -- Noise coordinates --------------------------------------------------
+	//
+	// Per layer, two displacement fields the cloud noise is sampled through:
+	// advected with the flow and reset on phases half a period apart, so the
+	// noise follows real trajectories and the reader crossfades the two.
+
+	/** Solid-body drift the noise carries on its own, as a fraction of the
+	 *  westerly jet's angular rate. The displacements hold only the flow's
+	 *  departure from it, so matching the dominant flow keeps them small. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Coordinates")
+	float NoiseDrift = 0.5f;
+
+	/** How long a displacement accumulates before it resets, in jet turnover
+	 *  times (1 / jet angular rate). Longer follows the flow further and
+	 *  stretches the noise more; 0.5 keeps the typical stretch under 2 to 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Coordinates", meta = (ClampMin = "0.05"))
+	float NoiseResetPeriod = 0.5f;
+
+	/** The westerly jet's angular rate: JetStrength times layer 0's JetScale. */
+	float GetJetRate() const
+	{
+		return JetStrength * (LayerProfiles.Num() > 0 ? LayerProfiles[0].JetScale : 1.0f);
+	}
+
+	/** NoiseDrift as an angular rate, radians per unit sim time. */
+	float GetNoiseDriftRate() const
+	{
+		return NoiseDrift * GetJetRate();
+	}
+
+	/** NoiseResetPeriod in sim time. */
+	float GetNoiseResetTime() const
+	{
+		return FMath::Max(NoiseResetPeriod, 0.05f) / FMath::Max(FMath::Abs(GetJetRate()), 1e-3f);
+	}
+
 	// -- Polar filter -------------------------------------------------------
 
 	/** cos(latitude) below which the longitudinal filter engages: 0.9 reaches
@@ -383,6 +422,10 @@ struct FFlowSimParams
 	float CondensationRate = 5.0f;
 	float EvaporationRate = 3.0f;
 	float CloudLifetime = 2.0f;
+
+	/** Radians per unit sim time, and sim time. */
+	float NoiseDriftRate = 0.0f;
+	float NoiseResetTime = 1.0f;
 
 	float FilterLatitude = 0.9f;
 	int32 FilterMaxHalfWidth = 8;

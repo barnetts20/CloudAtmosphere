@@ -76,6 +76,9 @@ private:
 	TRefCountPtr<IPooledRenderTarget> PooledRhs;
 	TRefCountPtr<IPooledRenderTarget> PooledSpectrum[2];
 	TRefCountPtr<IPooledRenderTarget> PooledCloud[2];
+
+	/** Noise displacements, phase A slices then phase B. Flips with the cloud. */
+	TRefCountPtr<IPooledRenderTarget> PooledNoise[2];
 	TRefCountPtr<IPooledRenderTarget> PooledRowMean;
 	TRefCountPtr<IPooledRenderTarget> PooledPhiEq;
 	TRefCountPtr<IPooledRenderTarget> PooledGlobalMean;
@@ -83,7 +86,8 @@ private:
 	/** Which of PooledFace holds the live faces. */
 	int32 CurrentFace = 0;
 
-	/** Which of PooledCloud holds the live tracer. Flips once per substep. */
+	/** Which of PooledCloud and PooledNoise hold the live tracers. Flips once
+	 *  per substep. */
 	int32 CurrentCloud = 0;
 
 	/** Grid the pooled state was allocated for. A change reallocates and
