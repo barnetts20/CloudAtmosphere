@@ -29,7 +29,7 @@ static TAutoConsoleVariable<int32> CVarGasGiantDebugMode(
 	-1,
 	TEXT("Override the config's debug view. -1 uses the config.\n")
 	TEXT("0 Vorticity, 1 Pressure, 2 Speed, 3 East, 4 North,\n")
-	TEXT("5 Helmholtz residual, 6 Zonal profile error, 7 Vertical motion, 8 Froude, 9 Cloud."),
+	TEXT("5 Helmholtz residual, 6 Zonal profile error, 7 Vertical motion, 8 Froude, 9 Cloud, 10 Cloud formation ascent."),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarGasGiantDebugLayer(
@@ -810,7 +810,8 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
 		case EFlowDebugMode::Vertical:    Out.DebugScale = DivScale; break;
 			// Saturates at Froude 1; the jump threshold is half way up.
 		case EFlowDebugMode::Froude:      Out.DebugScale = 1.0f; break;
-		case EFlowDebugMode::Cloud:       Out.DebugScale = 1.0f; break;
+		case EFlowDebugMode::Cloud:
+		case EFlowDebugMode::CloudAscent: Out.DebugScale = 1.0f; break;
 		default:                          Out.DebugScale = ZetaScale; break;
 		}
 

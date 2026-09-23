@@ -195,6 +195,13 @@ float4 SimLoad4(Texture2DArray<float4> Field, int2 C, uint Layer)
     return Field.Load(int4(W.x, W.y, Layer, 0));
 }
 
+float2 SimLoad2(Texture2DArray<float2> Field, int2 C, uint Layer)
+{
+    const int2 W = SimWrapCoord(C);
+
+    return Field.Load(int4(W.x, W.y, Layer, 0));
+}
+
 /** Catmull-Rom weights for one axis. */
 void SimCubicWeights(float F, out float W0, out float W1, out float W2, out float W3)
 {
@@ -284,6 +291,38 @@ float4 SimSampleCubic4(Texture2DArray<float4> Field, float2 Grid, uint Layer)
         for (int I = 0; I < 4; I++)
         {
             Sum += WX[I] * WY[J] * SimLoad4(Field, C0 + int2(I, J), Layer);
+        }
+    }
+
+    return Sum;
+}
+
+/** SimSampleCubic over a two-channel field, for scalars carried together. */
+float2 SimSampleCubic2(Texture2DArray<float2> Field, float2 Grid, uint Layer)
+{
+    const float2 Base = floor(Grid);
+    const float2 F = Grid - Base;
+
+    const int2 C0 = (int2) Base - int2(1, 1);
+
+    float WX0, WX1, WX2, WX3;
+    SimCubicWeights(F.x, WX0, WX1, WX2, WX3);
+
+    float WY0, WY1, WY2, WY3;
+    SimCubicWeights(F.y, WY0, WY1, WY2, WY3);
+
+    const float WX[4] = { WX0, WX1, WX2, WX3 };
+    const float WY[4] = { WY0, WY1, WY2, WY3 };
+
+    float2 Sum = 0.0f;
+
+	[unroll]
+    for (int J = 0; J < 4; J++)
+    {
+		[unroll]
+        for (int I = 0; I < 4; I++)
+        {
+            Sum += WX[I] * WY[J] * SimLoad2(Field, C0 + int2(I, J), Layer);
         }
     }
 

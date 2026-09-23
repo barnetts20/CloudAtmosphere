@@ -51,6 +51,9 @@ enum class EFlowDebugMode : uint8
 
 	/** The cloud tracer, 0 to 1. */
 	Cloud       UMETA(DisplayName = "Cloud"),
+
+	/** The vertical motion the cloud formed at, 0 to 1. */
+	CloudAscent UMETA(DisplayName = "Cloud formation ascent"),
 };
 
 /** Per-layer multipliers on the shared jet profile: the vertical wind shear.

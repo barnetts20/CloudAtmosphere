@@ -7,9 +7,11 @@
 // Terrestrial clouds: the field the march samples.
 //
 // THE SIM IS THE WEATHER MAP, THE NOISE IS THE CLOUD. Each column reads the
-// sim once and gets four things: COVERAGE (the sim's cloud field), TYPE (from
+// sim once and gets five things: COVERAGE (the sim's cloud field), TYPE (from
 // vertical motion and latitude: 0 stratiform, 1 towering), PRESSURE (the lid
-// and the base) and W (vertical motion, which stretches and lifts the noise).
+// and the base), ALTITUDE (the ascent the cloud formed at, which floats
+// stratiform cloud up) and W (vertical motion, which stretches and lifts the
+// noise).
 // Inside the column a shape noise is multiplied by a height profile, and
 // coverage decides how much of it survives: at low coverage only the densest
 // noise cores remain as scattered cloud, near 1 the column fills. A detail
@@ -142,6 +144,11 @@ struct TRFieldParams
     float BaseTropical;
     float BasePressure;
 
+	/** Altitude = saturate(AltitudeGain * formation ascent); it lifts the base
+	 *  of a stratiform column by up to AltitudeLift cloud thicknesses. */
+    float AltitudeGain;
+    float AltitudeLift;
+
 	/** How far rising air stretches the noise vertically, and lifts it, the
 	 *  latter a multiple of CloudThickness. */
     float WarpStretch;
@@ -213,11 +220,11 @@ struct TRFieldParams
  *  sees share every derivation. Packing, member by member:
  *
  *    CloudProfile      CloudBase, CloudThickness, SurfaceSoftness, CeilingFalloff
- *    CloudCurves       TopCurve, BottomCurve, CloudSlope, -
+ *    CloudCurves       TopCurve, BottomCurve, CloudSlope, WarpStretch
  *    CloudCoverage     CloudCover, CoverageGain, StratusDepth, ErosionGain
  *    CloudType         TypeBias, TypeAscent, TypeTropical, ErosionAscent
- *    CloudLid          PressureScale, CeilingDepth, CeilingPressure, -
- *    CloudLift         BaseTropical, BasePressure, WarpStretch, WarpShift
+ *    CloudLid          PressureScale, CeilingDepth, CeilingPressure, WarpShift
+ *    CloudLift         BaseTropical, BasePressure, AltitudeGain, AltitudeLift
  *    CloudMotion       WarpTime, DeepShearRatio, CrossfadePeriod, RotationWeight
  *    <Layer>NoiseWeights  Worley rung weights, layer amount
  *    <Layer>Sampling   Scale, Aspect, Erosion, Crossfade (0 or 1)
@@ -256,6 +263,7 @@ TRFieldParams TR_BuildField(
     F.TopCurve = CloudCurves.x;
     F.BottomCurve = CloudCurves.y;
     F.CloudSlope = CloudCurves.z;
+    F.WarpStretch = CloudCurves.w;
 
     F.CloudCover = CloudCoverage.x;
     F.CoverageGain = CloudCoverage.y;
@@ -270,11 +278,12 @@ TRFieldParams TR_BuildField(
     F.PressureScale = max(CloudLid.x, 1e-6f);
     F.CeilingDepth = max(CloudLid.y, 1e-3f);
     F.CeilingPressure = clamp(CloudLid.z, -0.99f, 0.99f);
+    F.WarpShift = CloudLid.w;
 
     F.BaseTropical = CloudLift.x;
     F.BasePressure = CloudLift.y;
-    F.WarpStretch = CloudLift.z;
-    F.WarpShift = CloudLift.w;
+    F.AltitudeGain = max(CloudLift.z, 0.0f);
+    F.AltitudeLift = CloudLift.w;
 
     F.WarpTime = CloudMotion.x;
     F.DeepShearRatio = CloudMotion.y;
@@ -394,6 +403,9 @@ struct TRColumn
 	/** Vertical motion, rising positive, (-1, 1). */
     float Ascent;
 
+	/** How high the cloud formed, [0, 1], from the sim's formation ascent. */
+    float Altitude;
+
 	/** How deeply the structure noise erodes the profile. Above 1 it cuts holes
 	 *  through a fully covered column. */
     float Erosion;
@@ -417,8 +429,11 @@ struct TRColumn
  *  ErosionAscent is positive, so subsidence breaks into patches and large-scale
  *  ascent fills into sheets.
  *
- *  THE BASE is the condensation level: tropicality and pressure only, no noise,
- *  which keeps it exact.
+ *  THE BASE is the condensation level: tropicality and pressure, plus the
+ *  altitude the cloud formed at for all but towering columns. A tower stays
+ *  rooted; what drifts off it as W falls turns stratiform at the altitude it
+ *  formed at, so outflow becomes high layered cloud and cloud grown under weak
+ *  lift stays low. No noise, which keeps the base exact.
  *
  *  SPARSE COLUMNS ARE SHALLOW. Depth ramps in over TR_COVERAGE_DEPTH_RAMP of
  *  coverage, so clear sky has no slab for the entry search to stop on. */
@@ -439,6 +454,7 @@ TRColumn TR_ColumnFromFlow(
 
     Col.Pressure = Low * rsqrt(1.0f + Low * Low);
     Col.Ascent = Weather.x;
+    Col.Altitude = saturate(F.AltitudeGain * Weather.z);
 
     Col.Coverage = saturate(F.CloudCover * 2.0f - 1.0f + F.CoverageGain * Weather.y);
 
@@ -449,7 +465,8 @@ TRColumn TR_ColumnFromFlow(
 
     const float D = F.CloudThickness;
 
-    Col.Base = F.CloudBase + D * (F.BaseTropical * Tropical + F.BasePressure * Col.Pressure);
+    Col.Base = F.CloudBase + D * (F.BaseTropical * Tropical + F.BasePressure * Col.Pressure
+		+ F.AltitudeLift * Col.Altitude * (1.0f - Col.Type));
 
     const float Lid = F.CeilingDepth * (1.0f + F.CeilingPressure * Col.Pressure);
 
@@ -790,8 +807,8 @@ void TR_FieldReach(
 {
     const float D = F.CloudThickness;
 
-    BaseUp = D * (max(F.BaseTropical, 0.0f) + abs(F.BasePressure));
-    BaseDown = D * (-min(F.BaseTropical, 0.0f) + abs(F.BasePressure));
+    BaseUp = D * (max(F.BaseTropical, 0.0f) + abs(F.BasePressure) + max(F.AltitudeLift, 0.0f));
+    BaseDown = D * (-min(F.BaseTropical, 0.0f) + abs(F.BasePressure) - min(F.AltitudeLift, 0.0f));
 
     Depth = D * max(F.CeilingDepth * (1.0f + abs(F.CeilingPressure)), 1e-3f);
 }

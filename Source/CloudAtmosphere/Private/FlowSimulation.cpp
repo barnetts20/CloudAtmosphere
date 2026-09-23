@@ -247,8 +247,9 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 	PooledSpectrum[0] = AllocatePooledTexture(SpectrumDesc, TEXT("FlowSim.SpectrumA"));
 	PooledSpectrum[1] = AllocatePooledTexture(SpectrumDesc, TEXT("FlowSim.SpectrumB"));
 
-	PooledCloud[0] = AllocatePooledTexture(ScalarDesc, TEXT("FlowSim.CloudA"));
-	PooledCloud[1] = AllocatePooledTexture(ScalarDesc, TEXT("FlowSim.CloudB"));
+	// Cloud fraction, and cloud times formation ascent.
+	PooledCloud[0] = AllocatePooledTexture(FaceDesc, TEXT("FlowSim.CloudA"));
+	PooledCloud[1] = AllocatePooledTexture(FaceDesc, TEXT("FlowSim.CloudB"));
 
 	// (row, layer).
 	const FIntPoint RowSize(Params.GridSize.Y, Slices);

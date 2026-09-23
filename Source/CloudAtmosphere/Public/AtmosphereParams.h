@@ -498,12 +498,24 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 
 	/** How far tropicality and pressure move the base, multiples of
 	 *  CloudThickness: a higher condensation level in the tropics, lower under
-	 *  lows. Nothing else moves the base, which keeps it exact per column. */
+	 *  lows. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float BaseTropical = 0.1f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float BasePressure = -0.1f;
+
+	/** Maps the sim's formation ascent, the vertical motion a cloud condensed
+	 *  at, to an altitude in [0, 1]. The ascent in cloud typically runs 0.1 to
+	 *  0.4, so about 3 spans it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float AltitudeGain = 3.0f;
+
+	/** How far altitude lifts the base, multiples of CloudThickness, scaled by
+	 *  1 - Type: towers stay rooted, stratiform cloud floats up to where it
+	 *  formed. Widens the marched band by the same amount. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float AltitudeLift = 0.6f;
 
 	// -- Vertical warp ----------------------------------------------------------
 

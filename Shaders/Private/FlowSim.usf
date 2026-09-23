@@ -108,6 +108,12 @@ float SimCondensationRate;
 float SimEvaporationRate;
 float SimCloudDecay;
 
+/** Cloud fraction below which the formation ascent fades to zero instead of
+ *  being divided out, so the ratio stays smooth where cloud is thin. */
+#ifndef SIM_CLOUD_ASCENT_FLOOR
+#define SIM_CLOUD_ASCENT_FLOOR 0.05f
+#endif
+
 int SimForcingChannel;
 int SimForcingBipolar;
 int SimHasForcing;
@@ -147,9 +153,12 @@ RWTexture2DArray<float> SimPhiStarUAV;
 Texture2DArray<float> SimRhsSRV;
 RWTexture2DArray<float> SimRhsUAV;
 
-/** Cloud fraction in [0, 1] at centres; ping-pong, advanced by Predict. */
-Texture2DArray<float> SimCloudSRV;
-RWTexture2DArray<float> SimCloudUAV;
+/** Cloud tracer at centres; ping-pong, advanced by Predict. x = cloud fraction
+ *  q in [0, 1]; y = q times the formation ascent, the mean W the cloud
+ *  condensed at, weighted by how much condensed. Carried as the product so
+ *  mixing weights by cloud amount; y never exceeds x. */
+Texture2DArray<float2> SimCloudSRV;
+RWTexture2DArray<float2> SimCloudUAV;
 
 /** Row spectra of the Helmholtz problem, (wavenumber, row, layer), complex.
  *  Two textures: the column solve reads one and writes the other. */
@@ -324,16 +333,23 @@ float SimVerticalMotion(float Divergence)
 /** Cubic sample clamped to the range of the four nearest centres. Keeps a
  *  bounded tracer bounded: Catmull-Rom overshoots at sharp edges, and an
  *  overshoot below zero is negative cloud. */
-float SimSampleBounded(Texture2DArray<float> Field, float2 Grid, uint Layer)
+float2 SimSampleBounded(Texture2DArray<float2> Field, float2 Grid, uint Layer)
 {
     const int2 Base = (int2) floor(Grid);
 
-    const float A = SimLoad(Field, Base, Layer);
-    const float B = SimLoad(Field, Base + int2(1, 0), Layer);
-    const float C = SimLoad(Field, Base + int2(0, 1), Layer);
-    const float D = SimLoad(Field, Base + int2(1, 1), Layer);
+    const float2 A = SimLoad2(Field, Base, Layer);
+    const float2 B = SimLoad2(Field, Base + int2(1, 0), Layer);
+    const float2 C = SimLoad2(Field, Base + int2(0, 1), Layer);
+    const float2 D = SimLoad2(Field, Base + int2(1, 1), Layer);
 
-    return clamp(SimSampleCubic(Field, Grid, Layer), min(min(A, B), min(C, D)), max(max(A, B), max(C, D)));
+    return clamp(SimSampleCubic2(Field, Grid, Layer), min(min(A, B), min(C, D)), max(max(A, B), max(C, D)));
+}
+
+/** The formation ascent from a tracer sample, in [0, 1]: y over x, faded to
+ *  zero below SIM_CLOUD_ASCENT_FLOOR. */
+float SimCloudAscent(float2 Cloud)
+{
+    return saturate(Cloud.y / max(Cloud.x, SIM_CLOUD_ASCENT_FLOOR));
 }
 
 // -- Face access ------------------------------------------------------------
@@ -576,7 +592,7 @@ void MainInitStateCS(uint3 Id : SV_DispatchThreadID)
 
     SimFaceUAV[int3(C, Layer)] = float2(SimZonalRate(Mu, Layer) * SimRowCos(C.y), 0.0f);
     SimPhiUAV[int3(C, Layer)] = SimPhiEqSRV.Load(int3(C.y, Layer, 0));
-    SimCloudUAV[int3(C, Layer)] = 0.0f;
+    SimCloudUAV[int3(C, Layer)] = float2(0.0f, 0.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -647,8 +663,9 @@ void MainReduceGlobalCS(uint3 Id : SV_DispatchThreadID)
  *  counterclockwise, a rotation sense that FlowField.ush still flips by
  *  hemisphere for the band signal.
  *
- *  WEATHER SLICE: (W, cloud, spare, spare). W is -divergence soft-saturated,
- *  positive where air converges and rises; cloud is the tracer, in [0, 1]. */
+ *  WEATHER SLICE: (W, cloud, ascent, spare). W is -divergence soft-saturated,
+ *  positive where air converges and rises; cloud is the tracer, in [0, 1];
+ *  ascent is the W the cloud formed at, in [0, 1], zero where there is none. */
 [numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
 void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
 {
@@ -693,8 +710,10 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
 		SimSoftSat((Phi - PhiMean) / SimOutputScales.x),
 		SimFaceVorticity(C.x, C.y, Layer) / SimOutputScales.y);
 
+    const float2 Cloud = SimCloudSRV.Load(int4(C.x, C.y, Layer, 0));
+
     SimOutputUAV[int3(C, Layer + (uint) SimGridSize.z)] = float4(
-		SimVerticalMotion(Divergence), SimCloudSRV.Load(int4(C.x, C.y, Layer, 0)), 0.0f, 0.0f);
+		SimVerticalMotion(Divergence), Cloud.x, SimCloudAscent(Cloud), 0.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -717,7 +736,9 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
  *  air rises, evaporation where it sinks, and decay. Stands in for moisture:
  *  cloud is where air HAS BEEN rising, carried with the wind, rather than
  *  where it is rising this instant -- which filters gravity-wave flicker and
- *  draws the trailing shapes W alone cannot.
+ *  draws the trailing shapes W alone cannot. New cloud adds its W to the
+ *  formation ascent in proportion to how much condensed; losses remove both
+ *  channels in proportion, so decay leaves the ascent where it was.
  *
  *  DRAG ON THE EDDY PART OF u AND ALL OF v. The zonal mean of u belongs to the
  *  nudge, and dragging it too makes the two settle at a compromise below the
@@ -812,13 +833,16 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
         SimPhiStarUAV[int3(C, Layer)] = PhiStar;
 
-        const float Cloud = SimSampleBounded(SimCloudSRV, SimDirectionToGrid(T.Departure), Layer);
+        const float2 Cloud = SimSampleBounded(SimCloudSRV, SimDirectionToGrid(T.Departure), Layer);
         const float W = SimVerticalMotion(Centre.w);
 
-        const float Rate = SimCondensationRate * max(W, 0.0f) * (1.0f - Cloud)
-			- (SimEvaporationRate * max(-W, 0.0f) + SimCloudDecay) * Cloud;
+        const float Formed = SimCondensationRate * max(W, 0.0f) * (1.0f - Cloud.x);
+        const float Loss = SimEvaporationRate * max(-W, 0.0f) + SimCloudDecay;
 
-        SimCloudUAV[int3(C, Layer)] = saturate(Cloud + Dt * Rate);
+        const float Q = saturate(Cloud.x + Dt * (Formed - Loss * Cloud.x));
+        const float QA = Cloud.y + Dt * (Formed * max(W, 0.0f) - Loss * Cloud.y);
+
+        SimCloudUAV[int3(C, Layer)] = float2(Q, clamp(QA, 0.0f, Q));
     }
 }
 
@@ -1203,7 +1227,7 @@ void MainRestoreCS(uint3 Id : SV_DispatchThreadID)
     SimPhiUAV[int3(Id)] = SimRestoreBuffer[2 * Total + Index];
 
 	// Not in the snapshot: cloud re-forms from the flow within a lifetime.
-    SimCloudUAV[int3(Id)] = 0.0f;
+    SimCloudUAV[int3(Id)] = float2(0.0f, 0.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -1231,6 +1255,7 @@ int2 SimDebugSize;
 #define SIM_DEBUG_VERTICAL    7
 #define SIM_DEBUG_FROUDE      8
 #define SIM_DEBUG_CLOUD       9
+#define SIM_DEBUG_CLOUD_ASCENT 10
 
 /** Diverging ramp, blue negative, red positive, dark at zero so a collapsed
  *  field reads as an empty frame rather than a plausible mid-grey. */
@@ -1317,7 +1342,13 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
     }
     else if (SimDebugMode == SIM_DEBUG_CLOUD)
     {
-        Value = SimCloudSRV.Load(int4(C.x, C.y, Layer, 0));
+        Value = SimCloudSRV.Load(int4(C.x, C.y, Layer, 0)).x;
+    }
+    else if (SimDebugMode == SIM_DEBUG_CLOUD_ASCENT)
+    {
+		// The W the cloud formed at. Bright in updraughts and in what drifts
+		// away from them; dark in cloud grown under weak lift.
+        Value = SimCloudAscent(SimCloudSRV.Load(int4(C.x, C.y, Layer, 0)));
     }
 
     SimDebugUAV[int2(Id.xy)] = float4(SimSignedRamp(Value / max(SimDebugScale, 1e-6f)), 1.0f);

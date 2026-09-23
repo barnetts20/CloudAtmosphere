@@ -113,11 +113,13 @@ float4 Flow_Sample(Texture2DArray FlowField, SamplerState FlowSampler, float3 N,
 #endif
 }
 
-/** Samples a layer's weather slice. Returns (W, cloud, spare, spare):
+/** Samples a layer's weather slice. Returns (W, cloud, ascent, spare):
  *    x  Vertical motion from convergence, soft-saturated into (-1, 1), positive
  *       rising. No hemisphere interpretation.
  *    y  Cloud fraction in [0, 1]: where air has been rising, carried by the
- *       wind. */
+ *       wind.
+ *    z  Formation ascent in [0, 1]: the W the cloud condensed at, carried with
+ *       it. High in updraughts and in what drifts off them; zero in clear air. */
 float4 Flow_SampleWeather(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
 {
     return Flow_Sample(FlowField, FlowSampler, N, Layer + Flow_LayerCount(FlowField));
