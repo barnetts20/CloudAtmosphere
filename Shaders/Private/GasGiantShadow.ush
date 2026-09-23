@@ -35,8 +35,8 @@
 #define GG_ShadowTauFromNodes(Node, Depth, Ceiling) AtmoShadow_TauFromNodes(Node, Depth, Ceiling)
 #define GG_ExtinctionTintRange(Neg, Pos, Base) AtmoShadow_ExtinctionTintRange(Neg, Pos, Base)
 
-#define GG_ShadowCascadeCentre(Level, CameraLocal, U, V, Extent, MapSize) \
-	AtmoShadow_CascadeCentre(Level, CameraLocal, U, V, Extent, MapSize)
+#define GG_ShadowCascadeCentre(Level, CameraLocal, U, V, HalfWidth, Extent0, MapSize) \
+	AtmoShadow_CascadeCentre(Level, CameraLocal, U, V, HalfWidth, Extent0, MapSize)
 
 /** The radius the map covers: the cull radius at UNFADED bounds.
  *
@@ -108,13 +108,13 @@ float GG_ShadowTau(
 	SamplerState ShadowSampler,
 	float3 LocalPos,
 	float3 LightLocal,
-	float3 CameraLocal,
+	AtmoShadowCameras Cameras,
 	float2 JitterTexels,
 	float Ceiling,
 	GGFieldParams F)
 {
     return AtmoShadow_Tau(
-		ShadowMap, ShadowSampler, LocalPos, LightLocal, CameraLocal,
+		ShadowMap, ShadowSampler, LocalPos, LightLocal, Cameras,
 		JitterTexels, Ceiling, GG_ShadowFrame(F));
 }
 
@@ -127,7 +127,7 @@ float GG_ShadowSurfaceOptDepth(
 	SamplerState ShadowSampler,
 	float3 LocalPos,
 	float3 LightLocal,
-	float3 CameraLocal,
+	AtmoShadowCameras Cameras,
 	float2 JitterTexels,
 	float Ceiling,
 	float FoldConstant,
@@ -135,6 +135,6 @@ float GG_ShadowSurfaceOptDepth(
 	GGFieldParams F)
 {
     return AtmoShadow_SurfaceOptDepth(
-		ShadowMap, ShadowSampler, LocalPos, LightLocal, CameraLocal,
+		ShadowMap, ShadowSampler, LocalPos, LightLocal, Cameras,
 		JitterTexels, Ceiling, GG_ShadowFrame(F), FoldConstant, ReceiverBias);
 }

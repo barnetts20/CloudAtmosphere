@@ -628,6 +628,9 @@ void APlanetAtmosphereActor::CreateMaterialInstances()
 
     BuiltType = PlanetType;
 
+    // The map holds the previous model's deck until every level is rebaked.
+    bShadowPrimed = false;
+
     // Order is the pipeline order: march, composite. Rebuilt rather
     // than assigned by index, so a stale instance cannot survive a swap and
     // write the same UserSceneTexture as its replacement.
@@ -737,10 +740,9 @@ struct FTerrestrialFieldPins
     FLinearColor CloudLid;
     FLinearColor CloudLift;
     FLinearColor CloudMotion;
-    FLinearColor StructureNoiseWeights;
+    FLinearColor NoiseLevels;
     FLinearColor StructureSampling;
     FLinearColor StructureWarp;
-    FLinearColor DetailNoiseWeights;
     FLinearColor DetailSampling;
     FLinearColor DetailWarp;
     FLinearColor CloudGenusStratus;
@@ -801,11 +803,14 @@ static FTerrestrialFieldPins PackTerrestrialField(
             return FLinearColor(L.FlowInherit, 0.0f, L.FadeNear, L.FadeSpan);
         };
 
-    Out.StructureNoiseWeights = Structure.NoiseWeights;
+    // Only the layer amount is read from NoiseWeights; its RGB octave weights
+    // are the gas giant's.
+    Out.NoiseLevels = FLinearColor(
+        Structure.MipBias, Structure.NoiseWeights.A, Detail.MipBias, Detail.NoiseWeights.A);
+
     Out.StructureSampling = Sampling(Structure);
     Out.StructureWarp = Warp(Structure);
 
-    Out.DetailNoiseWeights = Detail.NoiseWeights;
     Out.DetailSampling = Sampling(Detail);
     Out.DetailWarp = Warp(Detail);
 
@@ -1035,10 +1040,9 @@ void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
     SetVectorChecked(MID_Atmosphere, TEXT("CloudLid"), Pins.CloudLid);
     SetVectorChecked(MID_Atmosphere, TEXT("CloudLift"), Pins.CloudLift);
     SetVectorChecked(MID_Atmosphere, TEXT("CloudMotion"), Pins.CloudMotion);
-    SetVectorChecked(MID_Atmosphere, TEXT("StructureNoiseWeights"), Pins.StructureNoiseWeights);
+    SetVectorChecked(MID_Atmosphere, TEXT("NoiseLevels"), Pins.NoiseLevels);
     SetVectorChecked(MID_Atmosphere, TEXT("StructureSampling"), Pins.StructureSampling);
     SetVectorChecked(MID_Atmosphere, TEXT("StructureWarp"), Pins.StructureWarp);
-    SetVectorChecked(MID_Atmosphere, TEXT("DetailNoiseWeights"), Pins.DetailNoiseWeights);
     SetVectorChecked(MID_Atmosphere, TEXT("DetailSampling"), Pins.DetailSampling);
     SetVectorChecked(MID_Atmosphere, TEXT("DetailWarp"), Pins.DetailWarp);
     SetVectorChecked(MID_Atmosphere, TEXT("CloudGenusStratus"), Pins.CloudGenusStratus);
@@ -1122,6 +1126,8 @@ bool APlanetAtmosphereActor::PrepareShadowTarget()
         // Object must still be set to Linear Color, which no flag can enforce.
         Target->Init(Edge, Edge, DesiredSlices, PF_FloatRGBA);
         Target->UpdateResourceImmediate(true);
+
+        bShadowPrimed = false;
 
         UE_LOG(LogTemp, Log, TEXT("%s: Gas Giant Shadow Target set to %dx%d x %d RGBA16F."),
             *GetName(), Edge, Edge, DesiredSlices);
@@ -1411,8 +1417,8 @@ void APlanetAtmosphereActor::UpdateOccluderCaptures(
 
         const float Extent = Extents[Level];
 
-        // GG_ShadowCascadeCentre's snapping, at the same extent and resolution,
-        // so the capture and the cascade slice step together. Unsnapped, the
+        // Snapped to the capture's own texel grid, so what it holds stays fixed
+        // under the camera; the bake reads it by world position. Unsnapped, the
         // occluder shadow crawls against the deck shadow around it as the
         // camera moves.
         FVector2f Centre = FVector2f::ZeroVector;
@@ -1683,13 +1689,50 @@ bool APlanetAtmosphereActor::FillSharedShadowParams(
 
     Params.CameraLocal = ToLocal(CameraWorld - PlanetCenter);
 
-    // PUSHED, NOT RE-DERIVED. The near map's centre is snapped to its own texel
-    // grid, so the reconstruction has to snap from the same camera the bake did.
-    // Deriving it from the material's own camera instead would differ by a frame,
-    // and a frame is enough to land a whole texel out -- which is a jump in where
-    // the map sits, not a smooth disagreement.
-    SetVectorChecked(MID_Atmosphere, TEXT("ShadowCameraLocal"),
-        FLinearColor(Params.CameraLocal.X, Params.CameraLocal.Y, Params.CameraLocal.Z, 0.0f));
+    // -- Rotation -----------------------------------------------------------
+    //
+    // ShadowLevelsPerFrame levels this request, taken in turn; every level on
+    // the first request into a fresh target, which holds nothing yet.
+    const int32 LevelCount = AtmoShadowBake::CascadeCount;
+
+    if (!bShadowPrimed)
+    {
+        Params.LevelMask = (1u << LevelCount) - 1u;
+        ShadowLevelCursor = 0;
+        bShadowPrimed = true;
+    }
+    else
+    {
+        Params.LevelMask = 0u;
+
+        for (int32 i = 0; i < FMath::Clamp(ShadowLevelsPerFrame, 1, LevelCount); ++i)
+        {
+            Params.LevelMask |= 1u << ShadowLevelCursor;
+            ShadowLevelCursor = (ShadowLevelCursor + 1) % LevelCount;
+        }
+    }
+
+    for (int32 Level = 0; Level < LevelCount; ++Level)
+    {
+        if (Params.LevelMask & (1u << Level))
+        {
+            ShadowBakedCamera[Level] = Params.CameraLocal;
+        }
+    }
+
+    // PUSHED, NOT RE-DERIVED, AND PER LEVEL. A fine cascade's centre is snapped
+    // to its own texel grid from the camera it was baked around, so the reader
+    // has to snap from that same camera. Any other -- the material's own, or a
+    // level baked frames ago read against this frame's -- can land a whole texel
+    // out, which is a jump in where the map sits, not a smooth disagreement.
+    // Level 0 is planet-centred and needs none.
+    const auto PushCamera = [this](const TCHAR* Name, const FVector3f& Camera)
+        {
+            SetVectorChecked(MID_Atmosphere, Name, FLinearColor(Camera.X, Camera.Y, Camera.Z, 0.0f));
+        };
+
+    PushCamera(TEXT("ShadowCamera1"), ShadowBakedCamera[1]);
+    PushCamera(TEXT("ShadowCamera2"), ShadowBakedCamera[2]);
 
     // NO EXTENT AND NO CENTRE PUSHED. Every cascade derives its half-width from
     // the fade radii and its centre from the camera, on both sides, so the level
@@ -1866,10 +1909,9 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.CloudLid = ToVector4(Pins.CloudLid);
         Params.CloudLift = ToVector4(Pins.CloudLift);
         Params.CloudMotion = ToVector4(Pins.CloudMotion);
-        Params.StructureNoiseWeights = ToVector4(Pins.StructureNoiseWeights);
+        Params.NoiseLevels = ToVector4(Pins.NoiseLevels);
         Params.StructureSampling = ToVector4(Pins.StructureSampling);
         Params.StructureWarp = ToVector4(Pins.StructureWarp);
-        Params.DetailNoiseWeights = ToVector4(Pins.DetailNoiseWeights);
         Params.DetailSampling = ToVector4(Pins.DetailSampling);
         Params.DetailWarp = ToVector4(Pins.DetailWarp);
         Params.CloudGenusStratus = ToVector4(Pins.CloudGenusStratus);
@@ -1915,7 +1957,7 @@ float APlanetAtmosphereActor::GetGasGiantTime() const
     {
         if (const UFlowSimSubsystem* Sim = World->GetSubsystem<UFlowSimSubsystem>())
         {
-            return Sim->GetSimulatedTime();
+            return Sim->GetDisplayTime();
         }
     }
     return 0.0f;

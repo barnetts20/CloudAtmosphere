@@ -84,6 +84,26 @@ struct FFlowLayerProfile
 	float DragScale = 1.0f;
 };
 
+namespace FlowSimStep
+{
+	/** Smallest running step StepSize accepts. */
+	static constexpr float Min = 1e-6f;
+
+	/** Spin-up step, and the largest running step: reaches a developed state
+	 *  quickly. Its weather carries roughly 40% more thick cloud than 1e-5,
+	 *  and relaxes to the running step's look over about a cloud lifetime
+	 *  after spin-up ends. */
+	static constexpr float SpinUp = 0.0086f;
+
+	/** Steps a frame above which the log warns that the sim dominates frame
+	 *  time. */
+	static constexpr int32 WarnPerFrame = 64;
+
+	/** Hang guard, not a budget: one frame's graph holds about a dozen passes
+	 *  per step. Past it the sim runs slower than asked. */
+	static constexpr int32 MaxPerFrame = 2048;
+}
+
 /** Everything the sim needs, authored. Re-read at the top of each frame, so the
  *  asset can be edited while the sim runs; only the grid dimensions are latched.
  *
@@ -165,31 +185,27 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.01"))
 	float DeformationRadius = 0.2f;
 
-	/** Simulated time per second of real time. THE SPEED CONTROL, AND ONLY THAT:
-	 *  it sets how many substeps run per frame, never their size, so the same
-	 *  state evolves the same way at any speed and a snapshot baked fast plays
-	 *  back unchanged. Cost scales with it. Zero freezes the sim without tearing
-	 *  it down. */
+	/** Sim time per second of real time: THE SPEED HANDLE. The step is
+	 *  StepSize whatever the speed, so speed sets the steps per frame and the
+	 *  cost with it, and never the look. A live change continues the same
+	 *  state. Zero freezes the sim without tearing it down. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.0"))
-	float TimeScale = 2.0f;
+	float SimSpeed = 0.0025f;
 
-	/** Simulated time per substep. PART OF THE PHYSICS: numerical diffusion,
-	 *  divergence damping and the polar filter all act per substep, so changing
-	 *  it changes the weather, and a snapshot must be played back at the step it
-	 *  was baked at. The Courant numbers are consequences, reported at start.
+	/** Sim time per step: a look and cost control, independent of speed. The
+	 *  output blends the last two states, so motion is smooth when a frame
+	 *  takes no step.
 	 *
-	 *  PITFALL: a step that scales with speed makes TimeScale a physics
-	 *  parameter too: fewer, larger steps diffuse less per unit time, so the
-	 *  clouds stretch at high speed and collapse when it is lowered. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.00001", ClampMax = "0.1"))
-	float StepSize = 0.0086f;
+	 *  PITFALL: THE WEATHER DEPENDS ON THE STEP, and no conversion of the
+	 *  per-step settings removes that. The semi-Lagrangian interpolation
+	 *  smooths once per step, and the solver splits grid-scale gravity waves
+	 *  between pressure and divergence by an amount the step sets. Larger
+	 *  steps give sharper, thicker cloud; a large live change bursts
+	 *  divergence into cloud across the planet before it settles. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.000001", ClampMax = "0.0086"))
+	float StepSize = 1e-5f;
 
-	/** Cap on substeps per frame. Time beyond it is DISCARDED rather than
-	 *  carried, so a stall is not followed by a burst that makes the next frame
-	 *  worse; past the cap the sim runs slower than TimeScale asks, still on
-	 *  the same steps. Raise it, or use manual steps, to bake at high speed. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "1", ClampMax = "64"))
-	int32 MaxSubstepsPerFrame = 8;
+	float GetStepSize() const { return FMath::Clamp(StepSize, FlowSimStep::Min, FlowSimStep::SpinUp); }
 
 	// -- Forcing ------------------------------------------------------------
 
@@ -229,10 +245,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
 	float LayerCoupling = 0.1f;
 
-	/** Fraction of grid-scale divergence removed per substep: damps
+	/** Fraction of grid-scale divergence removed per step: damps
 	 *  gravity-wave noise and leaves the rotational flow alone. Scaled per row
-	 *  against the grid spacing there, so it is stable at every latitude and
-	 *  step size; larger features are damped in proportion to the square of
+	 *  against the grid spacing there, so it is stable at every latitude;
+	 *  larger features are damped in proportion to the square of
 	 *  their wavenumber. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing", meta = (ClampMin = "0.0", ClampMax = "0.5"))
 	float DivergenceDamping = 0.05f;
@@ -436,6 +452,10 @@ struct FFlowSimParams
 
 	float FilterLatitude = 0.9f;
 	int32 FilterMaxHalfWidth = 8;
+
+	/** Where the output sits between the state before the frame's last step
+	 *  (0) and after it (1). */
+	float StateBlend = 1.0f;
 
 	/** Output normalisation: x pressure, y vorticity, z divergence. */
 	FVector3f OutputScales = FVector3f(1.0f, 1.0f, 1.0f);

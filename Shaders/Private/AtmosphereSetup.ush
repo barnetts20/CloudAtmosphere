@@ -54,6 +54,14 @@ float3 Atmo_RayDirection(float2 viewportUV)
     return normalize(mul(ViewDir, (float3x3) View.ViewToTranslatedWorld));
 }
 
+/** The angle one pixel subtends at the view centre, from the unjittered
+ *  projection and the internal resolution. The march target is coarser than
+ *  that, which the noise layers' MipBias absorbs. */
+float Atmo_PixelAngle()
+{
+    return 2.0f / max(View.ViewToClipNoAA[1][1] * View.ViewSizeAndInvSize.y, 1e-4f);
+}
+
 /** Fills CompositeParams from the material's pin values. The gas giant path
  *  passes zero for every terrestrial cloud-shape argument, which it never reads.
  *

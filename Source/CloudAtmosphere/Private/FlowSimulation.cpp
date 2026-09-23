@@ -37,6 +37,8 @@ struct FFlowSimResources
 	FRDGTextureRef PhiEq = nullptr;
 	FRDGTextureRef GlobalMean = nullptr;
 	FRDGTextureRef LatLon = nullptr;
+	FRDGTextureRef CentreLatest = nullptr;
+	FRDGTextureRef LatLonLatest = nullptr;
 	FRDGTextureRef Output = nullptr;
 	FRDGTextureRef Debug = nullptr;
 
@@ -66,9 +68,11 @@ namespace
 			GridSize.Z);
 	}
 
+	/** One group per row and layer: the row reduction folds each row in a
+	 *  group. */
 	FIntVector GroupCountRows(const FIntVector& GridSize)
 	{
-		return FIntVector(FMath::DivideAndRoundUp(GridSize.Y, ThreadGroupSize1D), GridSize.Z, 1);
+		return FIntVector(GridSize.Y, GridSize.Z, 1);
 	}
 
 	FIntVector GroupCountLayers(const FIntVector& GridSize)
@@ -127,6 +131,7 @@ namespace
 
 		P.SimOutputScales = Params.OutputScales;
 		P.SimAtlasFaceSize = Params.AtlasFaceSize;
+		P.SimStateBlend = FMath::Clamp(Params.StateBlend, 0.0f, 1.0f);
 
 		P.SimDebugMode = Params.DebugMode;
 		P.SimDebugLayer = Params.DebugLayer;
@@ -199,6 +204,8 @@ void FFlowSimulation::Release_RenderThread()
 	PooledNoise[0].SafeRelease();
 	PooledNoise[1].SafeRelease();
 	PooledLatLon.SafeRelease();
+	PooledCentreLatest.SafeRelease();
+	PooledLatLonLatest.SafeRelease();
 	PooledRowMean.SafeRelease();
 	PooledPhiEq.SafeRelease();
 	PooledGlobalMean.SafeRelease();
@@ -271,10 +278,12 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 
 	// The output on the grid: flow, weather and both noise phases per layer.
 	// 32-bit, so the atlas is the one place the output is quantised.
-	PooledLatLon = AllocatePooledTexture(
-		FRDGTextureDesc::Create2DArray(
-			Size, PF_A32B32G32R32F, FClearValueBinding::Black, Flags, (uint16)(4 * Slices)),
-		TEXT("FlowSim.LatLon"));
+	const FRDGTextureDesc LatLonDesc = FRDGTextureDesc::Create2DArray(
+		Size, PF_A32B32G32R32F, FClearValueBinding::Black, Flags, (uint16)(4 * Slices));
+
+	PooledLatLon = AllocatePooledTexture(LatLonDesc, TEXT("FlowSim.LatLon"));
+	PooledLatLonLatest = AllocatePooledTexture(LatLonDesc, TEXT("FlowSim.LatLonLatest"));
+	PooledCentreLatest = AllocatePooledTexture(CentreDesc, TEXT("FlowSim.CentreLatest"));
 
 	// (row, layer).
 	const FIntPoint RowSize(Params.GridSize.Y, Slices);
@@ -394,11 +403,13 @@ void FFlowSimulation::AddReducePasses(FRDGBuilder& GraphBuilder, const FFlowSimP
 		P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
 		P->SimGlobalMeanUAV = GraphBuilder.CreateUAV(R.GlobalMean);
 
-		AddSimPass<FFlowSimReduceGlobalCS>(GraphBuilder, TEXT("FlowSim.ReduceGlobal"), P, GroupCountLayers(Params.GridSize));
+		// One group per layer.
+		AddSimPass<FFlowSimReduceGlobalCS>(GraphBuilder, TEXT("FlowSim.ReduceGlobal"), P,
+			FIntVector(Params.GridSize.Z, 1, 1));
 	}
 }
 
-void FFlowSimulation::AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
+void FFlowSimulation::AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R, bool bLatest)
 {
 	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
 	P->SimFaceSRV = GraphBuilder.CreateSRV(R.Source());
@@ -406,9 +417,9 @@ void FFlowSimulation::AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowS
 	P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
 	P->SimCloudSRV = GraphBuilder.CreateSRV(R.CloudSource());
 	P->SimNoiseSRV = GraphBuilder.CreateSRV(R.NoiseSource());
-	P->SimCentreUAV = GraphBuilder.CreateUAV(R.Centre);
+	P->SimCentreUAV = GraphBuilder.CreateUAV(bLatest ? R.CentreLatest : R.Centre);
 	P->SimExplicitUAV = GraphBuilder.CreateUAV(R.Explicit);
-	P->SimLatLonUAV = GraphBuilder.CreateUAV(R.LatLon);
+	P->SimLatLonUAV = GraphBuilder.CreateUAV(bLatest ? R.LatLonLatest : R.LatLon);
 
 	AddSimPass<FFlowSimReconstructCS>(GraphBuilder, TEXT("FlowSim.Reconstruct"), P, GroupCount2D(Params.GridSize));
 }
@@ -420,7 +431,7 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 	// -- 1. Means and centre fields of the current state ------------------
 
 	AddReducePasses(GraphBuilder, Params, R);
-	AddReconstructPass(GraphBuilder, Params, R);
+	AddReconstructPass(GraphBuilder, Params, R, false);
 
 	// -- 2. Predict: advection and every explicit term --------------------
 
@@ -522,6 +533,8 @@ void FFlowSimulation::AddResamplePass(FRDGBuilder& GraphBuilder, const FFlowSimP
 	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
 	P->SimCentreSRV = GraphBuilder.CreateSRV(R.Centre);
 	P->SimLatLonSRV = GraphBuilder.CreateSRV(R.LatLon);
+	P->SimCentreLatestSRV = GraphBuilder.CreateSRV(R.CentreLatest);
+	P->SimLatLonLatestSRV = GraphBuilder.CreateSRV(R.LatLonLatest);
 	P->SimOutputUAV = GraphBuilder.CreateUAV(R.Output);
 
 	AddSimPass<FFlowSimResampleCS>(GraphBuilder, TEXT("FlowSim.Resample"), P, Groups);
@@ -582,6 +595,8 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	R.PhiEq = GraphBuilder.RegisterExternalTexture(PooledPhiEq);
 	R.GlobalMean = GraphBuilder.RegisterExternalTexture(PooledGlobalMean);
 	R.LatLon = GraphBuilder.RegisterExternalTexture(PooledLatLon);
+	R.CentreLatest = GraphBuilder.RegisterExternalTexture(PooledCentreLatest);
+	R.LatLonLatest = GraphBuilder.RegisterExternalTexture(PooledLatLonLatest);
 	R.Current = CurrentFace;
 	R.CloudCurrent = CurrentCloud;
 
@@ -624,6 +639,10 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 
 		PendingRestore.Empty();
 		bInitialised = true;
+
+		// The start state is also the previous state, until a step replaces it.
+		AddReducePasses(GraphBuilder, Params, R);
+		AddReconstructPass(GraphBuilder, Params, R, false);
 	}
 
 	// Each substep at its own time: the forcing's phases and the noise resets
@@ -636,11 +655,12 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 		AddSubstep(GraphBuilder, StepParams, R);
 	}
 
-	// Final reduce and reconstruct, so the texture the material reads matches
-	// the state the last substep produced rather than the one it started from,
-	// then the resample onto the atlas the material reads.
+	// THE OUTPUT BLENDS THE LAST TWO STATES. Each substep's reconstruct leaves
+	// the state it started from in Centre and LatLon, so after the loop they
+	// hold the previous state; this one writes the latest beside them. A frame
+	// without substeps leaves the previous state as it was.
 	AddReducePasses(GraphBuilder, Params, R);
-	AddReconstructPass(GraphBuilder, Params, R);
+	AddReconstructPass(GraphBuilder, Params, R, true);
 	AddResamplePass(GraphBuilder, Params, R);
 
 	AddDebugPass(GraphBuilder, Params, R);

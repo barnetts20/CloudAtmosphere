@@ -68,6 +68,24 @@
  *  cloud is shallow cloud, and clear sky has no slab for the entry search to
  *  stop on. PITFALL: narrower makes the top a cliff at every coverage edge,
  *  steeper than CloudSlope bounds, and the entry search steps over cloud. */
+/** Spacing of the column keyframes along a view ray, in flow texels of arc.
+ *  The sim is far coarser than the march steps, so the column is read at these
+ *  and interpolated between; the fields are B-spline smooth, so linear
+ *  interpolation over half a texel is well below anything the thresholds
+ *  resolve. */
+#ifndef TR_COLUMN_SPACING
+#define TR_COLUMN_SPACING 0.5f
+#endif
+
+/** How many mips below the top of its chain the detail volume stops being
+ *  fetched and reads as its mean. At that mip a tile is a few texels and the
+ *  detail's cells average out, so the fetch returns the mean anyway; the last
+ *  mip before it fades across. Matters for the shadow bake's coarse cascade,
+ *  whose texels span dozens of detail texels. */
+#ifndef TR_DETAIL_MEAN_MIPS
+#define TR_DETAIL_MEAN_MIPS 3
+#endif
+
 #ifndef TR_COVERAGE_DEPTH_RAMP
 #define TR_COVERAGE_DEPTH_RAMP 0.25f
 #endif
@@ -164,14 +182,17 @@ struct TRFieldParams
     float DriftAngle;
     float NoisePhase;
 
-	/** The layer's amount in w; xyz are unread. FlowInherit is the share of the
-	 *  sim's noise displacement the layer follows. */
-    float4 StructureNoiseWeights;
+	/** Mips added to the layer's footprint mip, and the layer's amount (0
+	 *  skips it). FlowInherit is the share of the sim's noise displacement the
+	 *  layer follows. */
+    float StructureMipBias;
+    float StructureAmount;
     float StructureScale;
     float StructureErosion;
     float StructureFlowInherit;
 
-    float4 DetailNoiseWeights;
+    float DetailMipBias;
+    float DetailAmount;
     float DetailScale;
     float DetailErosion;
     float DetailFlowInherit;
@@ -220,6 +241,12 @@ struct TRFieldParams
 	 *  DetailFade is read here. */
     float StructureFade;
     float DetailFade;
+
+	/** One march pixel's width at the sample, in radians of arc on the unit
+	 *  sphere: what the noise mip is chosen from. Written per sample by the
+	 *  march, and per texel by the bake from its subsample spacing; 0 from
+	 *  TR_BuildField, which is mip 0. */
+    float PixelFootprint;
 };
 
 /** Fills TRFieldParams from the packed pins and derives the rest. The bake calls
@@ -233,7 +260,7 @@ struct TRFieldParams
  *    CloudLid          PressureScale, CeilingDepth, CeilingPressure, StratusDepth
  *    CloudLift         BaseTropical, BasePressure, AltitudeGain, AltitudeLift
  *    CloudMotion       DriftAngle, NoisePhase, WarpShift, RotationWeight
- *    <Layer>NoiseWeights  -, -, -, layer amount
+ *    NoiseLevels       StructureMipBias, StructureAmount, DetailMipBias, DetailAmount
  *    <Layer>Sampling   Scale, Aspect, Erosion, FadeMean
  *    <Layer>Warp       FlowInherit, GenusSubsidence (structure), FadeNear, FadeSpan
  *    CloudGenus<Name>  structure channel weights for that genus
@@ -252,10 +279,9 @@ TRFieldParams TR_BuildField(
 	float4 CloudLid,
 	float4 CloudLift,
 	float4 CloudMotion,
-	float4 StructureNoiseWeights,
+	float4 NoiseLevels,
 	float4 StructureSampling,
 	float4 StructureWarp,
-	float4 DetailNoiseWeights,
 	float4 DetailSampling,
 	float4 DetailWarp,
 	float4 CloudGenusStratus,
@@ -302,7 +328,8 @@ TRFieldParams TR_BuildField(
     F.WarpShift = CloudMotion.z;
     F.RotationWeight = CloudMotion.w;
 
-    F.StructureNoiseWeights = StructureNoiseWeights;
+    F.StructureMipBias = NoiseLevels.x;
+    F.StructureAmount = saturate(NoiseLevels.y);
     F.StructureScale = StructureSampling.x;
     F.StructureErosion = max(StructureSampling.z, 0.0f);
     F.StructureFlowInherit = StructureWarp.x;
@@ -313,7 +340,8 @@ TRFieldParams TR_BuildField(
     F.GenusCumulus = CloudGenusCumulus;
     F.GenusCirrus = CloudGenusCirrus;
 
-    F.DetailNoiseWeights = DetailNoiseWeights;
+    F.DetailMipBias = NoiseLevels.z;
+    F.DetailAmount = saturate(NoiseLevels.w);
     F.DetailScale = DetailSampling.x;
     F.DetailErosion = saturate(DetailSampling.z);
     F.DetailFadeMean = saturate(DetailSampling.w);
@@ -340,6 +368,7 @@ TRFieldParams TR_BuildField(
 
     F.StructureFade = 1.0f;
     F.DetailFade = 1.0f;
+    F.PixelFootprint = 0.0f;
 
     return F;
 }
@@ -352,8 +381,8 @@ TRFieldParams TR_BuildField(
 	PlanetRadius, HeightScale, Time, \
 	CloudProfile, CloudCurves, CloudCoverage, CloudType, \
 	CloudLid, CloudLift, CloudMotion, \
-	StructureNoiseWeights, StructureSampling, StructureWarp, \
-	DetailNoiseWeights, DetailSampling, DetailWarp, \
+	NoiseLevels, StructureSampling, StructureWarp, \
+	DetailSampling, DetailWarp, \
 	CloudGenusStratus, CloudGenusStratocumulus, CloudGenusCumulus, CloudGenusCirrus)
 
 /** The shell's ceiling: 1 below the falloff band, 0 at the atmosphere top,
@@ -431,7 +460,26 @@ struct TRColumn
     float Top;
 };
 
-/** The column at a spun direction N from its flow sample.
+/** What a column is built from: the sim read at one spun direction. Only the
+ *  flow slice's pressure is used, so it is read raw rather than through
+ *  Flow_Sample's velocity rotation. */
+struct TRColumnInputs
+{
+    float Pressure;
+    float3 Weather;
+};
+
+TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler, float3 N)
+{
+    TRColumnInputs In;
+
+    In.Pressure = Flow_SampleSlice(FlowField, FlowSampler, N, TR_FLOW_LAYER).z;
+    In.Weather = Flow_SampleWeather(FlowField, FlowSampler, N, TR_FLOW_LAYER).xyz;
+
+    return In;
+}
+
+/** The column at a spun direction N from its inputs.
  *
  *  COVERAGE IS THE SIM'S CLOUD FIELD, THRESHOLDED. CoverageGain maps the
  *  field's typical range onto [0, 1]; CloudCover sets the threshold, at 1 -
@@ -460,20 +508,15 @@ struct TRColumn
  *
  *  SPARSE COLUMNS ARE SHALLOW. Depth ramps in over TR_COVERAGE_DEPTH_RAMP of
  *  coverage, so clear sky has no slab for the entry search to stop on. */
-TRColumn TR_ColumnFromFlow(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	float4 Flow,
-	float3 N,
-	TRFieldParams F)
+TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
 {
     TRColumn Col;
 
-    const float4 Weather = Flow_SampleWeather(FlowField, FlowSampler, N, TR_FLOW_LAYER);
+    const float3 Weather = In.Weather;
 
     const float Tropical = 1.0f - abs(N.z);
 
-    const float Low = -Flow.z / F.PressureScale;
+    const float Low = -In.Pressure / F.PressureScale;
 
     Col.Pressure = Low * rsqrt(1.0f + Low * Low);
     Col.Ascent = Weather.x;
@@ -497,7 +540,7 @@ TRColumn TR_ColumnFromFlow(
     Col.Cirrus = Col.Altitude * (1.0f - Col.Type);
 
     Col.Erosion = F.StructureErosion * F.ErosionGain * max(1.0f - F.ErosionAscent * Weather.x, 0.0f)
-		* saturate(F.StructureNoiseWeights.w);
+		* F.StructureAmount;
 
     const float D = F.CloudThickness;
 
@@ -518,8 +561,7 @@ TRColumn TR_ColumnFromFlow(
 
 TRColumn TR_Column(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, TRFieldParams F)
 {
-    return TR_ColumnFromFlow(
-		FlowField, FlowSampler, Flow_Sample(FlowField, FlowSampler, N, TR_FLOW_LAYER), N, F);
+    return TR_ColumnFromInputs(TR_ReadColumn(FlowField, FlowSampler, N), N, F);
 }
 
 /** The column at a planet-local position, spun. For what varies over a system's
@@ -643,9 +685,31 @@ float TR_SlabEntry(
     return TSearch;
 }
 
+/** The mip a layer reads at: the texels one march pixel spans, as a power of
+ *  two, plus the layer's bias. UVWScale is noise units per radian, and a noise
+ *  unit is the volume's width in texels.
+ *
+ *  PREFILTERED, NOT UNDERSAMPLED. Past a few radii every octave above the pixel
+ *  folds down into shimmer as the camera moves; the mip averages it away and
+ *  keeps the octaves the pixel can show. The channels are fBm, so the octaves
+ *  removed first carry little of the variance and the coverage holds.
+ *
+ *  PITFALL: the average is taken before erosion and coverage cut the noise,
+ *  and filtered noise has less contrast, so cloud can thin with distance --
+ *  most at low cover and where erosion extrapolates past 1. It shows only once
+ *  the mip reaches a volume's base octaves; lower the bias if it does. */
+float TR_NoiseLod(Texture3D Volume, float UVWScale, float MipBias, TRFieldParams F)
+{
+    uint Width, Height, Depth, Levels;
+    Volume.GetDimensions(0, Width, Height, Depth, Levels);
+
+    const float Texels = F.PixelFootprint * UVWScale * (float) Width;
+
+    return max(log2(max(Texels, 1e-6f)) + MipBias, 0.0f);
+}
+
 /** One noise layer's four channels, in true 3D so the vertical structure the
- *  bake put in the volume survives. MIP 0 always: a footprint mip ties the
- *  field to camera distance.
+ *  bake put in the volume survives, at mip Lod.
  *
  *  THROUGH BOTH NOISE PHASES, crossfaded. Each is N plus Inherit times its
  *  displacement, turned about the axis by the drift, backwards so the noise
@@ -658,14 +722,15 @@ float4 TR_SampleLayer(
 	float3 DisplacementB,
 	float Inherit,
 	float UVWScale,
+	float Lod,
 	TRFieldParams F)
 {
     const float3 PA = Atmo_RotateZ(normalize(N + DisplacementA * Inherit), -F.DriftAngle);
     const float3 PB = Atmo_RotateZ(normalize(N + DisplacementB * Inherit), -F.DriftAngle);
 
     return lerp(
-		Volume.SampleLevel(Sampler, PB * UVWScale, 0.0f),
-		Volume.SampleLevel(Sampler, PA * UVWScale, 0.0f),
+		Volume.SampleLevel(Sampler, PB * UVWScale, Lod),
+		Volume.SampleLevel(Sampler, PA * UVWScale, Lod),
 		Flow_NoiseWeightA(F.NoisePhase));
 }
 
@@ -692,9 +757,17 @@ float TR_BlendNoise(float4 Channels, float4 Weights)
     return saturate(0.5f + dot(Channels - 0.5f, Weights) / max(length(Weights), 1e-3f));
 }
 
-/** Density at a point in the shell. LocalPos carries its true radius; the
- *  column is evaluated at the normalized direction. StepHalfLength is half the
- *  march step in atmosphere fractions along the radius.
+/** Whether a step misses its column's slab: density is exactly zero there.
+ *  The test uses the step's near edge on each side. */
+bool TR_SlabMissed(TRColumn Col, float Height, float HalfStep)
+{
+    return Col.Top <= Col.Base || Height + HalfStep <= Col.Base || Height - HalfStep >= Col.Top;
+}
+
+/** Density inside a column's slab, given the column and its noise
+ *  displacements. N is the spun direction, Height the atmosphere fraction and
+ *  HalfStep the step's half-extent along the radius; the caller has already
+ *  tested TR_SlabMissed.
  *
  *  THE PROFILE IS INTEGRATED ACROSS THE STEP, not sampled at its midpoint: one
  *  midpoint sample makes the slab a near-binary decision per step, and as a
@@ -706,38 +779,19 @@ float TR_BlendNoise(float4 Channels, float4 Weights)
  *    y  Cloud type, [0, 1]: the material coordinate.
  *    z  Pressure, lows positive.
  *    w  The column's top. */
-float4 TR_Density(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
+float4 TR_DensityInColumn(
 	Texture3D DetailVolume,
 	SamplerState DetailSampler,
 	Texture3D StructureVolume,
 	SamplerState StructureSampler,
-	float3 LocalPos,
-	float StepHalfLength,
+	float3 N,
+	float Height,
+	float HalfStep,
+	TRColumn Col,
+	float3 DisplacementA,
+	float3 DisplacementB,
 	TRFieldParams F)
 {
-    const float Radius = length(LocalPos);
-    const float3 Direction = LocalPos / max(Radius, 1e-4f);
-
-    const float Height = (Radius - F.PlanetRadius) / F.Thickness;
-    const float HalfStep = max(StepHalfLength, 0.0f);
-
-    const float3 N = normalize(Atmo_RotateZ(Direction, F.SpinAngle));
-
-    const float4 Flow0 = Flow_Sample(FlowField, FlowSampler, N, TR_FLOW_LAYER);
-
-    const TRColumn Col = TR_ColumnFromFlow(FlowField, FlowSampler, Flow0, N, F);
-
-    BRANCH
-
-	// ONE FETCH PAIR OUTSIDE THE SLAB RATHER THAN SEVEN: density there is
-	// exactly zero. The test uses the step's near edge on each side.
-    if (Col.Top <= Col.Base || Height + HalfStep <= Col.Base || Height - HalfStep >= Col.Top)
-    {
-        return float4(0.0f, Col.Type, Col.Pressure, Col.Top);
-    }
-
 	// -- Height profile, integrated across the step ----------------------------
 
     const float Profile =
@@ -747,11 +801,6 @@ float4 TR_Density(
 		/ 6.0f;
 
     const float HeightFraction = saturate((Height - Col.Base) / max(Col.Top - Col.Base, 1e-4f));
-
-	// -- Lateral: the sim's noise displacements -------------------------------
-
-    float3 DisplacementA, DisplacementB;
-    Flow_SampleNoise(FlowField, FlowSampler, N, TR_FLOW_LAYER, DisplacementA, DisplacementB);
 
 	// -- Vertical warp: rising air stretches and lifts the noise ---------------
 	//
@@ -768,12 +817,14 @@ float4 TR_Density(
 
     BRANCH
 
-    if (F.StructureNoiseWeights.w > 0.0f)
+    if (F.StructureAmount > 0.0f)
     {
+        const float UVWScale = F.StructureScale + (Height - Shift) * F.StructureVertical / Stretch;
+
         const float Noise = TR_BlendNoise(TR_StructureChannels(TR_SampleLayer(
 			StructureVolume, StructureSampler, N,
-			DisplacementA, DisplacementB, F.StructureFlowInherit,
-			F.StructureScale + (Height - Shift) * F.StructureVertical / Stretch, F)),
+			DisplacementA, DisplacementB, F.StructureFlowInherit, UVWScale,
+			TR_NoiseLod(StructureVolume, UVWScale, F.StructureMipBias, F), F)),
 			Col.Genus);
 
 		// Extrapolated past 1, the factor goes negative wherever the noise sits
@@ -793,15 +844,25 @@ float4 TR_Density(
 
     BRANCH
 
-    if (F.DetailNoiseWeights.w > 0.0f && Density > 0.0f)
+    if (F.DetailAmount > 0.0f && Density > 0.0f)
     {
 		// Faded toward the mean rather than off: see the header. Past the far
-		// edge the fetch is skipped.
+		// edge, or once the mip has averaged the detail away, the fetch is
+		// skipped.
+        const float UVWScale = F.DetailScale + (Height - Shift) * F.DetailVertical / Stretch;
+        const float Lod = TR_NoiseLod(DetailVolume, UVWScale, F.DetailMipBias, F);
+
+        uint Width, VolumeHeight, Depth, Levels;
+        DetailVolume.GetDimensions(0, Width, VolumeHeight, Depth, Levels);
+
+        const float Strength = F.DetailFade
+			* saturate(float(Levels) - 1.0f - float(TR_DETAIL_MEAN_MIPS) - Lod);
+
         float Modifier = F.DetailFadeMean;
 
         BRANCH
 
-        if (F.DetailFade > 0.0f)
+        if (Strength > 0.0f)
         {
 			// Wispy at the base, billowy toward the top, fibrous in cirrus.
             const float Billow = saturate(HeightFraction / TR_BILLOW_HEIGHT);
@@ -812,12 +873,11 @@ float4 TR_Density(
 
             Modifier = lerp(F.DetailFadeMean, TR_BlendNoise(TR_DetailChannels(TR_SampleLayer(
 				DetailVolume, DetailSampler, N,
-				DisplacementA, DisplacementB, F.DetailFlowInherit,
-				F.DetailScale + (Height - Shift) * F.DetailVertical / Stretch, F)),
-				Weights), F.DetailFade);
+				DisplacementA, DisplacementB, F.DetailFlowInherit, UVWScale, Lod, F)),
+				Weights), Strength);
         }
 
-        const float Erode = Modifier * F.DetailErosion * saturate(F.DetailNoiseWeights.w)
+        const float Erode = Modifier * F.DetailErosion * F.DetailAmount
 			* TR_DETAIL_EROSION_SCALE;
 
         Density = saturate((Density - Erode) / max(1.0f - Erode, 1e-3f));
@@ -826,9 +886,200 @@ float4 TR_Density(
     return float4(Density, Col.Type, Col.Pressure, Col.Top);
 }
 
+/** Density at a planet-local point, the column read where it stands. LocalPos
+ *  carries its true radius; StepHalfLength is half the march step in
+ *  atmosphere fractions along the radius. Returns as TR_DensityInColumn.
+ *
+ *  ONE COLUMN READ OUTSIDE THE SLAB RATHER THAN THE NOISE AS WELL: density
+ *  there is exactly zero. */
+float4 TR_Density(
+	Texture2DArray FlowField,
+	SamplerState FlowSampler,
+	Texture3D DetailVolume,
+	SamplerState DetailSampler,
+	Texture3D StructureVolume,
+	SamplerState StructureSampler,
+	float3 LocalPos,
+	float StepHalfLength,
+	TRFieldParams F)
+{
+    const float Radius = length(LocalPos);
+    const float Height = (Radius - F.PlanetRadius) / F.Thickness;
+    const float HalfStep = max(StepHalfLength, 0.0f);
+
+    const float3 N = normalize(Atmo_RotateZ(LocalPos / max(Radius, 1e-4f), F.SpinAngle));
+
+    const TRColumn Col = TR_ColumnFromInputs(TR_ReadColumn(FlowField, FlowSampler, N), N, F);
+
+    BRANCH
+
+    if (TR_SlabMissed(Col, Height, HalfStep))
+    {
+        return float4(0.0f, Col.Type, Col.Pressure, Col.Top);
+    }
+
+    float3 DisplacementA, DisplacementB;
+    Flow_SampleNoise(FlowField, FlowSampler, N, TR_FLOW_LAYER, DisplacementA, DisplacementB);
+
+    return TR_DensityInColumn(
+		DetailVolume, DetailSampler, StructureVolume, StructureSampler,
+		N, Height, HalfStep, Col, DisplacementA, DisplacementB, F);
+}
+
+// ---------------------------------------------------------------------------
+// Column keyframes along a view ray
+//
+// The column depends only on direction, and the sim is far coarser than the
+// march: a flow texel spans many steps even on a grazing ray. So the sim is read
+// at keyframes TR_COLUMN_SPACING texels apart along the ray and interpolated
+// between, instead of four slices per step.
+//
+// KEYFRAMES SIT ON A LATTICE IN ANGLE ABOUT THE PLANET CENTRE. A straight ray
+// sweeps a great circle: from its closest approach P at impact distance b, the
+// point at parameter t lies at angle atan((t - tP) / b), and its direction is
+// P cos(a) + D sin(a). Equal angles are equal arcs of sim, the lattice is fixed
+// by the ray's geometry rather than by where its jittered samples land, and
+// neighbouring pixels interpolate from near-identical keyframes.
+// ---------------------------------------------------------------------------
+
+/** One keyframe: the column's inputs and both noise displacements. */
+struct TRColumnKey
+{
+    TRColumnInputs Inputs;
+    float3 DisplacementA;
+    float3 DisplacementB;
+};
+
+struct TRRayCache
+{
+    float3 Perigee;
+    float3 Dir;
+    float TPerigee;
+    float Impact;
+    float CellAngle;
+    int Cell;
+    TRColumnKey KeyA;
+    TRColumnKey KeyB;
+};
+
+TRRayCache TR_RayCacheBegin(
+	Texture2DArray FlowField, float3 LocalOrigin, float3 LocalDir, TRFieldParams F)
+{
+    TRRayCache C;
+
+    C.Dir = LocalDir;
+    C.TPerigee = -dot(LocalOrigin, LocalDir);
+
+    const float3 P = LocalOrigin + LocalDir * C.TPerigee;
+    C.Impact = length(P);
+
+	// A ray through the centre has no plane; it is also inside the planet,
+	// which stops it, so any perpendicular serves.
+    const float3 Axis = abs(LocalDir.z) < 0.9f ? float3(0.0f, 0.0f, 1.0f) : float3(1.0f, 0.0f, 0.0f);
+
+    C.Perigee = C.Impact > 1e-4f * F.PlanetRadius
+		? P / C.Impact
+		: normalize(cross(LocalDir, Axis));
+
+    float FaceSize;
+    float2 InvSize;
+    Flow_AtlasMetrics(FlowField, FaceSize, InvSize);
+
+    C.CellAngle = TR_COLUMN_SPACING * (0.5f * PI) / max(FaceSize, 1.0f);
+
+	// No keyframe yet: the first sample reads both.
+    C.Cell = -2147483647;
+
+    C.KeyA = (TRColumnKey) 0;
+    C.KeyB = (TRColumnKey) 0;
+
+    return C;
+}
+
+/** The keyframe at a lattice angle, spun into the field's frame. */
+TRColumnKey TR_ReadKey(
+	Texture2DArray FlowField, SamplerState FlowSampler, TRRayCache C, float Angle, TRFieldParams F)
+{
+    float SinA, CosA;
+    sincos(min(Angle, 0.5f * PI), SinA, CosA);
+
+    const float3 N = normalize(Atmo_RotateZ(C.Perigee * CosA + C.Dir * SinA, F.SpinAngle));
+
+    TRColumnKey Key;
+
+    Key.Inputs = TR_ReadColumn(FlowField, FlowSampler, N);
+    Flow_SampleNoise(FlowField, FlowSampler, N, TR_FLOW_LAYER, Key.DisplacementA, Key.DisplacementB);
+
+    return Key;
+}
+
+/** TR_Density for a sample at parameter T on the ray the cache was begun with,
+ *  LocalPos being that point. Samples must arrive in increasing T for the
+ *  keyframes to carry over; out of order they are still correct, only reread. */
+float4 TR_DensityOnRay(
+	Texture2DArray FlowField,
+	SamplerState FlowSampler,
+	Texture3D DetailVolume,
+	SamplerState DetailSampler,
+	Texture3D StructureVolume,
+	SamplerState StructureSampler,
+	float3 LocalPos,
+	float T,
+	float StepHalfLength,
+	TRFieldParams F,
+	inout TRRayCache C)
+{
+    const float Radius = length(LocalPos);
+    const float Height = (Radius - F.PlanetRadius) / F.Thickness;
+    const float HalfStep = max(StepHalfLength, 0.0f);
+
+    const float3 N = normalize(Atmo_RotateZ(LocalPos / max(Radius, 1e-4f), F.SpinAngle));
+
+    const float Lattice = atan2(T - C.TPerigee, C.Impact) / C.CellAngle;
+    const int Cell = (int) floor(Lattice);
+
+    BRANCH
+
+    if (Cell != C.Cell)
+    {
+        if (Cell == C.Cell + 1)
+        {
+            C.KeyA = C.KeyB;
+        }
+        else
+        {
+            C.KeyA = TR_ReadKey(FlowField, FlowSampler, C, float(Cell) * C.CellAngle, F);
+        }
+
+        C.KeyB = TR_ReadKey(FlowField, FlowSampler, C, float(Cell + 1) * C.CellAngle, F);
+        C.Cell = Cell;
+    }
+
+    const float W = Lattice - float(Cell);
+
+    TRColumnInputs In;
+    In.Pressure = lerp(C.KeyA.Inputs.Pressure, C.KeyB.Inputs.Pressure, W);
+    In.Weather = lerp(C.KeyA.Inputs.Weather, C.KeyB.Inputs.Weather, W);
+
+    const TRColumn Col = TR_ColumnFromInputs(In, N, F);
+
+    BRANCH
+
+    if (TR_SlabMissed(Col, Height, HalfStep))
+    {
+        return float4(0.0f, Col.Type, Col.Pressure, Col.Top);
+    }
+
+    return TR_DensityInColumn(
+		DetailVolume, DetailSampler, StructureVolume, StructureSampler,
+		N, Height, HalfStep, Col,
+		lerp(C.KeyA.DisplacementA, C.KeyB.DisplacementA, W),
+		lerp(C.KeyA.DisplacementB, C.KeyB.DisplacementB, W), F);
+}
+
 /** The field-wide reach, in atmosphere fractions: how far the BASE can move
  *  each way, and how deep a column can get above it. THE ONE DERIVATION read by
- *  both bounds below. Every term in TR_ColumnFromFlow has to appear here: an
+ *  both bounds below. Every term in TR_ColumnFromInputs has to appear here: an
  *  underestimate slices the tops off the features it belongs to. */
 void TR_FieldReach(
 	TRFieldParams F,

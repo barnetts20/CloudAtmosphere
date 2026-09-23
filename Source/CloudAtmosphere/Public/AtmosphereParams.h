@@ -918,10 +918,10 @@ struct CLOUDATMOSPHERE_API FAtmosphereCarveParams
  *  THE TERRESTRIAL FIELD READS A SUBSET. Its structure layer is the cloud shape
  *  coverage erodes, with Erosion as how much the noise shapes it; its detail
  *  layer erodes edges, with Erosion as how hard. The terrestrial layers read
- *  their volumes' channels as noise types rather than octaves, so NoiseWeights
- *  holds only the amount, in A. FlowInherit is the share of
- *  the sim's carried noise displacement the layer follows, 1 moving exactly
- *  with the flow. Relief, BandMix, ShearInherit and bCrossfade are gas giant
+ *  their volumes' channels as noise types rather than octaves, so only
+ *  NoiseWeights' A, the amount, is read. FlowInherit is the share of the sim's
+ *  carried noise displacement the layer follows, 1 moving exactly with the
+ *  flow. Relief, BandMix, ShearInherit and bCrossfade are gas giant
  *  only: the terrestrial layers always crossfade the sim's two phases. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FAtmosphereNoiseLayerParams
@@ -994,6 +994,13 @@ struct CLOUDATMOSPHERE_API FAtmosphereNoiseLayerParams
 	 *  Terrestrial detail only. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float FadeMean = 0.5f;
+
+	/** Offset to the mip the volume is read at. 0 matches a volume texel to one
+	 *  pixel at internal resolution; each +1 halves the detail. The march runs
+	 *  at half resolution per axis, which 1 accounts for. Lower is sharper and
+	 *  shimmers in motion. Terrestrial only; the volume needs its mips. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-2.0", ClampMax = "4.0"))
+	float MipBias = 1.0f;
 
 	/** How far the layer's shapes carry material across a band boundary; at 1 a
 	 *  full-strength shape moves the boundary by about its own width. SIGNED:

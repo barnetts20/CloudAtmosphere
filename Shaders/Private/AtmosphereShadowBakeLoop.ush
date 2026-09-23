@@ -45,18 +45,18 @@
  *  Everything else about the field arrives through a hook. */
 void AtmoBake_Texel(uint3 DispatchThreadId)
 {
+    const int Level = int(DispatchThreadId.z) + ShadowFirstLevel;
+
     if (any(DispatchThreadId.xy >= uint2(ShadowMapSize))
-		|| DispatchThreadId.z >= uint(ATMO_SHADOW_CASCADES))
+		|| Level < 0 || Level >= ATMO_SHADOW_CASCADES)
     {
         return;
     }
 
-	// One dispatch, one slice per cascade. Nothing about the level crosses from
-	// the CPU: extent and centre are derived here by the same functions the
-	// reconstruction calls, so the two cannot disagree about where a slice is.
-    const uint3 Texel = DispatchThreadId;
-
-    const int Level = int(DispatchThreadId.z);
+	// One slice per cascade. Only the level index crosses from the CPU: extent
+	// and centre are derived here by the same functions the reconstruction
+	// calls, so the two cannot disagree about where a slice is.
+    const uint3 Texel = uint3(DispatchThreadId.xy, uint(Level));
 
     BakeFieldParams F = BakeField_Params();
 
@@ -70,6 +70,7 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
     AtmoShadow_Basis(ShadowLightDir, ShadowBasisU, ShadowBasisV);
 
     const float ShadowExtent = BakeField_CascadeExtent(F, Level);
+    const float Extent0 = BakeField_CascadeExtent(F, 0);
 
 	// A collapsed level -- a layer faded to nothing -- writes the sentinel and
 	// is skipped by the walk that reads it.
@@ -80,29 +81,23 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
         return;
     }
 
+    const float HalfWidth = AtmoShadow_CascadeHalfWidth(Level, ShadowExtent, Extent0);
+
     const float2 ShadowCentre = AtmoShadow_CascadeCentre(
 		Level, ShadowCameraLocal, ShadowBasisU, ShadowBasisV,
-		ShadowExtent, float2(ShadowMapSize));
+		HalfWidth, Extent0, float2(ShadowMapSize));
 
-    const float2 Q = (float2(Texel.xy) + 0.5f) * ShadowInvMapSize * 2.0f - 1.0f;
+	// EVERY CASCADE IS A WINDOW OF THE WARPED DISC, mapped to the plane by the
+	// same functions the reader inverts. Texels are then ellipses on the plane,
+	// so the footprint the subsamples cover is carried as the two vectors one
+	// texel moves along each map axis.
+    const float2 Disc = ShadowCentre
+		+ ((float2(Texel.xy) + 0.5f) * ShadowInvMapSize * 2.0f - 1.0f) * HalfWidth;
 
-	// CASCADE 0 IS WARPED, by the same functions the reader inverts. Its texels
-	// are then ellipses on the plane, so the footprint the subsamples cover is
-	// carried as the two vectors one texel moves along each map axis.
-    float2 JacobianX = float2(1.0f, 0.0f);
-    float2 JacobianY = float2(0.0f, 1.0f);
+    const float2 Plane = AtmoShadow_DiscToPlane(Disc) * Extent0;
 
-    float2 Plane;
-
-    if (Level == 0)
-    {
-        Plane = ShadowCentre + AtmoShadow_DiscToPlane(Q) * ShadowExtent;
-        AtmoShadow_DiscJacobian(Q, JacobianX, JacobianY);
-    }
-    else
-    {
-        Plane = ShadowCentre + Q * ShadowExtent;
-    }
+    float2 JacobianX, JacobianY;
+    AtmoShadow_DiscJacobian(Disc, JacobianX, JacobianY);
 
 	// Still the ray's closest approach to the planet centre: the map plane moved
 	// but the shell did not, so the intersection below is unchanged.
@@ -148,7 +143,7 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 			OccluderStrength, OccluderFalloff));
     }
 
-    const float TexelScale = 2.0f * ShadowExtent / float(max(ShadowMapSize.x, 1));
+    const float TexelScale = 2.0f * HalfWidth * Extent0 / float(max(ShadowMapSize.x, 1));
 
 	// The footprint, world vectors per texel along each map axis. The field's
 	// Sigma offsets along them with a unit TexelWorld, so the subsamples cover

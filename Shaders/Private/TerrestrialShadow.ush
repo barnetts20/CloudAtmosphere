@@ -35,8 +35,8 @@
 #define TR_ShadowTauFromNodes(Node, Depth, Ceiling) AtmoShadow_TauFromNodes(Node, Depth, Ceiling)
 #define TR_ExtinctionTintRange(Neg, Pos, Base) AtmoShadow_ExtinctionTintRange(Neg, Pos, Base)
 
-#define TR_ShadowCascadeCentre(Level, CameraLocal, U, V, Extent, MapSize) \
-	AtmoShadow_CascadeCentre(Level, CameraLocal, U, V, Extent, MapSize)
+#define TR_ShadowCascadeCentre(Level, CameraLocal, U, V, HalfWidth, Extent0, MapSize) \
+	AtmoShadow_CascadeCentre(Level, CameraLocal, U, V, HalfWidth, Extent0, MapSize)
 
 /** The radius the map covers: the field-wide top bound, the same radius the
  *  march plans against as cloudOuterRadius.
@@ -104,13 +104,13 @@ float TR_ShadowTau(
 	SamplerState ShadowSampler,
 	float3 LocalPos,
 	float3 LightLocal,
-	float3 CameraLocal,
+	AtmoShadowCameras Cameras,
 	float2 JitterTexels,
 	float Ceiling,
 	TRFieldParams F)
 {
     return AtmoShadow_Tau(
-		ShadowMap, ShadowSampler, LocalPos, LightLocal, CameraLocal,
+		ShadowMap, ShadowSampler, LocalPos, LightLocal, Cameras,
 		JitterTexels, Ceiling, TR_ShadowFrame(F));
 }
 
@@ -123,7 +123,7 @@ float TR_ShadowSurfaceOptDepth(
 	SamplerState ShadowSampler,
 	float3 LocalPos,
 	float3 LightLocal,
-	float3 CameraLocal,
+	AtmoShadowCameras Cameras,
 	float2 JitterTexels,
 	float Ceiling,
 	float FoldConstant,
@@ -131,6 +131,6 @@ float TR_ShadowSurfaceOptDepth(
 	TRFieldParams F)
 {
     return AtmoShadow_SurfaceOptDepth(
-		ShadowMap, ShadowSampler, LocalPos, LightLocal, CameraLocal,
+		ShadowMap, ShadowSampler, LocalPos, LightLocal, Cameras,
 		JitterTexels, Ceiling, TR_ShadowFrame(F), FoldConstant, ReceiverBias);
 }

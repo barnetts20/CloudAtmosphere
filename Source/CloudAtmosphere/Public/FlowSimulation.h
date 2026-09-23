@@ -64,7 +64,9 @@ private:
 	void AddInitPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	void AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	void AddReducePasses(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
-	void AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
+	/** Centre, explicit and output fields of the current faces. bLatest writes
+	 *  the output pair the resample blends toward, rather than the working pair. */
+	void AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R, bool bLatest);
 	void AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, struct FFlowSimResources& R);
 	void AddDebugPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	void AddResamplePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
@@ -80,8 +82,14 @@ private:
 
 	/** Noise displacements, phase A slices then phase B. Flips with the cloud. */
 	TRefCountPtr<IPooledRenderTarget> PooledNoise[2];
-	/** The output on the sim's own grid, before the resample onto the atlas. */
+	/** The output on the sim's own grid, before the resample onto the atlas.
+	 *  Doubles as the previous state's output once a frame's steps are done. */
 	TRefCountPtr<IPooledRenderTarget> PooledLatLon;
+
+	/** The latest state's centre fields and output, which the resample blends
+	 *  toward from Centre and LatLon by FFlowSimParams::StateBlend. */
+	TRefCountPtr<IPooledRenderTarget> PooledCentreLatest;
+	TRefCountPtr<IPooledRenderTarget> PooledLatLonLatest;
 
 	TRefCountPtr<IPooledRenderTarget> PooledRowMean;
 	TRefCountPtr<IPooledRenderTarget> PooledPhiEq;

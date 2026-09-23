@@ -64,6 +64,7 @@ SHADER_PARAMETER(int32, SimFilterMaxHalfWidth)
 // -- Output -------------------------------------------------------------
 SHADER_PARAMETER(FVector3f, SimOutputScales)
 SHADER_PARAMETER(int32, SimAtlasFaceSize)
+SHADER_PARAMETER(float, SimStateBlend)
 
 // -- Debug --------------------------------------------------------------
 SHADER_PARAMETER(int32, SimDebugMode)
@@ -82,6 +83,8 @@ SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float2>, SimSpectrumSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float2>, SimCloudSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimNoiseSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimLatLonSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimCentreLatestSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimLatLonLatestSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float2>, SimRowMeanSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, SimPhiEqSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, SimGlobalMeanSRV)

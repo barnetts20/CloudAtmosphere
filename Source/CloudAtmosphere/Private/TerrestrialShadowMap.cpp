@@ -64,10 +64,9 @@ namespace TerrestrialShadow
 		P->CloudLid = Params.CloudLid;
 		P->CloudLift = Params.CloudLift;
 		P->CloudMotion = Params.CloudMotion;
-		P->StructureNoiseWeights = Params.StructureNoiseWeights;
+		P->NoiseLevels = Params.NoiseLevels;
 		P->StructureSampling = Params.StructureSampling;
 		P->StructureWarp = Params.StructureWarp;
-		P->DetailNoiseWeights = Params.DetailNoiseWeights;
 		P->DetailSampling = Params.DetailSampling;
 		P->DetailWarp = Params.DetailWarp;
 		P->CloudGenusStratus = Params.CloudGenusStratus;
@@ -147,18 +146,30 @@ namespace TerrestrialShadow
 		P->OccluderDepth1 = DepthOrBlack(Params.Occluders[1]);
 		P->OccluderDepth2 = DepthOrBlack(Params.Occluders[2]);
 
-		// One slice per cascade on Z. The shader derives each level's extent and
-		// centre from its own slice index, so nothing about a level crosses from
-		// here and the bake cannot disagree with the march about where a slice sits.
+		// One pass per level in the mask, one slice each. Only the index
+		// crosses from here: the shader derives each level's extent and centre,
+		// so the bake cannot disagree with the march about where a slice sits.
 		const FIntVector Groups(
 			FMath::DivideAndRoundUp(Params.MapSize.X, AtmoShadowBake::ThreadGroupSize),
 			FMath::DivideAndRoundUp(Params.MapSize.Y, AtmoShadowBake::ThreadGroupSize),
-			AtmoShadowBake::CascadeCount);
+			1);
 
 		TShaderMapRef<FTerrestrialShadowBakeCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
-		FComputeShaderUtils::AddPass(
-			GraphBuilder,
-			RDG_EVENT_NAME("Terrestrial.ShadowBake"), Shader, P, Groups);
+		for (int32 Level = 0; Level < AtmoShadowBake::CascadeCount; ++Level)
+		{
+			if ((Params.LevelMask & (1u << Level)) == 0)
+			{
+				continue;
+			}
+
+			auto* LevelP = GraphBuilder.AllocParameters<FTerrestrialShadowBakeCS::FParameters>();
+			*LevelP = *P;
+			LevelP->ShadowFirstLevel = Level;
+
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("Terrestrial.ShadowBake Level %d", Level), Shader, LevelP, Groups);
+		}
 	}
 }

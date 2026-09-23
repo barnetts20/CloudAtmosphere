@@ -178,6 +178,10 @@ struct GGFieldParams
 	 *  scales its layer's carve and erosion and gates the fetches feeding it. */
     float StructureFade;
     float DetailFade;
+
+	/** One march pixel's width at the sample, radians of arc. Written by the
+	 *  march for either field; this deck samples mip 0 and does not read it. */
+    float PixelFootprint;
 };
 
 /** Fills GGFieldParams from the authored values, in panel order, and derives the
@@ -309,6 +313,7 @@ GGFieldParams GG_BuildField(
 
     F.StructureFade = 1.0f;
     F.DetailFade = 1.0f;
+    F.PixelFootprint = 0.0f;
 
     return F;
 }

@@ -192,8 +192,9 @@ static FAutoConsoleCommandWithWorldAndArgs GFlowSimStatusCmd(
 			if (UFlowSimSubsystem* Sub = FindSubsystem(World))
 			{
 				UE_LOG(LogFlowSim, Display,
-					TEXT("steps %d, simulated time %.2f, Courant %.3f, %s"),
+					TEXT("steps %d (%d last frame), simulated time %.4f, Courant %.3f, %s"),
 					Sub->GetStepsCompleted(),
+					Sub->GetStepsLastFrame(),
 					Sub->GetSimulatedTime(),
 					Sub->GetCourant(),
 					Sub->IsSpinningUp() ? TEXT("spinning up") : TEXT("free running"));
@@ -294,7 +295,6 @@ void UFlowSimSubsystem::StartSimulation(UFlowSimConfig* InConfig)
 	Config = InConfig;
 	bRunning = true;
 
-	StepAccumulator = 0.0f;
 	SimulatedTime = 0.0f;
 	StepsCompleted = 0;
 	PendingManualSteps = 0;
@@ -315,9 +315,7 @@ float UFlowSimSubsystem::GetCourant() const
 	}
 
 	const int32 W = FlowSimShader::GridLongitude(Config->GridLongitude);
-	const float Step = Config->StepSize;
-
-	return PeakRate(*Config) * Step * W / (2.0f * UE_PI);
+	return PeakRate(*Config) * CurrentStep * W / (2.0f * UE_PI);
 }
 
 void UFlowSimSubsystem::ReportInertSettings() const
@@ -377,22 +375,22 @@ void UFlowSimSubsystem::ReportCourant() const
 	}
 
 	// CONSEQUENCES, NOT CONTROLS. These fall out of the step with the profile,
-	// the rotation and the grid; the substep rate falls out of the speed.
+	// the rotation and the grid; the step rate falls out of the speed.
 	const int32 W = FlowSimShader::GridLongitude(Config->GridLongitude);
-	const float Step = Config->StepSize;
+	const float Step = Config->GetStepSize();
+	const float Steps = FMath::Max(Config->SimSpeed, 0.0f) / 60.0f / Step;
 	const float C = WaveSpeed(*Config);
 
-	const float Advective = GetCourant();
+	const float Advective = PeakRate(*Config) * Step * W / (2.0f * UE_PI);
 	const float Gravity = C * Step * W / (2.0f * UE_PI);
 	const float Froude = PeakRate(*Config) / C;
 	const float RotationPerStep = Config->PlanetaryVorticity * Step;
 
 	UE_LOG(LogFlowSim, Log,
-		TEXT("Step %.5f at TimeScale %.2f, %.1f substeps/frame at 60fps (cap %d). ")
+		TEXT("Speed %.4f: %.1f steps of %.6f per frame at 60fps. ")
 		TEXT("Advective Courant %.3f, gravity-wave Courant %.3f (implicit), ")
 		TEXT("Froude %.2f, Coriolis %.3f rad/step, wave speed %.3f."),
-		Step, Config->TimeScale,
-		Config->TimeScale / 60.0f / FMath::Max(Step, 1e-9f), Config->MaxSubstepsPerFrame,
+		Config->SimSpeed, Steps, Step,
 		Advective, Gravity, Froude, RotationPerStep, C);
 
 	if (Froude > 0.5f)
@@ -410,7 +408,7 @@ void UFlowSimSubsystem::ReportCourant() const
 			TEXT("Coriolis turns the flow %.2f rad per substep; the explicit ")
 			TEXT("rotation and implicit pressure split loses accuracy, weakening ")
 			TEXT("balanced jets and radiating gravity waves. ")
-			TEXT("Lower StepSize."),
+			TEXT("Lower PlanetaryVorticity."),
 			RotationPerStep);
 	}
 }
@@ -424,7 +422,9 @@ void UFlowSimSubsystem::ResetSimulation()
 {
 	SimulatedTime = 0.0f;
 	StepsCompleted = 0;
-	StepAccumulator = 0.0f;
+	CurrentStep = Config ? Config->GetStepSize() : 1e-5f;
+	PendingTime = CurrentStep;
+	StateBlend = 1.0f;
 
 	if (!Simulation)
 	{
@@ -522,7 +522,7 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 	}
 
 	FFlowSimParams Params;
-	if (!BuildParams(Params))
+	if (!BuildParams(Params, CurrentStep))
 	{
 		return false;
 	}
@@ -693,7 +693,7 @@ bool UFlowSimSubsystem::PrepareTargets() const
 	return true;
 }
 
-bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
+bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 {
 	if (!Config)
 	{
@@ -727,9 +727,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
 		Out.LayerProfile[i] = FVector4f(P.JetScale, P.BoostScale, P.ForcingScale, P.DragScale);
 	}
 
-	// A fixed step, independent of speed; the Courant numbers are reported
-	// rather than enforced.
-	Out.DeltaTime = FMath::Max(Config->StepSize, 0.0f);
+	Out.DeltaTime = FMath::Clamp(Step, 0.0f, FlowSimStep::SpinUp);
 	Out.Time = SimulatedTime;
 	Out.PlanetaryVorticity = Config->PlanetaryVorticity;
 
@@ -927,11 +925,14 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 	const bool bPaused = (PauseOverride >= 0) ? (PauseOverride != 0) : Config->bPaused;
 
 	int32 Substeps = 0;
+	int32 Due = 0;
+	const float RunStep = Config->GetStepSize();
+	float Step = RunStep;
+	float Blend = StateBlend;
 
-	// Derived exactly as BuildParams derives it, so the accumulator and the
-	// shader agree about how much time a substep is worth.
-	const float StepSize = FMath::Max(Config->StepSize, 0.0f);
-
+	// THE OUTPUT SHOWS SimulatedTime - Step + PendingTime, a blend of the last
+	// two states. Spin-up and manual steps show the state they reach, so they
+	// leave exactly one step owed and running resumes from what is on screen.
 	if (StepsCompleted < SpinUpTarget)
 	{
 		// Spread over frames: one graph of hundreds of substeps hitches, and a
@@ -939,39 +940,79 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 		Substeps = FMath::Min(
 			FMath::Max(Config->MaxSpinUpStepsPerFrame, 1),
 			SpinUpTarget - StepsCompleted);
+
+		Step = FlowSimStep::SpinUp;
+		PendingTime = RunStep;
+		Blend = 1.0f;
 	}
 	else if (PendingManualSteps > 0)
 	{
-		Substeps = FMath::Min(PendingManualSteps, FMath::Max(Config->MaxSubstepsPerFrame, 1));
+		Substeps = FMath::Min(PendingManualSteps, FlowSimStep::WarnPerFrame);
 		PendingManualSteps -= Substeps;
+		PendingTime = RunStep;
+		Blend = 1.0f;
 	}
-	else if (!bPaused && StepSize > 0.0f)
+	else if (!bPaused && Config->SimSpeed > 0.0f)
 	{
-		StepAccumulator += DeltaTime * Config->TimeScale;
+		// Speed times frame time, the frame time clamped so a slow frame asks
+		// for no more than a tenth of a second's worth.
+		PendingTime += Config->SimSpeed * FMath::Min(DeltaTime, 0.1f);
 
-		Substeps = FMath::FloorToInt(StepAccumulator / StepSize);
-		Substeps = FMath::Min(Substeps, FMath::Max(Config->MaxSubstepsPerFrame, 1));
+		// A frame at the hang guard drops the excess rather than owing it.
+		Due = FMath::FloorToInt(PendingTime / Step);
+		Substeps = FMath::Min(Due, FlowSimStep::MaxPerFrame);
+		PendingTime -= Due * Step;
+		Blend = FMath::Clamp(PendingTime / Step, 0.0f, 1.0f);
+	}
 
-		// Consume what was taken and DISCARD the rest beyond one step: carrying
-		// it turns a hitch into a burst that makes the next frame worse.
-		StepAccumulator -= Substeps * StepSize;
-		StepAccumulator = FMath::Min(StepAccumulator, StepSize);
+	// Said once per change of state, not per frame; the warning clears at half
+	// its threshold so a speed near it does not repeat it.
+	const int32 WarnBelow = (StepLoadLevel > 0) ? FlowSimStep::WarnPerFrame / 2 : FlowSimStep::WarnPerFrame;
+	const int32 Level = (Due > FlowSimStep::MaxPerFrame) ? 2
+		: (Substeps > WarnBelow) ? 1 : 0;
+
+	if (Level != StepLoadLevel && !bPaused && StepsCompleted >= SpinUpTarget)
+	{
+		StepLoadLevel = Level;
+
+		if (Level == 2)
+		{
+			UE_LOG(LogFlowSim, Warning,
+				TEXT("SimSpeed %.4f needs more than %d steps a frame; running slower than asked."),
+				Config->SimSpeed, FlowSimStep::MaxPerFrame);
+		}
+		else if (Level == 1)
+		{
+			UE_LOG(LogFlowSim, Warning,
+				TEXT("SimSpeed %.4f takes %d steps a frame; the sim now dominates frame time."),
+				Config->SimSpeed, Substeps);
+		}
+		else
+		{
+			UE_LOG(LogFlowSim, Log, TEXT("SimSpeed %.4f takes %d steps a frame."),
+				Config->SimSpeed, Substeps);
+		}
 	}
 
 	FFlowSimParams Params;
-	if (!BuildParams(Params))
+	if (!BuildParams(Params, Step))
 	{
 		return;
 	}
 
-	SimulatedTime += Substeps * StepSize;
+	Params.StateBlend = Blend;
+
+	CurrentStep = Step;
+	StateBlend = Blend;
+	LastSubsteps = Substeps;
+	SimulatedTime += Substeps * Step;
 	StepsCompleted += Substeps;
 
 	FFlowSimulation* Sim = Simulation;
 
 	// Zero substeps still enqueues, so the output and debug views keep updating
 	// on a paused sim.
-	ENQUEUE_RENDER_COMMAND(FlowSimStep)(
+	ENQUEUE_RENDER_COMMAND(FlowSimAdvance)(
 		[Sim, Params, Substeps](FRHICommandListImmediate& RHICmdList)
 		{
 			FRDGBuilder GraphBuilder(RHICmdList);

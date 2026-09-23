@@ -130,6 +130,13 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "128", ClampMax = "4096"))
     int32 ShadowResolution = 1024;
 
+    /** Cascades rebaked per frame, taken in turn. 1 rebakes each level every
+     *  third frame at a third of the cost; the clouds and the light move slowly
+     *  enough that the lag does not show. Each level is read against the camera
+     *  it was baked with, so a moving camera costs nothing in placement. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "1", ClampMax = "3"))
+    int32 ShadowLevelsPerFrame = 1;
+
     /** Opaque geometry casting into the deck shadow map. PARKED, so it carries
      *  no edit specifier and reaches neither the details panel nor Blueprint;
      *  FGasGiantOccluderShadowParams::IsEnabled answers false whatever a saved
@@ -498,6 +505,16 @@ private:
      *  when a usable target appears, so a fixed asset logs its recovery. */
     bool bWarnedShadowTarget = false;
 
+    /** The next cascade in the bake rotation, and the camera each level was
+     *  last baked around -- what the material reads that level against. */
+    int32 ShadowLevelCursor = 0;
+    FVector3f ShadowBakedCamera[AtmoShadowBake::CascadeCount];
+
+    /** False until every level has been baked into the current target. Cleared
+     *  when the target is reinitialised or the model changes, so the first
+     *  request after either bakes all of them. */
+    bool bShadowPrimed = false;
+
 
     // --- Occluder captures ---
     //
@@ -560,7 +577,7 @@ private:
     /** Starts the sim subsystem against the deck's config. */
     void StartFlowSimulation();
 
-    /** Simulated time from the sim subsystem, or 0 when it is not running. NOT
+    /** Sim time of the state the field shows, or 0 when the sim is not running. NOT
      *  WORLD TIME: the field is coherent against the sim's own clock, and the two
      *  diverge the moment the sim pauses, is stepped by hand or is restored from
      *  a snapshot -- after which the warp would advect a field that has not

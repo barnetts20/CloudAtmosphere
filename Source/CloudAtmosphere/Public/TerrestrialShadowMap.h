@@ -42,6 +42,10 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 
 	FVector3f CameraLocal = FVector3f::ZeroVector;
 
+	/** The cascades this request bakes, bit per level. The rest keep what they
+	 *  last held, read against the camera they were baked with. */
+	uint32 LevelMask = (1u << AtmoShadowBake::CascadeCount) - 1u;
+
 	// -- Deck ---------------------------------------------------------------
 	//
 	// TR_BuildField's arguments, in its order and under its names -- the same
@@ -60,10 +64,9 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	FVector4f CloudLid = FVector4f::Zero();
 	FVector4f CloudLift = FVector4f::Zero();
 	FVector4f CloudMotion = FVector4f::Zero();
-	FVector4f StructureNoiseWeights = FVector4f::Zero();
+	FVector4f NoiseLevels = FVector4f::Zero();
 	FVector4f StructureSampling = FVector4f::Zero();
 	FVector4f StructureWarp = FVector4f::Zero();
-	FVector4f DetailNoiseWeights = FVector4f::Zero();
 	FVector4f DetailSampling = FVector4f::Zero();
 	FVector4f DetailWarp = FVector4f::Zero();
 	FVector4f CloudGenusStratus = FVector4f::Zero();
@@ -149,6 +152,7 @@ SHADER_PARAMETER(FVector2f, ShadowInvMapSize)
 
 SHADER_PARAMETER(FVector3f, ShadowLightDir)
 SHADER_PARAMETER(FVector3f, ShadowCameraLocal)
+SHADER_PARAMETER(int32, ShadowFirstLevel)
 
 SHADER_PARAMETER(float, PlanetRadius)
 SHADER_PARAMETER(float, HeightScale)
@@ -160,10 +164,9 @@ SHADER_PARAMETER(FVector4f, CloudType)
 SHADER_PARAMETER(FVector4f, CloudLid)
 SHADER_PARAMETER(FVector4f, CloudLift)
 SHADER_PARAMETER(FVector4f, CloudMotion)
-SHADER_PARAMETER(FVector4f, StructureNoiseWeights)
+SHADER_PARAMETER(FVector4f, NoiseLevels)
 SHADER_PARAMETER(FVector4f, StructureSampling)
 SHADER_PARAMETER(FVector4f, StructureWarp)
-SHADER_PARAMETER(FVector4f, DetailNoiseWeights)
 SHADER_PARAMETER(FVector4f, DetailSampling)
 SHADER_PARAMETER(FVector4f, DetailWarp)
 SHADER_PARAMETER(FVector4f, CloudGenusStratus)

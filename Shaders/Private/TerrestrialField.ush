@@ -409,6 +409,17 @@ CompositeParams TR_BuildAtmo(
     return Params;
 }
 
+/** TR_BuildAtmo from the material's pins, which carry exactly these names. The
+ *  per-pixel terms, and the field, arrive as arguments. */
+#define TR_BUILD_ATMO(SvPosition, RayDir, SceneRayDistance, F) TR_BuildAtmo( \
+	SvPosition, RayDir, CameraPosition, SceneRayDistance, PlanetCenter, \
+	LightDirection, LightColor, \
+	RayleighBeta, RayleighScaleHeight, MieBeta, MieScaleHeight, MieG, \
+	AbsorptionBeta, AbsorptionAltitude, AbsorptionFalloff, \
+	AtmosphereAmbient, AtmosphereAmbientFloor, \
+	CloudOpticalDepth, LightExtinctionFraction, CloudAmbient, CloudAmbientFloor, \
+	AtmosphereSteps, CloudSteps, ChordSpread, SurfaceShadow, F)
+
 // ---------------------------------------------------------------------------
 // The march's hooks
 // ---------------------------------------------------------------------------
@@ -470,6 +481,30 @@ float4 Field_Sample(
 		StructureVolume, StructureSampler, LocalPos, StepHalfHeight, F);
 }
 
+/** Field_Sample along one view ray, reading the sim at keyframes rather than
+ *  per sample; see TR_DensityOnRay. The march begins a cache per ray and passes
+ *  each sample's ray parameter T with it. */
+#define FIELD_RAY_CACHE 1
+#define FieldRayCache TRRayCache
+
+FieldRayCache Field_RayBegin(FIELD_TEXTURE_DECL, float3 LocalOrigin, float3 LocalDir, FieldParams F)
+{
+    return TR_RayCacheBegin(FlowField, LocalOrigin, LocalDir, F);
+}
+
+float4 Field_SampleOnRay(
+	FIELD_TEXTURE_DECL,
+	float3 LocalPos,
+	float T,
+	float StepHalfHeight,
+	FieldParams F,
+	inout FieldRayCache Cache)
+{
+    return TR_DensityOnRay(
+		FlowField, FlowSampler, DetailVolume, DetailSampler,
+		StructureVolume, StructureSampler, LocalPos, T, StepHalfHeight, F, Cache);
+}
+
 /** Single-scattering albedo at a sample's material coordinate. */
 float3 Field_Albedo(float Material, FieldMaterialParams S)
 {
@@ -497,6 +532,15 @@ float3 Field_LightTint(
 	FieldMaterialParams S)
 {
     return TR_TypeTint(TR_TypeCoarse(FlowField, FlowSampler, LocalPos, F), S);
+}
+
+/** Field_LightTint from a sample already taken at the receiver: its second
+ *  channel is the cloud type TR_TypeCoarse would read, so no second column. */
+#define FIELD_SAMPLE_TINT 1
+
+float3 Field_SampleLightTint(float4 Sample, FieldMaterialParams S)
+{
+    return TR_TypeTint(Sample.y, S);
 }
 
 /** The tint to fall back on where nothing shadowed the receiver, so the branch

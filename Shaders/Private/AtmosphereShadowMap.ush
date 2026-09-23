@@ -106,16 +106,20 @@
 #define ATMO_SHADOW_LOOKUP_JITTER 1.0f
 #endif
 
-/** Angular warp on cascade 0, as a fraction of a quarter turn: 1 stores the
- *  disc against the angle from the sub-light point, 0 against the planar
- *  offset. BAKE AND READ BOTH TAKE IT FROM HERE, and a map read with a warp it
- *  was not baked with lands every shadow at the wrong radius.
+/** Angular warp of the map plane, as a fraction of a quarter turn: 1 stores
+ *  the disc against the angle from the sub-light point, 0 against the planar
+ *  offset. EVERY CASCADE IS A WINDOW OF THE ONE WARPED DISC. BAKE AND READ BOTH
+ *  TAKE IT FROM HERE, and a map read with a warp it was not baked with lands
+ *  every shadow at the wrong radius.
  *
- *  WHY. A planar texel covers 1 / cos(angle) of ground along the light, so
- *  toward the terminator each texel's error is drawn out into a streak along
- *  the light. At 1 the ground resolution is uniform across the lit hemisphere:
- *  7 times finer at 85 degrees and 18 at 88, pi/2 coarser under the light.
- *  The price is bake time: more texels land on the long grazing chords. */
+ *  WHY. A planar texel covers 1 / cos(angle) of ground along the light, and
+ *  at the terminator its width is a spread in the ALTITUDE its grazing rays
+ *  pass at. Points in one texel then read a ray up to half a texel above or
+ *  below their own, through different cloud, and the error is coherent along
+ *  the light and independent between neighbours: streaks along the light, one
+ *  texel wide. At 1 the ground resolution is uniform across the lit
+ *  hemisphere: 7 times finer at 85 degrees and 18 at 88. The price is bake
+ *  time: more texels land on the long grazing chords. */
 #ifndef ATMO_SHADOW_DISC_WARP
 #define ATMO_SHADOW_DISC_WARP 1.0f
 #endif
@@ -242,8 +246,8 @@ float AtmoShadow_WarpAngle()
     return saturate(ATMO_SHADOW_DISC_WARP) * (0.5f * PI);
 }
 
-/** Cascade 0's map coordinate, [-1, 1] across the map, to its plane offset over
- *  the extent. Radius sin(A S) / sin(A) at map radius S: the planar projection
+/** Warped disc coordinate, [-1, 1] across cascade 0, to its plane offset over
+ *  cascade 0's extent. Radius sin(A S) / sin(A) at map radius S: the planar projection
  *  of a sphere sampled evenly in angle. Past S = 1 it holds the edge, which is
  *  outside the shell. */
 float2 AtmoShadow_DiscToPlane(float2 Q)
@@ -264,7 +268,7 @@ float2 AtmoShadow_DiscToPlane(float2 Q)
     return Q * (sin(A * min(S, 1.0f)) / (S * sin(A)));
 }
 
-/** The inverse: plane offset over the extent to cascade 0's map coordinate. */
+/** The inverse: plane offset over cascade 0's extent to the disc coordinate. */
 float2 AtmoShadow_PlaneToDisc(float2 P)
 {
     const float A = AtmoShadow_WarpAngle();
@@ -311,25 +315,63 @@ void AtmoShadow_DiscJacobian(float2 Q, out float2 OutX, out float2 OutY)
     OutY = float2(Cross * N.x * N.y, Tangential + Cross * N.y * N.y);
 }
 
-/** Centre of a cascade in the map plane, snapped to its own texel grid. Level 0
- *  is centred on the planet and never moves. SNAPPING IS LOAD-BEARING: the
+/** The camera each cascade was baked around, planet-local. Levels bake on
+ *  different frames, so each is read against its own: a centre snapped from any
+ *  other camera can land a whole texel from where the bake put it. Level 0 is
+ *  planet-centred and reads none. */
+struct AtmoShadowCameras
+{
+    float3 Level[ATMO_SHADOW_CASCADES];
+};
+
+/** The cameras from the material's two pins. */
+AtmoShadowCameras AtmoShadow_MakeCameras(float3 Camera1, float3 Camera2)
+{
+    AtmoShadowCameras Cameras;
+
+    Cameras.Level[0] = float3(0.0f, 0.0f, 0.0f);
+    Cameras.Level[1] = Camera1;
+    Cameras.Level[2] = Camera2;
+
+    return Cameras;
+}
+
+/** A cascade's half-width in disc coordinates: its planar Extent near the
+ *  sub-light point, where the warp's scale is A / sin(A). Level 0 spans the
+ *  disc. */
+float AtmoShadow_CascadeHalfWidth(int Level, float Extent, float Extent0)
+{
+    if (Level <= 0)
+    {
+        return 1.0f;
+    }
+
+    const float A = AtmoShadow_WarpAngle();
+    const float Scale = (A < 1e-3f) ? 1.0f : sin(A) / A;
+
+    return min(Extent / max(Extent0, 1e-6f) * Scale, 1.0f);
+}
+
+/** Centre of a cascade in disc coordinates, snapped to its own texel grid. Level
+ *  0 is centred on the planet and never moves. SNAPPING IS LOAD-BEARING: the
  *  centre follows the camera, so an unsnapped map slides its lattice under the
  *  medium and every crossing depth moves with it -- the crawl an anchored march
  *  lattice exists to prevent, by another route. Whole-texel jumps land on
  *  boundaries that already exist. */
 float2 AtmoShadow_CascadeCentre(
-	int Level, float3 CameraLocal, float3 U, float3 V, float Extent, float2 MapSize)
+	int Level, float3 CameraLocal, float3 U, float3 V, float HalfWidth, float Extent0, float2 MapSize)
 {
     if (Level <= 0)
     {
         return float2(0.0f, 0.0f);
     }
 
-    const float2 Plane = float2(dot(CameraLocal, U), dot(CameraLocal, V));
+    const float2 Disc = AtmoShadow_PlaneToDisc(
+		float2(dot(CameraLocal, U), dot(CameraLocal, V)) / max(Extent0, 1e-6f));
 
-    const float2 TexelSize = 2.0f * Extent / max(MapSize, 1.0f);
+    const float2 TexelSize = 2.0f * HalfWidth / max(MapSize, 1.0f);
 
-    return floor(Plane / TexelSize) * TexelSize;
+    return floor(Disc / TexelSize) * TexelSize;
 }
 
 /** Optical depth from one texel's nodes at a given depth. Piecewise linear
@@ -403,8 +445,8 @@ float AtmoShadow_OccluderTau(
     return Sum / float(ATMO_SHADOW_OCCLUDER_TAPS);
 }
 
-/** Optical depth from one cascade slice, at a point already projected into the
- *  map plane. SAMPLER STATE MUST BE CLAMP ON BOTH AXES: the four taps come from
+/** Optical depth from one cascade slice, at a point already in disc
+ *  coordinates. SAMPLER STATE MUST BE CLAMP ON BOTH AXES: the four taps come from
  *  a floored texel index, reaching one texel outside the map at either edge.
  *  They land on exact centres, so a bilinear sampler returns each texel
  *  unfiltered and the weights below are the only reconstruction applied.
@@ -420,20 +462,17 @@ float AtmoShadow_TauSlice(
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
 	int Level,
-	float2 Plane,
+	float2 Disc,
 	float2 Centre,
-	float Extent,
+	float HalfWidth,
 	float Depth,
 	float2 JitterTexels,
 	float2 MapSize,
 	float Ceiling,
-	float BlurWorld,
+	float BlurDisc,
 	bool bHasOccluders)
 {
-	// Cascade 0 is stored warped; see ATMO_SHADOW_DISC_WARP.
-    const float2 Relative = (Plane - Centre) / Extent;
-
-    const float2 UV = ((Level == 0) ? AtmoShadow_PlaneToDisc(Relative) : Relative) * 0.5f + 0.5f;
+    const float2 UV = (Disc - Centre) / HalfWidth * 0.5f + 0.5f;
 
     const float2 InvSize = 1.0f / MapSize;
 
@@ -473,13 +512,13 @@ float AtmoShadow_TauSlice(
 	// the evaluation; the nodes cannot, since the depth selects which segment
 	// applies to them.
 	//
-	// The blur width is a distance, so it becomes a UV radius against this
-	// level's own half-width. Floored at half a texel: below that the taps land
-	// inside one texel and the bilinear ramp is the only edge there is anyway.
-	// On cascade 0 the radius ignores the warp, so the blur narrows toward the
-	// terminator by the warp's radial scale.
+	// The blur width, in disc units, becomes a UV radius against this level's
+	// half-width. Floored at half a texel: below that the taps land inside one
+	// texel and the bilinear ramp is the only edge there is anyway. Disc units
+	// ignore the warp, so the blur narrows toward the terminator by its radial
+	// scale.
     const float OccluderRadius = max(
-		BlurWorld / max(2.0f * Extent, 1e-4f), 0.5f * InvSize.x);
+		BlurDisc / max(2.0f * HalfWidth, 1e-6f), 0.5f * InvSize.x);
 
 	// ADDED, NOT CAPPED BY Ceiling. The ceiling bounds an extrapolated tail so a
 	// slow channel cannot glow through saturated medium; a blocker is opaque on
@@ -510,7 +549,7 @@ float AtmoShadow_Tau(
 	SamplerState ShadowSampler,
 	float3 LocalPos,
 	float3 LightLocal,
-	float3 CameraLocal,
+	AtmoShadowCameras Cameras,
 	float2 JitterTexels,
 	float Ceiling,
 	AtmoShadowFrame Frame)
@@ -542,14 +581,18 @@ float AtmoShadow_Tau(
 
     const bool bHasOccluders = MapSlices >= uint(ATMO_SHADOW_SLICES_WITH_OCCLUDERS);
 
+	// Every cascade windows the same warped disc, so the point's disc coordinate
+	// is shared by all of them.
+    const float Extent0 = Frame.Extents[0];
+    const float2 Disc = AtmoShadow_PlaneToDisc(Plane / Extent0);
+
 	// One width for every cascade, so the shadow is the same size in each and the
 	// blend between them has nothing to reveal.
-    const float BlurWorld = ATMO_SHADOW_OCCLUDER_BLUR * Frame.Thickness;
+    const float BlurDisc = ATMO_SHADOW_OCCLUDER_BLUR * Frame.Thickness / Extent0;
 
     float Tau = AtmoShadow_TauSlice(
-		ShadowMap, ShadowSampler, 0, Plane, float2(0.0f, 0.0f),
-		Frame.Extents[0], Depth, JitterTexels, MapSize, Ceiling, BlurWorld,
-		bHasOccluders);
+		ShadowMap, ShadowSampler, 0, Disc, float2(0.0f, 0.0f), 1.0f,
+		Depth, JitterTexels, MapSize, Ceiling, BlurDisc, bHasOccluders);
 
     UNROLL
 
@@ -562,11 +605,13 @@ float AtmoShadow_Tau(
             continue;
         }
 
+        const float HalfWidth = AtmoShadow_CascadeHalfWidth(Level, Extent, Extent0);
+
         const float2 Centre = AtmoShadow_CascadeCentre(
-			Level, CameraLocal, U, V, Extent, MapSize);
+			Level, Cameras.Level[Level], U, V, HalfWidth, Extent0, MapSize);
 
 		// Square support, so the edge measure is the larger axis.
-        const float2 Relative = (Plane - Centre) / Extent;
+        const float2 Relative = (Disc - Centre) / HalfWidth;
         const float Edge = max(abs(Relative.x), abs(Relative.y));
 
         if (Edge >= 1.0f)
@@ -575,8 +620,8 @@ float AtmoShadow_Tau(
         }
 
         const float Finer = AtmoShadow_TauSlice(
-			ShadowMap, ShadowSampler, Level, Plane, Centre, Extent, Depth,
-			JitterTexels, MapSize, Ceiling, BlurWorld, bHasOccluders);
+			ShadowMap, ShadowSampler, Level, Disc, Centre, HalfWidth, Depth,
+			JitterTexels, MapSize, Ceiling, BlurDisc, bHasOccluders);
 
         Tau = lerp(Finer, Tau, smoothstep(ATMO_SHADOW_NEAR_BLEND, 1.0f, Edge));
     }
@@ -623,7 +668,7 @@ float AtmoShadow_SurfaceOptDepth(
 	SamplerState ShadowSampler,
 	float3 LocalPos,
 	float3 LightLocal,
-	float3 CameraLocal,
+	AtmoShadowCameras Cameras,
 	float2 JitterTexels,
 	float Ceiling,
 	AtmoShadowFrame Frame,
@@ -639,7 +684,7 @@ float AtmoShadow_SurfaceOptDepth(
 
     const float Tau = AtmoShadow_Tau(
 		ShadowMap, ShadowSampler, LocalPos + L * (ReceiverBias * Frame.Thickness),
-		L, CameraLocal, JitterTexels, Ceiling, Frame);
+		L, Cameras, JitterTexels, Ceiling, Frame);
 
     return Tau / max(FoldConstant, 1e-8f);
 }

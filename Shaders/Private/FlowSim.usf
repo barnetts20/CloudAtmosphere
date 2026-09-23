@@ -195,6 +195,13 @@ RWTexture2D<float> SimGlobalMeanUAV;
 Texture2DArray<float4> SimLatLonSRV;
 RWTexture2DArray<float4> SimLatLonUAV;
 
+/** The latest state's centre fields and output. At resample, SimCentreSRV and
+ *  SimLatLonSRV hold the previous state's, and SimStateBlend runs 0 to 1 from
+ *  the previous state to this one. */
+Texture2DArray<float4> SimCentreLatestSRV;
+Texture2DArray<float4> SimLatLonLatestSRV;
+float SimStateBlend;
+
 /** The texture the material samples: SimLatLon's slices resampled onto the
  *  cube atlas; see FlowField.ush. */
 RWTexture2DArray<float4> SimOutputUAV;
@@ -652,51 +659,76 @@ void MainInitStateCS(uint3 Id : SV_DispatchThreadID)
 // Reductions. Plain means, because the grid is equal-area.
 // ---------------------------------------------------------------------------
 
-/** Dispatch (N_lat, LayerCount, 1). */
-[numthreads(GG_SIM_THREADS_1D, 1, 1)]
-void MainReduceRowsCS(uint3 Id : SV_DispatchThreadID)
+// ONE GROUP PER SUM, NOT ONE THREAD. A thread per row leaves a few hundred
+// threads looping serially over a whole row: the pass is all latency. Each
+// thread takes a strided share and the group folds them in shared memory.
+
+groupshared float2 SimReduce[GG_SIM_THREADS_1D];
+
+/** Folds SimReduce into element 0. Every thread of the group must call it. */
+void SimReduceGroup(uint Thread)
 {
-    const int Row = (int) Id.x;
-    const uint Layer = Id.y;
-
-    if (Row >= SimGridSize.y || (int) Layer >= SimGridSize.z)
+	[unroll]
+    for (uint Half = GG_SIM_THREADS_1D / 2; Half > 0; Half >>= 1)
     {
-        return;
+        GroupMemoryBarrierWithGroupSync();
+
+        if (Thread < Half)
+        {
+            SimReduce[Thread] += SimReduce[Thread + Half];
+        }
     }
-
-    float SumU = 0.0f;
-    float SumPhi = 0.0f;
-
-	[loop]
-    for (int I = 0; I < SimGridSize.x; I++)
-    {
-        SumU += SimFaceSRV.Load(int4(I, Row, Layer, 0)).x;
-        SumPhi += SimPhiSRV.Load(int4(I, Row, Layer, 0));
-    }
-
-    SimRowMeanUAV[int2(Row, Layer)] = float2(SumU, SumPhi) * SimInvGridSize.x;
 }
 
-/** Dispatch (LayerCount, 1, 1). */
-[numthreads(GG_SIM_THREADS_LAYERS, 1, 1)]
-void MainReduceGlobalCS(uint3 Id : SV_DispatchThreadID)
+/** Dispatch (N_lat, LayerCount, 1) groups: one per row. */
+[numthreads(GG_SIM_THREADS_1D, 1, 1)]
+void MainReduceRowsCS(uint3 Group : SV_GroupID, uint Thread : SV_GroupIndex)
 {
-    const uint Layer = Id.x;
+    const int Row = (int) Group.x;
+    const uint Layer = Group.y;
 
-    if ((int) Layer >= SimGridSize.z)
+    float2 Sum = float2(0.0f, 0.0f);
+
+	[loop]
+    for (int I = (int) Thread; I < SimGridSize.x; I += GG_SIM_THREADS_1D)
     {
-        return;
+        Sum += float2(
+			SimFaceSRV.Load(int4(I, Row, Layer, 0)).x,
+			SimPhiSRV.Load(int4(I, Row, Layer, 0)));
     }
+
+    SimReduce[Thread] = Sum;
+
+    SimReduceGroup(Thread);
+
+    if (Thread == 0)
+    {
+        SimRowMeanUAV[int2(Row, Layer)] = SimReduce[0] * SimInvGridSize.x;
+    }
+}
+
+/** Dispatch (LayerCount, 1, 1) groups: one per layer. */
+[numthreads(GG_SIM_THREADS_1D, 1, 1)]
+void MainReduceGlobalCS(uint3 Group : SV_GroupID, uint Thread : SV_GroupIndex)
+{
+    const uint Layer = Group.x;
 
     float Sum = 0.0f;
 
 	[loop]
-    for (int J = 0; J < SimGridSize.y; J++)
+    for (int J = (int) Thread; J < SimGridSize.y; J += GG_SIM_THREADS_1D)
     {
         Sum += SimRowMeanSRV.Load(int3(J, Layer, 0)).y;
     }
 
-    SimGlobalMeanUAV[int2(0, Layer)] = Sum * SimInvGridSize.y;
+    SimReduce[Thread] = float2(Sum, 0.0f);
+
+    SimReduceGroup(Thread);
+
+    if (Thread == 0)
+    {
+        SimGlobalMeanUAV[int2(0, Layer)] = SimReduce[0].x * SimInvGridSize.y;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1408,6 +1440,20 @@ float4 SimSampleMeridian4(Texture2DArray<float4> Field, float3 N, uint Layer)
     return Sum;
 }
 
+/** A centre field or output slice at the output's place between the last two
+ *  states. */
+float4 SimResampleCentre(float3 N, uint Slice)
+{
+    return lerp(SimSampleMeridian4(SimCentreSRV, N, Slice),
+		SimSampleMeridian4(SimCentreLatestSRV, N, Slice), SimStateBlend);
+}
+
+float4 SimResampleOutput(float3 N, uint Slice)
+{
+    return lerp(SimSampleMeridian4(SimLatLonSRV, N, Slice),
+		SimSampleMeridian4(SimLatLonLatestSRV, N, Slice), SimStateBlend);
+}
+
 /** One atlas texel of every slice for a layer. Dispatch (AtlasW, AtlasH,
  *  LayerCount), after the frame's last Reconstruct.
  *
@@ -1439,24 +1485,24 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 
     // -- Flow: velocity in the face basis, pressure and vorticity ------------
 
-    float3 Velocity = SimSampleMeridian4(SimCentreSRV, N, Layer).xyz;
+    float3 Velocity = SimResampleCentre(N, Layer).xyz;
     Velocity -= N * dot(N, Velocity);
 
     float3 T1, T2;
     Flow_FaceBasis(N, Face, T1, T2);
 
-    const float4 Flow = SimSampleMeridian4(SimLatLonSRV, N, Layer);
+    const float4 Flow = SimResampleOutput(N, Layer);
 
     SimOutputUAV[int3(Id.xy, Layer)] = float4(dot(Velocity, T1), dot(Velocity, T2), Flow.zw);
 
     // -- Weather and noise -----------------------------------------------------
 
-    float4 Weather = SimSampleMeridian4(SimLatLonSRV, N, Layer + L);
+    float4 Weather = SimResampleOutput(N, Layer + L);
     Weather.yz = saturate(Weather.yz);
 
     SimOutputUAV[int3(Id.xy, Layer + L)] = Weather;
-    SimOutputUAV[int3(Id.xy, Layer + 2u * L)] = SimSampleMeridian4(SimLatLonSRV, N, Layer + 2u * L);
-    SimOutputUAV[int3(Id.xy, Layer + 3u * L)] = SimSampleMeridian4(SimLatLonSRV, N, Layer + 3u * L);
+    SimOutputUAV[int3(Id.xy, Layer + 2u * L)] = SimResampleOutput(N, Layer + 2u * L);
+    SimOutputUAV[int3(Id.xy, Layer + 3u * L)] = SimResampleOutput(N, Layer + 3u * L);
 }
 
 // ---------------------------------------------------------------------------

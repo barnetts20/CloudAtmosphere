@@ -127,6 +127,10 @@ float3 ShadowLightDir;
  *  property of the delivery rather than of this pass. */
 float3 ShadowCameraLocal;
 
+/** The cascade this dispatch's first Z slice writes. Levels bake on their own
+ *  frames, each around the camera it was baked with. */
+int ShadowFirstLevel;
+
 /** One depth capture per cascade, named rather than arrayed: each is a separate
  *  render target owned by a separate component, and a Texture2D array cannot be
  *  indexed dynamically here anyway. Adding a cascade means adding a texture, a

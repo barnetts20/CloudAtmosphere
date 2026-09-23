@@ -13,6 +13,18 @@
 #include "/Plugin/CloudAtmosphere/Private/GasGiantField.ush"
 #endif
 
+/** Set by a field whose Field_Sample material coordinate is what its light tint
+ *  reads, which then provides Field_SampleLightTint. */
+#ifndef FIELD_SAMPLE_TINT
+#define FIELD_SAMPLE_TINT 0
+#endif
+
+/** Set by a field that samples along a ray through a per-ray cache, providing
+ *  FieldRayCache, Field_RayBegin and Field_SampleOnRay. */
+#ifndef FIELD_RAY_CACHE
+#define FIELD_RAY_CACHE 0
+#endif
+
 // The march: a ray through the atmosphere and whatever cloud field the model
 // supplies, gathering light toward the camera.
 //
@@ -53,6 +65,11 @@
 // back to one shell at exactly the distances the layering was for. The trade is
 // resolution independence -- if 4K and 1080p visibly disagree, scale the fade
 // ranges against the march target's pixel count.
+//
+// THE MIP IS THE EXCEPTION: it follows the pixel footprint, which the march
+// writes per sample beside the fades. It only begins once a pixel spans more
+// than a texel, by which distance the view is looking down and the vertical
+// structure it blurs is below the pixel too.
 
 /** Isolates one lighting term so a stray glow can be attributed rather than
  *  guessed at. Every mode returns that term alone with transmittance untouched,
@@ -164,7 +181,7 @@ float3 Atmo_ToLocal(float3 WorldPos, AtmoMarchParams P)
 float3 Atmo_LightMarch(
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
-	float3 ShadowCameraLocal,
+	AtmoShadowCameras ShadowCameras,
 	Texture2D TransmittanceTable,
 	SamplerState TransmittanceSampler,
 	AtmoMarchParams P,
@@ -265,7 +282,7 @@ float3 Atmo_LightMarch(
     const float TauScale = max(Fold.y * DeepestOctave, ATMO_SHADOW_MIN_TAU_SCALE);
 
     const float ShadowTau = AtmoShadow_Tau(
-		ShadowMap, ShadowSampler, LocalOrigin, LocalDir, ShadowCameraLocal,
+		ShadowMap, ShadowSampler, LocalOrigin, LocalDir, ShadowCameras,
 		ShadowJitter, ATMO_SHADOW_SATURATION / TauScale, Field_ShadowFrame(P.Field));
 
 	// PITFALL: no saturation snap. The depth is read, not accumulated, so a
@@ -299,12 +316,13 @@ float3 Atmo_LightMarch(
 /** Marches the atmosphere and the cloud deck toward the camera.
  *
  *  Returns float4(accumulated light, transmittance), matching Atmo_MainMarch so
- *  the composite stage is unchanged. */
+ *  the composite stage is unchanged. ShadowCameras is AtmoShadow_MakeCameras of
+ *  the material's ShadowCamera1 and ShadowCamera2 pins. */
 float4 Atmo_MainMarch(
 	FIELD_TEXTURE_DECL,
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
-	float3 ShadowCameraLocal,
+	AtmoShadowCameras ShadowCameras,
 	Texture2D TransmittanceTable,
 	SamplerState TransmittanceSampler,
 	AtmoMarchParams P)
@@ -358,6 +376,12 @@ float4 Atmo_MainMarch(
     const float3 LocalOrigin = Atmo_ToLocal(RayOrigin, P);
     const float3 LocalDir = mul(P.WorldToLocal, RayDir);
 
+#if FIELD_RAY_CACHE
+	// The ray's own parameter is the cache's: WorldToLocal is orthonormal, so
+	// LocalOrigin + LocalDir * t is the sample at t in either frame.
+    FieldRayCache RayCache = Field_RayBegin(FIELD_TEXTURE_ARGS, LocalOrigin, LocalDir, P.Field);
+#endif
+
     const float AtmoThickness = max(
 		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f);
 
@@ -367,6 +391,10 @@ float4 Atmo_MainMarch(
 	// the air's depth. Divided by the shell instead, retuning atmoRadius silently
 	// rescales every fade range.
     const float InvPlanetRadius = 1.0f / max(P.Atmo.planetParams.planetRadius, 1e-4f);
+
+	// A pixel's angle, so a distance in planet radii times this is its width in
+	// radians of arc on the unit sphere the volumes are sampled against.
+    const float PixelAngle = Atmo_PixelAngle();
 
     const float CoarseStep = AtmoThickness / float(max(P.Atmo.mainRayParams.atmoSteps, 1));
 
@@ -562,7 +590,9 @@ float4 Atmo_MainMarch(
             const float Offset = min((StepSeed - 0.5f) * CurrentStep * ATMO_STEP_JITTER,
 				MaxDist - (Pos + CurrentStep));
 
-            const float3 SamplePos = RayOrigin + RayDir * (Pos + CurrentStep * 0.5f + Offset);
+            const float SampleT = Pos + CurrentStep * 0.5f + Offset;
+
+            const float3 SamplePos = RayOrigin + RayDir * SampleT;
 
             const float DistFromCentre = length(SamplePos - P.Atmo.planetParams.planetPos);
             const float Height = DistFromCentre - P.Atmo.planetParams.planetRadius;
@@ -606,7 +636,7 @@ float4 Atmo_MainMarch(
 				// inherits that value whole -- and iso-step-index contours are rings
 				// about the view centre, so the lattice draws itself in the deck.
                 const float SampleDistance =
-					(Pos + CurrentStep * 0.5f + Offset) * InvPlanetRadius;
+					SampleT * InvPlanetRadius;
 
                 P.Field.DetailFade = 1.0f - smoothstep(
 					P.Field.DetailFadeNear, P.Field.DetailFadeFar, SampleDistance);
@@ -614,25 +644,57 @@ float4 Atmo_MainMarch(
                 P.Field.StructureFade = 1.0f - smoothstep(
 					P.Field.StructureFadeNear, P.Field.StructureFadeFar, SampleDistance);
 
+                P.Field.PixelFootprint = SampleDistance * PixelAngle;
+
                 float LobeShadow;
                 float CloudOptDepth;
                 const float3 AirTransmittance = Atmo_LightMarch(
-					ShadowMap, ShadowSampler, ShadowCameraLocal,
+					ShadowMap, ShadowSampler, ShadowCameras,
 					TransmittanceTable, TransmittanceSampler, P, LobeShadow, CloudOptDepth);
+
+				// The field sample, taken ahead of the tint so a field whose
+				// material coordinate is the tint's input can supply both.
+                float4 Sample = float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+                if (IsCloud)
+                {
+                    const float3 LocalPos = Atmo_ToLocal(SamplePos, P);
+                    const float3 LocalUp = LocalPos / max(DistFromCentre, 1e-4f);
+
+                    const float RadialRate = abs(dot(LocalDir, LocalUp));
+                    const float StepHalfHeight = RadialRate * CurrentStep * 0.5f / P.Field.Thickness;
+
+#if FIELD_RAY_CACHE
+                    Sample = Field_SampleOnRay(
+						FIELD_TEXTURE_ARGS, LocalPos, SampleT, StepHalfHeight, P.Field, RayCache);
+#else
+                    Sample = Field_Sample(FIELD_TEXTURE_ARGS, LocalPos, StepHalfHeight, P.Field);
+#endif
+                }
 
 				// THE RECEIVER'S BAND COLOURS THE DECK IT WAS SHADOWED BY. The map
 				// holds one depth, not the colours of the bands the light crossed,
 				// and bands are far wider than the deck is deep so the path mostly
-				// stays in the receiver's band. Off near band edges at low sun. One
-				// coarse tap, only where the deck shadows at all.
+				// stays in the receiver's band. Off near band edges at low sun. Only
+				// where the deck shadows at all, and from the sample when the field
+				// allows it -- a second column read otherwise.
                 float3 LightTint = Field_NeutralTint(P.Scatter);
 
                 BRANCH
 
                 if (CloudOptDepth > 0.0f)
                 {
-                    LightTint = Field_LightTint(FlowField, FlowSampler,
-						Atmo_ToLocal(SamplePos, P), P.Field, P.Scatter);
+#if FIELD_SAMPLE_TINT
+                    if (IsCloud)
+                    {
+                        LightTint = Field_SampleLightTint(Sample, P.Scatter);
+                    }
+                    else
+#endif
+                    {
+                        LightTint = Field_LightTint(FlowField, FlowSampler,
+							Atmo_ToLocal(SamplePos, P), P.Field, P.Scatter);
+                    }
                 }
 
                 const float3 LightBeta = P.Atmo.cloudParams.cloudAbsBeta * LightTint;
@@ -686,15 +748,6 @@ float4 Atmo_MainMarch(
 
                 if (IsCloud)
                 {
-                    const float3 LocalPos = Atmo_ToLocal(SamplePos, P);
-                    const float3 LocalUp = LocalPos / max(DistFromCentre, 1e-4f);
-
-                    const float RadialRate = abs(dot(LocalDir, LocalUp));
-                    const float StepHalfHeight = RadialRate * CurrentStep * 0.5f / P.Field.Thickness;
-
-                    const float4 Sample = Field_Sample(
-						FIELD_TEXTURE_ARGS, LocalPos, StepHalfHeight, P.Field);
-
                     if (Sample.x > 0.0f)
                     {
 						// THE BAND IS READ AT THE SCATTERING SITE. It says what
@@ -867,7 +920,7 @@ float4 Atmo_MainMarch(
 
 		// NO LOOKUP JITTER: see AtmoShadow_SurfaceOptDepth.
         const float SurfaceOptDepth = AtmoShadow_SurfaceOptDepth(
-			ShadowMap, ShadowSampler, SurfaceLocal, LightLocal, ShadowCameraLocal,
+			ShadowMap, ShadowSampler, SurfaceLocal, LightLocal, ShadowCameras,
 			float2(0.0f, 0.0f), ATMO_SHADOW_SATURATION / TauScale,
 			Field_ShadowFrame(P.Field), Fold.x,
 			P.Atmo.surfaceShadowParams.receiverBias)

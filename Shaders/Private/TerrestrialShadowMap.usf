@@ -52,10 +52,9 @@ float4 CloudType;
 float4 CloudLid;
 float4 CloudLift;
 float4 CloudMotion;
-float4 StructureNoiseWeights;
+float4 NoiseLevels;
 float4 StructureSampling;
 float4 StructureWarp;
-float4 DetailNoiseWeights;
 float4 DetailSampling;
 float4 DetailWarp;
 float4 CloudGenusStratus;
@@ -80,6 +79,13 @@ float TRShadow_TypeAlpha(float Type)
     return lerp(CloudExtinction.a, StormExtinction.a, saturate(Type));
 }
 
+/** The view march's column keyframes, one cache per bake thread. The loop's one
+ *  per-ray hook is BakeField_Entry, which begins it; Sigma reads it. The
+ *  subsamples share the centre ray's column: a texel spans at most about one
+ *  flow texel, over which the B-spline column barely varies, and it is the
+ *  noise inside the texel the subsamples exist to band-limit. */
+static TRRayCache TRShadow_Ray;
+
 /** Extinction at a point, averaged across the texel's footprint. Averaged as
  *  SIGMA: averaging optical depths or whole sub-rays would push the nonlinear
  *  part of the reconstruction through the mean and reintroduce the bias the map
@@ -88,7 +94,9 @@ float TRShadow_TypeAlpha(float Type)
  *  BOTH LAYERS, IN EVERY CASCADE. Detail erosion lowers mean density rather
  *  than only adding variation, so dropping it would leave the shadowing cloud
  *  uniformly denser than the visible one. The subsamples band-limit it against
- *  the texel instead. */
+ *  the texel instead, reading the noise at the mip their spacing resolves --
+ *  four samples cannot average the octaves finer than that, and a coarse
+ *  cascade texel spans dozens of detail texels. */
 float TRShadow_Sigma(
 	float3 Pos,
 	float3 BasisU,
@@ -98,6 +106,14 @@ float TRShadow_Sigma(
 	float AbsMax,
 	TRFieldParams F)
 {
+	// Half a texel between subsamples, in radians of arc, under the rule the
+	// view march uses for a pixel.
+    F.PixelFootprint = 0.5f * TexelWorld * max(length(BasisU), length(BasisV))
+		/ max(length(Pos), 1e-4f);
+
+    // The centre's parameter on the cached ray: T - TPerigee is dot(Pos, Dir).
+    const float T = dot(Pos, TRShadow_Ray.Dir) + TRShadow_Ray.TPerigee;
+
     float Density = 0.0f;
 
     UNROLL
@@ -110,11 +126,11 @@ float TRShadow_Sigma(
 
         const float3 SubPos = Pos + BasisU * Offset.x + BasisV * Offset.y;
 
-        const float4 Deck = TR_Density(
+        const float4 Deck = TR_DensityOnRay(
 			FlowTarget, FlowTargetSampler,
 			DetailVolume, DetailVolumeSampler,
 			StructureVolume, StructureVolumeSampler,
-			SubPos, StepHalfHeight, F);
+			SubPos, T, StepHalfHeight, F, TRShadow_Ray);
 
 		// Type scales extinction, so storm cloud shadows more than fair-weather
 		// cloud, and it arrives on the same fetch the density came from.
@@ -164,6 +180,8 @@ float BakeField_Entry(float3 Origin, float3 Dir, float RayLength, float TopMax,
 	// The miss flag is the view march's: the bake marches from wherever the
 	// trace stopped either way, and a ray that reaches no cloud accumulates
 	// nothing and writes the sentinel.
+    TRShadow_Ray = TR_RayCacheBegin(FlowTarget, Origin, Dir, F);
+
     bool bMissed;
 
     return TR_SlabEntry(

@@ -99,11 +99,21 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	float GetSimulatedTime() const { return SimulatedTime; }
 
+	/** Sim time of the state the output shows, one step or less behind
+	 *  GetSimulatedTime. Anything animated alongside the field clocks off this. */
+	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
+	float GetDisplayTime() const { return SimulatedTime - (1.0f - StateBlend) * CurrentStep; }
+
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	int32 GetStepsCompleted() const { return StepsCompleted; }
 
-	/** Current Courant number: peak rate * step * GridLongitude / 2pi. A
-	 *  consequence of StepRatio, the profile and the grid rather than a control.
+	/** Steps the last frame took: the cost readout for SimSpeed. */
+	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
+	int32 GetStepsLastFrame() const { return LastSubsteps; }
+
+	/** Current Courant number: peak rate * step * GridLongitude / 2pi, at the
+	 *  step the last frame took. A consequence of the speed, the profile and
+	 *  the grid rather than a control.
 	 *  Above 0.33 the numerical diffusion becomes a real dissipation term, so it
 	 *  is worth watching when tuning DragRate. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
@@ -124,9 +134,9 @@ private:
 
 	TArray<FTerrestrialShadowParams> TerrestrialShadowRequests;
 
-	/** Builds the flat render-thread snapshot. Returns false if the config is
-	 *  unusable, having already logged why. */
-	bool BuildParams(FFlowSimParams& OutParams) const;
+	/** Builds the flat render-thread snapshot at a step. Returns false if the config is unusable, having
+	 *  already logged why. */
+	bool BuildParams(FFlowSimParams& OutParams, float Step) const;
 
 	/** Checks the render targets against the grid, reconfiguring them when
 	 *  bAutoResizeTargets is set. Returns false if they remain unusable. All of
@@ -155,14 +165,28 @@ private:
 	 *  that changing it does nothing. */
 	void ReportInertSettings() const;
 
-	/** Logs the step size, Courant number and the TimeScale above which the sim
-	 *  goes diffusive. Reported, never enforced -- see StepRatio. */
+	/** Logs the speed, the steps it takes per frame at 60 fps, and the Courant
+	 *  numbers at that step. Reported, never enforced. */
 	void ReportCourant() const;
 
 	bool bTriedAutoStart = false;
 
-	/** Real time banked toward the next fixed substep. */
-	float StepAccumulator = 0.0f;
+	/** The step the last frame took, which the Courant number and a snapshot's
+	 *  parameters are read at. */
+	float CurrentStep = 1e-5f;
+
+	/** Sim time owed past the latest state, under one step. */
+	float PendingTime = 0.0f;
+
+	/** Where the output sits between the last two states; see
+	 *  FFlowSimParams::StateBlend. */
+	float StateBlend = 1.0f;
+
+	int32 LastSubsteps = 0;
+
+	/** 0 normal, 1 past FlowSimStep::WarnPerFrame, 2 at the hang guard. Logged
+	 *  when it changes. */
+	int32 StepLoadLevel = 0;
 
 	float SimulatedTime = 0.0f;
 	int32 StepsCompleted = 0;
