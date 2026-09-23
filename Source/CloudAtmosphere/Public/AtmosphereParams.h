@@ -388,256 +388,190 @@ struct CLOUDATMOSPHERE_API FAtmosphereGeometryParams
 };
 
 
-// Terrestrial parameter groups. Only the groups whose MEMBERS differ from the
-// gas giant's are twinned; everything shared is one instance on the actor,
-// since a planet is one model at a time.
+// Terrestrial parameter groups.
+//
+// THE SIM IS THE WEATHER MAP, THE NOISE IS THE CLOUD. Coverage, cloud type and
+// the pressure lid come from the sim per column; the structure layer's noise,
+// shaped by a height profile, is what coverage erodes into individual clouds,
+// and the detail layer erodes their edges. See TerrestrialDeck.ush.
+//
+// PACKED ON THE WAY OUT. Each group travels to the material and the bake as a
+// few float4 pins, packed in ApplyTerrestrialModelParams and unpacked once in
+// TR_BuildField; the members here keep their own names.
+//
+// CLOUD THICKNESS IS THE UNIT. Every height below except CloudBase is a
+// multiple or share of it.
 
-/** The terrestrial band's vertical profile: a slab of authored DEPTH sitting at
- *  an authored ALTITUDE, with the top derived from the two. Both surfaces are
- *  shaped by the same relief and the same noise, the base at BaseRelief of the
- *  band's displacement, so they move together except where BaseStormDrop
- *  separates them. Outside the slab there is no density at all.
- *
- *  CLOUD THICKNESS IS THE UNIT. Every relief amount on this model, and
- *  BaseStormDrop with them, is a multiple of it; the two softnesses are shares
- *  of it. Nothing here is authored against the shell except the two absolutes,
- *  so deepening the band scales its features rather than detuning them. */
+/** Where the clouds sit and how their columns are shaped. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 {
 	GENERATED_BODY()
 
-	/** Altitude of an unrelieved column's underside, as a fraction of atmosphere
-	 *  thickness. THE ANCHOR: relief moves the band about this rather than about
-	 *  its top, so raising it lifts the whole cloud without reshaping it. */
+	/** Condensation level of an unlifted column, as a fraction of atmosphere
+	 *  thickness. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float CloudBase = 0.15f;
 
-	/** Depth of an unrelieved column, as a fraction of atmosphere thickness, and
-	 *  the unit every relief amount is a multiple of. THE GRAIN HANDLE: widen it
-	 *  and the band spreads over more march steps, and its relief grows with it --
-	 *  the cloud getting deeper, not a side effect. PITFALL: keep CloudBase plus
-	 *  this below 1 - CeilingFalloff, or the ceiling thins the whole column and
-	 *  CloudOpticalDepth stops being exact. */
+	/** Depth of a fully towering column before the pressure lid, as a fraction of
+	 *  atmosphere thickness. PITFALL: keep CloudBase plus this below
+	 *  1 - CeilingFalloff, or the ceiling thins every tall column. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", ClampMax = "1.0"))
-	float CloudThickness = 1.0f;
+	float CloudThickness = 0.5f;
 
-	/** Share of the depth each surface's ramp occupies. At the half it caps at,
-	 *  the two meet in the middle and the column has no core; at zero both
-	 *  surfaces are hard. ONE SHARE FOR BOTH, with the two curves below carrying
-	 *  whatever asymmetry the surfaces want -- a base is sharper than a top
-	 *  because BottomCurve says so, not because it was given less room. Also sets
-	 *  the bake's step. */
+	/** Share of CloudThickness each end of the height profile ramps over. At 0.5
+	 *  a full column has no flat core; at 0 both ends are hard. Also sets the
+	 *  bake's step. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "0.5"))
-	float SurfaceSoftness = 0.5f;
+	float SurfaceSoftness = 0.35f;
 
-	/** Shape of the top ramp. PITFALL: below 0.5 the onset loses its C1 join and
-	 *  the surface hardens into an edge -- a legitimate look, not clamped. */
+	/** Shape of the profile's top ramp. Below 0.5 it loses its C1 join. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001"))
-	float TopCurve = 2.0f;
+	float TopCurve = 1.0f;
 
-	/** Shape of the bottom ramp, as TopCurve is for the top. Above 1 flattens the
-	 *  base, which is what a cumulus field wants. */
+	/** Shape of the bottom ramp. Above 1 flattens cloud bases. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001"))
-	float BottomCurve = 0.75f;
+	float BottomCurve = 2.0f;
 
-	/** How much of a full column the weather builds before relief. THE MASTER
-	 *  COVER HANDLE: 1 is overcast, 0 is a sky relief alone cannot fill, and a
-	 *  half is broken cloud whose gaps and edges are shaped by the same noise
-	 *  that shapes the tops. Remapped to a signed depth in the shader, which is
-	 *  what lets 0 reach far enough below zero to stay clear. */
+	/** Width of the band under the shell top across which density fades to zero,
+	 *  as a fraction of atmosphere thickness, so the tallest towers cap softly. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "0.5"))
+	float CeilingFalloff = 0.2f;
+
+	// -- Coverage and type ------------------------------------------------------
+
+	/** Global coverage. 0.5 leaves the sim's weather as it is; lower clears the
+	 *  sky, higher closes it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float CloudCover = 0.235f;
+	float CloudCover = 0.5f;
 
-	// -- The four flow quantities ---------------------------------------------
-	//
-	// Each answers a different question about the air, and each has one job.
-	// Coefficients are multiples of CloudThickness. Ascent is the sim's cloud
-	// tracer (FlowSimConfig's Cloud group): cloud where air has been rising,
-	// carried by the wind.
-	//
-	// PRESSURE IS A LIMIT, NOT A CONTRIBUTION. A high subsides and puts an
-	// inversion over itself, and moisture under a lid spreads into a thin flat
-	// sheet rather than building; a low has no lid and grows until it runs out
-	// of energy. So pressure sets the headroom and the base altitude, and adds
-	// no depth of its own -- which is also why its sign is safe here where it
-	// was not on depth. A ceiling going neutral at the equator is benign.
-
-	/** ORGANISATION: rotation magnitude, the finest scale the flow has. How much
-	 *  it AMPLIFIES ascent. Multiplies rather than adds, because rotation makes
-	 *  no cloud on its own: it concentrates what the cloud signal is already
-	 *  doing. */
+	/** How strongly the sim's cloud field maps to coverage. Raise it until the
+	 *  sim's cloudiest systems read as overcast. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float OrganisationBoost = 2.0f;
+	float CoverageGain = 2.5f;
 
-	/** ASCENT: how much depth the sim's cloud adds, signed about half cover --
-	 *  a clouded column builds, a clear one thins. THE MASTER SHAPE HANDLE:
-	 *  with the noise relief at zero, this and CloudCover are the whole
-	 *  shape. */
+	/** Depth of a stratiform column as a fraction of a towering one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StratusDepth = 0.25f;
+
+	/** Cloud type, 0 stratiform to 1 towering, is TypeBias + TypeAscent * rising
+	 *  air + TypeTropical * tropicality. Type sets column depth and blends the
+	 *  material from fair-weather to storm. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float AscentDepth = 0.50f;
+	float TypeBias = 0.2f;
 
-	/** Edge softness of the cloud signal: how much cloud fraction either side
-	 *  of a half it takes to read as fully clouded or fully clear. Small gives
-	 *  hard-edged cloud, large a gradual thinning. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float TypeAscent = 0.6f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float TypeTropical = 0.3f;
+
+	// -- Pressure -------------------------------------------------------------
+
+	/** The sim pressure that reads as a full low or high. Raise it until the lid
+	 *  varies across a system rather than switching at its edge. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.000001"))
-	float AscentSpeed = 0.5f;
+	float PressureScale = 0.5f;
 
-	/** How hard a system overturns within itself, added to the cloud signal:
-	 *  slack air inside it sinks, fast air inside it rises -- the one signal
-	 *  that varies radially inside a vortex, so it hollows an eye and builds a
-	 *  wall. Organisation gates it, so quiet air is untouched. 0 leaves the
-	 *  shape to the sim alone. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float AscentSubsidence = 0.6f;
-
-	/** Speed the overturning crosses zero at, in the sim's own units: below it
-	 *  the air inside a system sinks, above it rises. Sets an eye's radius
-	 *  against its wall -- lower for a tighter eye and a wider wall. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.000001"))
-	float SubsidenceSpeed = 0.5f;
-
-	/** The streamfunction that reads as a full high or low, in the sim's own
-	 *  units. HOW FAR THE PRESSURE GRADIENT SPREADS: the field is already
-	 *  soft-saturated sim-side, so too small a scale bounds it again into two
-	 *  flat levels with a seam between them -- a high side and a low side rather
-	 *  than a gradient. Raise it until the ceiling varies across a system rather
-	 *  than switching at its edge. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.000001"))
-	float PressureScale = 2.0f;
-
-	/** How deep a column may get before the inversion resists it, and how far
-	 *  pressure moves that lid -- positive gives a low more headroom than a high.
-	 *
-	 *  IT RESISTS RATHER THAN CUTS. Growth saturates toward the headroom instead
-	 *  of clamping at it, so a capped column flattens by squashing and keeps the
-	 *  variance it came with. Flat-topped, not a sheet with an edge -- which is
-	 *  what a real anvil is, air running out of buoyancy rather than hitting a
-	 *  wall. THE MARCHED BAND IS BOUNDED BY THIS ALONE, noise included, so it is
-	 *  also the one number that sets how much of the shell gets fine-stepped. */
+	/** Headroom as a multiple of CloudThickness, and how far pressure moves it:
+	 *  positive gives a low more room than a high. THE MARCHED BAND IS BOUNDED BY
+	 *  THIS, so it also sets how much of the shell gets fine-stepped. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001"))
-	float CeilingDepth = 0.7f;
+	float CeilingDepth = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-0.99", ClampMax = "0.99"))
 	float CeilingPressure = 0.5f;
 
-	/** Where the base sits. TROPICALITY is the condensation level standing in for
-	 *  moisture until there is moisture; PRESSURE lowers it under a low and
-	 *  raises it under a high, which is the subsidence inversion doing its other
-	 *  job. Nothing else moves the base -- no flow energy, no noise -- which is
-	 *  what makes it exactly known per column. */
+	/** How far tropicality and pressure move the base, multiples of
+	 *  CloudThickness: a higher condensation level in the tropics, lower under
+	 *  lows. Nothing else moves the base, which keeps it exact per column. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float BaseTropical = -0.10f;
+	float BaseTropical = 0.1f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float BasePressure = -0.10f;
+	float BasePressure = -0.1f;
 
-	/** How far ascent stretches the noise VERTICALLY. Rising air draws a feature
-	 *  out taller, sinking air presses it into a sheet.
-	 *
-	 *  TEXTURE, NOT WEATHER: it divides the vertical frequency rather than
-	 *  offsetting the coordinate, so a feature is redrawn taller instead of slid
-	 *  upward unaltered. Touches only the noise between the two surfaces, so it
-	 *  costs the marched band nothing. */
+	// -- Vertical warp ----------------------------------------------------------
+
+	/** How far rising air stretches the noise vertically: towers drawn taller,
+	 *  subsiding air pressed into sheets. Noise only; the bounds are unaffected. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-0.9"))
 	float WarpStretch = 0.5f;
 
-	/** How far ascent DISPLACES the noise vertically, a multiple of
-	 *  CloudThickness. Rising air carries a feature up and sinking air carries it
-	 *  down, unaltered in shape -- where WarpStretch redraws the same feature
-	 *  taller or flatter. The two compose; zero one to isolate the other. */
+	/** How far rising air lifts the noise, a multiple of CloudThickness. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float WarpShift = 0.5f;
+	float WarpShift = 0.2f;
 
-	/** Width of the band under the shell top across which density fades to zero,
-	 *  as a fraction of atmosphere thickness. WHAT LETS RARE FEATURES REACH THE
-	 *  SHELL: a storm tower that would cross it flattens into a soft cap instead
-	 *  of being cut, so the band never sits lower to make room for its tallest
-	 *  outlier. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "0.5"))
-	float CeilingFalloff = 0.5f;
+	// -- March ----------------------------------------------------------------
 
 	/** Bound on either surface's slope, in cloud depths per radian: the cone angle
 	 *  for the entry search. Under-declaring it is the one way that search steps
-	 *  over a surface, and the symptom is cloud missing on grazing rays rather
-	 *  than anything that looks like a slope problem. Raise it first. */
+	 *  over cloud, and the symptom is cloud missing on grazing rays. Raise it
+	 *  first. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
 	float CloudSlope = 60.0f;
 
-	/** Total optical depth through an unrelieved column, base to top, at any pair
-	 *  of curves. Below about 8 the sky shows through; far above a few hundred the
-	 *  cloud has no bright edge left at any sun angle. */
+	/** Optical depth through a full-depth column at density 1. Coverage and the
+	 *  noise take most columns well under it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
 	float CloudOpticalDepth = 40.0f;
 
-	/** READOUT, not authored: the highest a column top could reach, before the
-	 *  ceiling. Above 1 - CeilingFalloff the tallest features are being capped. */
+	/** READOUT, not authored: the highest a column top can reach. Above
+	 *  1 - CeilingFalloff the tallest columns are being capped. */
 	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly)
 	float SolvedTopMax = 0.0f;
 
-	/** READOUT, not authored: how much depth the NOISE can add to a column on
-	 *  its own. KEEP IT UNDER CloudThickness, or CloudCover at 0 stops being
-	 *  clear and the noise builds cloud in an empty sky -- which reads as a
-	 *  coverage fault and is a relief one. */
-	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly)
-	float SolvedReliefReach = 0.0f;
-
-	/** READOUT, not authored: the lowest a column base could fall, which is where
-	 *  the marched band ends. The span between this and SolvedTopMax is what
-	 *  CloudSteps divides, so a wide gap here is a coarse march for a thin
-	 *  cloud. */
+	/** READOUT, not authored: the lowest a column base can fall, where the
+	 *  marched band ends. */
 	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly)
 	float SolvedBaseMin = 0.0f;
 };
-/** How the terrestrial field reads the flow into shape. A CLONE, and the group
- *  most likely to be replaced outright: a band coordinate means something else
- *  on a planet without zones and belts. */
+
+/** How the noise travels with the flow. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FTerrestrialBandShapeParams
+struct CLOUDATMOSPHERE_API FTerrestrialMotionParams
 {
 	GENERATED_BODY()
 
-	/** Multiplies already-normalized vorticity, so 1 is neutral and the useful
-	 *  range is roughly 0.5 to 3. Too high flattens elevation to its asymptote
-	 *  everywhere but the boundaries: terraces joined by cliffs. */
+	/** Duration of the short advection through the flow that carries the noise
+	 *  along the current wind. The history lives in the sim. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float BandSharpness = 1.0f;
+	float WarpTime = 0.2f;
 
-	/** Shifts which band type dominates without retuning the sim. */
+	/** Length of the deep flow layer's step as a fraction of WarpTime: the
+	 *  vertical wind shear each layer's ShearInherit follows. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float DeepShearRatio = 0.5f;
+
+	/** How long a crossfade phase takes, in simulated time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
+	float CrossfadePeriod = 10.0f;
+
+	/** The planet's own rotation, radians per unit of simulated time. The sim
+	 *  runs in the rotating frame, so this rotates the sampling position. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float BandBias = 0.3f;
-
+	float RotationWeight = 0.1f;
 };
 
-/** The terrestrial field's material. A CLONE OF THE DECK'S THREE BAND SETS,
- *  pending the single colour with storm darkening that replaces them. */
+/** The clouds' material: fair-weather cloud at type 0, storm cloud at type 1,
+ *  blended by type. Scatter is single-scattering albedo; Extinction is RGB tint
+ *  with the amount in A, multiplying the solved extinction, 1 neutral. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FTerrestrialBandParams
+struct CLOUDATMOSPHERE_API FTerrestrialCloudMaterialParams
 {
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
-	FLinearColor ScatterNegative = FLinearColor(0.11422f, 0.200265f, 1.0f, 1.0f);
+	FLinearColor CloudScatter = FLinearColor(0.98f, 0.98f, 0.98f, 1.0f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	FLinearColor ExtinctionNegative = FLinearColor(1.0f, 0.969f, 0.938f, 1.0f);
+	FLinearColor CloudExtinction = FLinearColor(1.0f, 1.0f, 1.0f, 1.0f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
-	FLinearColor ScatterPositive = FLinearColor(0.136704f, 1.0f, 0.994174f, 1.0f);
+	FLinearColor StormScatter = FLinearColor(0.9f, 0.92f, 0.95f, 1.0f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	FLinearColor ExtinctionPositive = FLinearColor(1.0f, 0.969f, 0.938f, 1.0f);
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
-	FLinearColor ScatterBase = FLinearColor(1.0f, 0.0f, 0.127569f, 1.0f);
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	FLinearColor ExtinctionBase = FLinearColor(1.0f, 0.969f, 0.938f, 1.0f);
-
-	/** Where the band ramp saturates. Matching the inverse of the sim debug view's
-	 *  DebugScale makes the two agree about where boundaries are. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float BandScale = 2.0f;
+	FLinearColor StormExtinction = FLinearColor(1.0f, 1.0f, 1.0f, 2.0f);
 };
 
 // Gas giant parameter groups.
@@ -777,9 +711,9 @@ struct CLOUDATMOSPHERE_API FGasGiantProfileParams
 /** What the flow field does to a cloud field's shape: pressure, storms and the
  *  planet's own rotation. Every relief amount is a fraction of GradientThickness.
  *
- *  SHARED, BECAUSE THE FLOW IS. These read the sim's pressure and vorticity and
- *  turn them into relief, which any field driven by that sim wants. What a model
- *  does with a BAND is its own, and sits in its own group.
+ *  GAS GIANT ONLY: the terrestrial field reads the sim as a weather map and
+ *  keeps its own handles in FTerrestrialProfileParams and
+ *  FTerrestrialMotionParams.
  *
  *  THE HEMISPHERE PAIR IS HERE RATHER THAN THERE. The sim's channels are
  *  rotation senses and which sense is cyclonic flips at the equator, so every
@@ -859,8 +793,8 @@ struct CLOUDATMOSPHERE_API FGasGiantBandShapeParams
 	float BandRelief = 0.3f;
 };
 
-/** How the noise layers travel with the flow. Each layer's FlowInherit and
- *  ShearInherit say how much of it that layer follows. */
+/** How the gas giant's noise layers travel with the flow. Each layer's
+ *  FlowInherit and ShearInherit say how much of it that layer follows. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FAtmosphereMotionParams
 {
@@ -892,7 +826,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereMotionParams
 	float CrossfadePeriod = 10.0f;
 };
 
-/** Controls both noise layers' carves share. */
+/** Controls both gas giant noise layers' carves share. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FAtmosphereCarveParams
 {
@@ -910,12 +844,14 @@ struct CLOUDATMOSPHERE_API FAtmosphereCarveParams
 	float ErosionDepth = 1.0f;
 };
 
-/** One noise layer carving the deck. The deck has two with the same handles:
- *  Structure for the mid-level shape that reads from orbit, Detail for the micro
- *  variance gone within a fraction of a planet radius. Where they behave
- *  differently it is by construction rather than by handle -- the structure
- *  volume's G gates storm towers, and the detail relief's sidedness is
- *  GG_DETAIL_RELIEF_CENTRED. */
+/** One noise layer. Each model has two with the same handles: Structure for the
+ *  shape that reads from orbit, Detail for the variance gone within a fraction
+ *  of a planet radius.
+ *
+ *  THE TERRESTRIAL FIELD READS A SUBSET. Its structure layer is the cloud shape
+ *  coverage erodes, with Erosion as how much the noise shapes it; its detail
+ *  layer erodes edges, with Erosion as how hard. Relief and BandMix are gas
+ *  giant only. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FAtmosphereNoiseLayerParams
 {

@@ -3,12 +3,12 @@
 #include "/Plugin/CloudAtmosphere/Private/TerrestrialShadow.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereShadowBake.ush"
 
-// Terrestrial cloud band shadow map: this field's side of the bake.
+// Terrestrial cloud shadow map: this field's side of the bake.
 //
 // THE MARCH IS NOT HERE. The ray setup, the step lattice, the crossing
 // accumulation and the occluder band live in AtmosphereShadowBake.ush and
 // AtmosphereShadowBakeLoop.ush, which any bake writing this format shares. What
-// remains below is the deck's own -- its uniforms, its extinction, where a ray
+// remains below is the field's own -- its uniforms, its extinction, where a ray
 // enters it -- exposed to that loop through the BakeField_ hooks at the bottom
 // of the file.
 //
@@ -28,108 +28,52 @@ Texture3D StructureVolume;
 SamplerState StructureVolumeSampler;
 
 
-/** Each band's extinction: rgb tint, amount in a. The map stores one scalar
- *  depth, so the bake weights density by the amounts and folds in the largest
- *  tint channel; colour is applied from the receiver's band where the depth is
- *  read, and albedo belongs to the scattering site. */
-float4 ExtinctionNegative;
-float4 ExtinctionPositive;
-float4 ExtinctionBase;
-float BandScale;
+/** The two material sets' extinction: rgb tint, amount in a. The map stores
+ *  one scalar depth, so the bake weights density by the amount at each sample's
+ *  cloud type and folds in the largest tint channel; colour is applied from the
+ *  receiver's type where the depth is read. */
+float4 CloudExtinction;
+float4 StormExtinction;
 
 /** Solved into the light ray's coefficient by TR_CloudBeta, as the material
  *  solves it. */
 float CloudOpticalDepth;
 float LightExtinctionFraction;
 
-// -- TR_BuildField's arguments, in its order -------------------------------
-//
-// The same values the material passes, under the same names, so there is one
-// derivation of the deck rather than two. Any addition to TR_BuildField's
-// signature has to appear here and in FGasGiantShadowParams.
+// -- TR_BuildField's arguments, under the material's pin names --------------
 
 float PlanetRadius;
 float HeightScale;
 float Time;
-float CloudBase;
-float CloudThickness;
-float CeilingFalloff;
-float SurfaceSoftness;
-float TopCurve;
-float BottomCurve;
-float CloudCover;
-float OrganisationBoost;
-float PressureScale;
-float AscentDepth;
-float AscentSpeed;
-float AscentSubsidence;
-float SubsidenceSpeed;
-float CeilingDepth;
-float CeilingPressure;
-float BaseTropical;
-float BasePressure;
-float WarpStretch;
-float WarpShift;
-float BandSharpness;
-float BandBias;
-float HemisphereBlend;
-float HemisphereVariance;
-float ReliefThinning;
-float RotationWeight;
-float WarpTime;
-float DeepShearRatio;
-float TurbulenceFloor;
-float CrossfadePeriod;
-float EdgeBias;
-float ErosionDepth;
+float4 CloudProfile;
+float4 CloudCurves;
+float4 CloudCoverage;
+float4 CloudType;
+float4 CloudLid;
+float4 CloudLift;
+float4 CloudMotion;
 float4 StructureNoiseWeights;
-float StructureScale;
-float StructureAspect;
-float StructureRelief;
-float StructureErosion;
-float StructureFlowInherit;
-float StructureShearInherit;
-float StructureFadeNear;
-float StructureFadeSpan;
-float StructureBandMix;
-float StructureCrossfade;
+float4 StructureSampling;
+float4 StructureWarp;
 float4 DetailNoiseWeights;
-float DetailScale;
-float DetailAspect;
-float DetailRelief;
-float DetailErosion;
-float DetailFlowInherit;
-float DetailShearInherit;
-float DetailFadeNear;
-float DetailFadeSpan;
-float DetailBandMix;
-float DetailCrossfade;
-float CloudSlope;
+float4 DetailSampling;
+float4 DetailWarp;
 
 TRFieldParams TRShadow_Field()
 {
     return TR_BUILD_FIELD();
 }
 
-/** Per-band extinction amount, blended by the signed band. Mirrors
- *  TR_BandRamp and TR_BandTint on the a channel instead of rgb: sign
- *  picks the family, the ramp runs from Base at zero to that family at full
- *  magnitude, and a plain two-way lerp would blend the families through their
- *  midpoint and lose the boundary between them.
+/** Extinction amount at a cloud type. Mirrors TR_TypeTint on the a channel.
  *
- *  PITFALL: the view ray applies tint and amount together, as
- *  lerp(Base.rgb * Base.a, Hue.rgb * Hue.a, |T|), while the light path is this
- *  amount times a separately ramped tint. Lerp of products against product of
- *  lerps: equal at both ends, differing mid-ramp by a quarter of
- *  (Base.rgb - Hue.rgb)(Base.a - Hue.a). That is the price of one scalar depth
- *  channel, not a defect to fix here. */
-float TRShadow_BandAlpha(float Band)
+ *  PITFALL: the view ray applies tint and amount together, as a lerp of
+ *  products, while the light path is this amount times a separately lerped
+ *  tint. Equal at both ends, differing mid-way by a quarter of
+ *  (Cloud.rgb - Storm.rgb)(Cloud.a - Storm.a): the price of one scalar depth
+ *  channel. */
+float TRShadow_TypeAlpha(float Type)
 {
-    const float T = clamp(Band * BandScale, -1.0f, 1.0f);
-
-    const float Hue = (T < 0.0f) ? ExtinctionNegative.a : ExtinctionPositive.a;
-
-    return lerp(ExtinctionBase.a, Hue, abs(T));
+    return lerp(CloudExtinction.a, StormExtinction.a, saturate(Type));
 }
 
 /** Extinction at a point, averaged across the texel's footprint. Averaged as
@@ -137,10 +81,10 @@ float TRShadow_BandAlpha(float Band)
  *  part of the reconstruction through the mean and reintroduce the bias the map
  *  exists to remove.
  *
- *  BOTH LAYERS, IN EVERY CASCADE. Detail is erosion -- TR_Density applies it as
- *  a carve, lowering mean density rather than only adding variation -- so
- *  dropping it would leave the shadow deck uniformly denser than the visible
- *  one. The subsamples band-limit it against the texel instead. */
+ *  BOTH LAYERS, IN EVERY CASCADE. Detail erosion lowers mean density rather
+ *  than only adding variation, so dropping it would leave the shadowing cloud
+ *  uniformly denser than the visible one. The subsamples band-limit it against
+ *  the texel instead. */
 float TRShadow_Sigma(
 	float3 Pos,
 	float3 BasisU,
@@ -168,9 +112,9 @@ float TRShadow_Sigma(
 			StructureVolume, StructureVolumeSampler,
 			SubPos, StepHalfHeight, F);
 
-		// Band scales extinction, so a belt shadows more than a zone, and it
-		// arrives on the same fetch the density came from.
-        Density += Deck.x * TRShadow_BandAlpha(Deck.y);
+		// Type scales extinction, so storm cloud shadows more than fair-weather
+		// cloud, and it arrives on the same fetch the density came from.
+        Density += Deck.x * TRShadow_TypeAlpha(Deck.y);
     }
 
     return Density * AbsMax / float(ATMO_BAKE_SUBSAMPLES);
@@ -207,8 +151,8 @@ float BakeField_TopBound(BakeFieldParams F)
     return TR_TopMax(F);
 }
 
-/** Where the light ray first reaches the slab. The trace takes either surface,
- *  so a ray grazing under the field and climbing back into it on the far side
+/** Where the light ray first reaches a slab. The trace takes either surface,
+ *  so a ray grazing under the cloud and climbing back into it on the far side
  *  still finds the cloud it must shadow. */
 float BakeField_Entry(float3 Origin, float3 Dir, float RayLength, float TopMax,
 	BakeFieldParams F)
@@ -222,10 +166,9 @@ float BakeField_Entry(float3 Origin, float3 Dir, float RayLength, float TopMax,
 		FlowTarget, FlowTargetSampler, Origin, Dir, 0.0f, RayLength, TopMax, F, bMissed);
 }
 
-/** The radial advance a step is allowed. The ramps are the only part of the
- *  profile that varies, so the budget is spent on the finer of the two -- sized
- *  against the top's alone, a sharp base is crossed in one step and the map
- *  holds a hard edge the march resolves softly. */
+/** The radial advance a step is allowed, spent on the finer of the profile's
+ *  two ramps -- sized against the top's alone, a sharp base is crossed in one
+ *  step and the map holds a hard edge the march resolves softly. */
 float BakeField_HeightStep(BakeFieldParams F)
 {
     return min(F.SpanTop, F.SpanBase) * F.Thickness
@@ -238,14 +181,14 @@ float BakeField_LateralArc(float Radius)
 }
 
 /** PER WORLD UNIT, matching what AtmosphereSetup hands the march after its own
- *  divide by thickness. The largest tint channel any band can have is folded in
+ *  divide by thickness. The largest tint channel either set has is folded in
  *  so the stored thresholds mean transmittance on the fastest channel anywhere;
  *  Field_FoldConstant divides the same product back out on the read side. */
 float BakeField_FoldConstant(BakeFieldParams F)
 {
     return TR_CloudBeta(F, CloudOpticalDepth) * LightExtinctionFraction / F.Thickness
 		* TR_ExtinctionTintRange(
-			ExtinctionNegative.rgb, ExtinctionPositive.rgb, ExtinctionBase.rgb).y;
+			CloudExtinction.rgb, StormExtinction.rgb, CloudExtinction.rgb).y;
 }
 
 float BakeField_Sigma(float3 Pos, float3 BasisU, float3 BasisV, float TexelWorld,

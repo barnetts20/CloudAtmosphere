@@ -57,65 +57,22 @@ namespace TerrestrialShadow
 		P->PlanetRadius = Params.PlanetRadius;
 		P->HeightScale = Params.HeightScale;
 		P->Time = Params.Time;
-		P->CloudBase = Params.CloudBase;
-		P->CloudThickness = Params.CloudThickness;
-		P->CeilingFalloff = Params.CeilingFalloff;
-		P->SurfaceSoftness = Params.SurfaceSoftness;
-		P->TopCurve = Params.TopCurve;
-		P->BottomCurve = Params.BottomCurve;
-		P->CloudCover = Params.CloudCover;
-		P->OrganisationBoost = Params.OrganisationBoost;
-		P->PressureScale = Params.PressureScale;
-		P->AscentDepth = Params.AscentDepth;
-		P->AscentSpeed = Params.AscentSpeed;
-		P->AscentSubsidence = Params.AscentSubsidence;
-		P->SubsidenceSpeed = Params.SubsidenceSpeed;
-		P->CeilingDepth = Params.CeilingDepth;
-		P->CeilingPressure = Params.CeilingPressure;
-		P->BaseTropical = Params.BaseTropical;
-		P->BasePressure = Params.BasePressure;
-		P->WarpStretch = Params.WarpStretch;
-		P->WarpShift = Params.WarpShift;
-		P->BandSharpness = Params.BandSharpness;
-		P->BandBias = Params.BandBias;
-		P->HemisphereBlend = Params.HemisphereBlend;
-		P->HemisphereVariance = Params.HemisphereVariance;
-		P->ReliefThinning = Params.ReliefThinning;
-		P->RotationWeight = Params.RotationWeight;
-		P->WarpTime = Params.WarpTime;
-		P->DeepShearRatio = Params.DeepShearRatio;
-		P->TurbulenceFloor = Params.TurbulenceFloor;
-		P->CrossfadePeriod = Params.CrossfadePeriod;
-		P->EdgeBias = Params.EdgeBias;
-		P->ErosionDepth = Params.ErosionDepth;
+		P->CloudProfile = Params.CloudProfile;
+		P->CloudCurves = Params.CloudCurves;
+		P->CloudCoverage = Params.CloudCoverage;
+		P->CloudType = Params.CloudType;
+		P->CloudLid = Params.CloudLid;
+		P->CloudLift = Params.CloudLift;
+		P->CloudMotion = Params.CloudMotion;
 		P->StructureNoiseWeights = Params.StructureNoiseWeights;
-		P->StructureScale = Params.StructureScale;
-		P->StructureAspect = Params.StructureAspect;
-		P->StructureRelief = Params.StructureRelief;
-		P->StructureErosion = Params.StructureErosion;
-		P->StructureFlowInherit = Params.StructureFlowInherit;
-		P->StructureShearInherit = Params.StructureShearInherit;
-		P->StructureFadeNear = Params.StructureFadeNear;
-		P->StructureFadeSpan = Params.StructureFadeSpan;
-		P->StructureBandMix = Params.StructureBandMix;
-		P->StructureCrossfade = Params.StructureCrossfade;
+		P->StructureSampling = Params.StructureSampling;
+		P->StructureWarp = Params.StructureWarp;
 		P->DetailNoiseWeights = Params.DetailNoiseWeights;
-		P->DetailScale = Params.DetailScale;
-		P->DetailAspect = Params.DetailAspect;
-		P->DetailRelief = Params.DetailRelief;
-		P->DetailErosion = Params.DetailErosion;
-		P->DetailFlowInherit = Params.DetailFlowInherit;
-		P->DetailShearInherit = Params.DetailShearInherit;
-		P->DetailFadeNear = Params.DetailFadeNear;
-		P->DetailFadeSpan = Params.DetailFadeSpan;
-		P->DetailBandMix = Params.DetailBandMix;
-		P->DetailCrossfade = Params.DetailCrossfade;
-		P->CloudSlope = Params.CloudSlope;
+		P->DetailSampling = Params.DetailSampling;
+		P->DetailWarp = Params.DetailWarp;
 
-		P->ExtinctionNegative = Params.ExtinctionNegative;
-		P->ExtinctionPositive = Params.ExtinctionPositive;
-		P->ExtinctionBase = Params.ExtinctionBase;
-		P->BandScale = Params.BandScale;
+		P->CloudExtinction = Params.CloudExtinction;
+		P->StormExtinction = Params.StormExtinction;
 		P->CloudOpticalDepth = Params.CloudOpticalDepth;
 		P->LightExtinctionFraction = Params.LightExtinctionFraction;
 
@@ -130,7 +87,7 @@ namespace TerrestrialShadow
 		P->FlowTargetSampler = TStaticSamplerState<SF_Bilinear, AM_Wrap, AM_Clamp, AM_Clamp>::GetRHI();
 
 		// A missing volume binds black rather than refusing the bake. Black is a
-		// defined value through TR_PerlinWorley, so the deck comes out uncarved
+		// defined value through the noise, so the cloud comes out uneroded
 		// and the shadow is still broadly right -- diagnosable at a glance,
 		// where a planet with no shadows at all looks like a broken pass.
 		P->DetailVolume = Params.DetailTexture.IsValid()

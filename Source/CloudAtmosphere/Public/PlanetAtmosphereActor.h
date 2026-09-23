@@ -188,12 +188,11 @@ public:
     // lives on the property row and there is no row left, so both models' groups
     // are visible at once, distinguished only by their parent category.
 
-    // Terrestrial. THE TWO MODELS TWIN EVERY GROUP, in the same order under the
-    // same sub-categories, because nothing a model's look depends on translates
-    // between them: the terrestrial shell is a tenth the gas giant's, so every
-    // scale height, noise scale and relief amount authored as a fraction of it
-    // means something else. Shared STRUCTS, separate INSTANCES -- the members
-    // are the same questions, the answers are not.
+    // Terrestrial. The lighting groups are twinned with the gas giant's --
+    // shared STRUCTS, separate INSTANCES, since the terrestrial shell is a tenth
+    // the gas giant's and every scale authored against it means something else.
+    // The cloud groups are the terrestrial field's own: it reads the sim as a
+    // weather map rather than as bands.
     //
     // A group's default lives with its struct when the struct is one model's
     // own, and on the CDO in the constructor when the struct is shared.
@@ -203,32 +202,25 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
     FAtmosphereGeometryParams TerrestrialGeometry;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Band|Profile", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Clouds|Profile", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
     FTerrestrialProfileParams TerrestrialProfile;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Band|Flow", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereFlowParams TerrestrialFlow;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Clouds|Motion", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
+    FTerrestrialMotionParams TerrestrialMotion;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Band|Shape", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialBandShapeParams TerrestrialBandShape;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Band|Motion", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereMotionParams TerrestrialMotion;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Band|Surface", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereCarveParams TerrestrialCarve;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Band|Structure Layer", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
+    /** The cloud shape coverage erodes. Relief and BandMix are unused here. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Clouds|Structure Layer", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
     FAtmosphereNoiseLayerParams TerrestrialStructureLayer;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Band|Detail Layer", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
+    /** Edge erosion. Relief and BandMix are unused here. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Clouds|Detail Layer", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
     FAtmosphereNoiseLayerParams TerrestrialDetailLayer;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Atmosphere Lighting", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
     FAtmosphereLightingParams TerrestrialAtmosphereLighting;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Cloud Lighting|Bands", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialBandParams TerrestrialBands;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Cloud Lighting|Material", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
+    FTerrestrialCloudMaterialParams TerrestrialCloudMaterial;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Cloud Lighting|Extinction", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
     FAtmosphereExtinctionParams TerrestrialExtinction;
@@ -311,21 +303,6 @@ public:
     const FAtmosphereGeometryParams& ActiveGeometry() const
     {
         return bTerrestrial() ? TerrestrialGeometry : Geometry;
-    }
-
-    const FAtmosphereFlowParams& ActiveFlow() const
-    {
-        return bTerrestrial() ? TerrestrialFlow : Flow;
-    }
-
-    const FAtmosphereMotionParams& ActiveMotion() const
-    {
-        return bTerrestrial() ? TerrestrialMotion : Motion;
-    }
-
-    const FAtmosphereCarveParams& ActiveCarve() const
-    {
-        return bTerrestrial() ? TerrestrialCarve : Carve;
     }
 
     const FAtmosphereNoiseLayerParams& ActiveStructureLayer() const
@@ -481,13 +458,13 @@ private:
      *  Pushes the shared groups, then hands off to the built model's own. */
     void ApplyMarchParams(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir);
 
-    /** The three groups whose members are the model's: its profile, its band
-     *  shaping and its material. Same parameter NAMES on both paths, since the
-     *  two materials carry the same pins. */
+    /** The groups whose members are the model's own. The gas giant pushes each
+     *  member under its own name; the terrestrial field packs its groups into
+     *  the float4 pins TR_BuildField unpacks. */
     void ApplyGasGiantModelParams();
     void ApplyTerrestrialModelParams();
 
-    /** One noise layer's members, each under Prefix + member name. */
+    /** One gas giant noise layer's members, each under Prefix + member name. */
     void ApplyNoiseLayer(const TCHAR* Prefix, const FAtmosphereNoiseLayerParams& Layer);
 
     /** Queues this frame's deck shadow bake with the sim subsystem. SEPARATE FROM

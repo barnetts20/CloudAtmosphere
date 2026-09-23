@@ -11,9 +11,6 @@ class FRDGBuilder;
 
 /** Everything the terrestrial bake reads, flattened for the render thread.
  *
- *  A CLONE OF THE GAS GIANT'S, unchanged so far. The two diverge as the field
- *  does; until then the only difference is which .usf they bind.
- *
  *  Copied into a render command, so it holds no UObject -- the same split
  *  FFlowSimParams draws. Filled from the same field groups and derivations
  *  ApplyMarchParams pushes to the material, which is what keeps the band
@@ -54,71 +51,30 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	float PlanetRadius = 0.0f;
 	float HeightScale = 0.0f;
 	float Time = 0.0f;
-	float CloudBase = 0.0f;
-	float CloudThickness = 0.0f;
-	float CeilingFalloff = 0.0f;
-	float SurfaceSoftness = 0.0f;
-	float TopCurve = 0.0f;
-	float BottomCurve = 0.0f;
-	float CloudCover = 0.0f;
-	float OrganisationBoost = 0.0f;
-	float PressureScale = 1.0f;
-	float AscentDepth = 0.0f;
-	float AscentSpeed = 0.0f;
-	float AscentSubsidence = 0.0f;
-	float SubsidenceSpeed = 1.0f;
-	float CeilingDepth = 0.0f;
-	float CeilingPressure = 0.0f;
-	float BaseTropical = 0.0f;
-	float BasePressure = 0.0f;
-	float WarpStretch = 0.0f;
-	float WarpShift = 0.0f;
-	float BandSharpness = 0.0f;
-	float BandBias = 0.0f;
-	float HemisphereBlend = 0.0f;
-	float HemisphereVariance = 0.0f;
-	float ReliefThinning = 0.0f;
-	float RotationWeight = 0.0f;
-	float WarpTime = 0.0f;
-	float DeepShearRatio = 0.0f;
-	float TurbulenceFloor = 0.0f;
-	float CrossfadePeriod = 0.0f;
-	float EdgeBias = 0.0f;
-	float ErosionDepth = 0.0f;
+
+	// Packed as TR_BuildField documents.
+	FVector4f CloudProfile = FVector4f::Zero();
+	FVector4f CloudCurves = FVector4f::Zero();
+	FVector4f CloudCoverage = FVector4f::Zero();
+	FVector4f CloudType = FVector4f::Zero();
+	FVector4f CloudLid = FVector4f::Zero();
+	FVector4f CloudLift = FVector4f::Zero();
+	FVector4f CloudMotion = FVector4f::Zero();
 	FVector4f StructureNoiseWeights = FVector4f::Zero();
-	float StructureScale = 0.0f;
-	float StructureAspect = 0.0f;
-	float StructureRelief = 0.0f;
-	float StructureErosion = 0.0f;
-	float StructureFlowInherit = 0.0f;
-	float StructureShearInherit = 0.0f;
-	float StructureFadeNear = 0.0f;
-	float StructureFadeSpan = 0.0f;
-	float StructureBandMix = 0.0f;
-	float StructureCrossfade = 0.0f;
+	FVector4f StructureSampling = FVector4f::Zero();
+	FVector4f StructureWarp = FVector4f::Zero();
 	FVector4f DetailNoiseWeights = FVector4f::Zero();
-	float DetailScale = 0.0f;
-	float DetailAspect = 0.0f;
-	float DetailRelief = 0.0f;
-	float DetailErosion = 0.0f;
-	float DetailFlowInherit = 0.0f;
-	float DetailShearInherit = 0.0f;
-	float DetailFadeNear = 0.0f;
-	float DetailFadeSpan = 0.0f;
-	float DetailBandMix = 0.0f;
-	float DetailCrossfade = 0.0f;
-	float CloudSlope = 0.0f;
+	FVector4f DetailSampling = FVector4f::Zero();
+	FVector4f DetailWarp = FVector4f::Zero();
 
 	// -- Extinction ---------------------------------------------------------
 	//
-	// Each band's rgb tint and amount in a, plus what TR_DeckBeta solves the
-	// light ray's coefficient from. The albedo is a property of the scattering
-	// site, not of the medium the light crossed, and stays per-pixel.
+	// Both material sets' rgb tint and amount in a, plus what TR_CloudBeta
+	// solves the light ray's coefficient from. The albedo is a property of the
+	// scattering site, not of the medium the light crossed, and stays per-pixel.
 
-	FVector4f ExtinctionNegative = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
-	FVector4f ExtinctionPositive = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
-	FVector4f ExtinctionBase = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
-	float BandScale = 1.0f;
+	FVector4f CloudExtinction = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
+	FVector4f StormExtinction = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
 	float CloudOpticalDepth = 0.0f;
 	float LightExtinctionFraction = 0.0f;
 
@@ -193,65 +149,22 @@ SHADER_PARAMETER(FVector3f, ShadowCameraLocal)
 SHADER_PARAMETER(float, PlanetRadius)
 SHADER_PARAMETER(float, HeightScale)
 SHADER_PARAMETER(float, Time)
-SHADER_PARAMETER(float, CloudBase)
-SHADER_PARAMETER(float, CloudThickness)
-SHADER_PARAMETER(float, CeilingFalloff)
-SHADER_PARAMETER(float, SurfaceSoftness)
-SHADER_PARAMETER(float, TopCurve)
-SHADER_PARAMETER(float, BottomCurve)
-SHADER_PARAMETER(float, CloudCover)
-SHADER_PARAMETER(float, OrganisationBoost)
-SHADER_PARAMETER(float, PressureScale)
-SHADER_PARAMETER(float, AscentDepth)
-SHADER_PARAMETER(float, AscentSpeed)
-SHADER_PARAMETER(float, AscentSubsidence)
-SHADER_PARAMETER(float, SubsidenceSpeed)
-SHADER_PARAMETER(float, CeilingDepth)
-SHADER_PARAMETER(float, CeilingPressure)
-SHADER_PARAMETER(float, BaseTropical)
-SHADER_PARAMETER(float, BasePressure)
-SHADER_PARAMETER(float, WarpStretch)
-SHADER_PARAMETER(float, WarpShift)
-SHADER_PARAMETER(float, BandSharpness)
-SHADER_PARAMETER(float, BandBias)
-SHADER_PARAMETER(float, HemisphereBlend)
-SHADER_PARAMETER(float, HemisphereVariance)
-SHADER_PARAMETER(float, ReliefThinning)
-SHADER_PARAMETER(float, RotationWeight)
-SHADER_PARAMETER(float, WarpTime)
-SHADER_PARAMETER(float, DeepShearRatio)
-SHADER_PARAMETER(float, TurbulenceFloor)
-SHADER_PARAMETER(float, CrossfadePeriod)
-SHADER_PARAMETER(float, EdgeBias)
-SHADER_PARAMETER(float, ErosionDepth)
+SHADER_PARAMETER(FVector4f, CloudProfile)
+SHADER_PARAMETER(FVector4f, CloudCurves)
+SHADER_PARAMETER(FVector4f, CloudCoverage)
+SHADER_PARAMETER(FVector4f, CloudType)
+SHADER_PARAMETER(FVector4f, CloudLid)
+SHADER_PARAMETER(FVector4f, CloudLift)
+SHADER_PARAMETER(FVector4f, CloudMotion)
 SHADER_PARAMETER(FVector4f, StructureNoiseWeights)
-SHADER_PARAMETER(float, StructureScale)
-SHADER_PARAMETER(float, StructureAspect)
-SHADER_PARAMETER(float, StructureRelief)
-SHADER_PARAMETER(float, StructureErosion)
-SHADER_PARAMETER(float, StructureFlowInherit)
-SHADER_PARAMETER(float, StructureShearInherit)
-SHADER_PARAMETER(float, StructureFadeNear)
-SHADER_PARAMETER(float, StructureFadeSpan)
-SHADER_PARAMETER(float, StructureBandMix)
-SHADER_PARAMETER(float, StructureCrossfade)
+SHADER_PARAMETER(FVector4f, StructureSampling)
+SHADER_PARAMETER(FVector4f, StructureWarp)
 SHADER_PARAMETER(FVector4f, DetailNoiseWeights)
-SHADER_PARAMETER(float, DetailScale)
-SHADER_PARAMETER(float, DetailAspect)
-SHADER_PARAMETER(float, DetailRelief)
-SHADER_PARAMETER(float, DetailErosion)
-SHADER_PARAMETER(float, DetailFlowInherit)
-SHADER_PARAMETER(float, DetailShearInherit)
-SHADER_PARAMETER(float, DetailFadeNear)
-SHADER_PARAMETER(float, DetailFadeSpan)
-SHADER_PARAMETER(float, DetailBandMix)
-SHADER_PARAMETER(float, DetailCrossfade)
-SHADER_PARAMETER(float, CloudSlope)
+SHADER_PARAMETER(FVector4f, DetailSampling)
+SHADER_PARAMETER(FVector4f, DetailWarp)
 
-SHADER_PARAMETER(FVector4f, ExtinctionNegative)
-SHADER_PARAMETER(FVector4f, ExtinctionPositive)
-SHADER_PARAMETER(FVector4f, ExtinctionBase)
-SHADER_PARAMETER(float, BandScale)
+SHADER_PARAMETER(FVector4f, CloudExtinction)
+SHADER_PARAMETER(FVector4f, StormExtinction)
 SHADER_PARAMETER(float, CloudOpticalDepth)
 SHADER_PARAMETER(float, LightExtinctionFraction)
 

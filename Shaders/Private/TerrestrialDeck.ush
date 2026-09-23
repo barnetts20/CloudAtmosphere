@@ -4,79 +4,39 @@
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereNoise.ush"
 #include "/Plugin/CloudAtmosphere/Private/FlowField.ush"
 
-// Terrestrial cloud band: the field the march samples.
+// Terrestrial clouds: the field the march samples.
 //
-// A SLAB BETWEEN TWO SURFACES. Every column has a top and a base, both set by
-// the simulated flow and moved by two noise volumes; density ramps up from the
-// base, ramps down to the top and sits at 1 between them. OUTSIDE THE SLAB
-// THERE IS NOTHING -- above the top and below the base density is exactly zero,
-// which is what lets a ray pass under the cloud and a camera stand beneath it.
+// THE SIM IS THE WEATHER MAP, THE NOISE IS THE CLOUD. Each column reads the
+// sim once and gets four things: COVERAGE (the sim's cloud field), TYPE (from
+// vertical motion and latitude: 0 stratiform, 1 towering), PRESSURE (the lid
+// and the base) and W (vertical motion, which stretches and lifts the noise).
+// Inside the column a shape noise is multiplied by a height profile, and
+// coverage decides how much of it survives: at low coverage only the densest
+// noise cores remain as scattered cloud, near 1 the column fills. A detail
+// noise then erodes the edges, wispy toward the base and billowy toward the
+// top. The noise draws every cloud; the sim decides where, how much and what
+// kind.
 //
-// TWO AXES, AND EVERY DRIVER PICKS ONE. LIFT moves both surfaces together --
-// the condensation level, where air first saturates. DEPTH moves the top alone
-// -- how far it keeps rising past that. A hole is a column of no depth, empty at
-// every altitude rather than masked, and that is the whole of sparsity.
+// A SLAB BETWEEN TWO SURFACES BOUNDS IT. The base is the condensation level
+// and the top is the column's type-dependent depth under the pressure lid;
+// both are exact per column, which the entry search and the empty-air early-out
+// spend. Outside the slab density is exactly zero.
 //
-// Separating them is what lets low-and-deep, high-and-shallow and low-and-
-// shallow be three different skies rather than one number split by a ratio.
-// NOISE DRIVES DEPTH ONLY, so the base is a function of the flow alone: exactly
-// known per column rather than bounded, which the entry search and the empty-air
-// early-out both spend.
+// NO DISTANCE LEVEL OF DETAIL. Both noise layers apply at every range, so a
+// sample's density depends only on where it is.
 //
-// FOUR QUANTITIES OUT OF TWO TAPS, the flow slice and the weather slice, each
-// answering a different question about the air, and each with one job:
-//
-//   ORGANISATION, rotation magnitude. Where weather is organised at all -- the
-//     finest scale the flow has, since vorticity is the streamfunction
-//     differentiated twice. AMPLIFIES ASCENT RATHER THAN ADDING TO IT: rotation
-//     makes no cloud of its own, so multiplying concentrates what the cloud
-//     signal is already doing.
-//
-//   PRESSURE, signed, lows positive. NOT A CONTRIBUTION BUT A LIMIT. A high
-//     subsides and puts an inversion over itself, and moisture below a lid
-//     spreads into a thin flat sheet rather than building; a low has no lid and
-//     its columns grow until they run out of energy. So pressure sets the
-//     HEADROOM, and it sets where the base sits, and it decides which way the
-//     air is going vertically. It contributes no depth of its own.
-//
-//   ASCENT, the sim's cloud tracer signed about a half: positive where air has
-//     been rising, negative where it has been sinking or the cloud has decayed.
-//     THE MASTER SHAPE. It grows or carves the column and warps the noise.
-//
-//   TROPICALITY, 1 at the equator falling to 0 at the poles. The condensation
-//     level, standing in for moisture until there is moisture.
-//
-// THE CEILING RESISTS, IT DOES NOT CUT. Growth saturates toward the headroom
-// rather than clamping at it, so a capped column flattens by squashing and keeps
-// its variance -- flat-topped rather than a sheet with an edge. Air running out
-// of buoyancy is what a real anvil is, and it needs no threshold to say so.
-//
-// THE NOISE IS INSIDE THE CEILING, so a bumpy top still cannot exceed the
-// inversion, and the marched band is bounded by the headroom alone rather than
-// by the headroom plus everything the noise could add.
-//
-// NO DISTANCE LEVEL OF DETAIL. Both layers apply at every range, so a sample's
-// field depends only on where it is, never on how far the camera is from it.
-//
-// UNITS. TWO ABSOLUTES, both atmosphere fractions: CloudBase and
-// CloudThickness. EVERYTHING ELSE IS A FRACTION OF ONE OF THEM -- the softness
-// is a share of the thickness, every coefficient and relief amount is a multiple
-// of it, and ErosionDepth is a share of depth into the column. Thickness is the
-// only world-space length. Space is planet-local, spin axis on Z, positions unit
-// directions except in TR_Density.
+// UNITS. CloudBase and CloudThickness are atmosphere fractions; every other
+// height is a multiple of CloudThickness. Space is planet-local, spin axis on
+// Z, positions unit directions except in TR_Density.
 
 /** Warp loop length. Each iteration past the first costs a flow fetch. */
 #ifndef TR_WARP_ITERATIONS
 #define TR_WARP_ITERATIONS 4
 #endif
 
-/** Which sim slice the deck reads. The coarse warp and the band signal come
- *  from TR_FLOW_LAYER, the fine shear from TR_DEEP_FLOW_LAYER, and the two being
- *  different is what produces vertical wind shear rather than one sheet dragged
- *  around.
- *
- *  Pitfall: both must be under GasGiantSimConfig::LayerCount. A slice past the
- *  end reads clamped rather than failing, so the shear quietly vanishes. */
+/** Which sim layer the field reads, and which one supplies the vertical wind
+ *  shear. Both must be under the sim's LayerCount: a slice past the end reads
+ *  clamped rather than failing, and the shear quietly vanishes. */
 #ifndef TR_FLOW_LAYER
 #define TR_FLOW_LAYER 0
 #endif
@@ -87,39 +47,29 @@
 
 /** How far a crossfade phase runs its advection ramp, as a multiple of the
  *  authored warp displacement. 2 so the mean over a cycle is the authored
- *  amount: each phase ramps from nothing to this and resets. At 1 the deck would
- *  read as half as advected with the crossfade on as with it off, so enabling
- *  the feature would change the look rather than only the motion. */
+ *  amount. */
 #ifndef TR_CROSSFADE_SPAN
 #define TR_CROSSFADE_SPAN 2.0f
 #endif
 
-/** Whether the detail layer moves the deck top symmetrically about the noise
- *  median, as the structure layer does, or only downward. One-sided lowers the
- *  mean top as well as texturing it. Either amount may still be negative,
- *  mirroring the layer. */
-#ifndef TR_DETAIL_RELIEF_CENTRED
-#define TR_DETAIL_RELIEF_CENTRED 1
+/** How much of the density the detail layer can erode at full DetailErosion.
+ *  Above about a half it eats whole thin clouds rather than their edges. */
+#ifndef TR_DETAIL_EROSION_SCALE
+#define TR_DETAIL_EROSION_SCALE 0.35f
 #endif
 
-/** Slack the marched band gets beyond the surfaces' own reach, above and below,
- *  as a fraction of CloudThickness.
- *
- *  A TIGHT BOUND IS NOT A USABLE ONE. The reaches are exact, so cloud can sit
- *  arbitrarily close to either shell -- and the fine segment's first sample
- *  lands a jittered step inside it with nothing sampled before. A wedge of cloud
- *  against the shell then has no sample in it at all, and how much is lost moves
- *  with the step lattice, which moves with the camera: the symptom is a thin
- *  slice popping in and out as the camera climbs, not anything that looks like a
- *  missing bound.
- *
- *  SIZED IN FINE STEPS, NOT IN CLOUD. At the counts this marches at, a fine step
- *  is under a hundredth of the band, so this is several of them -- enough for the
- *  first one to land clear of anything. It costs a little of the band and
- *  therefore a little of every fine step, which is why it is a constant and not
- *  a handle: there is nothing here to art direct. */
-#ifndef TR_BAND_MARGIN
-#define TR_BAND_MARGIN 0.0f
+/** Height fraction over which detail erosion turns from wispy (base) to
+ *  billowy (top). */
+#ifndef TR_BILLOW_HEIGHT
+#define TR_BILLOW_HEIGHT 0.25f
+#endif
+
+/** Coverage over which a column grows from no slab to its full depth. Sparse
+ *  cloud is shallow cloud, and clear sky has no slab for the entry search to
+ *  stop on. PITFALL: narrower makes the top a cliff at every coverage edge,
+ *  steeper than CloudSlope bounds, and the entry search steps over cloud. */
+#ifndef TR_COVERAGE_DEPTH_RAMP
+#define TR_COVERAGE_DEPTH_RAMP 0.25f
 #endif
 
 /** Fraction of the cone-trace advance actually taken. Under 1 because CloudSlope
@@ -130,341 +80,238 @@
 #endif
 
 /** Cone-trace iteration cap. Reached only on rays that graze for their whole
- *  length, which return T1 and are treated as missing the slab. A ray climbing
- *  toward the base from below grazes over a longer run than one descending onto
- *  the top, so this binds there first. */
+ *  length, which return T1 and are treated as missing the slab. */
 #ifndef TR_SLAB_ENTRY_PROBES
 #define TR_SLAB_ENTRY_PROBES 24
 #endif
 
-/** Everything the field, density and deck-top functions read.
- *
- *  NAMES MATCH THE STACK: every authored member carries the name of its C++
- *  property, material parameter and Custom node pin, layer members taking their
- *  layer's prefix. Derived members are named for what they are, never reusing an
- *  authored name. The two per-sample fades are the march's and go unread. */
+/** Everything the field reads. Authored members carry their C++ property
+ *  names; they arrive packed on a handful of vector pins (see TR_BuildField)
+ *  and are unpacked here once. */
 struct TRFieldParams
 {
 	// -- Authored ------------------------------------------------------------
 
     float PlanetRadius;
 
-	/** Where an unrelieved column's underside sits, an atmosphere fraction. */
+	/** Condensation level of an unlifted column, an atmosphere fraction. */
     float CloudBase;
 
-	/** How deep an unrelieved column is, an atmosphere fraction, and the unit
-	 *  every relief amount is a multiple of. Floored against division. */
+	/** Depth of a fully towering column before the lid, an atmosphere fraction,
+	 *  and the unit every other height is a multiple of. */
     float CloudThickness;
 
-	/** Width of the band below the shell top across which density fades to
-	 *  zero, an atmosphere fraction. Floored above zero. */
-    float CeilingFalloff;
-
-	/** Shape of each ramp. Above 1 flattens the surface and hardens it; below
-	 *  0.5 the onset loses its C1 join. */
+	/** Share of CloudThickness each end of the height profile ramps over, and
+	 *  each ramp's shape. Above 1 flattens that end; below 0.5 it loses its C1
+	 *  join. */
+    float SurfaceSoftness;
     float TopCurve;
     float BottomCurve;
 
-	/** Depth a column reaches with every signal at zero, a signed multiple of
-	 *  CloudThickness. Authored 0 to 1 and remapped in TR_BuildField, so 0
-	 *  reaches a thickness below zero and nothing can lift it back. */
+	/** Width of the band under the shell top across which density fades to
+	 *  zero, an atmosphere fraction. */
+    float CeilingFalloff;
+
+	/** Global coverage, 0.5 neutral, and how strongly the sim's cloud field
+	 *  maps to coverage. */
     float CloudCover;
+    float CoverageGain;
 
-	/** How much organisation AMPLIFIES ascent. Rotation makes no cloud of its
-	 *  own, so this concentrates what the cloud signal is already doing. */
-    float OrganisationBoost;
+	/** Depth of a stratiform column as a fraction of a towering one. */
+    float StratusDepth;
 
-	/** How much depth the cloud signal adds, signed with it: a clouded column
-	 *  builds and a clear one thins. */
-    float AscentDepth;
+	/** Type = TypeBias + TypeAscent * W + TypeTropical * tropicality. */
+    float TypeBias;
+    float TypeAscent;
+    float TypeTropical;
 
-	/** 1 / AscentSpeed: how sharply the cloud tracer turns into a signal. The
-	 *  authored AscentSpeed is the edge softness -- small gives hard-edged
-	 *  cloud, large a gradual thinning. */
-    float CloudEdgeGain;
-
-	/** The streamfunction that reads as a full high or low. Sets how far the
-	 *  pressure gradient spreads before it saturates. */
+	/** The geopotential anomaly that reads as a full low or high. */
     float PressureScale;
 
-	/** How hard a system overturns within itself: slack air inside it sinks and
-	 *  fast air inside it rises. Gated by organisation, signed by speed. */
-    float AscentSubsidence;
-
-	/** Speed the overturning crosses zero at, squared. Below it the air inside a
-	 *  system is sinking, above it rising -- the eye's radius against its
-	 *  wall. */
-    float SubsidenceSpeedSq;
-
-	/** How deep a column may get before the inversion resists it, a multiple of
-	 *  CloudThickness, and how far pressure moves that: lows have more headroom
-	 *  than highs. Growth saturates toward it rather than stopping at it. */
+	/** Headroom as a multiple of CloudThickness, and how far pressure moves it:
+	 *  positive gives lows more room than highs. */
     float CeilingDepth;
     float CeilingPressure;
 
-	/** Where the base sits, multiples of CloudThickness. Tropicality is the
-	 *  condensation level until there is moisture; pressure lowers it under a
-	 *  low and raises it under a high. */
+	/** How far tropicality and pressure move the base, multiples of
+	 *  CloudThickness. */
     float BaseTropical;
     float BasePressure;
 
-	/** How far ascent stretches the noise VERTICALLY. Rising air draws a feature
-	 *  out taller, sinking air presses it into a sheet. Texture, not weather. */
+	/** How far rising air stretches the noise vertically, and lifts it, the
+	 *  latter a multiple of CloudThickness. */
     float WarpStretch;
-
-	/** How far ascent DISPLACES the noise vertically, a multiple of
-	 *  CloudThickness. Rising air carries a feature up, sinking air carries it
-	 *  down, unaltered in shape. */
     float WarpShift;
-
-
-	/** What FlowField.ush's interpreters read: the hemisphere width and the
-	 *  band's offset and gain. Held as the shared struct rather than as loose
-	 *  members, so a second field feeding those functions cannot describe the
-	 *  same four values differently, and a derived half-width has one home. */
-    FlowReadParams FlowRead;
-
-    float ReliefThinning;
-
-    float WarpTime;
-    float TurbulenceFloor;
-
-    float EdgeBias;
-    float ErosionDepth;
-
-	/** Worley rung weights in xyz, the layer's amount in w. */
-    float4 StructureNoiseWeights;
-    float StructureScale;
-    float StructureRelief;
-    float StructureErosion;
-    float StructureFlowInherit;
-    float StructureShearInherit;
-    float StructureFadeNear;
-    float StructureBandMix;
-    float StructureCrossfade;
-
-    float4 DetailNoiseWeights;
-    float DetailScale;
-    float DetailRelief;
-    float DetailErosion;
-    float DetailFlowInherit;
-    float DetailShearInherit;
-    float DetailFadeNear;
-    float DetailBandMix;
-    float DetailCrossfade;
 
 	/** Bound on either surface's slope, cloud depths per radian. Read only by
 	 *  the entry search's cone angle. */
     float CloudSlope;
+
+    float WarpTime;
+    float DeepShearRatio;
+    float RotationWeight;
+
+	/** Worley rung weights in xyz, the layer's amount in w. */
+    float4 StructureNoiseWeights;
+    float StructureScale;
+    float StructureErosion;
+    float StructureFlowInherit;
+    float StructureShearInherit;
+    float StructureCrossfade;
+
+    float4 DetailNoiseWeights;
+    float DetailScale;
+    float DetailErosion;
+    float DetailFlowInherit;
+    float DetailShearInherit;
+    float DetailCrossfade;
 
 	// -- Derived -------------------------------------------------------------
 
 	/** Atmosphere thickness in world units: the one absolute length here. */
     float Thickness;
 
-	/** The ramp depth each surface gets, an atmosphere fraction. Half the band at
-	 *  most, so the two can never overlap: peak density reaches exactly 1 and
-	 *  TR_CloudBeta is exact at any pair of curves. */
+	/** The ramp depth each end of the profile gets, an atmosphere fraction. Half
+	 *  CloudThickness at most, so a full column's two ramps never overlap and
+	 *  TR_CloudBeta is exact. */
     float SpanTop;
     float SpanBase;
 
-	/** The deep flow layer's step length: WarpTime * DeepShearRatio. */
     float DeepShearTime;
-
-	/** HemisphereBlend as a half-width in sin(latitude). The blend reaches about
-	 *  three quarters of full strength at that distance from the equator. */
-
     float SpinAngle;
 
-	/** Elapsed time in crossfade periods. Only its fraction is read, so the two
-	 *  phases sit half a period apart whatever the whole part is. */
+	/** Elapsed time in crossfade periods. Only its fraction is read. */
     float CrossfadeTime;
 
 	/** Noise units the shell spans vertically, per layer: Scale * Aspect *
-	 *  HeightScale, which is what makes the aspect a ratio -- heights are
-	 *  fractions of shell thickness while the horizontal scale is against planet
-	 *  radius. */
+	 *  HeightScale, which is what makes the aspect a ratio. */
     float StructureVertical;
     float DetailVertical;
 
-	/** FadeNear + FadeSpan, held above FadeNear, in planet radii. The shadow
-	 *  cascades' half-widths, which is all either range sizes on this field. */
+	/** Per-layer fade range, in planet radii from the camera. The march reads
+	 *  both edges to set the per-sample fades; the far edges are also the shadow
+	 *  map's cascade half-widths. */
+    float StructureFadeNear;
     float StructureFadeFar;
+    float DetailFadeNear;
     float DetailFadeFar;
 
 	// -- Per sample ----------------------------------------------------------
 
 	/** Per-layer level of detail, written per sample through the march's shared
-	 *  interface. UNREAD ON THIS FIELD: both layers apply at every range, so the
-	 *  image and the cost of a sample do not depend on camera distance. */
+	 *  interface. UNREAD ON THIS FIELD. */
     float StructureFade;
     float DetailFade;
 };
 
-/** Fills TRFieldParams from the authored values, in panel order, and derives the
- *  rest. The bake calls it with the same values, so every derivation here is
- *  shared by the deck the eye sees and the deck the light sees. RotationWeight
- *  is the planet's own rotation; the sim runs in the rotating frame, so it
- *  applies to the sampling position rather than the flow, negated because
- *  rotating the sample point backwards carries the field forwards. */
+/** Fills TRFieldParams from the packed pins and derives the rest. The bake calls
+ *  it with the same values, so the field the eye sees and the field the light
+ *  sees share every derivation. Packing, member by member:
+ *
+ *    CloudProfile      CloudBase, CloudThickness, SurfaceSoftness, CeilingFalloff
+ *    CloudCurves       TopCurve, BottomCurve, CloudSlope, -
+ *    CloudCoverage     CloudCover, CoverageGain, StratusDepth, -
+ *    CloudType         TypeBias, TypeAscent, TypeTropical, -
+ *    CloudLid          PressureScale, CeilingDepth, CeilingPressure, -
+ *    CloudLift         BaseTropical, BasePressure, WarpStretch, WarpShift
+ *    CloudMotion       WarpTime, DeepShearRatio, CrossfadePeriod, RotationWeight
+ *    <Layer>NoiseWeights  Worley rung weights, layer amount
+ *    <Layer>Sampling   Scale, Aspect, Erosion, Crossfade (0 or 1)
+ *    <Layer>Warp       FlowInherit, ShearInherit, FadeNear, FadeSpan
+ *
+ *  RotationWeight is the planet's own rotation; the sim runs in the rotating
+ *  frame, so it applies to the sampling position, negated because rotating the
+ *  sample point backwards carries the field forwards. */
 TRFieldParams TR_BuildField(
 	float PlanetRadius,
 	float HeightScale,
 	float Time,
-	float CloudBase,
-	float CloudThickness,
-	float CeilingFalloff,
-	float SurfaceSoftness,
-	float TopCurve,
-	float BottomCurve,
-	float CloudCover,
-	float OrganisationBoost,
-	float AscentDepth,
-	float AscentSpeed,
-	float PressureScale,
-	float AscentSubsidence,
-	float SubsidenceSpeed,
-	float CeilingDepth,
-	float CeilingPressure,
-	float BaseTropical,
-	float BasePressure,
-	float WarpStretch,
-	float WarpShift,
-	float BandSharpness,
-	float BandBias,
-	float HemisphereBlend,
-	float HemisphereVariance,
-	float ReliefThinning,
-	float RotationWeight,
-	float WarpTime,
-	float DeepShearRatio,
-	float TurbulenceFloor,
-	float CrossfadePeriod,
-	float EdgeBias,
-	float ErosionDepth,
+	float4 CloudProfile,
+	float4 CloudCurves,
+	float4 CloudCoverage,
+	float4 CloudType,
+	float4 CloudLid,
+	float4 CloudLift,
+	float4 CloudMotion,
 	float4 StructureNoiseWeights,
-	float StructureScale,
-	float StructureAspect,
-	float StructureRelief,
-	float StructureErosion,
-	float StructureFlowInherit,
-	float StructureShearInherit,
-	float StructureFadeNear,
-	float StructureFadeSpan,
-	float StructureBandMix,
-	float StructureCrossfade,
+	float4 StructureSampling,
+	float4 StructureWarp,
 	float4 DetailNoiseWeights,
-	float DetailScale,
-	float DetailAspect,
-	float DetailRelief,
-	float DetailErosion,
-	float DetailFlowInherit,
-	float DetailShearInherit,
-	float DetailFadeNear,
-	float DetailFadeSpan,
-	float DetailBandMix,
-	float DetailCrossfade,
-	float CloudSlope)
+	float4 DetailSampling,
+	float4 DetailWarp)
 {
     TRFieldParams F;
 
     F.PlanetRadius = PlanetRadius;
 
-    F.CloudBase = CloudBase;
-    F.CloudThickness = max(CloudThickness, 1e-4f);
+    F.CloudBase = CloudProfile.x;
+    F.CloudThickness = max(CloudProfile.y, 1e-4f);
+    F.SurfaceSoftness = CloudProfile.z;
+    F.CeilingFalloff = max(CloudProfile.w, 1e-3f);
 
-    F.TopCurve = TopCurve;
-    F.BottomCurve = BottomCurve;
+    F.TopCurve = CloudCurves.x;
+    F.BottomCurve = CloudCurves.y;
+    F.CloudSlope = CloudCurves.z;
 
-	// REMAPPED TO SIGNED HERE, once. Authored as cover, used as depth: 0 has to
-	// reach a full thickness below zero, or the relief leaves cloud in a sky the
-	// slider says is clear.
-    F.CloudCover = CloudCover * 2.0f - 1.0f;
+    F.CloudCover = CloudCoverage.x;
+    F.CoverageGain = CloudCoverage.y;
+    F.StratusDepth = saturate(CloudCoverage.z);
 
-    F.OrganisationBoost = OrganisationBoost;
-    F.PressureScale = max(PressureScale, 1e-6f);
-    F.AscentDepth = AscentDepth;
-    F.CloudEdgeGain = 1.0f / max(AscentSpeed, 1e-4f);
-    F.AscentSubsidence = AscentSubsidence;
-    F.SubsidenceSpeedSq = max(SubsidenceSpeed * SubsidenceSpeed, 1e-12f);
+    F.TypeBias = CloudType.x;
+    F.TypeAscent = CloudType.y;
+    F.TypeTropical = CloudType.z;
 
-    F.CeilingDepth = max(CeilingDepth, 1e-3f);
-    F.CeilingPressure = clamp(CeilingPressure, -0.99f, 0.99f);
+    F.PressureScale = max(CloudLid.x, 1e-6f);
+    F.CeilingDepth = max(CloudLid.y, 1e-3f);
+    F.CeilingPressure = clamp(CloudLid.z, -0.99f, 0.99f);
 
-    F.BaseTropical = BaseTropical;
-    F.BasePressure = BasePressure;
+    F.BaseTropical = CloudLift.x;
+    F.BasePressure = CloudLift.y;
+    F.WarpStretch = CloudLift.z;
+    F.WarpShift = CloudLift.w;
 
-    F.WarpStretch = WarpStretch;
-    F.WarpShift = WarpShift;
-
-    F.FlowRead.BandSharpness = BandSharpness;
-    F.FlowRead.BandBias = BandBias;
-
-    F.ReliefThinning = ReliefThinning;
-
-    F.WarpTime = WarpTime;
-    F.TurbulenceFloor = TurbulenceFloor;
-
-    F.EdgeBias = EdgeBias;
-    F.ErosionDepth = ErosionDepth;
+    F.WarpTime = CloudMotion.x;
+    F.DeepShearRatio = CloudMotion.y;
+    F.RotationWeight = CloudMotion.w;
 
     F.StructureNoiseWeights = StructureNoiseWeights;
-    F.StructureScale = StructureScale;
-    F.StructureRelief = StructureRelief;
-    F.StructureErosion = StructureErosion;
-    F.StructureFlowInherit = StructureFlowInherit;
-    F.StructureShearInherit = StructureShearInherit;
-    F.StructureFadeNear = StructureFadeNear;
-    F.StructureBandMix = StructureBandMix;
-    F.StructureCrossfade = StructureCrossfade;
+    F.StructureScale = StructureSampling.x;
+    F.StructureErosion = saturate(StructureSampling.z);
+    F.StructureCrossfade = StructureSampling.w;
+    F.StructureFlowInherit = StructureWarp.x;
+    F.StructureShearInherit = StructureWarp.y;
 
     F.DetailNoiseWeights = DetailNoiseWeights;
-    F.DetailScale = DetailScale;
-    F.DetailRelief = DetailRelief;
-    F.DetailErosion = DetailErosion;
-    F.DetailFlowInherit = DetailFlowInherit;
-    F.DetailShearInherit = DetailShearInherit;
-    F.DetailFadeNear = DetailFadeNear;
-    F.DetailBandMix = DetailBandMix;
-    F.DetailCrossfade = DetailCrossfade;
-
-    F.CloudSlope = CloudSlope;
+    F.DetailScale = DetailSampling.x;
+    F.DetailErosion = saturate(DetailSampling.z);
+    F.DetailCrossfade = DetailSampling.w;
+    F.DetailFlowInherit = DetailWarp.x;
+    F.DetailShearInherit = DetailWarp.y;
 
     F.Thickness = max(PlanetRadius * HeightScale, 1e-4f);
 
-    F.CeilingFalloff = max(CeilingFalloff, 1e-3f);
-
-	// ONE SHARE FOR BOTH SURFACES, capped at half the band so they meet at most
-	// in the middle and never overlap. The two curves carry whatever asymmetry
-	// the surfaces want: a base is sharper than a top because BottomCurve says
-	// so, not because it was given less room. Floored above zero only against
-	// the divisions below; a share of zero is a hard surface, which is a
-	// legitimate look.
-    F.SpanTop = clamp(SurfaceSoftness, 1e-4f, 0.5f) * F.CloudThickness;
+	// One share for both ends, capped at half so a full column's ramps meet at
+	// most in the middle. The curves carry any asymmetry.
+    F.SpanTop = clamp(F.SurfaceSoftness, 1e-4f, 0.5f) * F.CloudThickness;
     F.SpanBase = F.SpanTop;
 
-    F.DeepShearTime = WarpTime * DeepShearRatio;
-    F.SpinAngle = -RotationWeight * Time;
+    F.DeepShearTime = F.WarpTime * F.DeepShearRatio;
+    F.SpinAngle = -F.RotationWeight * Time;
 
-	// Floored against a zero width, which would make Flow_Hemisphere a sign()
-	// and seam along the equator.
-    F.FlowRead.HemisphereHalfWidth = max(sin(radians(HemisphereBlend)), 1e-4f);
-    F.FlowRead.HemisphereVariance = max(HemisphereVariance, 0.0f);
+	// Time and period are both simulated time, so the crossfade keeps pace with
+	// the flow at any sim speed. PITFALL: scaling the period by TimeScale too
+	// counts the speed twice.
+    F.CrossfadeTime = Time / max(CloudMotion.z, 1e-3f);
 
-	// Time and period are both simulated seconds: Time is the sim's clock, which
-	// already runs TimeScale times faster than real time, so the crossfade keeps
-	// pace with the flow at any sim speed. PITFALL: scaling the period by
-	// TimeScale too counts the speed twice. Floored so a zero period is a stopped
-	// clock rather than a divide.
-    F.CrossfadeTime = Time / max(CrossfadePeriod, 1e-3f);
-
-    F.StructureVertical = StructureScale * StructureAspect * HeightScale;
-    F.DetailVertical = DetailScale * DetailAspect * HeightScale;
+    F.StructureVertical = StructureSampling.x * StructureSampling.y * HeightScale;
+    F.DetailVertical = DetailSampling.x * DetailSampling.y * HeightScale;
 
 	// Each far edge held above its own near one, so a zero span cannot collapse
 	// a cascade onto the one inside it.
-    F.StructureFadeFar = StructureFadeNear + max(StructureFadeSpan, 1e-4f);
-    F.DetailFadeFar = DetailFadeNear + max(DetailFadeSpan, 1e-4f);
+    F.StructureFadeNear = max(StructureWarp.z, 0.0f);
+    F.StructureFadeFar = F.StructureFadeNear + max(StructureWarp.w, 1e-4f);
+    F.DetailFadeNear = max(DetailWarp.z, 0.0f);
+    F.DetailFadeFar = F.DetailFadeNear + max(DetailWarp.w, 1e-4f);
 
     F.StructureFade = 1.0f;
     F.DetailFade = 1.0f;
@@ -473,88 +320,31 @@ TRFieldParams TR_BuildField(
 }
 
 /** The call both consumers make, expanded from one definition beside the
- *  signature it has to match.
- *
- *  PITFALL: 53 POSITIONAL FLOAT ARGUMENTS. A parameter inserted above but missed
- *  at a call site still compiles, silently shifting every argument after it --
- *  BottomSoftness arriving as TopSoftness and so on, with nothing to catch
- *  it. Expanding from here makes that impossible: every name resolves in the
- *  caller's own scope, so a missing material pin or bake uniform is an
- *  undeclared identifier naming the symbol.
- *
- *  Requires a variable of each name in scope. The material Custom node's pins
- *  and GasGiantShadowMap.usf's uniforms both carry exactly these names, which is
- *  what lets one expansion serve both. */
+ *  signature it has to match. Requires a variable of each name in scope: the
+ *  material Custom node's pins and TerrestrialShadowMap.usf's uniforms carry
+ *  exactly these names. A missing one is an undeclared identifier naming it. */
 #define TR_BUILD_FIELD() TR_BuildField( \
 	PlanetRadius, HeightScale, Time, \
-	CloudBase, CloudThickness, CeilingFalloff, SurfaceSoftness, \
-	TopCurve, BottomCurve, CloudCover, \
-	OrganisationBoost, AscentDepth, AscentSpeed, PressureScale, \
-	AscentSubsidence, SubsidenceSpeed, \
-	CeilingDepth, CeilingPressure, BaseTropical, BasePressure, \
-	WarpStretch, WarpShift, \
-	BandSharpness, BandBias, HemisphereBlend, HemisphereVariance, \
-	ReliefThinning, RotationWeight, WarpTime, DeepShearRatio, \
-	TurbulenceFloor, CrossfadePeriod, EdgeBias, ErosionDepth, \
-	StructureNoiseWeights, StructureScale, StructureAspect, StructureRelief, \
-	StructureErosion, StructureFlowInherit, StructureShearInherit, StructureFadeNear, \
-	StructureFadeSpan, StructureBandMix, StructureCrossfade, DetailNoiseWeights, \
-	DetailScale, DetailAspect, DetailRelief, DetailErosion, \
-	DetailFlowInherit, DetailShearInherit, DetailFadeNear, DetailFadeSpan, \
-	DetailBandMix, DetailCrossfade, CloudSlope)
-
-/** What TR_Field returns. Two shapes rather than one, because the layers carve
- *  and erode by different amounts. Each is 1 where its layer contributes
- *  nothing.
- *
- *  BandShift is the shapes' signed offset to Band, 0 where neither layer
- *  contributes. TR_Density applies it, weighted by depth into the gradient. */
-struct TRFieldSample
-{
-    float Top;
-    float Base;
-    float Pressure;
-    float Band;
-    float BandShift;
-    float ShapeDetail;
-    float ShapeStructure;
-};
-
+	CloudProfile, CloudCurves, CloudCoverage, CloudType, \
+	CloudLid, CloudLift, CloudMotion, \
+	StructureNoiseWeights, StructureSampling, StructureWarp, \
+	DetailNoiseWeights, DetailSampling, DetailWarp)
 
 /** The shell's ceiling: 1 below the falloff band, 0 at the atmosphere top,
- *  smoothstep between. Multiplies every density the deck returns, so a tower
- *  that would cross it softens into a flattened cap instead of being cut and the
- *  deck never has to sit lower to clear its tallest outlier. Smoothstep, not
- *  linear: a slope break at the band's lower edge draws a line at one altitude
- *  across every tower reaching it.
- *
- *  PITFALL: the band's top belongs below it. A typical top inside the falloff
- *  thins the whole column, and CloudOpticalDepth stops being exact. */
+ *  smoothstep between, so a tower that would cross it softens into a cap. */
 float TR_CeilingFade(float Height, TRFieldParams F)
 {
     return 1.0f - smoothstep(1.0f - F.CeilingFalloff, 1.0f, Height);
 }
 
-/** Density at a height inside a column, from its two surfaces: a ramp down from
- *  the top times a ramp up from the base, each peaking at exactly 1 with zero
- *  derivative at both ends so neither onset nor plateau draws a line. Zero
- *  outside the slab, which is what the empty-air early-out relies on. No peak
- *  density term: Cloud Beta is solved from the optical depth wanted, so a peak
- *  here would divide back out.
+/** The height profile inside a column: a ramp down from the top times a ramp up
+ *  from the base, each peaking at exactly 1 with zero derivative at both ends.
+ *  Zero outside the slab.
  *
- *  PITFALL: an onset stays C1 only while its curve is above 0.5. At 0.5 the
- *  slope at that surface goes finite, creasing along the whole of it; below it
- *  the surface hardens into an edge. Both are legitimate looks, so this is not
- *  clamped -- the floor only keeps the exponent positive, since pow(t, 0)
- *  returns 1. */
+ *  THE SPANS ARE CUT AGAINST THIS COLUMN'S OWN DEPTH, so a shallow column peaks
+ *  below 1 instead of holding core density over no distance. */
 float TR_SlabDensity(float Height, float Top, float Base, TRFieldParams F)
 {
-	// THE FITTED SPANS, CUT AGAIN AGAINST THIS COLUMN'S OWN DEPTH. They already
-	// fit a full band, but coverage and the noise both vary the depth, so a
-	// column can be thinner than the band they came from. Cut
-	// rather than shared, so such a column peaks below 1 -- which is what a
-	// thinned cloud should do -- instead of holding core density over no
-	// distance and putting a hard sheet where the band pinches out.
     const float Depth = max(Top - Base, 1e-4f);
 
     const float FromTop = saturate((Top - Height) / min(F.SpanTop, Depth));
@@ -564,22 +354,13 @@ float TR_SlabDensity(float Height, float Top, float Base, TRFieldParams F)
 		* smoothstep(0.0f, 1.0f, pow(FromBase, max(F.BottomCurve, 1e-4f)));
 }
 
-/** The field's extinction coefficient per atmosphere thickness, solved so a ray
- *  down an UNRELIEVED column accumulates CloudOpticalDepth at core density.
- *  Multiply by a band's extinction for colour and divide by Thickness for world
- *  units. Solved rather than authored, so retuning the shell leaves the cloud's
- *  opacity where it was put, and shared by the march and the bake, which keeps
- *  the depth where the map goes opaque the depth where the eye sees it.
- *
- *  EXACT, because the spans are fitted. The two ramps cannot overlap and cannot
- *  exceed the band, so the plateau between them is never negative and the mass
- *  below is the profile's own integral rather than an estimate of it. Retuning
- *  either softness or either curve redistributes mass without changing how much
- *  light the column removes. */
+/** Extinction per atmosphere thickness, solved so a ray down a full-depth
+ *  column at density 1 accumulates CloudOpticalDepth. Solved rather than
+ *  authored, so reshaping the profile leaves the opacity where it was put, and
+ *  shared by the march and the bake. */
 float TR_CloudBeta(TRFieldParams F, float CloudOpticalDepth)
 {
-	// Each ramp's mean density: the integral of smoothstep(T^c) over [0,1] is
-	// 3/(2c+1) - 2/(3c+1), a half at c = 1.
+	// Each ramp's mean density: the integral of smoothstep(T^c) over [0,1].
     const float Ct = max(F.TopCurve, 1e-4f);
     const float Cb = max(F.BottomCurve, 1e-4f);
 
@@ -592,248 +373,108 @@ float TR_CloudBeta(TRFieldParams F, float CloudOpticalDepth)
 		/ max(MeanTop * F.SpanTop + MeanBase * F.SpanBase + Plateau, 1e-4f);
 }
 
-/** The band at a planet-local position from one bilinear tap of the top flow
- *  layer, without the shapes' BandShift. For what varies over a band's width
- *  rather than a feature's: the colour of extinction a light ray crossed. */
-float TR_BandCoarse(Texture2DArray FlowField, SamplerState FlowSampler, float3 LocalPos, TRFieldParams F)
+/** The column's weather, from one flow tap and one weather tap. */
+struct TRColumn
 {
-    const float3 N = normalize(Atmo_RotateZ(normalize(LocalPos), F.SpinAngle));
+	/** How much of the shape noise survives, [0, 1]. */
+    float Coverage;
 
-    const float U = frac(atan2(N.y, N.x) * (0.5f / PI));
-    const float V = 0.5f + 0.5f * N.z;
+	/** 0 stratiform to 1 towering. Also the material coordinate. */
+    float Type;
 
-    return Flow_Band(
-		FlowField.SampleLevel(FlowSampler, float3(U, V, TR_FLOW_LAYER), 0.0f), N, F.FlowRead);
-}
-
-/** The four quantities at a column, from its flow sample and one weather tap.
- *
- *  BOUNDED IS WHAT MAKES THE COEFFICIENTS MEAN SOMETHING. The sigmoid is
- *  strictly inside its range and smooth everywhere, where a clamp would flatten
- *  an overshooting core into a plateau and leave a slope break around its edge.
- *
- *  ORGANISATION TAKES THE MAGNITUDE AND NO HEMISPHERE, so a system straddling
- *  the equator stays one system rather than reversing across its own middle.
- *
- *  PRESSURE IS THE SIM'S GEOPOTENTIAL LESS ITS ZONAL MEAN, highs positive in
- *  both hemispheres, negated here so lows are positive. It sets the ceiling and
- *  the base and nothing else.
- *
- *  ASCENT IS THE CLOUD TRACER, which already integrates vertical motion along
- *  the wind: cloud where air has been rising, clear where it has been sinking.
- *  Reading the tracer rather than instantaneous W keeps gravity-wave flicker
- *  and one-cell convergence lines out of the shape.
- *
- *  OVERTURNING stays as an optional term: inside an organised system slack air
- *  sinks and fast air rises, which is the one signal that varies radially in a
- *  vortex. Gated by organisation, so quiet air is untouched; AscentSubsidence 0
- *  removes it.
- *
- *  Returns (organisation, ascent, pressure, tropicality). */
-float4 TR_Signals(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	float4 Flow,
-	float3 N,
-	TRFieldParams F)
-{
-    const float Vorticity = abs(Flow.w);
-
-    const float Organisation = Vorticity * rsqrt(1.0f + Vorticity * Vorticity);
-
-	// SCALED BEFORE THE SIGMOID. The field is already soft-saturated sim-side,
-	// so bounding it again with no scale reads as two levels and a seam rather
-	// than as a gradient.
-    const float Low = -Flow_Pressure(Flow, N, F.FlowRead) / F.PressureScale;
-
-    const float Pressure = Low * rsqrt(1.0f + Low * Low);
-
-    const float Cloud = Flow_SampleWeather(FlowField, FlowSampler, N, TR_FLOW_LAYER).y;
-
-    const float Excess = (2.0f * Cloud - 1.0f) * F.CloudEdgeGain;
-
-    const float Radial = dot(Flow.xy, Flow.xy) / F.SubsidenceSpeedSq - 1.0f;
-
-    const float Overturn = Radial * rsqrt(1.0f + Radial * Radial);
-
-    const float Lift = Excess + F.AscentSubsidence * Organisation * Overturn;
-
-    const float Ascent = Lift * rsqrt(1.0f + Lift * Lift);
-
-	// Tropicality is read off the position rather than the flow: no tap, and no
-	// sim, which is the whole point of the quantity.
-    return float4(Organisation, Ascent, Pressure, 1.0f - abs(N.z));
-}
-
-/** How deep a column may get here, a multiple of CloudThickness. THE ONE
- *  DERIVATION OF THE CEILING: the surfaces read it and so does the bound, and a
- *  second expression would let them disagree about a lid they both respect. */
-float TR_Headroom(float Pressure, TRFieldParams F)
-{
-    return max(F.CeilingDepth * (1.0f + F.CeilingPressure * Pressure), 1e-3f);
-}
-/** Both of a column's surfaces, in atmosphere fractions.
- *
- *  THE BASE IS THE CONDENSATION LEVEL and moves only with tropicality and
- *  pressure -- no flow energy, no noise. That leaves it an exact function of the
- *  flow, which the entry search and the empty-air early-out both spend: neither
- *  has to reserve room for something that cannot reach it.
- *
- *  THE TOP IS DEMAND MET BY HEADROOM. Organisation and ascent ask for depth, the
- *  noise asks with them, and the inversion answers by resisting -- growth
- *  saturates toward the headroom instead of stopping at it, so a capped column
- *  flattens by squashing and keeps the variance it came with. Nothing is
- *  clamped, so a field of them has no crease along its top.
- *
- *  THE NOISE IS INSIDE THE CEILING, which is both physical and useful: a bumpy
- *  top still cannot exceed the inversion, and the marched band is bounded by the
- *  headroom alone rather than by the headroom plus the noise's whole reach.
- *
- *  A HOLE IS NO DEMAND, clamped at zero. Empty at every altitude rather than
- *  masked, with edges shaped by whatever took the demand under -- the detail
- *  carve at the small scale, a subsiding high at the large one.
- *
- *  ReliefScale collapses structure relief under strain and deliberately does not
- *  touch the flow quantities, which are vertical motion rather than stretched
- *  material. */
-void TR_CloudSurfaces(
-	float4 Signals,
-	float CarveDetail,
-	float ReliefStructure,
-	float ReliefScale,
-	TRFieldParams F,
-	out float OutTop,
-	out float OutBase)
-{
-    const float D = F.CloudThickness;
-
-    OutBase = F.CloudBase
-		+ D * (F.BaseTropical * Signals.w + F.BasePressure * Signals.z);
-
-    float Demand = F.CloudCover + F.AscentDepth * Signals.y
-		* (1.0f + F.OrganisationBoost * Signals.x);
-
-    Demand += ReliefScale * F.StructureRelief * ReliefStructure;
-    Demand -= F.DetailRelief * CarveDetail;
-
-	// Saturating, not clamping: at small demand this is the demand, and it
-	// approaches the headroom without ever reaching it.
-    const float Growth =
-		Demand / (1.0f + max(Demand, 0.0f) / TR_Headroom(Signals.z, F));
-
-    OutTop = OutBase + D * max(Growth, 0.0f);
-}
-/** One flow fetch: the band, the pressure, and the slab's two surfaces as values
- *  and as bounds. */
-struct TRFlowProbe
-{
-    float Band;
+	/** Lows positive, bounded to (-1, 1). */
     float Pressure;
 
-	/** The flow's own surfaces, both volumes neutral. Not bounds -- the
-	 *  values. */
-    float TopFlow;
-    float BaseFlow;
+	/** Vertical motion, rising positive, (-1, 1). */
+    float Ascent;
 
-	/** Highest the top can reach at this column, noise included, and the base
-	 *  -- which is exact. */
-    float TopUpper;
-    float BaseLower;
-
-	/** The four quantities at this column. Carried so a sample does not read the
-	 *  flow a second time, and cannot land its surfaces a hair away from the
-	 *  bounds the search ran against. */
-    float4 Signals;
+	/** The slab, atmosphere fractions. Exact: nothing outside moves them. */
+    float Base;
+    float Top;
 };
 
-/** The slab's surfaces at a column from a flow sample, without the volumes.
+/** The column at a spun direction N from its flow sample.
  *
- *  THE BASE IS EXACT, NOT BOUNDED. Nothing but lift moves it and lift comes
- *  entirely from the flow, so a probe knows where it is. That is what lets the
- *  entry search close on it and the empty-air early-out test against it without
- *  either reserving room for a carve that cannot reach.
+ *  COVERAGE IS THE SIM'S CLOUD FIELD, scaled and offset. CoverageGain maps the
+ *  field's typical range onto [0, 1] and CloudCover shifts the whole sky; 0.5
+ *  leaves the sim's weather as it is.
  *
- *  ONLY THE TOP NEEDS A BOUND, since the noise moves it: the column's own
- *  headroom, which growth approaches and never reaches. A bound that
- *  overestimates costs the search an iteration; one that underestimates steps
- *  over the surface and lets the early-out skip real cloud.
+ *  TYPE IS HOW HARD THE AIR IS RISING, plus the tropics. A towering column is
+ *  CloudThickness deep, a stratiform one StratusDepth of that; the pressure lid
+ *  then scales both, so highs flatten into sheets and lows build.
  *
- *  Band and Pressure must match TR_Field's own values, or a sample taken through
- *  the early-out tints differently from one taken the long way. */
-TRFlowProbe TR_ProbeFromFlow(
+ *  THE BASE is the condensation level: tropicality and pressure only, no noise,
+ *  which keeps it exact.
+ *
+ *  SPARSE COLUMNS ARE SHALLOW. Depth ramps in over TR_COVERAGE_DEPTH_RAMP of
+ *  coverage, so clear sky has no slab for the entry search to stop on. */
+TRColumn TR_ColumnFromFlow(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
 	float4 Flow,
 	float3 N,
 	TRFieldParams F)
 {
-    TRFlowProbe Probe;
+    TRColumn Col;
 
-    Probe.Band = Flow_Band(Flow, N, F.FlowRead);
-    Probe.Pressure = Flow_Pressure(Flow, N, F.FlowRead);
-    Probe.Signals = TR_Signals(FlowField, FlowSampler, Flow, N, F);
+    const float4 Weather = Flow_SampleWeather(FlowField, FlowSampler, N, TR_FLOW_LAYER);
 
-    TR_CloudSurfaces(
-		Probe.Signals, 0.0f, 0.0f, 1.0f, F, Probe.TopFlow, Probe.BaseFlow);
+    const float Tropical = 1.0f - abs(N.z);
 
-    Probe.BaseLower = Probe.BaseFlow;
+    const float Low = -Flow.z / F.PressureScale;
 
-	// THIS COLUMN'S OWN CEILING, which growth approaches and never reaches, so
-	// the bound is exact without a carve margin: the noise asks for depth inside
-	// the ceiling rather than on top of it.
-	//
-	// CAPPED AT THE SHELL, where the ceiling fade has already taken density to
-	// zero. Uncapped, a rare tall column would widen every bound derived from
-	// this for the sake of air that cannot scatter.
-    Probe.TopUpper = min(
-		Probe.BaseFlow + F.CloudThickness * TR_Headroom(Probe.Signals.z, F), 1.0f);
+    Col.Pressure = Low * rsqrt(1.0f + Low * Low);
+    Col.Ascent = Weather.x;
 
-    return Probe;
+    Col.Coverage = saturate(F.CloudCover * 2.0f - 1.0f + F.CoverageGain * Weather.y);
+
+    Col.Type = saturate(F.TypeBias + F.TypeAscent * Weather.x + F.TypeTropical * Tropical);
+
+    const float D = F.CloudThickness;
+
+    Col.Base = F.CloudBase + D * (F.BaseTropical * Tropical + F.BasePressure * Col.Pressure);
+
+    const float Lid = F.CeilingDepth * (1.0f + F.CeilingPressure * Col.Pressure);
+
+    const float Depth = D * lerp(F.StratusDepth, 1.0f, Col.Type) * Lid
+		* smoothstep(0.0f, TR_COVERAGE_DEPTH_RAMP, Col.Coverage);
+
+	// Capped at the shell, where the ceiling fade has already taken density to
+	// zero.
+    Col.Top = min(Col.Base + Depth, 1.0f);
+
+    return Col;
 }
-/** The cheap read, for the jobs that do not need the volumes: finding where a
- *  ray enters the slab, and answering outside it, where the volumes cannot put
- *  density back. */
-TRFlowProbe TR_FlowProbe(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	float3 P,
-	TRFieldParams F)
-{
-    const float3 N = normalize(Atmo_RotateZ(P, F.SpinAngle));
 
-    return TR_ProbeFromFlow(
+TRColumn TR_Column(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, TRFieldParams F)
+{
+    return TR_ColumnFromFlow(
 		FlowField, FlowSampler, Flow_Sample(FlowField, FlowSampler, N, TR_FLOW_LAYER), N, F);
 }
 
-/** Distance along a ray at which it first reaches the slab, from either side.
- *  Returns T1 when it does not reach the slab between T0 and T1, and sets
- *  OutMissed only when that is PROVED rather than merely not found.
+/** The column at a planet-local position, spun. For what varies over a system's
+ *  width rather than a feature's: the tint of extinction a light ray crossed. */
+float TR_TypeCoarse(Texture2DArray FlowField, SamplerState FlowSampler, float3 LocalPos, TRFieldParams F)
+{
+    const float3 N = normalize(Atmo_RotateZ(normalize(LocalPos), F.SpinAngle));
+
+    return TR_Column(FlowField, FlowSampler, N, F).Type;
+}
+
+/** Distance along a ray at which it first reaches a slab, from either side.
+ *  Returns T1 when it does not reach one between T0 and T1, and sets OutMissed
+ *  only when that is PROVED rather than merely not found.
  *
- *  THE TWO ARE NOT THE SAME ANSWER AND THE CALLER MUST NOT CONFLATE THEM. The
- *  proofs are geometry: radius is monotone either side of the closest approach,
- *  so a ray climbing clear of TopMax, or below the base and still descending
- *  with its perigee outside the span, can be ruled out whatever the field does.
- *  Running out of segment is different -- the advances rest on CloudSlope
- *  bounding the surface, and an under-declared slope makes the cone overshoot
- *  and report a miss on a ray that crosses cloud. Treating that as proof drops
- *  the cloud entirely on those rays; treating it as "not found" costs them a
- *  full fine march and nothing else. Errors here have to land on cost.
+ *  THE TWO ARE NOT THE SAME ANSWER. The proofs are geometry: radius is monotone
+ *  either side of the closest approach, so a ray climbing clear of TopMax, or
+ *  below the base and still descending with its perigee outside the span, is
+ *  ruled out whatever the field does. Running out of segment rests on CloudSlope
+ *  bounding the surface, and an under-declared slope overshoots -- so it costs a
+ *  full fine march, never missing cloud.
  *
- *  LocalOrigin and
- *  LocalDir are in the field's frame, LocalDir normalized, which an orthonormal
- *  WorldToLocal preserves. TopMax is the field-wide upper bound, which is what
- *  lets a ray climbing clear of the slab give up.
- *
- *  A CONE TRACE, AND NOT AN OPTIMIZATION -- it is what keeps the limb from
- *  breaking. A grazing chord across the shell is enormous, and stepped at the
- *  field's own step size it exhausts the iteration cap in empty space, leaving
- *  the ray transparent at exactly the angles where its neighbours a fraction of
- *  a degree steeper go opaque: a sharp geometric threshold, drawing a hard
- *  silhouette where the limb should be softest.
- *
- *  ONE TRACE FOR BOTH SURFACES, chosen per probe rather than once: a ray
- *  descending from outside closes on the top, a camera on the ground produces
- *  nothing but the other kind, and a long grazing ray does both in turn. */
+ *  A CONE TRACE, AND NOT AN OPTIMIZATION: a grazing chord stepped at the
+ *  field's own step size exhausts the iteration cap in empty space and leaves a
+ *  hard silhouette at the limb. LocalDir is normalized. */
 float TR_SlabEntry(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
@@ -860,47 +501,38 @@ float TR_SlabEntry(
         const float3 ProbeDir = ProbePos / max(ProbeRadius, 1e-4f);
         const float ProbeRate = dot(LocalDir, ProbeDir);
 
-        const TRFlowProbe Probe = TR_FlowProbe(FlowField, FlowSampler, ProbeDir, F);
+        const TRColumn Col = TR_Column(
+			FlowField, FlowSampler, normalize(Atmo_RotateZ(ProbeDir, F.SpinAngle)), F);
 
-        if (ProbeHeight <= Probe.TopUpper && ProbeHeight >= Probe.BaseLower)
+        if (ProbeHeight <= Col.Top && ProbeHeight >= Col.Base && Col.Top > Col.Base)
         {
             return TSearch;
         }
 
-        const bool bAbove = ProbeHeight > Probe.TopUpper;
+        const bool bAbove = ProbeHeight > Col.Base;
 
-		// How far the surface is and how fast the ray alone closes on it.
+		// A clear column has no top to close on; its base stands in, which is a
+		// lower surface than any cloud nearby and so never overshoots one.
         const float Gap = bAbove
-			? ProbeHeight - Probe.TopUpper
-			: Probe.BaseLower - ProbeHeight;
+			? ProbeHeight - max(Col.Top, Col.Base)
+			: Col.Base - ProbeHeight;
 
         const float Approach = bAbove ? -ProbeRate : ProbeRate;
 
-		// Climbing and clear of the highest the field can reach. Both conditions
-		// matter: a climbing ray still inside that range can meet a taller
-		// column ahead.
+		// Climbing and clear of the highest the field can reach.
         if (bAbove && ProbeRate >= 0.0f && ProbeHeight > TopMax)
         {
             OutMissed = true;
             return T1;
         }
 
-		// BELOW THE BASE AND STILL DESCENDING, so the ray is moving away from
-		// the surface it needs and the cone has nothing to close on. Radius is
-		// monotone either side of the closest approach, so the search resumes
-		// there rather than giving up: a limb ray that skims under the cloud and
-		// climbs back into it would otherwise report the whole segment as
-		// missing the slab, which drops that cloud from the image entirely.
+		// BELOW THE BASE AND STILL DESCENDING: resume at the perigee rather than
+		// give up, or a limb ray that skims under the cloud and climbs back into
+		// it reports the whole segment as missing the slab.
 		//
-		// PITFALL: THE RATE IS ZERO TO WITHIN NOISE AT THE CLOSEST APPROACH
-		// ITSELF, and its sign there is arbitrary. Tested against a bare zero, a
-		// ray sitting on its own perigee enters this branch, finds the perigee
-		// already behind it, and reports a miss it has not proved -- which drops
-		// the cloud on every ray whose perigee lands inside the segment, dithered
-		// by which side of zero the noise fell on. Descending AND past perigee is
-		// geometrically impossible, so it is not an answer; the epsilon keeps the
-		// branch to rays genuinely still descending, and a perigee that is not
-		// ahead means there is nothing to skip rather than nothing to find.
+		// PITFALL: THE RATE IS ZERO TO WITHIN NOISE AT THE PERIGEE ITSELF, and its
+		// sign there is arbitrary. The epsilon keeps the branch to rays genuinely
+		// still descending; a perigee that is not ahead means nothing to skip.
         if (!bAbove && ProbeRate < -1e-4f)
         {
             const float TPerigee = -dot(LocalOrigin, LocalDir);
@@ -918,17 +550,10 @@ float TR_SlabEntry(
             }
         }
 
-		// The surface moves to meet the ray, so the closing rate is the sum of
-		// the ray's own approach and the surface's slope across the ground it
-		// covers. Dividing by the approach alone overshoots without bound at
-		// tangent. CloudSlope is in cloud depths per radian, matching the relief
-		// that produces the slope.
-		//
-		// PITFALL: it has to bound the STEEPER surface. The top carries the noise
-		// and moves over a volume texel; the base carries only lift and moves
-		// over a flow texel, which at a strong weight is the faster of the two.
-		// Under-declared, the cone overshoots and the search reports a surface it
-		// never found.
+		// The surface moves to meet the ray, so the closing rate is the ray's
+		// own approach plus the surface's slope across the ground it covers.
+		// PITFALL: CloudSlope has to bound the steeper surface, which at a
+		// coverage edge is the top collapsing onto the base.
         const float Horizontal = sqrt(max(1.0f - ProbeRate * ProbeRate, 0.0f));
 
         const float ClosingRate = Approach
@@ -948,335 +573,65 @@ float TR_SlabEntry(
     return TSearch;
 }
 
-/** Evaluates the cloud field at a direction on the sphere. Height is the shading
- *  point's atmosphere fraction and only affects the 3D volume lookups. Up to six
- *  fetches, depending on which layers are enabled.
- *
- *  N IS ALREADY SPUN, Flow0 IS ITS FLOW SAMPLE AND Probe IS ITS READING, all
- *  from the caller: the saturation test needs that fetch before it can decide
- *  whether to call this at all, so taking them as arguments keeps the test free
- *  and stops band and pressure being derived twice. Flow0 is also the warp
- *  loop's first iteration, UNWARPED deliberately -- the sim transports
- *  vorticity, so warping the lookup would double-count.
- *
- *  VOLUME SAMPLER STATE: wrap on all three axes, Linear Color. These are scalar
- *  fields and an sRGB decode curves them without erroring. */
-TRFieldSample TR_Field(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	Texture3D DetailVolume,
-	SamplerState DetailSampler,
-	Texture3D StructureVolume,
-	SamplerState StructureSampler,
+/** Samples one noise layer as a Perlin-Worley value in [0, 1], warped laterally
+ *  by Warp, sampled in true 3D so the vertical structure the bake put in the
+ *  volume survives, and crossfaded between two advection phases when asked.
+ *  MIP 0 always: a footprint mip ties the field to camera distance. */
+float TR_SampleLayer(
+	Texture3D Volume,
+	SamplerState Sampler,
 	float3 N,
-	float4 Flow0,
-	TRFlowProbe Probe,
-	float Height,
+	float3 Warp,
+	float UVWScale,
+	float4 NoiseWeights,
+	float Crossfade,
 	TRFieldParams F)
 {
-    const float Pressure = Probe.Pressure;
-
-    const float Zeta = Probe.Band;
-
-	// One on a band boundary, falling to zero in a band's interior: where the
-	// jets and their shear live. Weights the turbulence and the carves' edge
-	// bias. The same curve TR_BandHeight takes its magnitude from, so heights
-	// and weights agree about where the boundaries are.
-    const float Boundary = exp(-Zeta * Zeta);
-
-	// Turbulence follows the shear and the shear lives at the boundaries, so
-	// zone interiors go nearly laminar. Without it the bands read as one
-	// scalloped curve repeated all the way round.
-    const float Turbulence = lerp(F.TurbulenceFloor, 1.0f, Boundary);
-
-    const float StepTime = (F.WarpTime * Turbulence) / (float) TR_WARP_ITERATIONS;
-
-    float3 Pos = N;
-
-    float3 FirstVelocity = 0.0f;
-    float3 LastVelocity = 0.0f;
-
-    UNROLL
-
-    for (int It = 0; It < TR_WARP_ITERATIONS; It++)
-    {
-        const float4 Flow = (It == 0) ? Flow0
-			: Flow_Sample(FlowField, FlowSampler, Pos, TR_FLOW_LAYER);
-
-        const float3 Velocity = Flow_TangentVelocity(Pos, Flow.xy);
-
-        if (It == 0)
-        {
-            FirstVelocity = Velocity;
-        }
-
-        LastVelocity = Velocity;
-
-		// Renormalized every step because the displacement leaves the sphere.
-		// Only .z is read downstream, so a chord move biases latitude and
-		// compounds over several steps.
-        Pos = normalize(Pos + Velocity * StepTime);
-    }
-
-    const float3 Warped = Pos;
-
-	// A difference rather than a running sum: each step renormalizes, so the sum
-	// of the steps is not the distance travelled.
-    const float3 FlowWarp = Warped - N;
-
-    float Ridge = 0.5f;
-    float3 DeepShear = 0.0f;
-
-	// ADVECTION HAS NOWHERE TO ACCUMULATE. The volumes are resampled from
-	// scratch every frame, so a warp anchored to a fixed direction can only
-	// wobble. Two phases half a period apart, each ramping its displacement from
-	// nothing to TR_CROSSFADE_SPAN and resetting, give features somewhere to
-	// travel to; the weight is zero where a phase resets, so the discontinuity
-	// happens while that layer contributes nothing. It is a dissolve between two
-	// differently sheared copies, so the blend ghosts under shear.
-    const float PhaseA = frac(F.CrossfadeTime);
-    const float PhaseB = frac(F.CrossfadeTime + 0.5f);
-
-    const float WeightA = 1.0f - abs(2.0f * PhaseA - 1.0f);
-
-    const float WarpMulA = TR_CROSSFADE_SPAN * PhaseA;
-    const float WarpMulB = TR_CROSSFADE_SPAN * PhaseB;
-
-	// A layer at zero amount is skipped rather than evaluated at no weight.
-	// Neither test depends on the sample's distance from the camera.
-    const bool bWantDetail = (F.DetailNoiseWeights.w > 0.0f);
-    const bool bWantStructure = (F.StructureNoiseWeights.w > 0.0f);
+    float4 S;
 
     BRANCH
 
-	// DEEP SHEAR, ONE STEP THROUGH THE DEEP FLOW LAYER: a different sim slice
-	// from the coarse warp, which is what makes the shear vertical. Outside
-	// either layer's branch because it is geometry both layers inherit rather
-	// than noise belonging to one.
-    if (bWantDetail || bWantStructure)
+    if (Crossfade > 0.0f)
     {
-        const float3 PShear = normalize(N + FlowWarp * F.DetailFlowInherit);
+		// ADVECTION HAS NOWHERE TO ACCUMULATE: the volume is resampled from
+		// scratch every frame. Two phases half a period apart, each ramping its
+		// displacement from nothing to TR_CROSSFADE_SPAN and resetting, give
+		// features somewhere to travel to; each resets while its weight is zero.
+        const float PhaseA = frac(F.CrossfadeTime);
+        const float PhaseB = frac(F.CrossfadeTime + 0.5f);
 
-        const float4 DeepFlow = Flow_Sample(FlowField, FlowSampler, PShear, TR_DEEP_FLOW_LAYER);
+        const float WeightA = 1.0f - abs(2.0f * PhaseA - 1.0f);
 
-        DeepShear = Flow_TangentVelocity(PShear, DeepFlow.xy) * (F.DeepShearTime * Turbulence);
+        const float3 PA = normalize(N + Warp * (TR_CROSSFADE_SPAN * PhaseA));
+        const float3 PB = normalize(N + Warp * (TR_CROSSFADE_SPAN * PhaseB));
+
+        S = lerp(
+			Volume.SampleLevel(Sampler, PB * UVWScale, 0.0f),
+			Volume.SampleLevel(Sampler, PA * UVWScale, 0.0f),
+			WeightA);
+    }
+    else
+    {
+        S = Volume.SampleLevel(Sampler, normalize(N + Warp) * UVWScale, 0.0f);
     }
 
-	// Each layer's displacement: its FlowInherit of the coarse warp plus its
-	// ShearInherit of the deep shear. A displacement field with a large gradient
-	// IS strain, so inheriting one whole imposes an order-one strain on a layer
-	// regardless of its own flow.
-    const float3 DetailWarp = FlowWarp * F.DetailFlowInherit + DeepShear * F.DetailShearInherit;
-    const float3 StructureWarp = FlowWarp * F.StructureFlowInherit + DeepShear * F.StructureShearInherit;
-
-	// THE WARP THE TANGENT PLANE CANNOT CARRY. The two above displace a sample
-	// laterally, which is what horizontal flow does to cloud; these are what
-	// vertical flow does, and they are two different answers to it.
-	//
-	// STRETCH divides the vertical frequency, so rising air draws a feature out
-	// taller and sinking air presses the same feature into a sheet. A SHAPE
-	// change.
-	//
-	// SHIFT reads the volume from a different altitude, so rising air carries a
-	// feature up and sinking air carries it down unaltered. A DISPLACEMENT.
-	//
-	// Either alone is a look; zero one to isolate the other. Both touch the
-	// noise only, so they cost the bounds nothing -- the surfaces are where they
-	// were and only the texture between them moves.
-	//
-	// SCALED BY HOW MUCH COLUMN THERE IS TO WARP, from the flow's own surfaces,
-	// which are known without the volumes. A displacement fixed against
-	// CloudThickness moves a thin column's texture by more than the column's own
-	// depth, and since the ramp varies across a system that shears the noise into
-	// a cone -- an eye pulled down into a funnel with a wall too thin to march.
-	// Gated, a column with no depth gets no warp, which is the only answer that
-	// means anything there.
-    const float WarpRoom =
-		saturate((Probe.TopFlow - Probe.BaseFlow) / F.CloudThickness) * Probe.Signals.y;
-
-    const float Stretch = max(1.0f + F.WarpStretch * WarpRoom, 0.1f);
-    const float Shift = F.WarpShift * F.CloudThickness * WarpRoom;
-
-    BRANCH
-
-    if (bWantDetail)
-    {
-		// SAMPLED IN TRUE 3D: the position is a unit direction, so Scale alone
-		// would trace a sphere through the volume and discard the vertical
-		// structure the bake put there. No independent drift -- a clock
-		// scrolling the volume through its own domain makes the detail change
-		// whether or not anything is happening to it. If it looks pinned, raise
-		// WarpTime.
-        const float UVWScale = F.DetailScale + (Height - Shift) * F.DetailVertical / Stretch;
-
-		// MIP 0, ALWAYS. A footprint-derived mip blurs along the shell, erasing
-		// the vertical structure a high aspect ratio builds, and ties the field
-		// to camera distance and screen resolution. PITFALL: at range the layer
-		// is undersampled and its finest frequencies fold into the step jitter as
-		// grain; the composite blur is what absorbs it.
-        float4 DetailSample;
-
-        BRANCH
-
-        if (F.DetailCrossfade > 0.0f)
-        {
-			// The two phases differ only in how far along the same displacement
-			// they sit, so one flow loop serves both. The deep-flow fetch stays
-			// on the unphased position: it decides how the layer is sheared, not
-			// where it is.
-            const float3 PA = normalize(N + DetailWarp * WarpMulA);
-            const float3 PB = normalize(N + DetailWarp * WarpMulB);
-
-            DetailSample = lerp(
-				DetailVolume.SampleLevel(DetailSampler, PB * UVWScale, 0.0f),
-				DetailVolume.SampleLevel(DetailSampler, PA * UVWScale, 0.0f),
-				WeightA);
-        }
-        else
-        {
-            DetailSample = DetailVolume.SampleLevel(
-				DetailSampler, normalize(N + DetailWarp) * UVWScale, 0.0f);
-        }
-
-        Ridge = AtmoNoise_PerlinWorley(
-			DetailSample.r,
-			AtmoNoise_WorleyLadder(DetailSample.gba, F.DetailNoiseWeights.xyz));
-    }
-
-	// Neutral values: a half for the shape channels, which are centred, and 1
-	// for green, which no surface term reads any more.
-    float4 Structure = float4(0.5f, 1.0f, 1.0f, 1.0f);
-
-    BRANCH
-
-    if (bWantStructure)
-    {
-        const float UVWScale = F.StructureScale + (Height - Shift) * F.StructureVertical / Stretch;
-
-        BRANCH
-
-        if (F.StructureCrossfade > 0.0f)
-        {
-            const float3 PA = normalize(N + StructureWarp * WarpMulA);
-            const float3 PB = normalize(N + StructureWarp * WarpMulB);
-
-            Structure = lerp(
-				StructureVolume.SampleLevel(StructureSampler, PB * UVWScale, 0.0f),
-				StructureVolume.SampleLevel(StructureSampler, PA * UVWScale, 0.0f),
-				WeightA);
-        }
-        else
-        {
-			// Zero inheritance is legitimate rather than degenerate: this layer
-			// breaks the flow into rounded shapes, and a shape dragged through
-			// the flow field is no longer round.
-            const float3 PStructure = normalize(N + StructureWarp);
-
-            Structure = StructureVolume.SampleLevel(
-				StructureSampler, PStructure * UVWScale, 0.0f);
-        }
-    }
-
-	// RELIEF THINNING, MEASURED FROM THE FLOW RATHER THAN PRESCRIBED. An
-	// incompressible parcel stretched by g must thin vertically by 1/g; without
-	// it, filament width shrinks with strain while height does not and the march
-	// reads them as spikes. The velocity difference over the distance travelled
-	// is a strain rate, from two samples the loop already took -- a prescribed
-	// zonal profile reports zero inside a vortex straining material hard.
-    const float Travelled = length(FlowWarp);
-
-    const float StrainRate = length(LastVelocity - FirstVelocity) / max(Travelled, 1e-5f);
-
-    const float Winding = StrainRate * F.WarpTime;
-
-    const float ReliefScale = 1.0f / (1.0f + F.ReliefThinning * Winding);
-
-	// EDGE WEIGHTING. Detail applied uniformly is by definition grain: it has no
-	// relationship to the structure it sits on. Concentrated on the transitions
-	// it ravels the band edges, where a real gas giant's billows live.
-    const float Edge = lerp(F.EdgeBias, 1.0f, Boundary);
-
-    const float StructureMix = AtmoNoise_PerlinWorley(
-		Structure.r,
-		AtmoNoise_WorleyLadder(Structure.gba, F.StructureNoiseWeights.xyz));
-
-    const float DetailWeight = saturate(Edge * F.DetailNoiseWeights.w);
-    const float StructureWeight = saturate(Edge * F.StructureNoiseWeights.w);
-
-	// EROSION KEEPS ITS NEUTRAL AT 1, since it multiplies density and may only
-	// remove material. RELIEF is signed about the median, since it moves a
-	// surface and has no reason to prefer a direction.
-    const float ShapeDetail = lerp(1.0f, Ridge, DetailWeight);
-    const float ShapeStructure = lerp(1.0f, StructureMix, StructureWeight);
-
-#if TR_DETAIL_RELIEF_CENTRED
-	// About the median, so turning the layer up changes the deck's texture
-	// without changing its altitude.
-    const float CarveDetail = DetailWeight * (0.5f - Ridge);
-#else
-    const float CarveDetail = DetailWeight * (1.0f - Ridge);
-#endif
-
-    const float ReliefStructure = StructureWeight * (StructureMix - 0.5f);
-
-	// MATERIAL FOLLOWS SHAPE. The band boundary becomes the zero contour of Band
-	// plus the signed shapes that move the surface, so a billow near a boundary
-	// is made of whichever family its sign points at. Doubled so each term spans
-	// +-1 at full weight. PITFALL: keep it additive -- any form depending on
-	// sign(Band) flips on the zero contour and redraws the clean line as a
-	// discontinuity. The detail term is median-centred regardless of
-	// TR_DETAIL_RELIEF_CENTRED, which would push boundaries toward one family.
-    const float BandShift = 2.0f * (F.StructureBandMix * ReliefStructure
-		+ F.DetailBandMix * DetailWeight * (0.5f - Ridge));
-
-    TRFieldSample Out;
-
-	// THE PROBE'S SIGNALS, NOT A SECOND READ. They come from the same flow tap
-	// the probe already took, and a sample that derived them again could place
-	// its surfaces a hair away from the bounds the search ran against.
-    TR_CloudSurfaces(
-		Probe.Signals, CarveDetail, ReliefStructure, ReliefScale, F,
-		Out.Top, Out.Base);
-
-    Out.Pressure = Pressure;
-    Out.Band = Zeta;
-    Out.BandShift = BandShift;
-    Out.ShapeDetail = ShapeDetail;
-    Out.ShapeStructure = ShapeStructure;
-
-    return Out;
+    return AtmoNoise_PerlinWorley(S.r, AtmoNoise_WorleyLadder(S.gba, NoiseWeights.xyz));
 }
 
-/** The band colour ramp, for the debug material. Colour from the sign of
- *  vorticity scaled by the magnitude, so zero lands on EdgeColour and cores come
- *  out saturated, and the dark line between bands separates the two families
- *  instead of blending them through a muddy midpoint. Scale is the sim debug
- *  view's DebugScale inverted. */
-float3 TR_BandColour(float Band, float3 ColourA, float3 ColourB, float3 EdgeColour, float Scale)
-{
-    const float T = clamp(Band * Scale, -1.0f, 1.0f);
-
-    const float3 Hue = (T < 0.0f) ? ColourB : ColourA;
-
-    return lerp(EdgeColour, Hue, abs(T));
-}
-
-/** Density at a point in the shell. LocalPos carries its true radius, unlike
- *  elsewhere in this file; the columnar field is still evaluated at the
- *  normalized direction, the shell being thin enough that the true radius shifts
- *  UVW by less than one lattice cell. StepHalfLength is half the march step in
- *  atmosphere fractions along the radius, so a step straddling the cloud top is
- *  weighted by how much of it lies inside.
+/** Density at a point in the shell. LocalPos carries its true radius; the
+ *  column is evaluated at the normalized direction. StepHalfLength is half the
+ *  march step in atmosphere fractions along the radius.
+ *
+ *  THE PROFILE IS INTEGRATED ACROSS THE STEP, not sampled at its midpoint: one
+ *  midpoint sample makes the slab a near-binary decision per step, and as a
+ *  surface drifts against the lattice that decision flips along a line on
+ *  screen.
  *
  *  Returns:
- *    x  Density in [0,1]. Multiply by an extinction coefficient in the march.
- *    y  BAND, signed and unclamped -- what the material is, not a density term,
- *       shifted by the shapes near the surface.
- *    z  Pressure, for tinting vortices. Negative is cyclonic.
- *    w  The cloud top at this column. Outside the slab the volumes are skipped,
- *       so it is the flow's own top: what TR_CloudSurfaces returns with both
- *       layers neutral, the value the full path reaches with both layer amounts
- *       at zero. */
+ *    x  Density in [0, 1]. Multiply by an extinction coefficient in the march.
+ *    y  Cloud type, [0, 1]: the material coordinate.
+ *    z  Pressure, lows positive.
+ *    w  The column's top. */
 float4 TR_Density(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
@@ -1292,98 +647,122 @@ float4 TR_Density(
     const float3 Direction = LocalPos / max(Radius, 1e-4f);
 
     const float Height = (Radius - F.PlanetRadius) / F.Thickness;
-
     const float HalfStep = max(StepHalfLength, 0.0f);
 
     const float3 N = normalize(Atmo_RotateZ(Direction, F.SpinAngle));
 
     const float4 Flow0 = Flow_Sample(FlowField, FlowSampler, N, TR_FLOW_LAYER);
 
-    const TRFlowProbe Probe = TR_ProbeFromFlow(FlowField, FlowSampler, Flow0, N, F);
+    const TRColumn Col = TR_ColumnFromFlow(FlowField, FlowSampler, Flow0, N, F);
 
     BRANCH
 
-	// ONE FETCH OUTSIDE THE SLAB RATHER THAN SEVEN: density there is exactly
-	// zero and the volumes cannot put any back, so the probe's fetch supplies
-	// the band and pressure that are all that is left to want. The test uses the
-	// step's NEAR edge on each side, keeping the boundary a half step clear of
-	// the lattice, and runs against bounds rather than the surfaces themselves,
-	// which cost the volumes.
-    if (Height + HalfStep <= Probe.BaseLower || Height - HalfStep >= Probe.TopUpper)
+	// ONE FETCH PAIR OUTSIDE THE SLAB RATHER THAN SEVEN: density there is
+	// exactly zero. The test uses the step's near edge on each side.
+    if (Col.Top <= Col.Base || Height + HalfStep <= Col.Base || Height - HalfStep >= Col.Top)
     {
-        return float4(0.0f, Probe.Band, Probe.Pressure, Probe.TopFlow);
+        return float4(0.0f, Col.Type, Col.Pressure, Col.Top);
     }
 
-    const TRFieldSample Field = TR_Field(
-		FlowField, FlowSampler, DetailVolume, DetailSampler,
-		StructureVolume, StructureSampler,
-		N, Flow0, Probe, Height, F);
+	// -- Height profile, integrated across the step ----------------------------
 
-    const float Top = Field.Top;
-    const float Base = Field.Base;
+    const float Profile =
+		(TR_SlabDensity(Height - HalfStep, Col.Top, Col.Base, F) * TR_CeilingFade(Height - HalfStep, F)
+		+ 4.0f * TR_SlabDensity(Height, Col.Top, Col.Base, F) * TR_CeilingFade(Height, F)
+		+ TR_SlabDensity(Height + HalfStep, Col.Top, Col.Base, F) * TR_CeilingFade(Height + HalfStep, F))
+		/ 6.0f;
 
-	// THE PROFILE IS INTEGRATED ACROSS THE STEP, NOT SAMPLED AT ITS MIDPOINT.
-	// One midpoint sample makes the slab a near-binary decision per step, and as
-	// a surface drifts against the lattice that decision flips along a line on
-	// screen. Both surfaces vary slowly across a step, so they are evaluated
-	// once at the centre and only the profile is integrated -- three closed-form
-	// evaluations, no extra fetches. The ceiling fade rides the same points.
-    const float RampNear = TR_SlabDensity(Height - HalfStep, Top, Base, F)
-		* TR_CeilingFade(Height - HalfStep, F);
-    const float RampMid = TR_SlabDensity(Height, Top, Base, F)
-		* TR_CeilingFade(Height, F);
-    const float RampFar = TR_SlabDensity(Height + HalfStep, Top, Base, F)
-		* TR_CeilingFade(Height + HalfStep, F);
+    const float HeightFraction = saturate((Height - Col.Base) / max(Col.Top - Col.Base, 1e-4f));
 
-    const float Gradient = (RampNear + 4.0f * RampMid + RampFar) / 6.0f;
+	// -- Lateral warp: the flow carries the noise ------------------------------
 
-    const float DepthFraction =
-		saturate((Top - Height) / max(Top - Base, 1e-4f));
+    const float StepTime = F.WarpTime / (float) TR_WARP_ITERATIONS;
 
-	// Full erosion at the top, none below ErosionDepth into the slab, or the
-	// cloud is uniformly pitted rather than solid material with a worked top.
-	// Smoothstep rather than linear: a linear falloff leaves the end of erosion
-	// C0, a faint shelf edge-on at a constant altitude.
-    const float CarveWeight =
-		1.0f - smoothstep(0.0f, max(F.ErosionDepth, 1e-4f), DepthFraction);
+    float3 Pos = N;
 
-	// THE CARVE MODULATES THE GRADIENT AND NOTHING ELSE. Multiplicative, and the
-	// gradient is exactly zero outside the slab, so nothing the noise does can
-	// put density beyond the bounds TR_TopMax and TR_BaseMin computed.
-	// Each lerp floors its layer at (1 - erosion) rather than zero, which is
-	// what keeps erosion a worked surface rather than coverage.
-    const float CarveDetail = lerp(1.0f, Field.ShapeDetail,
-		saturate(F.DetailErosion) * CarveWeight);
+    UNROLL
 
-    const float CarveStructure = lerp(1.0f, Field.ShapeStructure,
-		saturate(F.StructureErosion) * CarveWeight);
+    for (int It = 0; It < TR_WARP_ITERATIONS; It++)
+    {
+        const float4 Flow = (It == 0) ? Flow0
+			: Flow_Sample(FlowField, FlowSampler, Pos, TR_FLOW_LAYER);
 
-    const float Density = Gradient * CarveDetail * CarveStructure;
+		// Renormalized every step because the displacement leaves the sphere.
+        Pos = normalize(Pos + Flow_TangentVelocity(Pos, Flow.xy) * StepTime);
+    }
 
-	// Mixing lives in the worked top and is gone by the base, where the
-	// early-out reports the probe's unshifted band. Smoothstep so the weight is
-	// C1 at both ends and the handoff draws no contour in colour.
-    const float MixWeight = 1.0f - smoothstep(0.0f, 1.0f, DepthFraction);
+    const float3 FlowWarp = Pos - N;
 
-    return float4(Density, Field.Band + Field.BandShift * MixWeight, Field.Pressure, Top);
+	// DEEP SHEAR, ONE STEP THROUGH THE DEEP FLOW LAYER: a different sim layer,
+	// which is what makes the shear vertical.
+    const float3 PShear = normalize(N + FlowWarp * F.StructureFlowInherit);
+
+    const float3 DeepShear = Flow_TangentVelocity(
+		PShear, Flow_Sample(FlowField, FlowSampler, PShear, TR_DEEP_FLOW_LAYER).xy) * F.DeepShearTime;
+
+	// -- Vertical warp: rising air stretches and lifts the noise ---------------
+	//
+	// STRETCH divides the vertical frequency, so rising air draws a feature out
+	// taller; SHIFT reads the volume from a different altitude. Both touch only
+	// the noise, so they cost the bounds nothing.
+
+    const float Stretch = max(1.0f + F.WarpStretch * Col.Ascent, 0.1f);
+    const float Shift = F.WarpShift * F.CloudThickness * Col.Ascent;
+
+	// -- Shape: the noise coverage erodes --------------------------------------
+
+    float Shape = Profile;
+
+    BRANCH
+
+    if (F.StructureNoiseWeights.w > 0.0f)
+    {
+        const float Noise = TR_SampleLayer(
+			StructureVolume, StructureSampler, N,
+			FlowWarp * F.StructureFlowInherit + DeepShear * F.StructureShearInherit,
+			F.StructureScale + (Height - Shift) * F.StructureVertical / Stretch,
+			F.StructureNoiseWeights, F.StructureCrossfade, F);
+
+        Shape *= lerp(1.0f, Noise, F.StructureErosion * saturate(F.StructureNoiseWeights.w));
+    }
+
+	// COVERAGE AS A THRESHOLD ON THE SHAPE, then as a scale. At low coverage
+	// only the shape's densest cores survive -- and since the profile falls off
+	// toward the top, the tops go first, leaving low scattered cloud. Near 1 the
+	// whole column survives.
+    const float Coverage = Col.Coverage;
+
+    float Density = saturate((Shape - (1.0f - Coverage)) / max(Coverage, 1e-3f)) * Coverage;
+
+	// -- Detail: erosion of the edges ------------------------------------------
+
+    BRANCH
+
+    if (F.DetailNoiseWeights.w > 0.0f && Density > 0.0f)
+    {
+        const float Detail = TR_SampleLayer(
+			DetailVolume, DetailSampler, N,
+			FlowWarp * F.DetailFlowInherit + DeepShear * F.DetailShearInherit,
+			F.DetailScale + (Height - Shift) * F.DetailVertical / Stretch,
+			F.DetailNoiseWeights, F.DetailCrossfade, F);
+
+		// Wispy at the base, where the noise itself erodes; billowy toward the
+		// top, where its inverse does and rounded lobes remain.
+        const float Modifier = lerp(Detail, 1.0f - Detail, saturate(HeightFraction / TR_BILLOW_HEIGHT));
+
+        const float Erode = Modifier * F.DetailErosion * saturate(F.DetailNoiseWeights.w)
+			* TR_DETAIL_EROSION_SCALE;
+
+        Density = saturate((Density - Erode) / max(1.0f - Erode, 1e-3f));
+    }
+
+    return float4(Density, Col.Type, Col.Pressure, Col.Top);
 }
 
-/** The three reaches, in atmosphere fractions: how far the BASE can move each
- *  way, and how deep the top can get above it.
- *
- *  THE ONE DERIVATION OF THE FIELD-WIDE REACH, read by both bounds below.
- *
- *  EVERY TERM IN TR_CloudSurfaces HAS TO APPEAR HERE. An underestimate is not
- *  conservative, it is a clipping error: the cull radius comes from the top
- *  bound, so a term left out slices the tops off the features it belongs to.
- *
- *  THE DEPTH IS THE HEADROOM AND NOTHING ELSE, because growth saturates toward
- *  it -- demand, noise and all. That is what makes the band tight: the noise no
- *  longer widens it, and the only thing that does is how much lid the pressure
- *  can lift.
- *
- *  Tropicality is in [0,1] so its coefficient reaches only the way it points;
- *  pressure is signed so its reaches both ways whatever its sign. */
+/** The field-wide reach, in atmosphere fractions: how far the BASE can move
+ *  each way, and how deep a column can get above it. THE ONE DERIVATION read by
+ *  both bounds below. Every term in TR_ColumnFromFlow has to appear here: an
+ *  underestimate slices the tops off the features it belongs to. */
 void TR_FieldReach(
 	TRFieldParams F,
 	out float BaseUp,
@@ -1397,44 +776,23 @@ void TR_FieldReach(
 
     Depth = D * max(F.CeilingDepth * (1.0f + abs(F.CeilingPressure)), 1e-3f);
 }
-/** The highest any column top can reach, an atmosphere fraction.
- *
- *  AT EVERY QUANTITY AT ONCE, which no column ever sees. The shells are
- *  planet-wide and one deep low anywhere is enough, so the marched band does not
- *  narrow when the sky is quiet -- the cost of a bound that has to hold
- *  everywhere.
- *
- *  PLUS TR_BAND_MARGIN, which is somewhere for the first fine step to land.
- *
- *  CLAMPED AT THE SHELL: the ceiling fade leaves no density above it. Unclamped,
- *  a tall rare feature would widen the marched band and coarsen every step for
- *  the sake of a few columns. */
+
+/** The highest any column top can reach, an atmosphere fraction, clamped at the
+ *  shell. Planet-wide, so the marched band does not narrow when the sky is
+ *  quiet. */
 float TR_TopMax(TRFieldParams F)
 {
     float BaseUp, BaseDown, Depth;
     TR_FieldReach(F, BaseUp, BaseDown, Depth);
 
-    return min(F.CloudBase + BaseUp + Depth
-		+ TR_BAND_MARGIN * F.CloudThickness, 1.0f);
+    return min(F.CloudBase + BaseUp + Depth, 1.0f);
 }
 
-/** How much depth the NOISE asks for on its own, an atmosphere fraction: what
- *  CloudCover at its floor has to out-reach, and the readout that says whether
- *  it does. Not a bound any more -- the ceiling absorbs it -- but still the
- *  number that decides whether a clear sky stays clear. */
-float TR_ReliefReach(TRFieldParams F)
-{
-    return F.CloudThickness
-		* 0.5f * (abs(F.StructureRelief) + abs(F.DetailRelief));
-}
-
-/** The lowest any column base can fall, an atmosphere fraction: WHERE THE
- *  MARCHED BAND ENDS, and the altitude a ray passes beneath without meeting
- *  cloud. */
+/** The lowest any column base can fall: where the marched band ends. */
 float TR_BaseMin(TRFieldParams F)
 {
     float BaseUp, BaseDown, Depth;
     TR_FieldReach(F, BaseUp, BaseDown, Depth);
 
-    return F.CloudBase - BaseDown - TR_BAND_MARGIN * F.CloudThickness;
+    return F.CloudBase - BaseDown;
 }
