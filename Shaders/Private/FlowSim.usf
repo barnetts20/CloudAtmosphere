@@ -310,12 +310,21 @@ float SimForcingPhase(float3 P, float3 Dir, uint Layer, float Rate, float Clock,
     const float3 Q = float3(CosA * P.x - SinA * P.y, SinA * P.x + CosA * P.y, P.z);
     const float3 D = float3(CosA * Dir.x - SinA * Dir.y, SinA * Dir.x + CosA * Dir.y, Dir.z);
 
-    const float Eps = SimInvGridSize.y;
+	// ONE VOLUME TEXEL EITHER SIDE. A trilinear field is piecewise linear, so
+	// a difference narrower than a texel returns its piecewise-constant
+	// gradient, which jumps on every texel face: the volume's lattice is drawn
+	// into the flow as arcs and herringbone. Across a full texel the difference
+	// interpolates between texel gradients and is continuous.
+    uint VolumeW, VolumeH, VolumeD;
+    SimForcingNoise.GetDimensions(VolumeW, VolumeH, VolumeD);
 
-    const float A = SimSampleForcing((Q + D * Eps) * SimForcingScale + Offset);
-    const float B = SimSampleForcing((Q - D * Eps) * SimForcingScale + Offset);
+    const float Scale = max(SimForcingScale, 1e-4f);
+    const float Eps = 1.0f / (float(max(VolumeW, 1u)) * Scale);
 
-    return (A - B) / (2.0f * Eps * max(SimForcingScale, 1e-4f));
+    const float A = SimSampleForcing((Q + D * Eps) * Scale + Offset);
+    const float B = SimSampleForcing((Q - D * Eps) * Scale + Offset);
+
+    return (A - B) / (2.0f * Eps * Scale);
 }
 
 /** Slope of the forcing streamfunction along Dir at P. The forcing velocity is

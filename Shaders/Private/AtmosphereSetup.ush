@@ -22,25 +22,36 @@
 // top-left corner of the screen by that factor, with its depth cut moving with
 // it, so the occlusion looks right while the whole image is misplaced.
 
-/** World ray direction through a viewport UV, from two points on the ray.
+/** World ray direction through a viewport UV, from the UNJITTERED projection.
  *
- *  PITFALL: one unprojected point is a POSITION, and normalizing it is only a
- *  direction if the camera sits at the translated-world origin. The point is a
- *  couple of near-plane distances out, so any offset there is a large angle, and
- *  an offset along the view axis reads as a FOV change: the planet draws a few
- *  percent off in size with its centre in the right place. Differencing two
- *  points assumes nothing about where the camera is. The depths are arbitrary;
- *  the sign is taken from the view forward so either Z convention works. */
+ *  PITFALL: ClipToTranslatedWorld carries the temporal AA jitter, and these
+ *  passes run after the upscaler resolves it, so a ray built from it wobbles by
+ *  up to half an internal pixel every frame with nothing left to average it. Up
+ *  close the cloud features span many pixels and the wobble is invisible; from
+ *  a few radii out they are sub-pixel and each frame lands on different ones,
+ *  so a still image shimmers, worse with distance. ViewToClipNoAA is the same
+ *  projection without the jitter.
+ *
+ *  Perspective inverts in place: NDC = view.xy / view.z * (P00, P11) + (P20,
+ *  P21), which also covers an off-axis frustum. An orthographic view has one
+ *  direction for every pixel. */
 float3 Atmo_RayDirection(float2 viewportUV)
 {
-    float2 ClipXY = viewportUV * float2(2, -2) + float2(-1, 1);
+    const float4x4 P = View.ViewToClipNoAA;
 
-    float4 A = mul(float4(ClipXY, 0.5, 1.0), View.ClipToTranslatedWorld);
-    float4 B = mul(float4(ClipXY, 0.25, 1.0), View.ClipToTranslatedWorld);
+    if (P[3][3] >= 1.0f)
+    {
+        return View.ViewForward;
+    }
 
-    float3 dir = normalize(B.xyz / B.w - A.xyz / A.w);
+    const float2 ClipXY = viewportUV * float2(2, -2) + float2(-1, 1);
 
-    return dir * (dot(dir, View.ViewForward) < 0.0f ? -1.0f : 1.0f);
+    const float3 ViewDir = float3(
+		(ClipXY.x - P[2][0]) / P[0][0],
+		(ClipXY.y - P[2][1]) / P[1][1],
+		1.0f);
+
+    return normalize(mul(ViewDir, (float3x3) View.ViewToTranslatedWorld));
 }
 
 /** Fills CompositeParams from the material's pin values. The gas giant path

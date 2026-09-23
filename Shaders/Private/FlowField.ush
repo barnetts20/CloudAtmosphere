@@ -12,7 +12,8 @@
 // sin(latitude), whose columns converge at the poles; it resamples its output
 // each frame onto an equi-angular cube, six faces packed 3 x 2 into each slice,
 // each face ringed by a gutter copied from its neighbours. No point on the
-// sphere is singular, and a filtered read never leaves its face's tile.
+// sphere is singular, and a filtered read never leaves its face's tile. Near
+// an edge a read cross-fades the faces that meet there (FLOW_ATLAS_BLEND).
 //
 // VELOCITY IS STORED IN EACH FACE'S OWN TANGENT BASIS, which is defined
 // everywhere on the face, and Flow_Sample turns it back into east and north.
@@ -47,11 +48,21 @@ struct FlowReadParams
 #define FLOW_FIELD_FILTER 1
 #endif
 
-/** Gutter texels around each face in the atlas: 2 covers the B-spline's
- *  footprint. PITFALL: FlowSimShader::AtlasGutter sizes the texture in C++ and
- *  must equal this, or every face reads its neighbour's tile. */
+/** Texels either side of a face edge over which neighbouring faces cross-fade.
+ *  Each face resamples the sim on its own lattice, so their reconstructions
+ *  disagree at grid-scale detail and a hard switch shows as a seam; carried
+ *  noise magnifies it, since a displacement mismatch shifts the noise phase.
+ *  0 disables the blend. */
+#ifndef FLOW_ATLAS_BLEND
+#define FLOW_ATLAS_BLEND 2
+#endif
+
+/** Gutter texels around each face in the atlas: the blend band plus the
+ *  B-spline's two-texel footprint. PITFALL: FlowSimShader::AtlasGutter sizes
+ *  the texture in C++ and must equal this, or every face reads its neighbour's
+ *  tile. */
 #ifndef FLOW_ATLAS_GUTTER
-#define FLOW_ATLAS_GUTTER 2
+#define FLOW_ATLAS_GUTTER (FLOW_ATLAS_BLEND + 2)
 #endif
 
 // -- Cube atlas ---------------------------------------------------------------
@@ -174,24 +185,86 @@ float Flow_LayerCount(Texture2DArray FlowField)
     return (float) (Slices / 4u);
 }
 
-/** Samples one slice of the atlas by direction, raw, and reports the face it
- *  read. Any sampler state works: every tap stays inside the face's tile. */
-float4 Flow_SampleSlice(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	float3 N,
-	float Slice,
-	out uint OutFace)
+/** The faces a direction reads and their weights, which sum to one. Slot k
+ *  is the face on axis k facing N; a slot with zero weight is not read. A face
+ *  weighs in wherever N lies within FLOW_ATLAS_BLEND texels of it, so up to
+ *  three contribute at a corner and one across most of a face. */
+struct FlowFaceSet
+{
+    uint Face[3];
+    float2 Coord[3];
+    float Weight[3];
+};
+
+FlowFaceSet Flow_FaceSet(float3 N, float FaceSize)
+{
+    FlowFaceSet Set;
+
+#if FLOW_ATLAS_BLEND > 0
+
+    const float Band = 2.0f * FLOW_ATLAS_BLEND / FaceSize;
+
+    float Total = 0.0f;
+
+	[unroll]
+    for (uint Axis = 0; Axis < 3u; ++Axis)
+    {
+        Set.Face[Axis] = 2u * Axis + (N[Axis] < 0.0f ? 1u : 0u);
+        Set.Coord[Axis] = Flow_FaceCoord(N, Set.Face[Axis]);
+
+		// Neighbouring faces' coordinates across an edge sum to two, so the
+		// ramp centred on the edge hands one face's weight to the other.
+        const float2 Ramp = 1.0f - smoothstep(1.0f - Band, 1.0f + Band, abs(Set.Coord[Axis]));
+
+        Set.Weight[Axis] = Ramp.x * Ramp.y;
+        Total += Set.Weight[Axis];
+    }
+
+	[unroll]
+    for (uint Slot = 0; Slot < 3u; ++Slot)
+    {
+        Set.Weight[Slot] /= Total;
+    }
+
+#else
+
+    const uint Primary = Flow_Face(N);
+
+	[unroll]
+    for (uint Axis = 0; Axis < 3u; ++Axis)
+    {
+        Set.Face[Axis] = Primary;
+        Set.Coord[Axis] = Flow_FaceCoord(N, Primary);
+        Set.Weight[Axis] = Axis == 0u ? 1.0f : 0.0f;
+    }
+
+#endif
+
+    return Set;
+}
+
+/** Face size and texel size of the atlas bound as FlowField. */
+void Flow_AtlasMetrics(Texture2DArray FlowField, out float FaceSize, out float2 InvSize)
 {
     uint Width, Height, Slices, Levels;
     FlowField.GetDimensions(0, Width, Height, Slices, Levels);
 
-    const float2 InvSize = 1.0f / float2(Width, Height);
+    FaceSize = Flow_AtlasFaceSize((float) Width);
+    InvSize = 1.0f / float2(Width, Height);
+}
 
-    OutFace = Flow_Face(N);
-
-    const float2 Pixel = Flow_AtlasTexel(
-		OutFace, Flow_FaceCoord(N, OutFace), Flow_AtlasFaceSize((float) Width));
+/** Samples one slice of one face's tile, raw. Any sampler state works: every
+ *  tap stays inside the tile for coordinates within the blend band. */
+float4 Flow_SampleTile(
+	Texture2DArray FlowField,
+	SamplerState FlowSampler,
+	uint Face,
+	float2 Coord,
+	float Slice,
+	float FaceSize,
+	float2 InvSize)
+{
+    const float2 Pixel = Flow_AtlasTexel(Face, Coord, FaceSize);
 
 #if FLOW_FIELD_FILTER == 0
 
@@ -205,7 +278,7 @@ float4 Flow_SampleSlice(
 	// pass through the texel values, so a one-texel step in the field stops
 	// being one in the surface. Four bilinear taps, each placed at the offset
 	// that reproduces a pair's weights; the footprint is two texels either side,
-	// which is what the gutter covers.
+	// which the gutter holds beyond the blend band.
     const float2 Texel = Pixel - 0.5f;
     const float2 Corner = floor(Texel);
     const float2 Frac = Texel - Corner;
@@ -233,6 +306,33 @@ float4 Flow_SampleSlice(
 #endif
 }
 
+/** Samples one slice of the atlas by direction, raw, blended across face
+ *  edges. For scalar slices only: the flow slice's velocity is in each face's
+ *  own basis and has to be rotated before it blends, which Flow_Sample does. */
+float4 Flow_SampleSlice(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Slice)
+{
+    float FaceSize;
+    float2 InvSize;
+    Flow_AtlasMetrics(FlowField, FaceSize, InvSize);
+
+    const FlowFaceSet Set = Flow_FaceSet(N, FaceSize);
+
+    float4 Result = 0.0f;
+
+	[unroll]
+    for (uint Slot = 0; Slot < 3u; ++Slot)
+    {
+        [branch]
+        if (Set.Weight[Slot] > 0.0f)
+        {
+            Result += Set.Weight[Slot] * Flow_SampleTile(
+				FlowField, FlowSampler, Set.Face[Slot], Set.Coord[Slot], Slice, FaceSize, InvSize);
+        }
+    }
+
+    return Result;
+}
+
 /** Samples a layer's flow slice by direction.
  *
  *  Returns (u_east, u_north, pressure, vorticity):
@@ -249,20 +349,38 @@ float4 Flow_SampleSlice(
  *  sense is flips at the equator. Read it through Flow_Band, never raw. */
 float4 Flow_Sample(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
 {
-    uint Face;
-    float4 S = Flow_SampleSlice(FlowField, FlowSampler, N, Layer, Face);
+    float FaceSize;
+    float2 InvSize;
+    Flow_AtlasMetrics(FlowField, FaceSize, InvSize);
 
-    float3 T1, T2;
-    Flow_FaceBasis(N, Face, T1, T2);
+    const FlowFaceSet Set = Flow_FaceSet(N, FaceSize);
 
-    const float3 Velocity = T1 * S.x + T2 * S.y;
+    float3 Velocity = 0.0f;
+    float2 Scalars = 0.0f;
+
+	[unroll]
+    for (uint Slot = 0; Slot < 3u; ++Slot)
+    {
+        [branch]
+        if (Set.Weight[Slot] > 0.0f)
+        {
+            const float4 S = Flow_SampleTile(
+				FlowField, FlowSampler, Set.Face[Slot], Set.Coord[Slot], Layer, FaceSize, InvSize);
+
+            float3 T1, T2;
+            Flow_FaceBasis(N, Set.Face[Slot], T1, T2);
+
+            Velocity += Set.Weight[Slot] * (T1 * S.x + T2 * S.y);
+            Scalars += Set.Weight[Slot] * S.zw;
+        }
+    }
 
     const float C = max(length(N.xy), 1e-5f);
 
-    S.x = dot(Velocity, float3(-N.y, N.x, 0.0f) / C);
-    S.y = dot(Velocity, float3(-N.z * N.x / C, -N.z * N.y / C, C));
-
-    return S;
+    return float4(
+		dot(Velocity, float3(-N.y, N.x, 0.0f) / C),
+		dot(Velocity, float3(-N.z * N.x / C, -N.z * N.y / C, C)),
+		Scalars);
 }
 
 /** Samples a layer's weather slice. Returns (W, cloud, ascent, spare):
@@ -274,8 +392,7 @@ float4 Flow_Sample(Texture2DArray FlowField, SamplerState FlowSampler, float3 N,
  *       it. High in updraughts and in what drifts off them; zero in clear air. */
 float4 Flow_SampleWeather(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
 {
-    uint Face;
-    return Flow_SampleSlice(FlowField, FlowSampler, N, Layer + Flow_LayerCount(FlowField), Face);
+    return Flow_SampleSlice(FlowField, FlowSampler, N, Layer + Flow_LayerCount(FlowField));
 }
 
 /** Samples a layer's two noise displacements, phase A then phase B: xyz
@@ -292,9 +409,27 @@ void Flow_SampleNoise(
 {
     const float L = Flow_LayerCount(FlowField);
 
-    uint Face;
-    OutA = Flow_SampleSlice(FlowField, FlowSampler, N, Layer + 2.0f * L, Face).xyz;
-    OutB = Flow_SampleSlice(FlowField, FlowSampler, N, Layer + 3.0f * L, Face).xyz;
+    float FaceSize;
+    float2 InvSize;
+    Flow_AtlasMetrics(FlowField, FaceSize, InvSize);
+
+    const FlowFaceSet Set = Flow_FaceSet(N, FaceSize);
+
+    OutA = 0.0f;
+    OutB = 0.0f;
+
+	[unroll]
+    for (uint Slot = 0; Slot < 3u; ++Slot)
+    {
+        [branch]
+        if (Set.Weight[Slot] > 0.0f)
+        {
+            OutA += Set.Weight[Slot] * Flow_SampleTile(
+				FlowField, FlowSampler, Set.Face[Slot], Set.Coord[Slot], Layer + 2.0f * L, FaceSize, InvSize).xyz;
+            OutB += Set.Weight[Slot] * Flow_SampleTile(
+				FlowField, FlowSampler, Set.Face[Slot], Set.Coord[Slot], Layer + 3.0f * L, FaceSize, InvSize).xyz;
+        }
+    }
 }
 
 /** Phase A's crossfade weight from its phase in [0, 1): zero at the reset,

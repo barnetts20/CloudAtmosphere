@@ -70,6 +70,10 @@ namespace TerrestrialShadow
 		P->DetailNoiseWeights = Params.DetailNoiseWeights;
 		P->DetailSampling = Params.DetailSampling;
 		P->DetailWarp = Params.DetailWarp;
+		P->CloudGenusStratus = Params.CloudGenusStratus;
+		P->CloudGenusStratocumulus = Params.CloudGenusStratocumulus;
+		P->CloudGenusCumulus = Params.CloudGenusCumulus;
+		P->CloudGenusCirrus = Params.CloudGenusCirrus;
 
 		P->CloudExtinction = Params.CloudExtinction;
 		P->StormExtinction = Params.StormExtinction;

@@ -66,6 +66,10 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	FVector4f DetailNoiseWeights = FVector4f::Zero();
 	FVector4f DetailSampling = FVector4f::Zero();
 	FVector4f DetailWarp = FVector4f::Zero();
+	FVector4f CloudGenusStratus = FVector4f::Zero();
+	FVector4f CloudGenusStratocumulus = FVector4f::Zero();
+	FVector4f CloudGenusCumulus = FVector4f::Zero();
+	FVector4f CloudGenusCirrus = FVector4f::Zero();
 
 	// -- Extinction ---------------------------------------------------------
 	//
@@ -162,6 +166,10 @@ SHADER_PARAMETER(FVector4f, StructureWarp)
 SHADER_PARAMETER(FVector4f, DetailNoiseWeights)
 SHADER_PARAMETER(FVector4f, DetailSampling)
 SHADER_PARAMETER(FVector4f, DetailWarp)
+SHADER_PARAMETER(FVector4f, CloudGenusStratus)
+SHADER_PARAMETER(FVector4f, CloudGenusStratocumulus)
+SHADER_PARAMETER(FVector4f, CloudGenusCumulus)
+SHADER_PARAMETER(FVector4f, CloudGenusCirrus)
 
 SHADER_PARAMETER(FVector4f, CloudExtinction)
 SHADER_PARAMETER(FVector4f, StormExtinction)

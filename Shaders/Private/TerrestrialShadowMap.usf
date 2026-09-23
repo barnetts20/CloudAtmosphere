@@ -58,6 +58,10 @@ float4 StructureWarp;
 float4 DetailNoiseWeights;
 float4 DetailSampling;
 float4 DetailWarp;
+float4 CloudGenusStratus;
+float4 CloudGenusStratocumulus;
+float4 CloudGenusCumulus;
+float4 CloudGenusCirrus;
 
 TRFieldParams TRShadow_Field()
 {

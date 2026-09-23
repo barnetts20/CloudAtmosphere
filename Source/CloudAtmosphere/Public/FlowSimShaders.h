@@ -142,7 +142,7 @@ namespace FlowSimShader
 	/** Gutter texels around each atlas face. PITFALL: must equal
 	 *  FLOW_ATLAS_GUTTER in FlowField.ush, which the materials read without
 	 *  this define, or every face reads its neighbour's tile. */
-	static constexpr int32 AtlasGutter = 2;
+	static constexpr int32 AtlasGutter = 4;
 
 	/** Atlas face edge for a grid width: four faces span the equator, matching
 	 *  the grid's resolution there. */

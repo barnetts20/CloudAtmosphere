@@ -59,13 +59,26 @@ struct CLOUDATMOSPHERE_API FAtmosphereCompositeParams
 {
 	GENERATED_BODY()
 
-	/** Kernel size in SOURCE pixels. THE COST IS QUADRATIC IN THIS: the loop is
-	 *  the disc inscribed in a (2r+1) square, two fetches a tap, so 6 is about 113
-	 *  taps and 8 about 197. It mostly pays to hide the march's sampling noise
-	 *  rather than to upsample, so anything that quiets the march lets this come
-	 *  down -- the cheapest place in the chain to get frames back. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0", ClampMax = "16"))
-	int32 BlurRadius = 6;
+	/** Kernel radius in SOURCE pixels near the planet and far from it, eased
+	 *  between by camera distance. Near, it hides the march's dither, which is
+	 *  large on screen; far, the dither is sub-pixel and a wide kernel only
+	 *  softens the clouds. THE COST IS QUADRATIC IN THE RADIUS: the loop is the
+	 *  disc inscribed in a (2r+1) square, two fetches a tap, so 4 is about 50
+	 *  taps and 8 about 200. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "16.0"))
+	float MaxBlurRadius = 4.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "16.0"))
+	float MinBlurRadius = 1.0f;
+
+	/** Camera distance from the planet centre, in planet radii, at which the
+	 *  radius starts easing from MaxBlurRadius, and over how far it reaches
+	 *  MinBlurRadius. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float BlurFadeStart = 1.25f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001"))
+	float BlurFadeSpan = 1.25f;
 
 	/** The Gaussian's width as a DIVISOR of the radius: sigma = radius / falloff.
 	 *  Higher concentrates weight at the centre. At 1 the edge taps still carry
@@ -573,6 +586,40 @@ struct CLOUDATMOSPHERE_API FTerrestrialMotionParams
 	float RotationWeight = 0.1f;
 };
 
+/** Which noise each cloud genus is drawn from: weights over the structure
+ *  volume's four channels as the deck reads them, R smooth (Perlin), G billow
+ *  (inverted Worley F1), B cellular (Worley F2 - F1), A fibrous (ridged
+ *  Perlin); see Design/TerrestrialClouds.md for the bake. Each column blends the four
+ *  genera by its type and altitude, and layered cloud turns cellular where the
+ *  air sinks. Weights need not sum to one: the blend keeps the noise's
+ *  contrast whatever their total. */
+USTRUCT(BlueprintType)
+struct CLOUDATMOSPHERE_API FTerrestrialGenusParams
+{
+	GENERATED_BODY()
+
+	/** Low layered cloud in still or rising air: sheets. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FLinearColor Stratus = FLinearColor(1.0f, 0.0f, 0.0f, 0.0f);
+
+	/** Low layered cloud in sinking air: broken cells. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FLinearColor Stratocumulus = FLinearColor(0.3f, 0.0f, 0.7f, 0.0f);
+
+	/** Towering cloud at any altitude. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FLinearColor Cumulus = FLinearColor(0.2f, 0.8f, 0.0f, 0.0f);
+
+	/** High layered cloud: streaks. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FLinearColor Cirrus = FLinearColor(0.2f, 0.0f, 0.0f, 0.8f);
+
+	/** How fast sinking air turns stratus into stratocumulus, per unit of the
+	 *  sim's vertical motion. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float Subsidence = 3.0f;
+};
+
 /** The clouds' material: fair-weather cloud at type 0, storm cloud at type 1,
  *  blended by type. Scatter is single-scattering albedo; Extinction is RGB tint
  *  with the amount in A, multiplying the solved extinction, 1 neutral. */
@@ -870,7 +917,9 @@ struct CLOUDATMOSPHERE_API FAtmosphereCarveParams
  *
  *  THE TERRESTRIAL FIELD READS A SUBSET. Its structure layer is the cloud shape
  *  coverage erodes, with Erosion as how much the noise shapes it; its detail
- *  layer erodes edges, with Erosion as how hard. FlowInherit is the share of
+ *  layer erodes edges, with Erosion as how hard. The terrestrial layers read
+ *  their volumes' channels as noise types rather than octaves, so NoiseWeights
+ *  holds only the amount, in A. FlowInherit is the share of
  *  the sim's carried noise displacement the layer follows, 1 moving exactly
  *  with the flow. Relief, BandMix, ShearInherit and bCrossfade are gas giant
  *  only: the terrestrial layers always crossfade the sim's two phases. */
@@ -939,11 +988,12 @@ struct CLOUDATMOSPHERE_API FAtmosphereNoiseLayerParams
 	float FadeSpan = 0.5f;
 
 	/** The noise's mean value, what the terrestrial detail layer settles to as
-	 *  it fades, so distant cloud keeps the same average erosion. PITFALL: if
-	 *  cloud thickens or thins across the fade band, this is off from the
-	 *  volume's real mean. Terrestrial detail only. */
+	 *  it fades, so distant cloud keeps the same average erosion. 0.5 for a
+	 *  volume whose channels are equalized. PITFALL: if cloud thickens or thins
+	 *  across the fade band, this is off from the volume's real mean.
+	 *  Terrestrial detail only. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float FadeMean = 0.6f;
+	float FadeMean = 0.5f;
 
 	/** How far the layer's shapes carry material across a band boundary; at 1 a
 	 *  full-strength shape moves the boundary by about its own width. SIGNED:

@@ -166,21 +166,28 @@ public:
 	float DeformationRadius = 0.2f;
 
 	/** Simulated time per second of real time. THE SPEED CONTROL, AND ONLY THAT:
-	 *  the substep count per frame is unaffected, since the step size scales
-	 *  with it. Zero freezes the sim without tearing it down. */
+	 *  it sets how many substeps run per frame, never their size, so the same
+	 *  state evolves the same way at any speed and a snapshot baked fast plays
+	 *  back unchanged. Cost scales with it. Zero freezes the sim without tearing
+	 *  it down. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.0"))
 	float TimeScale = 2.0f;
 
-	/** Step size as a FRACTION OF TIMESCALE: Step = TimeScale * StepRatio, so the
-	 *  substep count per frame is DeltaTime / StepRatio at every speed and the
-	 *  frame cost is pinned. The Courant numbers are consequences, reported at
-	 *  start. */
+	/** Simulated time per substep. PART OF THE PHYSICS: numerical diffusion,
+	 *  divergence damping and the polar filter all act per substep, so changing
+	 *  it changes the weather, and a snapshot must be played back at the step it
+	 *  was baked at. The Courant numbers are consequences, reported at start.
+	 *
+	 *  PITFALL: a step that scales with speed makes TimeScale a physics
+	 *  parameter too: fewer, larger steps diffuse less per unit time, so the
+	 *  clouds stretch at high speed and collapse when it is lowered. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.00001", ClampMax = "0.1"))
-	float StepRatio = 0.0043f;
+	float StepSize = 0.0086f;
 
 	/** Cap on substeps per frame. Time beyond it is DISCARDED rather than
 	 *  carried, so a stall is not followed by a burst that makes the next frame
-	 *  worse. */
+	 *  worse; past the cap the sim runs slower than TimeScale asks, still on
+	 *  the same steps. Raise it, or use manual steps, to bake at high speed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "1", ClampMax = "64"))
 	int32 MaxSubstepsPerFrame = 8;
 

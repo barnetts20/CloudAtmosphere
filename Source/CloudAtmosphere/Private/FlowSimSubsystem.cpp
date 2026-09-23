@@ -315,7 +315,7 @@ float UFlowSimSubsystem::GetCourant() const
 	}
 
 	const int32 W = FlowSimShader::GridLongitude(Config->GridLongitude);
-	const float Step = Config->TimeScale * Config->StepRatio;
+	const float Step = Config->StepSize;
 
 	return PeakRate(*Config) * Step * W / (2.0f * UE_PI);
 }
@@ -376,10 +376,10 @@ void UFlowSimSubsystem::ReportCourant() const
 		return;
 	}
 
-	// CONSEQUENCES, NOT CONTROLS. StepRatio pins the frame cost; these fall out
-	// of it with the profile, the rotation and the grid.
+	// CONSEQUENCES, NOT CONTROLS. These fall out of the step with the profile,
+	// the rotation and the grid; the substep rate falls out of the speed.
 	const int32 W = FlowSimShader::GridLongitude(Config->GridLongitude);
-	const float Step = Config->TimeScale * Config->StepRatio;
+	const float Step = Config->StepSize;
 	const float C = WaveSpeed(*Config);
 
 	const float Advective = GetCourant();
@@ -388,11 +388,11 @@ void UFlowSimSubsystem::ReportCourant() const
 	const float RotationPerStep = Config->PlanetaryVorticity * Step;
 
 	UE_LOG(LogFlowSim, Log,
-		TEXT("Step %.5f at TimeScale %.2f, %.1f substeps/frame at 60fps. ")
+		TEXT("Step %.5f at TimeScale %.2f, %.1f substeps/frame at 60fps (cap %d). ")
 		TEXT("Advective Courant %.3f, gravity-wave Courant %.3f (implicit), ")
 		TEXT("Froude %.2f, Coriolis %.3f rad/step, wave speed %.3f."),
 		Step, Config->TimeScale,
-		(1.0f / 60.0f) / FMath::Max(Config->StepRatio, 1e-9f),
+		Config->TimeScale / 60.0f / FMath::Max(Step, 1e-9f), Config->MaxSubstepsPerFrame,
 		Advective, Gravity, Froude, RotationPerStep, C);
 
 	if (Froude > 0.5f)
@@ -410,7 +410,7 @@ void UFlowSimSubsystem::ReportCourant() const
 			TEXT("Coriolis turns the flow %.2f rad per substep; the explicit ")
 			TEXT("rotation and implicit pressure split loses accuracy, weakening ")
 			TEXT("balanced jets and radiating gravity waves. ")
-			TEXT("Lower StepRatio or TimeScale."),
+			TEXT("Lower StepSize."),
 			RotationPerStep);
 	}
 }
@@ -727,9 +727,9 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out) const
 		Out.LayerProfile[i] = FVector4f(P.JetScale, P.BoostScale, P.ForcingScale, P.DragScale);
 	}
 
-	// Step = TimeScale * StepRatio, strictly proportional; the Courant numbers
-	// are reported rather than enforced.
-	Out.DeltaTime = FMath::Max(Config->TimeScale * Config->StepRatio, 0.0f);
+	// A fixed step, independent of speed; the Courant numbers are reported
+	// rather than enforced.
+	Out.DeltaTime = FMath::Max(Config->StepSize, 0.0f);
 	Out.Time = SimulatedTime;
 	Out.PlanetaryVorticity = Config->PlanetaryVorticity;
 
@@ -930,7 +930,7 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 
 	// Derived exactly as BuildParams derives it, so the accumulator and the
 	// shader agree about how much time a substep is worth.
-	const float StepSize = FMath::Max(Config->TimeScale * Config->StepRatio, 0.0f);
+	const float StepSize = FMath::Max(Config->StepSize, 0.0f);
 
 	if (StepsCompleted < SpinUpTarget)
 	{

@@ -20,6 +20,10 @@
  *  pixels. BlurWeight lerps back toward the untouched centre, making the blur
  *  an authored amount rather than all or nothing.
  *
+ *  THE RADIUS IS CONTINUOUS. The actor eases it with camera distance, so the
+ *  outermost ring of taps is weighted by how far inside the radius it sits;
+ *  an integer radius pops a whole ring in or out as it crosses a pixel.
+ *
  *  CIRCULAR, NOT SQUARE: the loop is bounded by a (2r+1) square and only the 79%
  *  of taps inside the inscribed disc are taken. A square support reaches
  *  r*sqrt(2) into its corners, so unless the falloff has already killed those
@@ -62,7 +66,7 @@ float4 Atmo_Composite(
 	float3 sceneColor,
 	float2 screenUV,
 	float falloff,
-	int radius,
+	float radius,
 	float depthSharpness,
 	float depthTapScale,
 	float blurWeight)
@@ -76,14 +80,14 @@ float4 Atmo_Composite(
     float alphaSum = center.a;
     float totalWeight = 1.0;
 
-    const float radiusF = float(max(radius, 1));
+    const float radiusF = max(radius, 0.0);
+    const int radiusI = (int) ceil(radiusF);
 
 	// exp(-d^2 / 2 sigma^2), folded into one multiply. The divisor is floored so
-	// a falloff of zero widens the kernel rather than dividing by it.
-    const float sigma = radiusF / max(falloff, 0.25);
+	// a falloff of zero widens the kernel rather than dividing by it, and the
+	// radius so a zero radius is a narrow kernel rather than a divide.
+    const float sigma = max(radiusF, 0.5) / max(falloff, 0.25);
     const float invW = 1.0 / (2.0 * sigma * sigma);
-
-    const float radiusSq = radiusF * radiusF;
 
 	// MEASURED, NOT FROM View.ViewSizeAndInvSize. A user scene texture pass
 	// renders at OUTPUT resolution while View describes the INTERNAL one, so
@@ -105,16 +109,19 @@ float4 Atmo_Composite(
 	// loop or under a branch.
     const float2 depthGradient = float2(ddx(centerDepth), ddy(centerDepth));
 
-    for (int x = -radius; x <= radius; x++)
+    for (int x = -radiusI; x <= radiusI; x++)
     {
-        for (int y = -radius; y <= radius; y++)
+        for (int y = -radiusI; y <= radiusI; y++)
         {
             if (x == 0 && y == 0)
                 continue;
 
             float dist2 = float(x * x + y * y);
 
-            if (dist2 > radiusSq)
+			// Full weight a pixel inside the radius, none a pixel outside.
+            float edgeW = saturate(radiusF + 0.5 - sqrt(dist2));
+
+            if (edgeW <= 0.0)
                 continue;
 
             float2 offset = float2(x, y);
@@ -146,7 +153,7 @@ float4 Atmo_Composite(
 
             float depthW = exp(-depthDiff * depthDiff * depthSharpness);
 
-            float w = spatialW * depthW;
+            float w = spatialW * depthW * edgeW;
 
             sum += s.rgb * w;
             alphaSum += s.a * w;

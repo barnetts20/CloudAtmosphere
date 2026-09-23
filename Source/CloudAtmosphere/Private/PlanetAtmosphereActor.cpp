@@ -667,7 +667,25 @@ void APlanetAtmosphereActor::UpdateMaterialParameters()
     // is. The pass reads the atmosphere buffer and the depth buffer, and does not
     // need to know where the planet is.
 
-    SetScalarChecked(MID_Postprocess, TEXT("Blur Radius"), static_cast<float>(Composite.BlurRadius));
+    // The radius eases from Max near the planet to Min far from it. The view
+    // rendered last frame, as the shadow bake takes it: one frame stale.
+    float CameraRadii = Composite.BlurFadeStart;
+
+    if (const UWorld* World = GetWorld())
+    {
+        if (World->ViewLocationsRenderedLastFrame.Num() > 0)
+        {
+            CameraRadii = static_cast<float>(
+                FVector::Dist(World->ViewLocationsRenderedLastFrame[0], PlanetCenter))
+                / FMath::Max(PlanetRadius, 1e-4f);
+        }
+    }
+
+    const float BlurFade = FMath::SmoothStep(Composite.BlurFadeStart,
+        Composite.BlurFadeStart + FMath::Max(Composite.BlurFadeSpan, 1e-3f), CameraRadii);
+
+    SetScalarChecked(MID_Postprocess, TEXT("Blur Radius"),
+        FMath::Lerp(Composite.MaxBlurRadius, Composite.MinBlurRadius, BlurFade));
     SetScalarChecked(MID_Postprocess, TEXT("Blur Falloff Factor"), Composite.BlurFalloffFactor);
     SetScalarChecked(MID_Postprocess, TEXT("Depth Sharpness"), Composite.DepthSharpness);
     SetScalarChecked(MID_Postprocess, TEXT("Depth Tap Scale"), Composite.DepthTapScale);
@@ -725,6 +743,10 @@ struct FTerrestrialFieldPins
     FLinearColor DetailNoiseWeights;
     FLinearColor DetailSampling;
     FLinearColor DetailWarp;
+    FLinearColor CloudGenusStratus;
+    FLinearColor CloudGenusStratocumulus;
+    FLinearColor CloudGenusCumulus;
+    FLinearColor CloudGenusCirrus;
 };
 
 /** The sim's noise drift angle and phase A's position in its reset cycle, at
@@ -752,6 +774,7 @@ static void NoiseClock(const UFlowSimConfig* Config, float Time, float& OutDrift
 
 static FTerrestrialFieldPins PackTerrestrialField(
     const FTerrestrialProfileParams& P, const FTerrestrialMotionParams& M,
+    const FTerrestrialGenusParams& G,
     const FAtmosphereNoiseLayerParams& Structure, const FAtmosphereNoiseLayerParams& Detail,
     const UFlowSimConfig* SimConfig, float Time)
 {
@@ -785,6 +808,14 @@ static FTerrestrialFieldPins PackTerrestrialField(
     Out.DetailNoiseWeights = Detail.NoiseWeights;
     Out.DetailSampling = Sampling(Detail);
     Out.DetailWarp = Warp(Detail);
+
+    // The genus blend's subsidence rides in the structure warp's spare slot.
+    Out.StructureWarp.G = G.Subsidence;
+
+    Out.CloudGenusStratus = G.Stratus;
+    Out.CloudGenusStratocumulus = G.Stratocumulus;
+    Out.CloudGenusCumulus = G.Cumulus;
+    Out.CloudGenusCirrus = G.Cirrus;
 
     return Out;
 }
@@ -993,7 +1024,8 @@ void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
         TerrestrialProfile, TerrestrialProfile.SolvedTopMax, TerrestrialProfile.SolvedBaseMin);
 
     const FTerrestrialFieldPins Pins = PackTerrestrialField(
-        TerrestrialProfile, TerrestrialMotion, TerrestrialStructureLayer, TerrestrialDetailLayer,
+        TerrestrialProfile, TerrestrialMotion, TerrestrialGenus,
+        TerrestrialStructureLayer, TerrestrialDetailLayer,
         Simulation.Config, GetGasGiantTime());
 
     SetVectorChecked(MID_Atmosphere, TEXT("CloudProfile"), Pins.CloudProfile);
@@ -1009,6 +1041,10 @@ void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
     SetVectorChecked(MID_Atmosphere, TEXT("DetailNoiseWeights"), Pins.DetailNoiseWeights);
     SetVectorChecked(MID_Atmosphere, TEXT("DetailSampling"), Pins.DetailSampling);
     SetVectorChecked(MID_Atmosphere, TEXT("DetailWarp"), Pins.DetailWarp);
+    SetVectorChecked(MID_Atmosphere, TEXT("CloudGenusStratus"), Pins.CloudGenusStratus);
+    SetVectorChecked(MID_Atmosphere, TEXT("CloudGenusStratocumulus"), Pins.CloudGenusStratocumulus);
+    SetVectorChecked(MID_Atmosphere, TEXT("CloudGenusCumulus"), Pins.CloudGenusCumulus);
+    SetVectorChecked(MID_Atmosphere, TEXT("CloudGenusCirrus"), Pins.CloudGenusCirrus);
 
     SetScalarChecked(MID_Atmosphere, TEXT("CloudOpticalDepth"), TerrestrialProfile.CloudOpticalDepth);
 
@@ -1819,7 +1855,8 @@ void APlanetAtmosphereActor::RequestShadowBake(
         }
 
         const FTerrestrialFieldPins Pins = PackTerrestrialField(
-            TerrestrialProfile, TerrestrialMotion, TerrestrialStructureLayer, TerrestrialDetailLayer,
+            TerrestrialProfile, TerrestrialMotion, TerrestrialGenus,
+            TerrestrialStructureLayer, TerrestrialDetailLayer,
             Simulation.Config, Params.Time);
 
         Params.CloudProfile = ToVector4(Pins.CloudProfile);
@@ -1835,6 +1872,10 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.DetailNoiseWeights = ToVector4(Pins.DetailNoiseWeights);
         Params.DetailSampling = ToVector4(Pins.DetailSampling);
         Params.DetailWarp = ToVector4(Pins.DetailWarp);
+        Params.CloudGenusStratus = ToVector4(Pins.CloudGenusStratus);
+        Params.CloudGenusStratocumulus = ToVector4(Pins.CloudGenusStratocumulus);
+        Params.CloudGenusCumulus = ToVector4(Pins.CloudGenusCumulus);
+        Params.CloudGenusCirrus = ToVector4(Pins.CloudGenusCirrus);
 
         Params.CloudOpticalDepth = TerrestrialProfile.CloudOpticalDepth;
         Params.CloudExtinction = ToVector4(TerrestrialCloudMaterial.CloudExtinction);

@@ -29,6 +29,13 @@
 // both are exact per column, which the entry search and the empty-air early-out
 // spend. Outside the slab density is exactly zero.
 //
+// THE NOISE IS CHOSEN BY GENUS. Both volumes share one layout of noise TYPES,
+// octaves summed in the bake: R Perlin, G Worley F1, B Worley F2 - F1, A ridged
+// Perlin. The structure layer reads them as smooth, billow (1 - F1), cellular
+// and fibrous; a column's type and altitude blend four genera -- stratus,
+// stratocumulus, cumulus, cirrus -- into weights over them. The detail layer
+// erodes by them: wispy (Perlin), billow (F1) and fibrous (1 - ridged).
+//
 // THE DETAIL LAYER FADES WITH DISTANCE, TO ITS MEAN. It erodes, so dropping it
 // would thicken distant cloud; settling on the noise's mean value keeps the
 // average erosion and removes only the grain. The structure layer draws the
@@ -157,8 +164,8 @@ struct TRFieldParams
     float DriftAngle;
     float NoisePhase;
 
-	/** Worley rung weights in xyz, the layer's amount in w. FlowInherit is the
-	 *  share of the sim's noise displacement the layer follows. */
+	/** The layer's amount in w; xyz are unread. FlowInherit is the share of the
+	 *  sim's noise displacement the layer follows. */
     float4 StructureNoiseWeights;
     float StructureScale;
     float StructureErosion;
@@ -171,6 +178,14 @@ struct TRFieldParams
 
 	/** The detail noise's mean value, which it settles to as it fades. */
     float DetailFadeMean;
+
+	/** Structure channel weights per genus, and how fast sinking air turns
+	 *  stratus into stratocumulus. */
+    float4 GenusStratus;
+    float4 GenusStratocumulus;
+    float4 GenusCumulus;
+    float4 GenusCirrus;
+    float GenusSubsidence;
 
 	// -- Derived -------------------------------------------------------------
 
@@ -218,9 +233,10 @@ struct TRFieldParams
  *    CloudLid          PressureScale, CeilingDepth, CeilingPressure, StratusDepth
  *    CloudLift         BaseTropical, BasePressure, AltitudeGain, AltitudeLift
  *    CloudMotion       DriftAngle, NoisePhase, WarpShift, RotationWeight
- *    <Layer>NoiseWeights  Worley rung weights, layer amount
+ *    <Layer>NoiseWeights  -, -, -, layer amount
  *    <Layer>Sampling   Scale, Aspect, Erosion, FadeMean
- *    <Layer>Warp       FlowInherit, -, FadeNear, FadeSpan
+ *    <Layer>Warp       FlowInherit, GenusSubsidence (structure), FadeNear, FadeSpan
+ *    CloudGenus<Name>  structure channel weights for that genus
  *
  *  RotationWeight is the planet's own rotation; the sim runs in the rotating
  *  frame, so it applies to the sampling position, negated because rotating the
@@ -241,7 +257,11 @@ TRFieldParams TR_BuildField(
 	float4 StructureWarp,
 	float4 DetailNoiseWeights,
 	float4 DetailSampling,
-	float4 DetailWarp)
+	float4 DetailWarp,
+	float4 CloudGenusStratus,
+	float4 CloudGenusStratocumulus,
+	float4 CloudGenusCumulus,
+	float4 CloudGenusCirrus)
 {
     TRFieldParams F;
 
@@ -286,6 +306,12 @@ TRFieldParams TR_BuildField(
     F.StructureScale = StructureSampling.x;
     F.StructureErosion = max(StructureSampling.z, 0.0f);
     F.StructureFlowInherit = StructureWarp.x;
+    F.GenusSubsidence = max(StructureWarp.y, 0.0f);
+
+    F.GenusStratus = CloudGenusStratus;
+    F.GenusStratocumulus = CloudGenusStratocumulus;
+    F.GenusCumulus = CloudGenusCumulus;
+    F.GenusCirrus = CloudGenusCirrus;
 
     F.DetailNoiseWeights = DetailNoiseWeights;
     F.DetailScale = DetailSampling.x;
@@ -327,7 +353,8 @@ TRFieldParams TR_BuildField(
 	CloudProfile, CloudCurves, CloudCoverage, CloudType, \
 	CloudLid, CloudLift, CloudMotion, \
 	StructureNoiseWeights, StructureSampling, StructureWarp, \
-	DetailNoiseWeights, DetailSampling, DetailWarp)
+	DetailNoiseWeights, DetailSampling, DetailWarp, \
+	CloudGenusStratus, CloudGenusStratocumulus, CloudGenusCumulus, CloudGenusCirrus)
 
 /** The shell's ceiling: 1 below the falloff band, 0 at the atmosphere top,
  *  smoothstep between, so a tower that would cross it softens into a cap. */
@@ -389,6 +416,11 @@ struct TRColumn
 
 	/** How high the cloud formed, [0, 1], from the sim's formation ascent. */
     float Altitude;
+
+	/** Structure channel weights, blended from the genera; and the cirrus share,
+	 *  which also turns the detail fibrous. */
+    float4 Genus;
+    float Cirrus;
 
 	/** How deeply the structure noise erodes the profile. Above 1 it cuts holes
 	 *  through a fully covered column. */
@@ -453,6 +485,16 @@ TRColumn TR_ColumnFromFlow(
 		Threshold - F.CoverageSoftness, Threshold + F.CoverageSoftness, F.CoverageGain * Weather.y);
 
     Col.Type = saturate(F.TypeBias + F.TypeAscent * Weather.x + F.TypeTropical * Tropical);
+
+	// Layered cloud is stratus, cellular where the air sinks, and cirrus as it
+	// rises; towering cloud is cumulus at any height.
+    const float Breakup = saturate(-Weather.x * F.GenusSubsidence);
+
+    const float4 Layered = lerp(
+		lerp(F.GenusStratus, F.GenusStratocumulus, Breakup), F.GenusCirrus, Col.Altitude);
+
+    Col.Genus = lerp(Layered, F.GenusCumulus, Col.Type);
+    Col.Cirrus = Col.Altitude * (1.0f - Col.Type);
 
     Col.Erosion = F.StructureErosion * F.ErosionGain * max(1.0f - F.ErosionAscent * Weather.x, 0.0f)
 		* saturate(F.StructureNoiseWeights.w);
@@ -601,14 +643,14 @@ float TR_SlabEntry(
     return TSearch;
 }
 
-/** Samples one noise layer as a Perlin-Worley value in [0, 1], in true 3D so
- *  the vertical structure the bake put in the volume survives. MIP 0 always: a
- *  footprint mip ties the field to camera distance.
+/** One noise layer's four channels, in true 3D so the vertical structure the
+ *  bake put in the volume survives. MIP 0 always: a footprint mip ties the
+ *  field to camera distance.
  *
  *  THROUGH BOTH NOISE PHASES, crossfaded. Each is N plus Inherit times its
  *  displacement, turned about the axis by the drift, backwards so the noise
  *  moves forwards. Each phase resets where its weight is zero. */
-float TR_SampleLayer(
+float4 TR_SampleLayer(
 	Texture3D Volume,
 	SamplerState Sampler,
 	float3 N,
@@ -616,18 +658,38 @@ float TR_SampleLayer(
 	float3 DisplacementB,
 	float Inherit,
 	float UVWScale,
-	float4 NoiseWeights,
 	TRFieldParams F)
 {
     const float3 PA = Atmo_RotateZ(normalize(N + DisplacementA * Inherit), -F.DriftAngle);
     const float3 PB = Atmo_RotateZ(normalize(N + DisplacementB * Inherit), -F.DriftAngle);
 
-    const float4 S = lerp(
+    return lerp(
 		Volume.SampleLevel(Sampler, PB * UVWScale, 0.0f),
 		Volume.SampleLevel(Sampler, PA * UVWScale, 0.0f),
 		Flow_NoiseWeightA(F.NoisePhase));
+}
 
-    return AtmoNoise_PerlinWorley(S.r, AtmoNoise_WorleyLadder(S.gba, NoiseWeights.xyz));
+/** The shared layout as the structure layer reads it: every channel high where
+ *  there is cloud. */
+float4 TR_StructureChannels(float4 S)
+{
+    return float4(S.r, 1.0f - S.g, S.b, S.a);
+}
+
+/** The shared layout as the detail layer reads it: every channel high where
+ *  the edge is eaten away. x wispy, y billow, z fibrous; w unused. */
+float4 TR_DetailChannels(float4 S)
+{
+    return float4(S.r, S.g, 1.0f - S.a, 0.0f);
+}
+
+/** Weighted blend of equalized channels, in [0, 1] about 0.5. Divided by the
+ *  weights' length rather than their sum, which keeps the contrast of
+ *  independent channels: a plain average of two pulls toward the middle and
+ *  softens every blend. */
+float TR_BlendNoise(float4 Channels, float4 Weights)
+{
+    return saturate(0.5f + dot(Channels - 0.5f, Weights) / max(length(Weights), 1e-3f));
 }
 
 /** Density at a point in the shell. LocalPos carries its true radius; the
@@ -708,11 +770,11 @@ float4 TR_Density(
 
     if (F.StructureNoiseWeights.w > 0.0f)
     {
-        const float Noise = TR_SampleLayer(
+        const float Noise = TR_BlendNoise(TR_StructureChannels(TR_SampleLayer(
 			StructureVolume, StructureSampler, N,
 			DisplacementA, DisplacementB, F.StructureFlowInherit,
-			F.StructureScale + (Height - Shift) * F.StructureVertical / Stretch,
-			F.StructureNoiseWeights, F);
+			F.StructureScale + (Height - Shift) * F.StructureVertical / Stretch, F)),
+			Col.Genus);
 
 		// Extrapolated past 1, the factor goes negative wherever the noise sits
 		// below 1 - 1/Erosion, and those holes survive any coverage.
@@ -735,22 +797,25 @@ float4 TR_Density(
     {
 		// Faded toward the mean rather than off: see the header. Past the far
 		// edge the fetch is skipped.
-        float Detail = F.DetailFadeMean;
+        float Modifier = F.DetailFadeMean;
 
         BRANCH
 
         if (F.DetailFade > 0.0f)
         {
-            Detail = lerp(F.DetailFadeMean, TR_SampleLayer(
+			// Wispy at the base, billowy toward the top, fibrous in cirrus.
+            const float Billow = saturate(HeightFraction / TR_BILLOW_HEIGHT);
+
+            const float4 Weights =
+				float4(1.0f - Billow, Billow, 0.0f, 0.0f) * (1.0f - Col.Cirrus)
+				+ float4(0.0f, 0.0f, Col.Cirrus, 0.0f);
+
+            Modifier = lerp(F.DetailFadeMean, TR_BlendNoise(TR_DetailChannels(TR_SampleLayer(
 				DetailVolume, DetailSampler, N,
 				DisplacementA, DisplacementB, F.DetailFlowInherit,
-				F.DetailScale + (Height - Shift) * F.DetailVertical / Stretch,
-				F.DetailNoiseWeights, F), F.DetailFade);
+				F.DetailScale + (Height - Shift) * F.DetailVertical / Stretch, F)),
+				Weights), F.DetailFade);
         }
-
-		// Wispy at the base, where the noise itself erodes; billowy toward the
-		// top, where its inverse does and rounded lobes remain.
-        const float Modifier = lerp(Detail, 1.0f - Detail, saturate(HeightFraction / TR_BILLOW_HEIGHT));
 
         const float Erode = Modifier * F.DetailErosion * saturate(F.DetailNoiseWeights.w)
 			* TR_DETAIL_EROSION_SCALE;
