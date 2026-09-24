@@ -131,6 +131,7 @@ namespace
 		P.SimDragRate = Params.DragRate;
 		P.SimLayerCoupling = Params.LayerCoupling;
 		P.SimDivergenceDamping = Params.DivergenceDamping;
+		P.SimSharpCentre = Params.bSharpCentreVelocity ? 1 : 0;
 		P.SimThermalRelaxation = Params.ThermalRelaxation;
 		P.SimThermalParams = Params.ThermalParams;
 
@@ -149,7 +150,6 @@ namespace
 		P.SimCellMotion = Params.CellMotion;
 		P.SimCellGenesis = Params.CellGenesis;
 		P.SimCellCloud = Params.CellCloud;
-		P.SimCellPatch = Params.CellPatch;
 		P.SimCellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
 		P.SimStepIndex = Params.StepIndex;
 

@@ -1163,6 +1163,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.DragRate = Config->DragRate;
 	Out.LayerCoupling = Config->LayerCoupling;
 	Out.DivergenceDamping = FMath::Clamp(Config->DivergenceDamping, 0.0f, 0.5f);
+	Out.bSharpCentreVelocity = Config->bSharpCentreVelocity;
 
 	Out.ThermalRelaxation = FMath::Max(Config->ThermalRelaxation, 0.0f);
 	Out.ThermalParams = FVector4f(
@@ -1236,16 +1237,10 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		FMath::Max(Config->GenesisSpin, 0.0f));
 
 	Out.CellCloud = FVector4f(
-		FMath::Clamp(Config->StormCellCanopy, 0.0f, 1.0f),
-		FMath::Clamp(Config->StormCellCanopyRadius, 0.05f, 1.0f),
-		FMath::Clamp(Config->StormCellFeed, 0.0f, 1.0f),
-		FMath::Clamp(Config->StormCellFeedFloor, 0.0f, 1.0f));
-
-	Out.CellPatch = FVector4f(
-		FMath::Clamp(Config->StormCellFeedFill, 0.0f, 1.0f),
-		FMath::Max(Config->StormCellPatchScale, 0.5f),
-		FMath::Max(Config->StormCellFeedRate, 0.0f),
-		FMath::Clamp(Config->StormCellInflow, 0.0f, 1.0f));
+		FMath::Clamp(Config->StormCellCloud, 0.0f, 1.0f),
+		FMath::Max(Config->StormCellCloudRate, 0.0f),
+		FMath::Clamp(Config->StormCellInflow, 0.0f, 1.0f),
+		0.0f);
 
 	Out.CellCount = FMath::Clamp(Config->MaxStormCells, 0, FlowSimShader::MaxStormCells);
 

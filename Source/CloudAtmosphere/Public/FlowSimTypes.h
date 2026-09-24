@@ -277,6 +277,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing", meta = (ClampMin = "0.0", ClampMax = "0.5"))
 	float DivergenceDamping = 0.05f;
 
+	/** Rebuild centre velocities to fourth order from the faces rather than as
+	 *  a two-face average. Keeps a compact vortex from bleeding into a cross
+	 *  along the grid axes. PITFALL: it also damps fast motion far less --
+	 *  about twice the eddy speed, more W and more cloud at the same settings --
+	 *  so the deck's coverage tuning does not carry over, and the faster flow
+	 *  pulls the two noise phases apart until their crossfade reads as density
+	 *  sliding under the clouds. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
+	bool bSharpCentreVelocity = false;
+
 	// -- Thermal forcing ----------------------------------------------------
 	//
 	// Each layer's target is the jet profile plus its share of ThermalShear:
@@ -513,46 +523,24 @@ public:
 
 	// -- Storm cloud ------------------------------------------------------------
 	//
-	// Each cell feeds its own cloud into the sim, so a storm has structure
-	// whatever weather it spawned in: a canopy on the top layer, a band zone on
-	// the bottom, the eye cleared in every layer. Cloud only rises toward the
-	// feed, and the storm tracer is not fed, so a cell still fades with its
-	// parent storm.
+	// Each cell carries its own cloud on the same ramp as its vectors: none at
+	// the centre, the most at the eyewall, none at the radius. It only raises
+	// the bottom layer's cloud, so the weather already there still counts, and
+	// the flow winds the two together. The eye clears in every layer. The storm
+	// tracer is not fed, so a cell still fades with its parent storm.
 
-	/** Cloud the top layer is held at across the canopy: the smooth shield of
-	 *  merged anvils over a storm's core. */
+	/** Cloud the bottom layer is raised to at the eyewall, scaled by the vector
+	 *  ramp elsewhere. PITFALL: much above the deck's coverage threshold this
+	 *  becomes a solid disc the structure noise cannot break up; at CloudCover
+	 *  1, CoverageGain 3 and CoverageSoftness 0.5, coverage is full from about
+	 *  0.17. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float StormCellCanopy = 0.8f;
+	float StormCellCloud = 0.25f;
 
-	/** Canopy radius, as a fraction of the cell radius. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.05", ClampMax = "1.0"))
-	float StormCellCanopyRadius = 0.4f;
-
-	/** Cloud the bottom layer is held at in the fed patches of the band zone,
-	 *  which runs from the eyewall out and fades over the outer two thirds of
-	 *  the radius. The flow winds each patch into a band. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float StormCellFeed = 0.9f;
-
-	/** Cloud the rest of the band zone is held at: the lanes between bands,
-	 *  thinner but never empty. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float StormCellFeedFloor = 0.3f;
-
-	/** Fraction of the band zone fed at full strength. Lower gives fewer,
-	 *  more distinct bands. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float StormCellFeedFill = 0.4f;
-
-	/** Noise patches across the cell radius. More gives more, narrower bands. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.5"))
-	float StormCellPatchScale = 4.0f;
-
-	/** Rate cloud rises toward the feed and clears in the eye, per unit time.
-	 *  Against the flow's rotation it sets how far each band trails from its
-	 *  patch. */
+	/** Rate cloud rises toward that and clears in the eye, per unit time.
+	 *  Against the flow's rotation it sets how far the cloud trails. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0"))
-	float StormCellFeedRate = 4.0f;
+	float StormCellCloudRate = 4.0f;
 
 	/** Vertical motion added with the vector strength, in W's units: rising
 	 *  air makes the column towering and fills it in. */
@@ -754,6 +742,7 @@ struct FFlowSimParams
 	float DragRate = 1.5f;
 	float LayerCoupling = 0.1f;
 	float DivergenceDamping = 0.05f;
+	bool bSharpCentreVelocity = false;
 
 	float ThermalRelaxation = 0.5f;
 
@@ -782,7 +771,6 @@ struct FFlowSimParams
 	FVector4f CellMotion = FVector4f::Zero();
 	FVector4f CellGenesis = FVector4f::Zero();
 	FVector4f CellCloud = FVector4f::Zero();
-	FVector4f CellPatch = FVector4f::Zero();
 	int32 CellCount = 0;
 
 	/** Steps completed before the frame's first; seeds the cells' spawns. */
