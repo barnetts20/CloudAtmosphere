@@ -143,9 +143,12 @@ namespace
 		P.SimWindEvaporation = Params.WindEvaporation;
 
 		P.SimCellShape = Params.CellShape;
+		P.SimCellVortex = Params.CellVortex;
+		P.SimCellDraft = Params.CellDraft;
 		P.SimCellLife = Params.CellLife;
 		P.SimCellMotion = Params.CellMotion;
 		P.SimCellGenesis = Params.CellGenesis;
+		P.SimCellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
 		P.SimStepIndex = Params.StepIndex;
 
 		P.SimNoiseDriftRate = Params.NoiseDriftRate;
@@ -589,6 +592,7 @@ void FFlowSimulation::AddResamplePass(FRDGBuilder& GraphBuilder, const FFlowSimP
 	P->SimLatLonSRV = GraphBuilder.CreateSRV(R.LatLon);
 	P->SimCentreLatestSRV = GraphBuilder.CreateSRV(R.CentreLatest);
 	P->SimLatLonLatestSRV = GraphBuilder.CreateSRV(R.LatLonLatest);
+	P->SimCellSRV = GraphBuilder.CreateSRV(R.Cells);
 	P->SimOutputUAV = GraphBuilder.CreateUAV(R.Output);
 
 	AddSimPass<FFlowSimResampleCS>(GraphBuilder, TEXT("FlowSim.Resample"), P, Groups);
@@ -617,6 +621,7 @@ void FFlowSimulation::AddDebugPass(FRDGBuilder& GraphBuilder, const FFlowSimPara
 
 	// The frame's last Reconstruct wrote the latest state's output.
 	P->SimLatLonSRV = GraphBuilder.CreateSRV(R.LatLonLatest);
+	P->SimCellSRV = GraphBuilder.CreateSRV(R.Cells);
 	P->SimDebugUAV = GraphBuilder.CreateUAV(R.Debug);
 
 	AddSimPass<FFlowSimDebugVisCS>(GraphBuilder, TEXT("FlowSim.DebugVis"), P, Groups);

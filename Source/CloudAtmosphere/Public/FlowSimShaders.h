@@ -67,9 +67,12 @@ SHADER_PARAMETER(float, SimWindEvaporation)
 
 // -- Storm cells --------------------------------------------------------
 SHADER_PARAMETER(FVector4f, SimCellShape)
+SHADER_PARAMETER(FVector4f, SimCellVortex)
+SHADER_PARAMETER(FVector4f, SimCellDraft)
 SHADER_PARAMETER(FVector4f, SimCellLife)
 SHADER_PARAMETER(FVector4f, SimCellMotion)
 SHADER_PARAMETER(FVector4f, SimCellGenesis)
+SHADER_PARAMETER(int32, SimCellCount)
 SHADER_PARAMETER(int32, SimStepIndex)
 
 // -- Noise coordinates --------------------------------------------------

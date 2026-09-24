@@ -76,7 +76,8 @@ enum class EFlowDebugMode : uint8
 	 *  condense. */
 	Humidity    UMETA(DisplayName = "Relative humidity"),
 
-	/** Storm intensity, 0 to 1. Storm cells show as discs with a clear eye. */
+	/** Storm intensity, 0 to 1, in red; storm cells' vector strength in blue
+	 *  where it is larger. */
 	Storm       UMETA(DisplayName = "Storm"),
 
 	/** Height of the layer's top: the free surface on layer 0, an interface
@@ -388,58 +389,21 @@ public:
 
 	// -- Storm cells ----------------------------------------------------------
 	//
-	// Tracked tropical storms: each spawns where the genesis conditions hold,
-	// moves with the stack's mean flow, spins the flow into a compact vortex
-	// and holds a storm disc with a clear eye while it lives.
+	// Tracked tropical storms riding on the sim's own. Each spawns on a storm
+	// with cyclonic spin in the genesis band, follows it, and fades once it is
+	// gone. While alive it pushes the flow around it toward a vortex, which the
+	// flow then carries the weather around, and it raises the deepest storm
+	// cloud in its eyewall band on the output.
 
 	/** Cells alive at once, up to FlowSimShader::MaxStormCells. Zero turns them
 	 *  off. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0", ClampMax = "32"))
 	int32 MaxStormCells = 12;
 
-	/** Spawn attempts per unit sim time, planet-wide. An attempt holds only
-	 *  where the genesis window and humidity allow. */
+	/** Spawn attempts per unit sim time, planet-wide. Each tests eight points
+	 *  in the genesis band for a storm to seed on. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
 	float StormCellSpawnRate = 4.0f;
-
-	/** Vortex radius, degrees of arc; the winds peak at about 0.7 of it. Wants
-	 *  at least four grid cells, 3.5 degrees at 512 columns. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.5", ClampMax = "30.0"))
-	float StormCellRadius = 4.5f;
-
-	/** Peak wind of a full-strength cell's vortex, in the jet's units. What the
-	 *  flow reaches is less, drag working against it. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
-	float StormCellWind = 2.0f;
-
-	/** Rate the flow spins toward the vortex and the storm disc fills, per
-	 *  unit time. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
-	float StormCellSpinUp = 10.0f;
-
-	/** Eye radius as a fraction of the vortex radius. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.01", ClampMax = "1.0"))
-	float StormCellEye = 0.3f;
-
-	/** Rates intensity grows while conditions hold and decays once they fail,
-	 *  per unit time. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
-	float StormCellGrowth = 2.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
-	float StormCellDecay = 1.0f;
-
-	/** Sim time after which a cell decays whatever the conditions. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.01"))
-	float StormCellLifetime = 3.0f;
-
-	/** Poleward-west drift on top of the steering flow, in the jet's units. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
-	float StormCellDrift = 0.05f;
-
-	/** The top layer's reversed share of the vortex: the outflow anticyclone. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float StormCellOutflow = 0.5f;
 
 	/** Latitudes, degrees, between which cells form. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0", ClampMax = "90.0"))
@@ -457,6 +421,108 @@ public:
 	 *  0.15 under this. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float GenesisHumidity = 0.85f;
+
+	/** Storm intensity a seed needs beneath it. A cell weakens once the storm
+	 *  within half its radius falls below this. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float GenesisStorm = 0.2f;
+
+	/** Normalised cyclonic vorticity at which a seed counts fully; below it the
+	 *  seed is weighted down. Zero ignores spin. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
+	float GenesisSpin = 0.05f;
+
+	/** Rates intensity grows while conditions hold and decays once they fail,
+	 *  per unit time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
+	float StormCellGrowth = 2.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
+	float StormCellDecay = 1.0f;
+
+	/** Sim time after which a cell decays whatever the conditions. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.01"))
+	float StormCellLifetime = 3.0f;
+
+	/** Poleward-west drift on top of the steering flow, in the jet's units. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
+	float StormCellDrift = 0.05f;
+
+	/** Rate a cell is pulled toward the centre of the storm beneath it, per
+	 *  unit time. Keeps it on its parent. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
+	float StormCellFollow = 2.0f;
+
+	// -- Storm stamp ------------------------------------------------------------
+	//
+	// A cell's vortex: vectors tangent to circles about its centre, cyclonic,
+	// rising from zero at the centre to StormCellEyeStrength at the eye's edge,
+	// peaking at the eyewall and falling to zero at the radius. The flow is
+	// pushed along them; the eyewall band is drawn on the output.
+	//
+	// PITFALL: the sim grid resolves the push and the atlas the band. Nothing
+	// under about two grid cells survives: at 512 columns the eyewall wants to
+	// sit at least 1.4 degrees out, at AtlasFaceSize 256 at least 0.7.
+
+	/** Outer radius, degrees of arc, where every effect reaches zero. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.5", ClampMax = "45.0"))
+	float StormCellRadius = 8.0f;
+
+	/** Eye radius, as a fraction of the radius. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "0.9"))
+	float StormCellEye = 0.08f;
+
+	/** Where the vectors peak, as a fraction of the radius. Outside the eye. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.01", ClampMax = "0.95"))
+	float StormCellEyewall = 0.18f;
+
+	/** Vector strength at the eye's edge, as a fraction of the eyewall's. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellEyeStrength = 0.2f;
+
+	/** How fast the vectors fall from the eyewall to the radius, as the power
+	 *  of the remaining distance: 1 is linear, higher tightens the storm onto
+	 *  its core. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.1"))
+	float StormCellFalloff = 1.5f;
+
+	/** Peak wind of the vortex the flow is pushed toward, in the jet's units. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
+	float StormCellWind = 2.0f;
+
+	/** Rate of the push, per unit time: the flow gains StormCellWind times this
+	 *  per unit time at the eyewall. Against the bottom layer's drag it settles
+	 *  near this over DragRate of the peak wind, less what the flow around it
+	 *  carries away. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
+	float StormCellForcing = 1.5f;
+
+	/** The top layer's share of the push; the bottom layer's is 1, and those
+	 *  between are linear. Negative spins the top the other way, as a storm's
+	 *  outflow does. PITFALL: the top layer's drag is a tenth of the bottom's
+	 *  by default, so a share there settles ten times stronger. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
+	float StormCellTopShare = 0.0f;
+
+	/** Vertical motion added with the vector strength, in W's units: rising
+	 *  air makes the column towering and fills it in. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
+	float StormCellDraft = 0.5f;
+
+	/** Vertical motion in the eye. Negative sinks, which breaks the cloud
+	 *  there up. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
+	float StormCellEyeDraft = -0.5f;
+
+	/** Cloud cover and storm intensity the eyewall band is raised to: the band
+	 *  runs from 40% of peak vector strength inward to the eyewall. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellBandStorm = 1.0f;
+
+	/** Pressure drop across the eyewall band, in the output's normalised
+	 *  units. The deck deepens low-pressure columns. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float StormCellBandPressure = 0.5f;
 
 	// -- Noise coordinates --------------------------------------------------
 
@@ -658,12 +724,14 @@ struct FFlowSimParams
 	/** x rate, y threshold, z spin, w decay rate. */
 	FVector4f StormParams = FVector4f(4.0f, 0.1f, 2.0f, 1.0f);
 
-	/** See SimCellShape, SimCellLife, SimCellMotion and SimCellGenesis in
-	 *  FlowSim.usf. */
+	/** See SimCellShape through SimCellGenesis in FlowSim.usf. */
 	FVector4f CellShape = FVector4f::Zero();
+	FVector4f CellVortex = FVector4f::Zero();
+	FVector4f CellDraft = FVector4f::Zero();
 	FVector4f CellLife = FVector4f::Zero();
 	FVector4f CellMotion = FVector4f::Zero();
 	FVector4f CellGenesis = FVector4f::Zero();
+	int32 CellCount = 0;
 
 	/** Steps completed before the frame's first; seeds the cells' spawns. */
 	int32 StepIndex = 0;
@@ -671,6 +739,7 @@ struct FFlowSimParams
 	/** Radians per unit sim time, and sim time. */
 	float NoiseDriftRate = 0.0f;
 	float NoiseResetTime = 1.0f;
+
 
 	float FilterLatitude = 0.9f;
 	int32 FilterMaxHalfWidth = 8;

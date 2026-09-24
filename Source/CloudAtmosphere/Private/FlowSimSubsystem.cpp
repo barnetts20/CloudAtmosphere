@@ -1197,11 +1197,25 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	const float GenesisMin = FMath::DegreesToRadians(FMath::Clamp(Config->GenesisLatitudeMin, 0.0f, 90.0f));
 	const float GenesisMax = FMath::DegreesToRadians(FMath::Clamp(Config->GenesisLatitudeMax, 0.0f, 90.0f));
 
+	const float Eye = FMath::Clamp(Config->StormCellEye, 0.0f, 0.9f);
+
 	Out.CellShape = FVector4f(
-		FMath::DegreesToRadians(FMath::Clamp(Config->StormCellRadius, 0.5f, 30.0f)),
-		FMath::Max(Config->StormCellWind, 0.0f),
-		FMath::Clamp(Config->StormCellEye, 0.01f, 1.0f),
-		FMath::Max(Config->StormCellSpinUp, 0.0f));
+		FMath::DegreesToRadians(FMath::Clamp(Config->StormCellRadius, 0.5f, 45.0f)),
+		Eye,
+		FMath::Clamp(Config->StormCellEyewall, Eye + 0.01f, 0.95f),
+		FMath::Clamp(Config->StormCellEyeStrength, 0.0f, 1.0f));
+
+	Out.CellVortex = FVector4f(
+		FMath::Max(Config->StormCellFalloff, 0.1f),
+		FMath::Max(Config->StormCellForcing, 0.0f),
+		FMath::Clamp(Config->StormCellTopShare, -1.0f, 1.0f),
+		FMath::Max(Config->StormCellWind, 0.0f));
+
+	Out.CellDraft = FVector4f(
+		FMath::Clamp(Config->StormCellDraft, -1.0f, 1.0f),
+		FMath::Clamp(Config->StormCellEyeDraft, -1.0f, 1.0f),
+		FMath::Clamp(Config->StormCellBandStorm, 0.0f, 1.0f),
+		FMath::Clamp(Config->StormCellBandPressure, 0.0f, 2.0f));
 
 	Out.CellLife = FVector4f(
 		FMath::Max(Config->StormCellSpawnRate, 0.0f),
@@ -1211,15 +1225,17 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 
 	Out.CellMotion = FVector4f(
 		FMath::Max(Config->StormCellDrift, 0.0f),
-		FMath::Clamp(Config->StormCellOutflow, 0.0f, 1.0f),
+		FMath::Max(Config->StormCellFollow, 0.0f),
 		FMath::Min(GenesisMin, GenesisMax),
 		FMath::Max(GenesisMin, GenesisMax));
 
 	Out.CellGenesis = FVector4f(
 		FMath::Max(Config->GenesisShear, 0.01f),
 		FMath::Clamp(Config->GenesisHumidity, 0.0f, 1.0f),
-		(float)FMath::Clamp(Config->MaxStormCells, 0, FlowSimShader::MaxStormCells),
-		0.0f);
+		FMath::Clamp(Config->GenesisStorm, 0.01f, 1.0f),
+		FMath::Max(Config->GenesisSpin, 0.0f));
+
+	Out.CellCount = FMath::Clamp(Config->MaxStormCells, 0, FlowSimShader::MaxStormCells);
 
 	Out.StepIndex = StepsCompleted;
 
