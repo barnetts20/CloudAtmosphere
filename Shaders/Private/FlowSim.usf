@@ -162,8 +162,8 @@ float SimWindEvaporation;
  *             z and w genesis latitudes, radians.
  *    Genesis  x shear limit, y humidity threshold, z storm a seed needs,
  *             w cyclonic vorticity at which a seed counts fully.
- *    Cloud    x cloud the bottom layer is raised to at the eyewall, y rate it
- *             rises toward that and clears in the eye, z inflow below and
+ *    Cloud    x share of the way to full cover the bottom layer's cloud is
+ *             lifted at the eyewall, y rate of the lift and the eye's clearing, z inflow below and
  *             outflow above as a fraction of the vortex's speed, w storm
  *             raised across the whole storm. */
 float4 SimCellShape;
@@ -928,16 +928,17 @@ float SimCellPotential(float3 P)
     return SimCellCloud.z * SimCellVortex.w * SimCellShape.x * Chi;
 }
 
-/** The cloud the cells raise the bottom layer to, and how strongly each eye
- *  clears every layer.
+/** How far the cells lift the bottom layer's cloud toward full cover, and how
+ *  strongly each eye clears every layer.
  *
  *  THE STAMP CARRIES ITS OWN CLOUD, on the same ramp as its vectors: none at
- *  the centre, the most at the eyewall, none at the radius. The flow winds it
- *  with whatever weather is already there, and the deck's noise breaks it up.
- *  PITFALL: a peak much above the coverage threshold leaves a disc the
- *  structure noise cannot erode; keep it where the deck's coverage is still
- *  ramping. Cloud only rises toward it; the eye clears. */
-float2 SimCellCloudTarget(float3 P, uint Layer)
+ *  the centre, the most at the eyewall, none at the radius. A lift toward full
+ *  rather than a fixed target, so it adds to whatever weather is there and a
+ *  hurricane always holds more cloud than its surroundings: the last feature
+ *  cover or erosion removes. PITFALL: a fixed target below the ambient cloud
+ *  does nothing, and the hurricane culls with, or before, the cloud around
+ *  it. The flow winds the lifted cloud, and the deck's noise breaks it up. */
+float2 SimCellCloudFeed(float3 P, uint Layer)
 {
     const bool bBottom = Layer + 1u == (uint) SimGridSize.z;
     const float Eye = SimCellShape.y;
@@ -1774,8 +1775,9 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
  *
  *  Storm cells: each layer is pushed along the live cells' vortices, all of the
  *  push on the bottom layer and SimCellVortex.z of it on top, plus inflow below
- *  and outflow above. Each cell also raises the bottom layer's cloud along its
- *  vector ramp (SimCellCloudTarget), which the flow winds like any other.
+ *  and outflow above. Each cell also lifts the bottom layer's cloud toward full
+ *  along its vector ramp (SimCellCloudFeed), which the flow winds like any
+ *  other.
  *
  *  Noise: each phase's displacement at the departure point, carried to this
  *  centre and turned by the drift over the step. A phase resets to zero at the
@@ -1943,12 +1945,12 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
     float Cloud = saturate(Tracer.x + Dt * (Formed - Loss * Tracer.x));
 
-	// The storm cells' own cloud: raised toward their feed, cleared in the eye.
+	// The storm cells' own cloud: lifted toward full, cleared in the eye.
     if (bCellNear)
     {
-        const float2 Feed = SimCellCloudTarget(P, Layer);
+        const float2 Feed = SimCellCloudFeed(P, Layer);
 
-        Cloud = saturate(Cloud + SimCellCloud.y * Dt * (max(Feed.x - Cloud, 0.0f) - Feed.y * Cloud));
+        Cloud = saturate(Cloud + SimCellCloud.y * Dt * (Feed.x * (1.0f - Cloud) - Feed.y * Cloud));
     }
 
     const float CloudAscent = clamp(Tracer.y + Dt * (Formed * Rising - Loss * Tracer.y), 0.0f, Cloud);

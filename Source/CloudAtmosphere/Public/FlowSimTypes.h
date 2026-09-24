@@ -533,16 +533,17 @@ public:
 	// the flow winds the two together. The eye clears in every layer. The storm
 	// tracer is not fed, so a cell still fades with its parent storm.
 
-	/** Cloud the bottom layer is raised to at the eyewall, scaled by the vector
-	 *  ramp elsewhere. PITFALL: much above the deck's coverage threshold this
-	 *  becomes a solid disc the structure noise cannot break up; at CloudCover
-	 *  1, CoverageGain 3 and CoverageSoftness 0.5, coverage is full from about
-	 *  0.17. */
+	/** How strongly a cell lifts the bottom layer's cloud toward full cover at
+	 *  the eyewall, scaled by the vector ramp elsewhere. A lift on top of the
+	 *  weather already there, so a hurricane always holds more cloud than its
+	 *  surroundings and is the last thing cover or erosion removes. Against the
+	 *  cloud's decay alone the eyewall settles near r / (r + 1 / CloudLifetime),
+	 *  r being this times StormCellCloudRate: 0.75 at the defaults. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellCloud = 0.25f;
 
-	/** Rate cloud rises toward that and clears in the eye, per unit time.
-	 *  Against the flow's rotation it sets how far the cloud trails. */
+	/** Rate of that lift and of the eye's clearing, per unit time. Against the
+	 *  flow's rotation it sets how far the cloud trails. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0"))
 	float StormCellCloudRate = 4.0f;
 
