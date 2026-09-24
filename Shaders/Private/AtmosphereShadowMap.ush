@@ -456,8 +456,12 @@ float AtmoShadow_OccluderTau(
  *  interpolating first and branching after puts a slope discontinuity wherever a
  *  segment boundary crosses a texel. Those creases sit on the lattice, looking
  *  like resolution, but their width comes from the optical depth step across the
- *  boundary and does not shrink when texels do. QUINTIC WEIGHTS for the blend,
- *  since bilinear's slope jumps read as facets locked to the same lattice. */
+ *  boundary and does not shrink when texels do.
+ *
+ *  LINEAR WEIGHTS. PITFALL: smoothstep or quintic weights hold each texel's value
+ *  flat around its centre and put the whole change in a band at its edge, which
+ *  draws the lattice as blocks -- visible as voxels along a long shadow seen
+ *  lengthwise, where one texel covers many pixels. */
 float AtmoShadow_TauSlice(
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
@@ -479,8 +483,7 @@ float AtmoShadow_TauSlice(
     const float2 Sample = UV * MapSize - 0.5f + JitterTexels * ATMO_SHADOW_LOOKUP_JITTER;
     const float2 Base = floor(Sample);
 
-    float2 Frac = Sample - Base;
-    Frac = Frac * Frac * Frac * (Frac * (Frac * 6.0f - 15.0f) + 10.0f);
+    const float2 Frac = Sample - Base;
 
     const float3 UV00 = float3((Base + 0.5f) * InvSize, float(Level));
 
@@ -661,7 +664,7 @@ float AtmoShadow_Tau(
  *  JitterTexels IS NORMALLY ZERO HERE. A light ray offsets its lookups because
  *  it has many samples along one ray to average the texel neighbourhood with;
  *  one tap per pixel has nothing to average, so an offset is a dither rather
- *  than a filter, and it lands in transmittance. The quintic reconstruction is
+ *  than a filter, and it lands in transmittance. The bilinear reconstruction is
  *  continuous on its own. */
 float AtmoShadow_SurfaceOptDepth(
 	Texture2DArray ShadowMap,

@@ -363,12 +363,14 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
         Node2 = T + (ATMO_SHADOW_TAU2 - Tau) * TailRate;
     }
 
-    float4 Out = float4(NodeEntry, Node0, Node1, Node2) / F.Thickness;
+    float4 Out = min(float4(NodeEntry, Node0, Node1, Node2) / F.Thickness, ATMO_SHADOW_NO_DECK);
+
+    Out = AtmoBake_History(Out, Level, Offset, RayLength / F.Thickness, HalfWidth, Extent0);
 
 	// NO DEBUG REMAP HERE. The march reads this map, so a define rescaling what
 	// is written rescales the lighting with it, and the symptom -- a fully
 	// shadowed planet with a lit sliver at the terminator -- reads as a
 	// reconstruction bug rather than a units mismatch. Scale in the visualisation
 	// material instead.
-    ShadowMapUAV[Texel] = min(Out, ATMO_SHADOW_NO_DECK);
+    ShadowMapUAV[Texel] = Out;
 }

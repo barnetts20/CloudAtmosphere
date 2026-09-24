@@ -197,6 +197,14 @@ namespace GasGiantShadow
 			*LevelP = *P;
 			LevelP->ShadowFirstLevel = Level;
 
+			// Copied even at weight 0, so the binding is always a written texture.
+			const FAtmoShadowHistory& History = Params.History[Level];
+
+			LevelP->ShadowHistory = AtmoShadowBake::AddHistoryCopy(GraphBuilder, Map, Level);
+			LevelP->ShadowHistoryLightDir = History.LightDir;
+			LevelP->ShadowHistoryCameraLocal = History.CameraLocal;
+			LevelP->ShadowHistoryWeight = History.Weight;
+
 			FComputeShaderUtils::AddPass(
 				GraphBuilder,
 				RDG_EVENT_NAME("GasGiant.ShadowBake Level %d", Level), Shader, LevelP, Groups);

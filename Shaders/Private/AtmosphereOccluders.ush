@@ -19,7 +19,7 @@
 #define ATMO_OCC_NO_HIT 3.402823e+38f
 
 /** Lateral taps per ray. Sets how many steps the soft edge has: the boundary
- *  texels report a fraction of this, and the reader's quintic blend smooths
+ *  texels report a fraction of this, and the reader's bilinear blend smooths
  *  between them. Eight is enough for a footprint of a texel or two; a wider one
  *  bands without more. */
 #ifndef ATMO_OCC_SUBSAMPLES

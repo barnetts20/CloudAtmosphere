@@ -131,6 +131,14 @@ float3 ShadowCameraLocal;
  *  frames, each around the camera it was baked with. */
 int ShadowFirstLevel;
 
+/** The level's previous bake: a one-slice copy of it taken before this pass, the
+ *  light and camera it was baked with, and the share of it this bake keeps. A
+ *  weight of 0 skips the history entirely. */
+Texture2DArray<float4> ShadowHistory;
+float3 ShadowHistoryLightDir;
+float3 ShadowHistoryCameraLocal;
+float ShadowHistoryWeight;
+
 /** One depth capture per cascade, named rather than arrayed: each is a separate
  *  render target owned by a separate component, and a Texture2D array cannot be
  *  indexed dynamically here anyway. Adding a cascade means adding a texture, a
@@ -182,6 +190,79 @@ float AtmoBake_Crossing(float Target, float Tau, float SigmaA, float SigmaB, flo
     const float Root = (-SigmaA + sqrt(max(Disc, 0.0f))) / (2.0f * Curve);
 
     return saturate(Root / max(Step, 1e-6f));
+}
+
+/** Blends a texel's fresh crossing depths with the level's previous bake along
+ *  the same ray, so a rebake fades in rather than stepping. Nodes in thicknesses;
+ *  Offset is the ray's closest approach to the planet centre; ChordEnd is the
+ *  ray's exit depth.
+ *
+ *  REPROJECTED, NOT READ AT THE SAME TEXEL. The previous bake sat around another
+ *  camera, and under another light: the ray is found in that bake's own map
+ *  and its nodes interpolated from the four texels around it.
+ *
+ *  ONLY NODES CROSSED INSIDE THE CHORD BLEND, in the new bake and in every tap
+ *  with weight. A node past the exit is an extrapolation or the no-deck sentinel,
+ *  and blending one in slides a crossing across the whole chord over several
+ *  bakes instead of fading it. Those take the new value, then the nodes are
+ *  re-sorted, which the reconstruction needs. */
+float4 AtmoBake_History(
+	float4 Nodes, int Level, float3 Offset, float ChordEnd, float HalfWidth, float Extent0)
+{
+    BRANCH
+
+    if (ShadowHistoryWeight <= 0.0f)
+    {
+        return Nodes;
+    }
+
+    float3 U, V;
+    AtmoShadow_Basis(ShadowHistoryLightDir, U, V);
+
+    const float2 MapSize = float2(ShadowMapSize);
+
+    const float2 Centre = AtmoShadow_CascadeCentre(
+		Level, ShadowHistoryCameraLocal, U, V, HalfWidth, Extent0, MapSize);
+
+    const float2 Disc = AtmoShadow_PlaneToDisc(
+		float2(dot(Offset, U), dot(Offset, V)) / max(Extent0, 1e-6f));
+
+    const float2 Sample = ((Disc - Centre) / HalfWidth * 0.5f + 0.5f) * MapSize - 0.5f;
+
+	// Outside the previous window: that bake never saw this ray.
+    if (any(Sample < 0.0f) || any(Sample > MapSize - 1.0f))
+    {
+        return Nodes;
+    }
+
+    const int2 Base = int2(floor(Sample));
+    const float2 Frac = Sample - float2(Base);
+    const int2 Last = ShadowMapSize - 1;
+
+    const float4 H00 = ShadowHistory.Load(int4(Base, 0, 0));
+    const float4 H10 = ShadowHistory.Load(int4(min(Base + int2(1, 0), Last), 0, 0));
+    const float4 H01 = ShadowHistory.Load(int4(min(Base + int2(0, 1), Last), 0, 0));
+    const float4 H11 = ShadowHistory.Load(int4(min(Base + int2(1, 1), Last), 0, 0));
+
+    const float4 W = float4(
+		(1.0f - Frac.x) * (1.0f - Frac.y), Frac.x * (1.0f - Frac.y),
+		(1.0f - Frac.x) * Frac.y, Frac.x * Frac.y);
+
+    const float4 Previous = H00 * W.x + H10 * W.y + H01 * W.z + H11 * W.w;
+
+    float4 Deepest = Nodes;
+    Deepest = max(Deepest, H00 * step(1e-4f, W.x));
+    Deepest = max(Deepest, H10 * step(1e-4f, W.y));
+    Deepest = max(Deepest, H01 * step(1e-4f, W.z));
+    Deepest = max(Deepest, H11 * step(1e-4f, W.w));
+
+    float4 Out = lerp(Nodes, Previous, ShadowHistoryWeight * step(Deepest, ChordEnd));
+
+    Out.y = max(Out.y, Out.x);
+    Out.z = max(Out.z, Out.y);
+    Out.w = max(Out.w, Out.z);
+
+    return Out;
 }
 
 /** Depth of the nearest opaque occluder on a texel's ray, in the ray parameter,

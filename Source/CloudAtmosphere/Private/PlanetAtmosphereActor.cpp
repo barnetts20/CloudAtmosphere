@@ -1700,6 +1700,9 @@ bool APlanetAtmosphereActor::FillSharedShadowParams(
     // the first request into a fresh target, which holds nothing yet.
     const int32 LevelCount = AtmoShadowBake::CascadeCount;
 
+    // A fresh target holds nothing to blend from.
+    const bool bHasHistory = bShadowPrimed;
+
     if (!bShadowPrimed)
     {
         Params.LevelMask = (1u << LevelCount) - 1u;
@@ -1717,12 +1720,42 @@ bool APlanetAtmosphereActor::FillSharedShadowParams(
         }
     }
 
+    // -- History ------------------------------------------------------------
+    //
+    // Each baked level keeps exp(-age / smoothing) of its previous bake, where
+    // age is the time since that bake. Per level and in seconds, so the fade is
+    // the same whatever the frame rate or the rotation's cadence. A light that
+    // jumped drops it: the reprojection holds for a light that turns, not for
+    // one that teleports.
+    const double Now = FPlatformTime::Seconds();
+
     for (int32 Level = 0; Level < LevelCount; ++Level)
     {
-        if (Params.LevelMask & (1u << Level))
+        if ((Params.LevelMask & (1u << Level)) == 0)
         {
-            ShadowBakedCamera[Level] = Params.CameraLocal;
+            continue;
         }
+
+        FAtmoShadowHistory& History = Params.History[Level];
+
+        History.LightDir = ShadowBakedLight[Level];
+        History.CameraLocal = ShadowBakedCamera[Level];
+        History.Weight = 0.0f;
+
+        const bool bLightHeld = FVector3f::DotProduct(Params.LightDir, ShadowBakedLight[Level])
+            >= AtmoShadowBake::HistoryLightCosine;
+
+        if (bHasHistory && bLightHeld && ShadowTemporalSmoothing > 0.0f && ShadowBakeTime[Level] > 0.0)
+        {
+            const float Age = static_cast<float>(Now - ShadowBakeTime[Level]);
+
+            History.Weight = FMath::Min(
+                FMath::Exp(-Age / ShadowTemporalSmoothing), AtmoShadowBake::MaxHistoryWeight);
+        }
+
+        ShadowBakedCamera[Level] = Params.CameraLocal;
+        ShadowBakedLight[Level] = Params.LightDir;
+        ShadowBakeTime[Level] = Now;
     }
 
     // PUSHED, NOT RE-DERIVED, AND PER LEVEL. A fine cascade's centre is snapped

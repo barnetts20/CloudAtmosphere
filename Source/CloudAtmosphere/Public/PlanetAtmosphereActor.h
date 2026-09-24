@@ -137,6 +137,14 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "1", ClampMax = "3"))
     int32 ShadowLevelsPerFrame = 1;
 
+    /** Seconds over which a rebaked cascade fades in from its previous bake,
+     *  reprojected to the current light and camera. Hides the step each rebake
+     *  takes as the clouds advect under the texel lattice, at the cost of the
+     *  shadow trailing the clouds by about this long. 0 shows each bake as it
+     *  lands. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float ShadowTemporalSmoothing = 0.1f;
+
     /** Half-widths of the terrestrial map's inner cascades around the camera,
      *  in planet radii: X for level 1, Y for level 2, each held inside the one
      *  outside it. Narrower is sharper near the camera and hands over to the
@@ -517,6 +525,12 @@ private:
      *  last baked around -- what the material reads that level against. */
     int32 ShadowLevelCursor = 0;
     FVector3f ShadowBakedCamera[AtmoShadowBake::CascadeCount];
+
+    /** The light each level was last baked under, and when, in platform
+     *  seconds: what the next bake of that level reprojects and weights its
+     *  history by. */
+    FVector3f ShadowBakedLight[AtmoShadowBake::CascadeCount];
+    double ShadowBakeTime[AtmoShadowBake::CascadeCount] = {};
 
     /** False until every level has been baked into the current target. Cleared
      *  when the target is reinitialised or the model changes, so the first

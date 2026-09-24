@@ -46,6 +46,10 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 	 *  last held, read against the camera they were baked with. */
 	uint32 LevelMask = (1u << AtmoShadowBake::CascadeCount) - 1u;
 
+	/** Per level: what its previous bake was made with and how much of it the
+	 *  next one keeps. Read only for levels in LevelMask. */
+	TStaticArray<FAtmoShadowHistory, AtmoShadowBake::CascadeCount> History;
+
 	// -- Deck ---------------------------------------------------------------
 	//
 	// GG_BuildField's arguments, in its order and under its names -- the same
@@ -180,6 +184,10 @@ SHADER_PARAMETER(FVector2f, ShadowInvMapSize)
 SHADER_PARAMETER(FVector3f, ShadowLightDir)
 SHADER_PARAMETER(FVector3f, ShadowCameraLocal)
 SHADER_PARAMETER(int32, ShadowFirstLevel)
+SHADER_PARAMETER(FVector3f, ShadowHistoryLightDir)
+SHADER_PARAMETER(FVector3f, ShadowHistoryCameraLocal)
+SHADER_PARAMETER(float, ShadowHistoryWeight)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2DArray<float4>, ShadowHistory)
 
 SHADER_PARAMETER(float, PlanetRadius)
 SHADER_PARAMETER(float, HeightScale)
