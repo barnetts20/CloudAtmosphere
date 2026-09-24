@@ -497,17 +497,25 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-1", ClampMax = "7"))
 	int32 CloudLayer = -1;
 
-	/** Cloud type, 0 stratiform to 1 towering, is TypeBias + TypeAscent * rising
-	 *  air + TypeTropical * tropicality. Type sets column depth and blends the
-	 *  material from fair-weather to storm. */
+	/** Cloud type, 0 stratiform to 1 towering, is TypeBias + TypeCloud * cloud
+	 *  amount (the field scaled by CoverageGain) + TypeTropical * tropicality +
+	 *  TypeStorm * the sim's storm. Type sets column depth and the noise genus,
+	 *  and blends the material from fair-weather to storm. Driven by the cloud
+	 *  itself, so towers move and wind with the flow's structure. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float TypeBias = 0.2f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float TypeAscent = 0.6f;
+	float TypeCloud = 0.6f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float TypeTropical = 0.3f;
+
+	/** How far the sim's storm deepens and darkens cloud. A term rather than a
+	 *  floor, so storm grades into the cloud around it instead of turning every
+	 *  stormy column into a full tower. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float TypeStorm = 0.5f;
 
 	// -- Breakup --------------------------------------------------------------
 

@@ -83,6 +83,16 @@
 #define TR_EROSION_CUT 0.5f
 #endif
 
+/** How far the noise stretches vertically with column depth, 0 to 1. At 1 a
+ *  column of any depth spans as many noise features as a stratiform one, so
+ *  erosion cuts through a tower as it does through a deck. PITFALL: at 0 a
+ *  tower stacks several independent features, a view ray down it almost
+ *  always meets one, and it reads solid at any erosion while thin cloud
+ *  breaks up. */
+#ifndef TR_COLUMN_COHERENCE
+#define TR_COLUMN_COHERENCE 1.0f
+#endif
+
 /** Coverage over which a column grows from no slab to its full depth. Sparse
  *  cloud is shallow cloud, and clear sky has no slab for the entry search to
  *  stop on. PITFALL: narrower makes the top a cliff at every coverage edge,
@@ -162,11 +172,12 @@ struct TRFieldParams
 	 *  column is full depth, 1 depth is proportional to the amount. */
     float CloudRelief;
 
-	/** Type = max(TypeBias + TypeAscent * W + TypeTropical * tropicality,
-	 *  storm). */
+	/** Type = TypeBias + TypeCloud * amount + TypeTropical * tropicality
+	 *  + TypeStorm * storm. */
     float TypeBias;
-    float TypeAscent;
+    float TypeCloud;
     float TypeTropical;
+    float TypeStorm;
 
 	/** Column erosion = StructureErosion * ErosionGain * (1 - ErosionAscent * W). */
     float ErosionGain;
@@ -283,12 +294,13 @@ struct TRFieldParams
  *    CloudProfile      CloudBase, CloudThickness, SurfaceSoftness, CeilingFalloff
  *    CloudCurves       TopCurve, BottomCurve, CloudSlope, WarpStretch
  *    CloudCoverage     CloudCover, CoverageGain, CoverageSoftness, ErosionGain
- *    CloudType         TypeBias, TypeAscent, TypeTropical, ErosionAscent
+ *    CloudType         TypeBias, TypeCloud, TypeTropical, ErosionAscent
  *    CloudLid          PressureScale, CeilingDepth, CeilingPressure, StratusDepth
  *    CloudLift         BaseTropical, BasePressure, AltitudeGain, AltitudeLift
  *    CloudMotion       DriftAngle, NoisePhase, WarpShift, RotationWeight
  *    NoiseLevels       StructureMipBias, StructureAmount, DetailMipBias, DetailAmount
- *    <Layer>Sampling   Scale, Aspect, Erosion, FadeMean
+ *    <Layer>Sampling   Scale, Aspect, Erosion, FadeMean (detail) or
+ *                      TypeStorm (structure)
  *    <Layer>Warp       FlowInherit, GenusSubsidence (structure) or
  *                      CloudRelief (detail), FadeNear, FadeSpan
  *    ShadowCascades    Cascade 1 half-width, cascade 2 half-width, CloudLayer,
@@ -340,7 +352,7 @@ TRFieldParams TR_BuildField(
     F.ErosionGain = max(CloudCoverage.w, 0.0f);
 
     F.TypeBias = CloudType.x;
-    F.TypeAscent = CloudType.y;
+    F.TypeCloud = CloudType.y;
     F.TypeTropical = CloudType.z;
     F.ErosionAscent = CloudType.w;
 
@@ -363,6 +375,7 @@ TRFieldParams TR_BuildField(
     F.StructureAmount = saturate(NoiseLevels.y);
     F.StructureScale = StructureSampling.x;
     F.StructureErosion = max(StructureSampling.z, 0.0f);
+    F.TypeStorm = max(StructureSampling.w, 0.0f);
     F.StructureFlowInherit = StructureWarp.x;
     F.GenusSubsidence = max(StructureWarp.y, 0.0f);
 
@@ -536,11 +549,16 @@ TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler,
  *  raising it to recover cloud flattens the sim's contrast until the noise,
  *  not the weather, decides where the gaps are.
  *
- *  TYPE IS HOW HARD THE AIR IS RISING, plus the tropics, and at least the
- *  sim's storm intensity: a storm is towering cloud of storm material whatever
- *  the local W. A towering column is CloudThickness deep, a stratiform one
- *  StratusDepth of that; the pressure lid then scales both, so highs flatten
- *  into sheets and lows build.
+ *  TYPE IS HOW MUCH CLOUD THERE IS, plus the tropics and the sim's storm
+ *  intensity: dense cloud builds towering, thin cloud stays layered, and storm
+ *  deepens and darkens cloud in proportion. A towering column is
+ *  CloudThickness deep, a stratiform one StratusDepth of that; the pressure lid
+ *  then scales both, so highs flatten into sheets and lows build. PITFALL: type
+ *  from the local W draws the sim's vertical-motion waves, which travel through
+ *  the cloud rather than with it, as bands of towering cloud sliding across
+ *  the flow's own structure. Storm taken as a floor on type rather than a term
+ *  turns every stormy column into a full tower of storm material, a deck
+ *  erosion barely touches beside the cloud around it.
  *
  *  EROSION IS BREAKUP. Sinking air erodes harder than rising air when
  *  ErosionAscent is positive, so subsidence breaks into patches and large-scale
@@ -582,7 +600,8 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
     Col.Coverage = smoothstep(
 		Threshold - F.CoverageSoftness, Threshold + F.CoverageSoftness, F.CoverageGain * Weather.y);
 
-    Col.Type = max(saturate(F.TypeBias + F.TypeAscent * Weather.x + F.TypeTropical * Tropical), saturate(Weather.w));
+    Col.Type = saturate(F.TypeBias + F.TypeCloud * Amount + F.TypeTropical * Tropical
+		+ F.TypeStorm * saturate(Weather.w));
 
 	// Layered cloud is stratus, cellular where the air sinks, and cirrus as it
 	// rises; towering cloud is cumulus at any height.
@@ -861,10 +880,15 @@ float4 TR_DensityInColumn(
 	// -- Vertical warp: rising air stretches and lifts the noise ---------------
 	//
 	// STRETCH divides the vertical frequency, so rising air draws a feature out
-	// taller; SHIFT reads the volume from a different altitude. Both touch only
-	// the noise, so they cost the bounds nothing.
+	// taller, and so does depth past a stratiform column's (TR_COLUMN_COHERENCE);
+	// SHIFT reads the volume from a different altitude. Both touch only the
+	// noise, so they cost the bounds nothing.
 
-    const float Stretch = max(1.0f + F.WarpStretch * Col.Ascent, 0.1f);
+    const float DepthFit = max((Col.Top - Col.Base)
+		/ max(F.CloudThickness * F.StratusDepth, 1e-3f), 1.0f);
+
+    const float Stretch = max(1.0f + F.WarpStretch * Col.Ascent, 0.1f)
+		* lerp(1.0f, DepthFit, TR_COLUMN_COHERENCE);
     const float Shift = F.WarpShift * F.CloudThickness * Col.Ascent;
 
 	// -- Shape: the noise coverage erodes --------------------------------------

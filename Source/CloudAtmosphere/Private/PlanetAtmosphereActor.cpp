@@ -789,7 +789,7 @@ static FTerrestrialFieldPins PackTerrestrialField(
     Out.CloudProfile = FLinearColor(P.CloudBase, P.CloudThickness, P.SurfaceSoftness, P.CeilingFalloff);
     Out.CloudCurves = FLinearColor(P.TopCurve, P.BottomCurve, P.CloudSlope, P.WarpStretch);
     Out.CloudCoverage = FLinearColor(P.CloudCover, P.CoverageGain, P.CoverageSoftness, P.ErosionGain);
-    Out.CloudType = FLinearColor(P.TypeBias, P.TypeAscent, P.TypeTropical, P.ErosionAscent);
+    Out.CloudType = FLinearColor(P.TypeBias, P.TypeCloud, P.TypeTropical, P.ErosionAscent);
     Out.CloudLid = FLinearColor(P.PressureScale, P.CeilingDepth, P.CeilingPressure, P.StratusDepth);
     Out.CloudLift = FLinearColor(P.BaseTropical, P.BasePressure, P.AltitudeGain, P.AltitudeLift);
     Out.CloudMotion = FLinearColor(DriftAngle, NoisePhase, P.WarpShift, M.RotationWeight);
@@ -810,6 +810,10 @@ static FTerrestrialFieldPins PackTerrestrialField(
         Structure.MipBias, Structure.NoiseWeights.A, Detail.MipBias, Detail.NoiseWeights.A);
 
     Out.StructureSampling = Sampling(Structure);
+
+    // FadeMean is the detail layer's alone; the structure's slot carries the
+    // storm's share of cloud type.
+    Out.StructureSampling.A = P.TypeStorm;
     Out.StructureWarp = Warp(Structure);
 
     Out.DetailSampling = Sampling(Detail);
