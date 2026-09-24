@@ -162,8 +162,8 @@ float SimWindEvaporation;
  *             z and w genesis latitudes, radians.
  *    Genesis  x shear limit, y humidity threshold, z storm a seed needs,
  *             w cyclonic vorticity at which a seed counts fully.
- *    Cloud    x share of the way to full cover the bottom layer's cloud is
- *             lifted at the eyewall, y rate of the lift and the eye's clearing, z inflow below and
+ *    Cloud    x share of the way to full cover each layer's cloud is lifted
+ *             at the eyewall, y rate of the lift and the eye's clearing, z inflow below and
  *             outflow above as a fraction of the vortex's speed, w storm
  *             raised across the whole storm. */
 float4 SimCellShape;
@@ -176,6 +176,10 @@ float4 SimCellCloud;
 
 /** Live cell slots, up to GG_SIM_MAX_CELLS. */
 int SimCellCount;
+
+/** Froude number, against SimWaveSpeedSq, at which the cells stop pushing the
+ *  flow. Zero never stops them. */
+float SimCellMaxFroude;
 
 /** Steps completed before this one: seeds the cells' spawn draws. */
 int SimStepIndex;
@@ -903,6 +907,25 @@ bool SimCellNear(float3 P)
     return false;
 }
 
+/** How much of the cells' push a face takes, from the flow arriving at it:
+ *  1 well below SimCellMaxFroude, fading to 0 at it.
+ *
+ *  PITFALL: A SHALLOW-WATER FLOW NEAR ITS WAVE SPEED STEEPENS INTO BORES --
+ *  hydraulic jumps that travel through the field as sharp lines. A cell's
+ *  vortex is the fastest flow on the planet, so an unlimited push drives it
+ *  there and sheds them. */
+float SimCellFroudeGate(float3 Arrival)
+{
+    if (SimCellMaxFroude <= 0.0f)
+    {
+        return 1.0f;
+    }
+
+    const float Froude = length(Arrival) * rsqrt(max(SimWaveSpeedSq, 1e-8f));
+
+    return 1.0f - smoothstep(0.75f * SimCellMaxFroude, SimCellMaxFroude, Froude);
+}
+
 /** Every live cell's velocity potential at P: its gradient runs the inflow
  *  fraction of the vortex's speed toward the centre. Added below and
  *  subtracted above, it is the storm's secondary circulation, which draws what
@@ -928,8 +951,8 @@ float SimCellPotential(float3 P)
     return SimCellCloud.z * SimCellVortex.w * SimCellShape.x * Chi;
 }
 
-/** How far the cells lift the bottom layer's cloud toward full cover, and how
- *  strongly each eye clears every layer.
+/** How far the cells lift each layer's cloud toward full cover, and how
+ *  strongly each eye clears it.
  *
  *  THE STAMP CARRIES ITS OWN CLOUD, on the same ramp as its vectors: none at
  *  the centre, the most at the eyewall, none at the radius. A lift toward full
@@ -937,10 +960,11 @@ float SimCellPotential(float3 P)
  *  hurricane always holds more cloud than its surroundings: the last feature
  *  cover or erosion removes. PITFALL: a fixed target below the ambient cloud
  *  does nothing, and the hurricane culls with, or before, the cloud around
- *  it. The flow winds the lifted cloud, and the deck's noise breaks it up. */
+ *  it. EVERY LAYER, so the hurricane holds its cloud whichever layer the deck
+ *  reads, and its upper cloud spreads with the outflow as a canopy. The flow
+ *  winds the lifted cloud, and the deck's noise breaks it up. */
 float2 SimCellCloudFeed(float3 P, uint Layer)
 {
-    const bool bBottom = Layer + 1u == (uint) SimGridSize.z;
     const float Eye = SimCellShape.y;
 
     float Target = 0.0f;
@@ -959,10 +983,7 @@ float2 SimCellCloudFeed(float3 P, uint Layer)
 
         const float InEye = 1.0f - smoothstep(0.7f * Eye, Eye, R);
 
-        if (bBottom)
-        {
-            Target = max(Target, Intensity * SimCellCloud.x * SimCellProfile(R) * (1.0f - InEye));
-        }
+        Target = max(Target, Intensity * SimCellCloud.x * SimCellProfile(R) * (1.0f - InEye));
 
         Clear = max(Clear, Intensity * InEye);
     }
@@ -1775,9 +1796,9 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
  *
  *  Storm cells: each layer is pushed along the live cells' vortices, all of the
  *  push on the bottom layer and SimCellVortex.z of it on top, plus inflow below
- *  and outflow above. Each cell also lifts the bottom layer's cloud toward full
- *  along its vector ramp (SimCellCloudFeed), which the flow winds like any
- *  other.
+ *  and outflow above, faded out as the flow nears SimCellMaxFroude. Each cell
+ *  also lifts every layer's cloud toward full along its vector ramp
+ *  (SimCellCloudFeed), which the flow winds like any other.
  *
  *  Noise: each phase's displacement at the departure point, carried to this
  *  centre and turned by the drift over the step. A phase resets to zero at the
@@ -1847,9 +1868,11 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
         if (bCellNear)
         {
-            U -= CellShare * SimRowCos(C.y) * (SimCellCornerPsi(C.x, C.y + 1) - SimCellCornerPsi(C.x, C.y)) / SimDMu();
+            const float Gate = SimCellFroudeGate(Arrival);
 
-            U += CellRadial * (SimCellPotential(SimDirection(SimColumnToLon((float) C.x), Mu))
+            U -= Gate * CellShare * SimRowCos(C.y) * (SimCellCornerPsi(C.x, C.y + 1) - SimCellCornerPsi(C.x, C.y)) / SimDMu();
+
+            U += Gate * CellRadial * (SimCellPotential(SimDirection(SimColumnToLon((float) C.x), Mu))
 				- SimCellPotential(SimDirection(SimColumnToLon((float) C.x - 1.0f), Mu)))
 				/ (SimRowCos(C.y) * SimDLon());
         }
@@ -1876,12 +1899,14 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
         if (bCellNear)
         {
-            V += CellShare * (SimCellCornerPsi(C.x + 1, C.y) - SimCellCornerPsi(C.x, C.y))
+            const float Gate = SimCellFroudeGate(Arrival);
+
+            V += Gate * CellShare * (SimCellCornerPsi(C.x + 1, C.y) - SimCellCornerPsi(C.x, C.y))
 				/ (SimFaceCos(C.y) * SimDLon());
 
             const float Lon = SimColumnToLon((float) C.x);
 
-            V += CellRadial * SimFaceCos(C.y)
+            V += Gate * CellRadial * SimFaceCos(C.y)
 				* (SimCellPotential(SimDirection(Lon, SimRowToMu((float) C.y)))
 					- SimCellPotential(SimDirection(Lon, SimRowToMu((float) C.y - 1.0f)))) / SimDMu();
         }

@@ -453,18 +453,22 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 
 	// -- Coverage and type ------------------------------------------------------
 
-	/** How much of the sim's cloud field counts as cloud. Sets a threshold at
-	 *  1 - CloudCover on the scaled field: lower keeps only the cores of the
-	 *  systems, higher spreads them. Clear sky stays clear at any value. */
+	/** How far down the ranking of cloud coverage reaches. Each column ranks by
+	 *  its cloud amount raised by its storm, so hurricanes rank highest, then
+	 *  storms, then plain cloud. 0 is clear sky, low values keep only
+	 *  hurricanes and large storms, and the rest of the cloud comes in toward
+	 *  1, where every column holding cloud is covered. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float CloudCover = 0.5f;
+	float CloudCover = 0.8f;
 
-	/** Scales the sim's cloud field, whose typical range is 0 to 0.4, onto about
-	 *  0 to 1 before the threshold. */
+	/** How far storm raises a column's rank over plain cloud: rank is amount *
+	 *  (1 + StormPriority * storm) / (1 + StormPriority), so plain cloud tops
+	 *  out at 1 / (1 + StormPriority) and full storm reaches 1. 0 ranks by cloud
+	 *  alone. Storm raises only cloud that exists. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float CoverageGain = 2.5f;
+	float StormPriority = 1.0f;
 
-	/** Half-width of the threshold on the scaled field: how far a system's edge
+	/** Half-width of the coverage threshold, in rank: how far a system's edge
 	 *  ramps from clear to fully covered. Lower is crisper. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "1.0"))
 	float CoverageSoftness = 0.2f;
@@ -492,7 +496,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	 *  own units (read it off the Column cloud debug view). Set it near the top
 	 *  of the sim's range so only the densest cloud builds full; at or below the
 	 *  typical value whole systems saturate into flat, full-height storm cloud.
-	 *  Independent of CoverageGain, which only places the edges. */
+	 *  Also the scale of coverage's rank. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001"))
 	float CloudFull = 0.4f;
 

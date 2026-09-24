@@ -511,6 +511,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
 	float StormCellForcing = 1.5f;
 
+	/** Froude number at which the cells stop pushing the flow, fading from
+	 *  three quarters of it: the vortex speed limit, whatever the wind and
+	 *  forcing ask for. A flow near its wave speed steepens into bores that
+	 *  travel through the field as sharp lines; the Froude number debug view
+	 *  shows where it gets close. Zero turns the limit off. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float StormCellMaxFroude = 0.5f;
+
 	/** The top layer's share of the push; the bottom layer's is 1, and those
 	 *  between are linear. Negative spins the top the other way, as a storm's
 	 *  outflow does. PITFALL: the top layer's drag is a tenth of the bottom's
@@ -533,8 +541,8 @@ public:
 	// the flow winds the two together. The eye clears in every layer. The storm
 	// tracer is not fed, so a cell still fades with its parent storm.
 
-	/** How strongly a cell lifts the bottom layer's cloud toward full cover at
-	 *  the eyewall, scaled by the vector ramp elsewhere. A lift on top of the
+	/** How strongly a cell lifts every layer's cloud toward full cover at the
+	 *  eyewall, scaled by the vector ramp elsewhere. A lift on top of the
 	 *  weather already there, so a hurricane always holds more cloud than its
 	 *  surroundings and is the last thing cover or erosion removes. Against the
 	 *  cloud's decay alone the eyewall settles near r / (r + 1 / CloudLifetime),
@@ -785,6 +793,7 @@ struct FFlowSimParams
 	FVector4f CellMotion = FVector4f::Zero();
 	FVector4f CellGenesis = FVector4f::Zero();
 	FVector4f CellCloud = FVector4f::Zero();
+	float CellMaxFroude = 0.0f;
 	int32 CellCount = 0;
 
 	/** Steps completed before the frame's first; seeds the cells' spawns. */

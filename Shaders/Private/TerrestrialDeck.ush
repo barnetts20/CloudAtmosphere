@@ -80,7 +80,7 @@
  *  coverage: the hole fraction a thick system breaks up into. Half leaves
  *  about half of it clear, the survivors ramping from their edges to full. */
 #ifndef TR_EROSION_CUT
-#define TR_EROSION_CUT 0.0f
+#define TR_EROSION_CUT 0.5f
 #endif
 
 /** How far the noise stretches vertically with column depth, 0 to 1. At 1 a
@@ -90,7 +90,7 @@
  *  always meets one, and it reads solid at any erosion while thin cloud
  *  breaks up. */
 #ifndef TR_COLUMN_COHERENCE
-#define TR_COLUMN_COHERENCE 0.0f
+#define TR_COLUMN_COHERENCE 1.0f
 #endif
 
 /** Coverage over which a column grows from no slab to its full depth. Sparse
@@ -150,11 +150,13 @@ struct TRFieldParams
 	 *  zero, an atmosphere fraction. */
     float CeilingFalloff;
 
-	/** Global coverage, 0.5 neutral, and how strongly the sim's cloud field
-	 *  maps to coverage. CoverageFray is how far low coverage raises the
-	 *  erosion threshold, fraying system edges, against fading them. */
+	/** How far down the columns' priority coverage reaches: 0 none, 1 all
+	 *  cloud. StormPriority is how far storm raises a column's priority over
+	 *  plain cloud, CoverageSoftness the threshold's half-width in priority.
+	 *  CoverageFray is how far low coverage raises the erosion threshold,
+	 *  fraying system edges, against fading them. */
     float CloudCover;
-    float CoverageGain;
+    float StormPriority;
     float CoverageSoftness;
     float CoverageFray;
 
@@ -299,7 +301,7 @@ struct TRFieldParams
  *
  *    CloudProfile      CloudBase, CloudThickness, SurfaceSoftness, CeilingFalloff
  *    CloudCurves       TopCurve, BottomCurve, CloudSlope, WarpStretch
- *    CloudCoverage     CloudCover, CoverageGain, CoverageSoftness, ErosionGain
+ *    CloudCoverage     CloudCover, StormPriority, CoverageSoftness, ErosionGain
  *    CloudType         TypeBias, TypeCloud, TypeTropical, ErosionAscent
  *    CloudLid          PressureScale, CeilingDepth, CeilingPressure, StratusDepth
  *    CloudLift         BaseTropical, BasePressure, AltitudeGain, AltitudeLift
@@ -355,7 +357,7 @@ TRFieldParams TR_BuildField(
     F.WarpStretch = CloudCurves.w;
 
     F.CloudCover = CloudCoverage.x;
-    F.CoverageGain = CloudCoverage.y;
+    F.StormPriority = max(CloudCoverage.y, 0.0f);
     F.CoverageSoftness = max(CloudCoverage.z, 1e-3f);
     F.ErosionGain = max(CloudCoverage.w, 0.0f);
 
@@ -549,12 +551,15 @@ TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler,
 
 /** The column at a spun direction N from its inputs.
  *
- *  COVERAGE IS THE SIM'S CLOUD FIELD, THRESHOLDED. CoverageGain maps the
- *  field's typical range onto [0, 1]; CloudCover sets the threshold, at 1 -
- *  CloudCover, and CoverageSoftness the width either side. A threshold rather
- *  than an offset: clear sky stays clear at any CloudCover, and a system keeps
- *  a defined edge whatever the global amount. Inside it coverage reaches 1 and
- *  erosion breaks it up.
+ *  COVERAGE IS A THRESHOLD ON PRIORITY. A column's priority is its cloud
+ *  amount raised by its storm: amount * (1 + StormPriority * storm) /
+ *  (1 + StormPriority). Hurricanes, which hold the densest cloud and full
+ *  storm, rank highest, then storms, then plain cloud, which tops out at
+ *  1 / (1 + StormPriority). CloudCover sweeps the threshold down through that
+ *  ranking: at 0 nothing is covered, low values keep only hurricanes and large
+ *  storms, and the rest comes in toward 1. Storm raises only cloud that
+ *  exists, so clear sky stays clear at any setting, and a system keeps a
+ *  defined edge. Inside it coverage reaches 1 and erosion breaks it up.
  *
  *  PITFALL: an additive CloudCover lifts every column by the same amount, so
  *  raising it to recover cloud flattens the sim's contrast until the noise,
@@ -583,9 +588,9 @@ TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler,
  *  keeps the base exact.
  *
  *  DEPTH FOLLOWS THE CLOUD AMOUNT, the sim's cloud over CloudFull, by
- *  CloudRelief. Separate from CoverageGain, which only places the edges: the
- *  amount must span the sim's range, or relief and type saturate across whole
- *  systems and every column reads as full towering storm cloud. Coverage saturates across a narrow band, so without this every
+ *  CloudRelief. The amount must span the sim's range, or relief and type
+ *  saturate across whole systems and every column reads as full towering
+ *  storm cloud. Coverage saturates across a narrow band, so without this every
  *  covered column is full depth and the sim's gradients -- spiral bands, a
  *  storm's rise toward its eyewall -- read as flat decks with cliff edges
  *  rather than as relief. PITFALL: relief steepens the top wherever the cloud
@@ -607,15 +612,21 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
     Col.Ascent = Weather.x;
     Col.Altitude = saturate(F.AltitudeGain * Weather.z);
 
-    const float Threshold = 1.0f - F.CloudCover;
     const float Amount = saturate(Weather.y / F.CloudFull);
+    const float Storm = saturate(Weather.w);
 
-    Col.Coverage = smoothstep(
-		Threshold - F.CoverageSoftness, Threshold + F.CoverageSoftness, F.CoverageGain * Weather.y);
+    const float Priority = Amount * (1.0f + F.StormPriority * Storm) / (1.0f + F.StormPriority);
+
+	// From above the highest priority at CloudCover 0 to just above none at 1,
+	// so both ends are exact: nothing, then every column holding cloud.
+    const float Soft = F.CoverageSoftness;
+    const float Threshold = lerp(1.0f + Soft, Soft, saturate(F.CloudCover));
+
+    Col.Coverage = smoothstep(Threshold - Soft, Threshold + Soft, Priority);
 
     Col.Type = saturate(F.TypeBias + F.TypeTropical * Tropical
 		+ F.TypeCloud * pow(Amount, F.TypeCurve)
-		+ F.TypeStorm * pow(saturate(Weather.w), F.TypeCurve));
+		+ F.TypeStorm * pow(Storm, F.TypeCurve));
 
 	// Layered cloud is stratus, cellular where the air sinks, and cirrus as it
 	// rises; towering cloud is cumulus at any height.

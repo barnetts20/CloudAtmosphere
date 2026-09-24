@@ -1243,6 +1243,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		FMath::Clamp(Config->StormCellStorm, 0.0f, 1.0f));
 
 	Out.CellCount = FMath::Clamp(Config->MaxStormCells, 0, FlowSimShader::MaxStormCells);
+	Out.CellMaxFroude = FMath::Max(Config->StormCellMaxFroude, 0.0f);
 
 	Out.StepIndex = StepsCompleted;
 

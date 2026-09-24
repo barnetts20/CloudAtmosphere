@@ -75,6 +75,7 @@ SHADER_PARAMETER(FVector4f, SimCellMotion)
 SHADER_PARAMETER(FVector4f, SimCellGenesis)
 SHADER_PARAMETER(FVector4f, SimCellCloud)
 SHADER_PARAMETER(int32, SimCellCount)
+SHADER_PARAMETER(float, SimCellMaxFroude)
 SHADER_PARAMETER(int32, SimStepIndex)
 
 // -- Noise coordinates --------------------------------------------------
