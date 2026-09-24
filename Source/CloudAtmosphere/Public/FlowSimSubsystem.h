@@ -58,8 +58,7 @@ public:
 	 *
 	 *  ONE MAP PER PLANET, NOT PER VIEW: the map reaches the march as a material
 	 *  parameter, which has no view dimension, so a second viewport shares the
-	 *  first's camera-derived layer fades. An LOD mismatch in the secondary view
-	 *  rather than a wrong shadow, and a property of the delivery. */
+	 *  first's camera-derived layer fades. */
 	void RequestShadowBake(const FGasGiantShadowParams& InParams);
 
 	/** The terrestrial field's bake. A SEPARATE QUEUE, not an overload sharing
@@ -87,8 +86,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	bool SaveSnapshot(UFlowSnapshot* Target);
 
-	/** Advance exactly N substeps and then pause. Watching one advection step at a
-	 *  time in the residual view is what localises a discretisation bug. */
+	/** Advance exactly N substeps and then pause. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	void StepOnce(int32 NumSteps = 1);
 
@@ -112,10 +110,8 @@ public:
 	int32 GetStepsLastFrame() const { return LastSubsteps; }
 
 	/** Current Courant number: peak rate * step * GridLongitude / 2pi, at the
-	 *  step the last frame took. A consequence of the speed, the profile and
-	 *  the grid rather than a control.
-	 *  Above 0.33 the numerical diffusion becomes a real dissipation term, so it
-	 *  is worth watching when tuning DragRate. */
+	 *  step the last frame took. Above 0.33 the numerical diffusion becomes a
+	 *  real dissipation term, so it is worth watching when tuning DragRate. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	float GetCourant() const;
 
@@ -139,9 +135,7 @@ private:
 	bool BuildParams(FFlowSimParams& OutParams, float Step) const;
 
 	/** Checks the render targets against the grid, reconfiguring them when
-	 *  bAutoResizeTargets is set. Returns false if they remain unusable. All of
-	 *  the validation before any of the dispatches: a half-configured run is worse
-	 *  than a refused one, because it produces output that looks like a result. */
+	 *  bAutoResizeTargets is set. Returns false if they remain unusable. */
 	bool PrepareTargets() const;
 
 	UPROPERTY(Transient)
@@ -168,6 +162,11 @@ private:
 	/** Logs the speed, the steps it takes per frame at 60 fps, and the Courant
 	 *  numbers at that step. Reported, never enforced. */
 	void ReportCourant() const;
+
+	/** Logs the stack's mode wave speeds, how far the thermal shear is past the
+	 *  point storms grow at, and warns when the balanced interfaces reach the
+	 *  edge of the stack. */
+	void ReportStack() const;
 
 	bool bTriedAutoStart = false;
 

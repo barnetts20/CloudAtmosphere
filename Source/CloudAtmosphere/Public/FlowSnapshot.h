@@ -34,6 +34,9 @@ struct FFlowSnapshotProvenance
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
 	float PlanetaryVorticity = 0.0f;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
+	float ThermalShear = 0.0f;
+
 	/** True when this profile would draw the same jets at the same latitudes.
 	 *  Only the parameters that place the jets are compared; the rest change how
 	 *  the field evolves, not where its structure sits. */
@@ -45,7 +48,8 @@ struct FFlowSnapshotProvenance
 			&& FMath::IsNearlyEqual(JetStrength, Other.JetStrength, Tol)
 			&& FMath::IsNearlyEqual(EquatorialBoost, Other.EquatorialBoost, Tol)
 			&& FMath::IsNearlyEqual(Asymmetry, Other.Asymmetry, Tol)
-			&& FMath::IsNearlyEqual(WidthBias, Other.WidthBias, Tol);
+			&& FMath::IsNearlyEqual(WidthBias, Other.WidthBias, Tol)
+			&& FMath::IsNearlyEqual(ThermalShear, Other.ThermalShear, Tol);
 	}
 };
 
@@ -56,25 +60,26 @@ struct FFlowSnapshotProvenance
  *  that presents as the sim misbehaving. A float array round-trips exactly.
  *
  *  THE LAYOUT IS THE SOLVER'S STATE, one plane per float: u faces, v faces,
- *  the geopotential, cloud fraction, cloud times formation ascent, then noise
- *  phase A's displacement xyz and phase B's, each plane layer-major, then row,
- *  then column. See FFlowSimulation::StateFloatsPerCell.
+ *  the layer thickness, cloud fraction, cloud times formation ascent, vapour,
+ *  storm, then noise phase A's displacement xyz and phase B's, each plane
+ *  layer-major, then row, then column; then the storm cells, eight floats a
+ *  slot. See FFlowSimulation::StateFloatsPerCell.
  *
- *  PITFALL: THE TRACERS ARE STATE TOO. The clouds and noise the deck draws are
- *  carried by the sim, not derived from the flow; a snapshot without them
- *  restores the winds under an empty sky, which reads as a fresh seed. */
+ *  PITFALL: THE TRACERS ARE STATE TOO. The clouds, moisture and noise the deck
+ *  draws are carried by the sim, not derived from the flow; a snapshot without
+ *  them restores the winds under an empty sky, which reads as a fresh seed. */
 UCLASS(BlueprintType)
 class CLOUDATMOSPHERE_API UFlowSnapshot : public UDataAsset
 {
 	GENERATED_BODY()
 
 public:
-	/** Grid this was captured at. A restore onto a different grid is refused
-	 *  rather than resampled. */
+	/** Grid this was captured at, layers included. A restore onto a different
+	 *  grid is refused rather than resampled. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Snapshot")
 	FIntVector Grid = FIntVector::ZeroValue;
 
-	/** Length Grid.X * Grid.Y * Grid.Z * FloatsPerCell. */
+	/** Length Grid.X * Grid.Y * Grid.Z * FloatsPerCell + TrailingFloats. */
 	UPROPERTY()
 	TArray<float> State;
 
@@ -92,12 +97,16 @@ public:
 	/** Floats per cell the current solver stores. Matches
 	 *  FFlowSimulation::StateFloatsPerCell; duplicated so this header stays free
 	 *  of the render-side one. */
-	static constexpr int32 FloatsPerCell = 11;
+	static constexpr int32 FloatsPerCell = 13;
+
+	/** The storm cells after the planes. Matches
+	 *  FFlowSimulation::StateTrailingFloats. */
+	static constexpr int32 TrailingFloats = 8 * 32;
 
 	bool IsValidFor(const FIntVector& InGrid) const
 	{
 		const int32 N = InGrid.X * InGrid.Y * InGrid.Z;
 
-		return Grid == InGrid && N > 0 && State.Num() == N * FloatsPerCell;
+		return Grid == InGrid && N > 0 && State.Num() == N * FloatsPerCell + TrailingFloats;
 	}
 };

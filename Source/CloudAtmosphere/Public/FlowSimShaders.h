@@ -25,13 +25,20 @@ SHADER_PARAMETER(float, SimWidthBias)
 SHADER_PARAMETER(int32, SimZonalProfile)
 SHADER_PARAMETER_ARRAY(FVector4f, SimLayerProfile, [8])
 
+// -- Stack --------------------------------------------------------------
+SHADER_PARAMETER_ARRAY(FVector4f, SimLayerState, [8])
+SHADER_PARAMETER_ARRAY(FVector4f, SimMatMontgomery, [16])
+SHADER_PARAMETER_ARRAY(FVector4f, SimMatMontgomeryInverse, [16])
+SHADER_PARAMETER_ARRAY(FVector4f, SimMatModeToLayer, [16])
+SHADER_PARAMETER_ARRAY(FVector4f, SimMatLayerToMode, [16])
+SHADER_PARAMETER_ARRAY(FVector4f, SimMatModeToMontgomery, [16])
+
 // -- Time, rotation and gravity waves -----------------------------------
 SHADER_PARAMETER(float, SimDeltaTime)
 SHADER_PARAMETER(float, SimTime)
 SHADER_PARAMETER(float, SimPlanetaryVorticity)
 SHADER_PARAMETER(float, SimWaveSpeedSq)
 SHADER_PARAMETER(float, SimImplicitWeight)
-SHADER_PARAMETER(float, SimHelmholtzScale)
 
 // -- Forcing volume -----------------------------------------------------
 SHADER_PARAMETER(int32, SimForcingChannel)
@@ -47,11 +54,23 @@ SHADER_PARAMETER(float, SimDragRate)
 SHADER_PARAMETER(float, SimLayerCoupling)
 SHADER_PARAMETER(float, SimDivergenceDamping)
 SHADER_PARAMETER(float, SimThermalRelaxation)
+SHADER_PARAMETER(FVector4f, SimThermalParams)
 
-// -- Cloud tracer -------------------------------------------------------
+// -- Moisture, cloud and storms -----------------------------------------
 SHADER_PARAMETER(float, SimCondensationRate)
 SHADER_PARAMETER(float, SimEvaporationRate)
 SHADER_PARAMETER(float, SimCloudDecay)
+SHADER_PARAMETER(FVector4f, SimMoistureParams)
+SHADER_PARAMETER(float, SimLatentHeating)
+SHADER_PARAMETER(FVector4f, SimStormParams)
+SHADER_PARAMETER(float, SimWindEvaporation)
+
+// -- Storm cells --------------------------------------------------------
+SHADER_PARAMETER(FVector4f, SimCellShape)
+SHADER_PARAMETER(FVector4f, SimCellLife)
+SHADER_PARAMETER(FVector4f, SimCellMotion)
+SHADER_PARAMETER(FVector4f, SimCellGenesis)
+SHADER_PARAMETER(int32, SimStepIndex)
 
 // -- Noise coordinates --------------------------------------------------
 SHADER_PARAMETER(float, SimNoiseDriftRate)
@@ -80,13 +99,13 @@ SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float>, SimPhiSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float>, SimPhiStarSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float>, SimRhsSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float2>, SimSpectrumSRV)
-SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float2>, SimCloudSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimTracerSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimNoiseSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimLatLonSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimCentreLatestSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimLatLonLatestSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float2>, SimRowMeanSRV)
-SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, SimPhiEqSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, SimMontgomeryEqSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, SimGlobalMeanSRV)
 
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float2>, SimFaceUAV)
@@ -96,15 +115,17 @@ SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float>, SimPhiUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float>, SimPhiStarUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float>, SimRhsUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float2>, SimSpectrumUAV)
-SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float2>, SimCloudUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimTracerUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimNoiseUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimLatLonUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, SimRowMeanUAV)
-SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, SimPhiEqUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, SimMontgomeryEqUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, SimGlobalMeanUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimOutputUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SimDebugUAV)
 
+SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FVector4f>, SimCellSRV)
+SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FVector4f>, SimCellUAV)
 SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, SimRestoreBuffer)
 SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, SimCaptureBuffer)
 
@@ -141,6 +162,10 @@ namespace FlowSimShader
 
 	/** Tallest column the latitude solve holds in group shared memory. */
 	static constexpr int32 MaxGridLatitude = 1024;
+
+	/** Storm cell slots, and the thread group of the pass that advances them.
+	 *  PITFALL: UFlowSnapshot::CellFloats is sized from this too. */
+	static constexpr int32 MaxStormCells = 32;
 
 	/** Gutter texels around each atlas face. PITFALL: must equal
 	 *  FLOW_ATLAS_GUTTER in FlowField.ush, which the materials read without
@@ -200,6 +225,7 @@ GG_DECLARE_SIM_SHADER(FFlowSimInitStateCS)
 GG_DECLARE_SIM_SHADER(FFlowSimReduceRowsCS)
 GG_DECLARE_SIM_SHADER(FFlowSimReduceGlobalCS)
 GG_DECLARE_SIM_SHADER(FFlowSimReconstructCS)
+GG_DECLARE_SIM_SHADER(FFlowSimCellsCS)
 GG_DECLARE_SIM_SHADER(FFlowSimPredictCS)
 GG_DECLARE_SIM_SHADER(FFlowSimFilterCS)
 GG_DECLARE_SIM_SHADER(FFlowSimRhsCS)

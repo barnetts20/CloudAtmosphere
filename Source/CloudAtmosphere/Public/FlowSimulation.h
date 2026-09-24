@@ -17,8 +17,8 @@ DECLARE_LOG_CATEGORY_EXTERN(LogFlowSim, Log, All);
  *  POOLED RATHER THAN TRANSIENT, because RDG resources live for one graph and a
  *  simulation is defined by state that survives between them.
  *
- *  THE STATE is the face velocities and the geopotential. Everything else is
- *  rebuilt within a substep.
+ *  THE STATE is the face velocities, the layer thicknesses, the tracers, the
+ *  noise displacements and the storm cells. Everything else is rebuilt within a substep.
  *
  *  THE FACE PING-PONG IS TRACKED RATHER THAN INFERRED. Predict, Filter and
  *  Correct each read every face and write every face, so the faces are two
@@ -26,14 +26,24 @@ DECLARE_LOG_CATEGORY_EXTERN(LogFlowSim, Log, All);
  *  flips means the live buffer alternates between substeps, which is why the
  *  index is a member and every early-out path has to leave it consistent.
  *
- *  The geopotential needs no ping-pong: the Helmholtz inverse transform writes
- *  it once per substep. */
+ *  The thicknesses need no ping-pong: Correct writes them once per substep from
+ *  the modal amplitudes the solve leaves in PhiStar. */
 class CLOUDATMOSPHERE_API FFlowSimulation
 {
 public:
-	/** Floats per cell in a snapshot: u, v, phi, the cloud pair, and both
-	 *  noise phases' displacements (xyz each). */
-	static constexpr int32 StateFloatsPerCell = 11;
+	/** Floats per cell in a snapshot: u, v, phi, the four tracer channels
+	 *  (cloud, cloud ascent, vapour, storm), and both noise phases'
+	 *  displacements (xyz each). */
+	static constexpr int32 StateFloatsPerCell = 13;
+
+	/** Floats after the per-cell planes: every storm cell slot's two float4s. */
+	static constexpr int32 StateTrailingFloats = 8 * 32;
+
+	/** Floats a snapshot of this grid holds. */
+	static int32 StateFloats(const FIntVector& Grid)
+	{
+		return Grid.X * Grid.Y * Grid.Z * StateFloatsPerCell + StateTrailingFloats;
+	}
 
 	/** Discard all state. The next Enqueue rebuilds and re-seeds. */
 	void RequestReset();
@@ -68,6 +78,7 @@ private:
 	/** Centre, explicit and output fields of the current faces. bLatest writes
 	 *  the output pair the resample blends toward, rather than the working pair. */
 	void AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R, bool bLatest);
+	void AddCellsPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	void AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, struct FFlowSimResources& R);
 	void AddDebugPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	void AddResamplePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
@@ -76,13 +87,22 @@ private:
 	TRefCountPtr<IPooledRenderTarget> PooledCentre;
 	TRefCountPtr<IPooledRenderTarget> PooledExplicit;
 	TRefCountPtr<IPooledRenderTarget> PooledPhi;
+
+	/** phi* until the solve, then the modal amplitudes Correct reads. */
 	TRefCountPtr<IPooledRenderTarget> PooledPhiStar;
 	TRefCountPtr<IPooledRenderTarget> PooledRhs;
 	TRefCountPtr<IPooledRenderTarget> PooledSpectrum[2];
-	TRefCountPtr<IPooledRenderTarget> PooledCloud[2];
 
-	/** Noise displacements, phase A slices then phase B. Flips with the cloud. */
+	/** Cloud, cloud ascent, vapour and storm per layer. */
+	TRefCountPtr<IPooledRenderTarget> PooledTracer[2];
+
+	/** Storm cells, two float4 per slot, advanced in place. */
+	TRefCountPtr<FRDGPooledBuffer> PooledCells;
+
+	/** Noise displacements, phase A slices then phase B. Flips with the
+	 *  tracers. */
 	TRefCountPtr<IPooledRenderTarget> PooledNoise[2];
+
 	/** The output on the sim's own grid, before the resample onto the atlas.
 	 *  Doubles as the previous state's output once a frame's steps are done. */
 	TRefCountPtr<IPooledRenderTarget> PooledLatLon;
@@ -93,15 +113,15 @@ private:
 	TRefCountPtr<IPooledRenderTarget> PooledLatLonLatest;
 
 	TRefCountPtr<IPooledRenderTarget> PooledRowMean;
-	TRefCountPtr<IPooledRenderTarget> PooledPhiEq;
+	TRefCountPtr<IPooledRenderTarget> PooledMontgomeryEq;
 	TRefCountPtr<IPooledRenderTarget> PooledGlobalMean;
 
 	/** Which of PooledFace holds the live faces. */
 	int32 CurrentFace = 0;
 
-	/** Which of PooledCloud and PooledNoise hold the live tracers. Flips once
+	/** Which of PooledTracer and PooledNoise hold the live tracers. Flips once
 	 *  per substep. */
-	int32 CurrentCloud = 0;
+	int32 CurrentTracer = 0;
 
 	/** Grid the pooled state was allocated for. A change reallocates and
 	 *  re-seeds. */

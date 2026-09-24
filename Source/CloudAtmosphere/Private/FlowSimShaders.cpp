@@ -21,6 +21,7 @@ namespace FlowSimShader
 		OutEnvironment.SetDefine(TEXT("GG_SIM_THREADS_LINE"), ThreadGroupSizeLine);
 		OutEnvironment.SetDefine(TEXT("GG_SIM_LINE_MAX"), MaxGridLongitude);
 		OutEnvironment.SetDefine(TEXT("GG_SIM_COLUMN_MAX"), MaxGridLatitude);
+		OutEnvironment.SetDefine(TEXT("GG_SIM_MAX_CELLS"), MaxStormCells);
 
 		// The Rhs pass reads the R32F UAV it also writes. R32F is in the
 		// guaranteed typed-UAV-load set; every other UAV here is write-only, which
@@ -40,6 +41,7 @@ GG_IMPLEMENT_SIM_SHADER(FFlowSimInitStateCS, "MainInitStateCS")
 GG_IMPLEMENT_SIM_SHADER(FFlowSimReduceRowsCS, "MainReduceRowsCS")
 GG_IMPLEMENT_SIM_SHADER(FFlowSimReduceGlobalCS, "MainReduceGlobalCS")
 GG_IMPLEMENT_SIM_SHADER(FFlowSimReconstructCS, "MainReconstructCS")
+GG_IMPLEMENT_SIM_SHADER(FFlowSimCellsCS, "MainCellsCS")
 GG_IMPLEMENT_SIM_SHADER(FFlowSimPredictCS, "MainPredictCS")
 GG_IMPLEMENT_SIM_SHADER(FFlowSimFilterCS, "MainFilterCS")
 GG_IMPLEMENT_SIM_SHADER(FFlowSimRhsCS, "MainRhsCS")

@@ -23,33 +23,47 @@ enum class EFlowZonalProfile : uint8
 	ThreeCell   UMETA(DisplayName = "Three cell (terrestrial)"),
 };
 
+/** Where the thermal shear sits in latitude. */
+UENUM(BlueprintType)
+enum class EFlowThermalShape : uint8
+{
+	/** One zone per hemisphere about BaroclinicLatitude: the equator-to-pole
+	 *  temperature contrast of a terrestrial planet. */
+	Midlatitude UMETA(DisplayName = "Midlatitude zone"),
+
+	/** The jet profile itself, sign included: a banded gas giant, whose jets
+	 *  decay with height. */
+	FollowJets  UMETA(DisplayName = "Follow the jets"),
+};
+
 /** Which field the debug view renders. Mirrors SIM_DEBUG_* in FlowSim.usf. */
 UENUM(BlueprintType)
 enum class EFlowDebugMode : uint8
 {
 	Vorticity   UMETA(DisplayName = "Vorticity"),
 
-	/** Geopotential less its zonal mean. Positive in highs in both hemispheres. */
+	/** Montgomery potential less its zonal mean. Positive in highs in both
+	 *  hemispheres. */
 	Pressure    UMETA(DisplayName = "Pressure"),
 
 	Speed       UMETA(DisplayName = "Speed"),
 	East        UMETA(DisplayName = "Eastward velocity"),
 	North       UMETA(DisplayName = "Northward velocity"),
 
-	/** Rhs - (I - sL) phi, featureless once converged. MainDebugVisCS has the
-	 *  note on reading one that is not. */
+	/** Rhs - (I - sL) psi for the vertical mode DebugLayer selects,
+	 *  featureless once converged. */
 	Residual    UMETA(DisplayName = "Helmholtz residual"),
 
 	/** Zonal-mean eastward velocity minus the profile: whether the nudge holds. */
 	ZonalError  UMETA(DisplayName = "Zonal profile error"),
 
-	/** -divergence: red rising, blue sinking. */
+	/** The layer's vertical motion: red rising, blue sinking. */
 	Vertical    UMETA(DisplayName = "Vertical motion"),
 
-	/** Speed over gravity-wave speed. */
+	/** Speed over the wave speed DeformationRadius sets. */
 	Froude      UMETA(DisplayName = "Froude number"),
 
-	/** The cloud tracer, 0 to 1. */
+	/** The layer's cloud tracer, 0 to 1. */
 	Cloud       UMETA(DisplayName = "Cloud"),
 
 	/** The vertical motion the cloud formed at, 0 to 1. */
@@ -57,17 +71,27 @@ enum class EFlowDebugMode : uint8
 
 	/** Noise displacement magnitude, phase A, in radians. */
 	NoiseDisplacement UMETA(DisplayName = "Noise displacement"),
+
+	/** Relative humidity less CondensationOnset: red where rising air would
+	 *  condense. */
+	Humidity    UMETA(DisplayName = "Relative humidity"),
+
+	/** Storm intensity, 0 to 1. Storm cells show as discs with a clear eye. */
+	Storm       UMETA(DisplayName = "Storm"),
+
+	/** Height of the layer's top: the free surface on layer 0, an interface
+	 *  below it. */
+	LayerHeight UMETA(DisplayName = "Layer top height"),
 };
 
-/** Per-layer multipliers on the shared jet profile: the vertical wind shear.
- *  Multipliers rather than independent profiles, so every layer's jets sit at
- *  the same latitudes. */
+/** Per-layer settings. Profile values are multipliers on the shared jet
+ *  profile, so every layer's jets sit at the same latitudes. */
 USTRUCT(BlueprintType)
 struct FFlowLayerProfile
 {
 	GENERATED_BODY()
 
-	/** Scales JetStrength. Below 1 gives a slower deep layer. */
+	/** Scales JetStrength. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer")
 	float JetScale = 1.0f;
 
@@ -79,9 +103,15 @@ struct FFlowLayerProfile
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer")
 	float ForcingScale = 1.0f;
 
-	/** Scales the drag. */
+	/** Scales the drag. The bottom layer carries the surface drag; layers above
+	 *  it want little. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer")
 	float DragScale = 1.0f;
+
+	/** Relative depth of the layer in the stack. A thicker top layer leaves the
+	 *  interface more room to rise toward the poles before it reaches the top. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer", meta = (ClampMin = "0.1"))
+	float DepthScale = 1.0f;
 };
 
 namespace FlowSimStep
@@ -102,19 +132,23 @@ namespace FlowSimStep
 	/** Hang guard, not a budget: one frame's graph holds about a dozen passes
 	 *  per step. Past it the sim runs slower than asked. */
 	static constexpr int32 MaxPerFrame = 2048;
+
+	/** Step above which a stack of layers runs at no less than StackWeight: its
+	 *  layers' explicit pressure terms move at each other's speeds, and at
+	 *  large steps that amplifies polar grid-scale noise below it. */
+	static constexpr float StackLargeStep = 1e-3f;
+	static constexpr float StackWeight = 0.75f;
 }
 
 /** Everything the sim needs, authored. Re-read at the top of each frame, so the
  *  asset can be edited while the sim runs; only the grid dimensions are latched.
  *
  *  THE REGIME IS SET BY THREE RATIOS, and every look control sits inside it:
- *    Rossby   JetStrength / PlanetaryVorticity. Low is Earth-like: flow slow
- *             against rotation, large balanced systems.
- *    Froude   peak speed / gravity-wave speed. Must stay below about 0.5, or the
- *             flow forms hydraulic jumps.
- *    Size     DeformationRadius. The eddy scale: small gives many narrow bands
- *             and small vortices, large a few big systems.
- *  The start log reports all three. */
+ *    Rossby   JetStrength / PlanetaryVorticity. Low is Earth-like.
+ *    Froude   peak speed / gravity-wave speed. Must stay below about 0.5.
+ *    Size     DeformationRadius. The eddy scale.
+ *  On a stack, the thermal shear against the deformation radius sets how
+ *  readily the shear breaks into storms. The start log reports all of them. */
 UCLASS(BlueprintType)
 class CLOUDATMOSPHERE_API UFlowSimConfig : public UDataAsset
 {
@@ -128,23 +162,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (ClampMin = "32", ClampMax = "2048"))
 	int32 GridLongitude = 512;
 
-	/** Latitude rows, in sin(latitude). Half the longitude count gives roughly
-	 *  square cells in the tropics. At most 1024, the tallest column the
+	/** Latitude rows, in sin(latitude). At most 1024, the tallest column the
 	 *  Helmholtz solve holds. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (ClampMin = "16", ClampMax = "1024"))
 	int32 GridLatitude = 256;
 
-	/** Stack depth. Two is the smallest with any vertical shear. */
+	/** Layers in the stack, 0 on top, coupled through their pressure. Two is
+	 *  the smallest with baroclinic storms; one is a single shallow layer. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (ClampMin = "1", ClampMax = "8"))
-	int32 LayerCount = 3;
+	int32 LayerCount = 2;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid")
 	TArray<FFlowLayerProfile> LayerProfiles;
 
 	// -- Jet profile --------------------------------------------------------
-	//
-	// The zonal flow the nudge maintains, and the one the sim starts balanced
-	// on. See GasGiantJets.ush.
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile")
 	EFlowZonalProfile ZonalProfile = EFlowZonalProfile::Banded;
@@ -168,40 +199,40 @@ public:
 
 	// -- Physics ------------------------------------------------------------
 
-	/** 2 * Omega. Sets the Rossby number against JetStrength and, through its
-	 *  variation with latitude, the beta effect that arrests the inverse cascade
-	 *  into jets.
+	/** 2 * Omega. Sets the Rossby number against JetStrength and the beta
+	 *  effect that arrests the inverse cascade into jets.
 	 *
-	 *  PITFALL: also the explicit Coriolis step. Its peak rotation per substep is
-	 *  this times the step size; above about 0.5 radians the split between
-	 *  explicit rotation and implicit pressure starts radiating gravity waves. */
+	 *  PITFALL: also the explicit Coriolis step. Above about 0.5 radians of
+	 *  rotation per step the split between explicit rotation and implicit
+	 *  pressure radiates gravity waves. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics")
 	float PlanetaryVorticity = 24.0f;
 
-	/** Rossby deformation radius at 45 degrees, in planet radii: the scale where
-	 *  rotation and stratification balance, and so the size eddies settle at.
-	 *  The gravity-wave speed follows as c = Ld * PlanetaryVorticity * sin(45).
-	 *  Large reduces the model to non-divergent flow. */
+	/** Rossby deformation radius at 45 degrees, in planet radii: the size eddies
+	 *  settle at. On a stack it is the first internal mode's, the one weather
+	 *  systems grow at; the stack's depth follows from it and Stratification. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.01"))
 	float DeformationRadius = 0.2f;
 
+	/** Density step at each interface, as a fraction of the surface's. Small
+	 *  keeps the free surface nearly flat, so pressure systems are carried by
+	 *  the interfaces. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float Stratification = 0.1f;
+
 	/** Sim time per second of real time: THE SPEED HANDLE. The step is
 	 *  StepSize whatever the speed, so speed sets the steps per frame and the
-	 *  cost with it, and never the look. A live change continues the same
-	 *  state. Zero freezes the sim without tearing it down. */
+	 *  cost with it, and never the look. Zero freezes the sim. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.0"))
 	float SimSpeed = 0.0025f;
 
-	/** Sim time per step: a look and cost control, independent of speed. The
-	 *  output blends the last two states, so motion is smooth when a frame
-	 *  takes no step.
+	/** Sim time per step: a look and cost control, independent of speed.
 	 *
 	 *  PITFALL: THE WEATHER DEPENDS ON THE STEP, and no conversion of the
 	 *  per-step settings removes that. The semi-Lagrangian interpolation
 	 *  smooths once per step, and the solver splits grid-scale gravity waves
 	 *  between pressure and divergence by an amount the step sets. Larger
-	 *  steps give sharper, thicker cloud; a large live change bursts
-	 *  divergence into cloud across the planet before it settles. */
+	 *  steps give sharper, thicker cloud. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.000001", ClampMax = "0.0086"))
 	float StepSize = 1e-5f;
 
@@ -209,16 +240,15 @@ public:
 
 	// -- Forcing ------------------------------------------------------------
 
-	/** Relaxation of the ZONAL-MEAN eastward velocity toward the profile, per
-	 *  unit time. Not of the field, which would erase every eddy each step.
-	 *  PITFALL: every nudge is an unbalanced push that the flow answers with
-	 *  gravity waves, so strong nudging reads as ripples. */
+	/** Relaxation of each layer's ZONAL-MEAN eastward velocity toward its
+	 *  profile, per unit time. PITFALL: every nudge is an unbalanced push that
+	 *  the flow answers with gravity waves, so strong nudging reads as
+	 *  ripples. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
 	float NudgeRate = 1.0f;
 
 	/** Equilibrium eddy speed the stochastic forcing sustains against the drag,
-	 *  per unit slope of the forcing noise. Divergence-free, so it stirs without
-	 *  pumping mass. */
+	 *  per unit slope of the forcing noise. Divergence-free. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
 	float ForcingAmplitude = 0.3f;
 
@@ -226,75 +256,217 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
 	float ForcingScale = 0.25f;
 
-	/** How long one forcing pattern lives, in sim time. Each is a fresh random
-	 *  draw carried east with the jets, crossfaded into the next, so eddies are
-	 *  born, released and travel. Short is restless stirring; long lets a
-	 *  pattern hold eddies in place. */
+	/** How long one forcing pattern lives, in sim time. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing", meta = (ClampMin = "0.01"))
 	float ForcingLifetime = 0.5f;
 
 	/** Linear drag on the eddy part of the eastward velocity and all of the
-	 *  northward, per unit time. The large-scale energy sink that arrests the
-	 *  cascade, AND what turns flow into lows and out of highs: the Ekman
-	 *  convergence the vertical motion output reads. */
+	 *  northward, per unit time, scaled per layer. The energy sink that arrests
+	 *  the cascade, and what turns flow into lows and out of highs. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
 	float DragRate = 1.5f;
 
-	/** Relaxation between vertically adjacent layers. Weak on purpose: strong
-	 *  coupling collapses the stack to one layer. */
+	/** Relaxation of each layer's velocity toward its neighbours': interfacial
+	 *  friction. Strong coupling erodes the shear storms grow from. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
 	float LayerCoupling = 0.1f;
 
-	/** Fraction of grid-scale divergence removed per step: damps
-	 *  gravity-wave noise and leaves the rotational flow alone. Scaled per row
-	 *  against the grid spacing there, so it is stable at every latitude;
-	 *  larger features are damped in proportion to the square of
-	 *  their wavenumber. */
+	/** Fraction of grid-scale divergence removed per step, scaled per row
+	 *  against the grid spacing there. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing", meta = (ClampMin = "0.0", ClampMax = "0.5"))
 	float DivergenceDamping = 0.05f;
 
-	/** Relaxation of the geopotential toward the profile's balanced state, per
-	 *  unit time: jets maintained through their pressure gradient rather than
-	 *  pushed directly, as a temperature contrast maintains them. Zero leaves the
-	 *  nudge as the only driver. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing", meta = (ClampMin = "0.0"))
-	float ThermalRelaxation = 0.0f;
+	// -- Thermal forcing ----------------------------------------------------
+	//
+	// Each layer's target is the jet profile plus its share of ThermalShear:
+	// all of it on the top layer, none on the bottom. The nudge holds the
+	// winds to it and the relaxation holds the interfaces at the heights in
+	// balance with it, which is the temperature contrast storms draw on.
+
+	/** Rate interfaces relax toward their balanced heights, per unit time, by
+	 *  moving mass between layers; column mass is untouched. On a single layer
+	 *  its thickness relaxes instead. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Thermal Forcing", meta = (ClampMin = "0.0"))
+	float ThermalRelaxation = 0.5f;
+
+	/** Vertical shear between the top and bottom layer, angular rate. Storms
+	 *  grow once it exceeds about PlanetaryVorticity * DeformationRadius^2 at
+	 *  the zone; well past that the interface reaches the top of the stack. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Thermal Forcing")
+	float ThermalShear = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Thermal Forcing")
+	EFlowThermalShape ThermalShape = EFlowThermalShape::Midlatitude;
+
+	/** Centre of the midlatitude zone, degrees. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Thermal Forcing", meta = (ClampMin = "0.0", ClampMax = "90.0"))
+	float BaroclinicLatitude = 45.0f;
+
+	/** Half-width of the midlatitude zone, degrees. Storms need it to span a
+	 *  few deformation radii. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Thermal Forcing", meta = (ClampMin = "1.0", ClampMax = "90.0"))
+	float BaroclinicWidth = 24.0f;
+
+	// -- Moisture -----------------------------------------------------------
+	//
+	// Vapour per layer, in units of the equator's surface saturation. The
+	// surface evaporates into the bottom layer; rising air near saturation
+	// condenses it into cloud, releasing latent heat.
+
+	/** Saturation at the equator and at the poles, bottom layer. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0"))
+	float SaturationEquator = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0"))
+	float SaturationPole = 0.25f;
+
+	/** The top layer's saturation as a fraction of the bottom's; layers between
+	 *  fall geometrically. Cold air aloft holds little. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float UpperSaturation = 0.3f;
+
+	/** Relative humidity at which rising air starts to condense; it condenses
+	 *  fully at saturation. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0", ClampMax = "0.99"))
+	float CondensationOnset = 0.7f;
+
+	/** Rate the surface moistens the bottom layer toward saturation. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0"))
+	float SurfaceEvaporation = 2.0f;
+
+	/** How much the bottom layer's wind speed raises surface evaporation, per
+	 *  unit speed: the moisture supply under a storm's own winds. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0"))
+	float WindEvaporation = 1.0f;
+
+	/** Share of a layer's depth moved up across the interface above it per
+	 *  unit of vapour condensed: the latent heat that deepens lows under
+	 *  condensing air. On a single layer it draws mass up into the layer.
+	 *  PITFALL: a positive feedback; strong values run away into grid-scale
+	 *  convection. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0"))
+	float LatentHeating = 0.1f;
 
 	// -- Cloud --------------------------------------------------------------
 	//
-	// An advected cloud fraction standing in for moisture: it forms where air
-	// rises, clears where air sinks, and is carried by the wind in between.
-	// Rates are per unit time against vertical motion normalised to (-1, 1).
-	// Written to the weather slice's second channel.
+	// An advected cloud fraction fed by condensation, cleared by sinking air,
+	// and carried by the wind in between. Rates are per unit time against
+	// vertical motion normalised to (-1, 1).
 
-	/** How fast rising air fills a column with cloud. */
+	/** How fast rising saturated air fills a column with cloud. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud", meta = (ClampMin = "0.0"))
 	float CondensationRate = 5.0f;
 
-	/** How fast sinking air clears it. */
+	/** How fast sinking air evaporates cloud back into vapour. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud", meta = (ClampMin = "0.0"))
 	float EvaporationRate = 3.0f;
 
-	/** How long cloud survives in still air before decaying, in sim time. Longer
-	 *  carries cloud further from where it formed. */
+	/** How long cloud survives in still air before raining out, in sim time. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud", meta = (ClampMin = "0.001"))
-	float CloudLifetime = 2.0f;
+	float CloudLifetime = 3.0f;
+
+	// -- Storms -------------------------------------------------------------
+	//
+	// An advected storm intensity, 0 to 1, grown where condensation is
+	// intense and the air spins cyclonically. The deck draws it as storm cloud.
+
+	/** How fast a storm builds at full drive, per unit time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storms", meta = (ClampMin = "0.0"))
+	float StormRate = 4.0f;
+
+	/** Condensing ascent, W near saturation, below which nothing builds. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storms", meta = (ClampMin = "0.0", ClampMax = "0.99"))
+	float StormThreshold = 0.1f;
+
+	/** How much normalised cyclonic vorticity raises the drive. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storms", meta = (ClampMin = "0.0"))
+	float StormSpin = 2.0f;
+
+	/** How long a storm lasts once its drive is gone, in sim time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storms", meta = (ClampMin = "0.001"))
+	float StormLifetime = 1.0f;
+
+	// -- Storm cells ----------------------------------------------------------
+	//
+	// Tracked tropical storms: each spawns where the genesis conditions hold,
+	// moves with the stack's mean flow, spins the flow into a compact vortex
+	// and holds a storm disc with a clear eye while it lives.
+
+	/** Cells alive at once, up to FlowSimShader::MaxStormCells. Zero turns them
+	 *  off. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0", ClampMax = "32"))
+	int32 MaxStormCells = 12;
+
+	/** Spawn attempts per unit sim time, planet-wide. An attempt holds only
+	 *  where the genesis window and humidity allow. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
+	float StormCellSpawnRate = 4.0f;
+
+	/** Vortex radius, degrees of arc; the winds peak at about 0.7 of it. Wants
+	 *  at least four grid cells, 3.5 degrees at 512 columns. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.5", ClampMax = "30.0"))
+	float StormCellRadius = 4.5f;
+
+	/** Peak wind of a full-strength cell's vortex, in the jet's units. What the
+	 *  flow reaches is less, drag working against it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
+	float StormCellWind = 2.0f;
+
+	/** Rate the flow spins toward the vortex and the storm disc fills, per
+	 *  unit time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
+	float StormCellSpinUp = 10.0f;
+
+	/** Eye radius as a fraction of the vortex radius. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float StormCellEye = 0.3f;
+
+	/** Rates intensity grows while conditions hold and decays once they fail,
+	 *  per unit time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
+	float StormCellGrowth = 2.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
+	float StormCellDecay = 1.0f;
+
+	/** Sim time after which a cell decays whatever the conditions. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.01"))
+	float StormCellLifetime = 3.0f;
+
+	/** Poleward-west drift on top of the steering flow, in the jet's units. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
+	float StormCellDrift = 0.05f;
+
+	/** The top layer's reversed share of the vortex: the outflow anticyclone. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellOutflow = 0.5f;
+
+	/** Latitudes, degrees, between which cells form. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0", ClampMax = "90.0"))
+	float GenesisLatitudeMin = 8.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0", ClampMax = "90.0"))
+	float GenesisLatitudeMax = 22.0f;
+
+	/** Speed difference between the top and bottom layers at which the window
+	 *  closes: shear tears a storm apart. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.01"))
+	float GenesisShear = 1.0f;
+
+	/** Bottom layer's relative humidity a cell needs to form; it weakens below
+	 *  0.15 under this. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float GenesisHumidity = 0.85f;
 
 	// -- Noise coordinates --------------------------------------------------
-	//
-	// Per layer, two displacement fields the cloud noise is sampled through:
-	// advected with the flow and reset on phases half a period apart, so the
-	// noise follows real trajectories and the reader crossfades the two.
 
 	/** Solid-body drift the noise carries on its own, as a fraction of the
-	 *  westerly jet's angular rate. The displacements hold only the flow's
-	 *  departure from it, so matching the dominant flow keeps them small. */
+	 *  westerly jet's angular rate. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Coordinates")
 	float NoiseDrift = 0.5f;
 
 	/** How long a displacement accumulates before it resets, in jet turnover
-	 *  times (1 / jet angular rate). Longer follows the flow further and
-	 *  stretches the noise more; 0.5 keeps the typical stretch under 2 to 1. */
+	 *  times (1 / jet angular rate). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Coordinates", meta = (ClampMin = "0.05"))
 	float NoiseResetPeriod = 0.5f;
 
@@ -318,8 +490,7 @@ public:
 
 	// -- Polar filter -------------------------------------------------------
 
-	/** cos(latitude) below which the longitudinal filter engages: 0.9 reaches
-	 *  to about 26 degrees of latitude, 0.35 only to 70. */
+	/** cos(latitude) below which the longitudinal filter engages. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Polar Filter", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float FilterLatitude = 0.9f;
 
@@ -331,7 +502,8 @@ public:
 	// -- Solver -------------------------------------------------------------
 
 	/** Weight of the implicit half of the gravity-wave terms. 0.5 is neutral;
-	 *  above it gravity waves are damped, more strongly the higher. */
+	 *  above it gravity waves are damped. A stack runs at least
+	 *  FlowSimStep::StackWeight at large steps. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "0.5", ClampMax = "1.0"))
 	float ImplicitWeight = 0.6f;
 
@@ -352,8 +524,8 @@ public:
 
 	// -- Start state --------------------------------------------------------
 
-	/** A captured state to start from. Empty means seed and spin up. A grid
-	 *  mismatch is refused and falls back to seeding. */
+	/** A captured state to start from. Empty means seed and spin up. A grid or
+	 *  layout mismatch is refused and falls back to seeding. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Start State")
 	TObjectPtr<UFlowSnapshot> InitialState;
 
@@ -364,17 +536,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spin Up", meta = (ClampMin = "0", ClampMax = "8192"))
 	int32 SpinUpSteps = 300;
 
-	/** Spin-up substeps per frame. Spread over frames so the spin-up neither
-	 *  hitches nor hides: watching the seed organise says more than the
-	 *  converged state. */
+	/** Spin-up substeps per frame. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spin Up", meta = (ClampMin = "1", ClampMax = "64"))
 	int32 MaxSpinUpStepsPerFrame = 8;
 
 	// -- Targets ------------------------------------------------------------
 
-	/** RGBA16F 2D array, sized (GridLongitude, GridLatitude, 2 * LayerCount).
-	 *  Slices [0, L) are flow, [L, 2L) weather; see FlowField.ush. This is what
-	 *  the material samples. */
+	/** RGBA16F 2D array, the cube atlas with 4 * LayerCount slices; see
+	 *  FlowField.ush. This is what the material samples. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Targets")
 	TObjectPtr<UTextureRenderTarget2DArray> FlowTarget;
 
@@ -393,6 +562,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
 	EFlowDebugMode DebugMode = EFlowDebugMode::Vorticity;
 
+	/** Layer to view; the vertical mode, for the residual. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (ClampMin = "0", ClampMax = "7"))
 	int32 DebugLayer = 0;
 
@@ -407,12 +577,36 @@ public:
 	bool bPaused = false;
 };
 
+/** The stack's vertical structure, derived from the config: every layer's
+ *  depth and every coupling matrix, 8 x 8 row-major in 16 float4s. */
+struct FFlowSimStack
+{
+	/** Mean geopotential of each layer. */
+	float Depth[8] = {};
+
+	/** Wave speed squared of each vertical mode, fastest first. */
+	float ModeSpeedSq[8] = {};
+
+	/** Layers to Montgomery potential, and back. */
+	FVector4f Montgomery[16];
+	FVector4f MontgomeryInverse[16];
+
+	/** Modes to layers, layers to modes, modes to Montgomery potential. */
+	FVector4f ModeToLayer[16];
+	FVector4f LayerToMode[16];
+	FVector4f ModeToMontgomery[16];
+
+	/** The wave speed DeformationRadius sets: the first internal mode's, or the
+	 *  single layer's. */
+	float DesignSpeedSq = 1.0f;
+};
+
 /** Flat snapshot handed to the render thread. Captured BY VALUE into a render
  *  command, so it holds no UObject; RHI references are copied on the game
  *  thread. */
 struct FFlowSimParams
 {
-	FIntVector GridSize = FIntVector(512, 256, 3);
+	FIntVector GridSize = FIntVector(512, 256, 2);
 
 	FVector4f JetParams = FVector4f(3.0f, 1.0f, 0.5f, 0.5f);
 	int32 ZonalProfile = 0;
@@ -421,14 +615,18 @@ struct FFlowSimParams
 		FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(),
 		FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero() };
 
+	/** Per layer: x depth, y the Helmholtz scale of the mode in its slice,
+	 *  z saturation factor, w height output scale. */
+	FVector4f LayerState[8] = {
+		FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(),
+		FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero() };
+
+	FFlowSimStack Stack;
+
 	float DeltaTime = 0.0086f;
 	float Time = 0.0f;
 	float PlanetaryVorticity = 24.0f;
-
-	/** c^2, and the derived solver constants. */
-	float WaveSpeedSq = 1.0f;
 	float ImplicitWeight = 0.6f;
-	float HelmholtzScale = 0.0f;
 
 	int32 ForcingChannel = 1;
 	bool bForcingBipolar = true;
@@ -440,11 +638,35 @@ struct FFlowSimParams
 	float DragRate = 1.5f;
 	float LayerCoupling = 0.1f;
 	float DivergenceDamping = 0.05f;
-	float ThermalRelaxation = 0.0f;
+
+	float ThermalRelaxation = 0.5f;
+
+	/** x shear, y shape (0 midlatitude, 1 jets), z zone latitude, w zone
+	 *  half-width, radians. */
+	FVector4f ThermalParams = FVector4f::Zero();
 
 	float CondensationRate = 5.0f;
 	float EvaporationRate = 3.0f;
-	float CloudLifetime = 2.0f;
+	float CloudLifetime = 3.0f;
+
+	/** x saturation at the equator, y at the poles, z condensation onset,
+	 *  w surface evaporation. */
+	FVector4f MoistureParams = FVector4f(1.0f, 0.25f, 0.7f, 2.0f);
+	float WindEvaporation = 1.0f;
+	float LatentHeating = 0.1f;
+
+	/** x rate, y threshold, z spin, w decay rate. */
+	FVector4f StormParams = FVector4f(4.0f, 0.1f, 2.0f, 1.0f);
+
+	/** See SimCellShape, SimCellLife, SimCellMotion and SimCellGenesis in
+	 *  FlowSim.usf. */
+	FVector4f CellShape = FVector4f::Zero();
+	FVector4f CellLife = FVector4f::Zero();
+	FVector4f CellMotion = FVector4f::Zero();
+	FVector4f CellGenesis = FVector4f::Zero();
+
+	/** Steps completed before the frame's first; seeds the cells' spawns. */
+	int32 StepIndex = 0;
 
 	/** Radians per unit sim time, and sim time. */
 	float NoiseDriftRate = 0.0f;

@@ -11,6 +11,7 @@
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/TextureRenderTarget2DArray.h"
 #include "RenderingThread.h"
+#include "Algo/Sort.h"
 
 // TAutoConsoleVariable and FAutoConsoleCommandWithWorldAndArgs.
 #include "HAL/IConsoleManager.h"
@@ -29,7 +30,8 @@ static TAutoConsoleVariable<int32> CVarGasGiantDebugMode(
 	-1,
 	TEXT("Override the config's debug view. -1 uses the config.\n")
 	TEXT("0 Vorticity, 1 Pressure, 2 Speed, 3 East, 4 North,\n")
-	TEXT("5 Helmholtz residual, 6 Zonal profile error, 7 Vertical motion, 8 Froude, 9 Cloud, 10 Cloud formation ascent, 11 Noise displacement."),
+	TEXT("5 Helmholtz residual, 6 Zonal profile error, 7 Vertical motion, 8 Froude, 9 Cloud, 10 Cloud formation ascent, 11 Noise displacement,\n")
+	TEXT("12 Relative humidity, 13 Storm, 14 Layer top height."),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarGasGiantDebugLayer(
@@ -202,28 +204,306 @@ static FAutoConsoleCommandWithWorldAndArgs GFlowSimStatusCmd(
 		}));
 
 // ---------------------------------------------------------------------------
+// The profile and the stack, on the CPU
+// ---------------------------------------------------------------------------
 
-/** Peak angular rate the profile can reach in the fastest layer. The saturation
- *  caps the shaped term at 1 and the equatorial boost rides on top of it; each
- *  layer scales both. PITFALL: reading the shared profile alone under-reports a
- *  layer with JetScale above 1, and the Froude check then passes a regime the
- *  sim cannot balance. */
+namespace
+{
+	int32 LayerCountOf(const UFlowSimConfig& Config)
+	{
+		return FMath::Clamp(Config.LayerCount, 1, 8);
+	}
+
+	FFlowLayerProfile LayerOf(const UFlowSimConfig& Config, int32 Layer)
+	{
+		// Layers past the authored list take an unscaled copy of the shared
+		// profile rather than zero, which would read as a sim bug.
+		return Config.LayerProfiles.IsValidIndex(Layer) ? Config.LayerProfiles[Layer] : FFlowLayerProfile();
+	}
+
+	/** Share of the thermal shear a layer carries: 1 on top, 0 at the bottom. */
+	float ShearShare(int32 Layer, int32 Layers)
+	{
+		return (Layers > 1) ? (float)(Layers - 1 - Layer) / (float)(Layers - 1) : 0.0f;
+	}
+
+	/** Mirrors GG_ZonalRate and SimThreeCellRate, for the reports. */
+	float JetRate(const UFlowSimConfig& Config, float Mu, float Strength, float Boost)
+	{
+		if (Config.ZonalProfile == EFlowZonalProfile::ThreeCell)
+		{
+			const float A = FMath::Abs(Mu);
+			const float Jet = (A - 0.71f) / 0.17f;
+			const float Trades = Mu / 0.33f;
+			const float Polar = (A - 0.97f) / 0.09f;
+
+			return Strength * (FMath::Exp(-Jet * Jet) - 0.35f * FMath::Exp(-Trades * Trades) - 0.5f * FMath::Exp(-Polar * Polar));
+		}
+
+		const float K = Config.BandCount * UE_PI;
+		const float Raw = (FMath::Cos(K * Mu) + 0.45f * FMath::Cos(K * 1.7f * Mu) + Config.Asymmetry * FMath::Sin(K * 0.6f * Mu))
+			* 0.6897f - Config.WidthBias;
+
+		float Saturated = Raw;
+		const float Abs = FMath::Abs(Raw);
+
+		if (Abs > 0.5f)
+		{
+			const float U = FMath::Clamp(Abs - 0.5f, 0.0f, 1.0f);
+			const float U4 = U * U * U * U;
+			Saturated = FMath::Sign(Raw) * (0.5f + U - (U4 * U * U - 3.0f * U4 * U + 2.5f * U4));
+		}
+
+		return Strength * (Saturated + Boost * FMath::Exp(-Mu * Mu * 12.0f));
+	}
+
+	/** Mirrors SimZonalRate: the layer's jets plus its share of the shear. */
+	float LayerZonalRate(const UFlowSimConfig& Config, float Mu, int32 Layer)
+	{
+		const FFlowLayerProfile P = LayerOf(Config, Layer);
+		const float Jets = JetRate(Config, Mu, Config.JetStrength * P.JetScale, Config.EquatorialBoost * P.BoostScale);
+
+		float Shape = 0.0f;
+
+		if (Config.ThermalShape == EFlowThermalShape::FollowJets)
+		{
+			Shape = JetRate(Config, Mu, 1.0f, Config.EquatorialBoost);
+		}
+		else
+		{
+			const float Offset = (FMath::Abs(FMath::Asin(FMath::Clamp(Mu, -1.0f, 1.0f))) - FMath::DegreesToRadians(Config.BaroclinicLatitude))
+				/ FMath::Max(FMath::DegreesToRadians(Config.BaroclinicWidth), 1e-3f);
+
+			Shape = FMath::Exp(-Offset * Offset);
+		}
+
+		return Jets + ShearShare(Layer, LayerCountOf(Config)) * Config.ThermalShear * Shape;
+	}
+
+	/** Eigen-decomposition of a symmetric matrix by cyclic Jacobi rotations:
+	 *  S = Q diag(Lambda) Q^T, eigenvectors in Q's columns. Exact to double
+	 *  precision in a few sweeps at the stack's size. */
+	void SymmetricEigen(int32 N, double S[8][8], double Lambda[8], double Q[8][8])
+	{
+		for (int32 i = 0; i < N; ++i)
+		{
+			for (int32 j = 0; j < N; ++j)
+			{
+				Q[i][j] = (i == j) ? 1.0 : 0.0;
+			}
+		}
+
+		for (int32 Sweep = 0; Sweep < 64; ++Sweep)
+		{
+			double Off = 0.0;
+
+			for (int32 p = 0; p < N; ++p)
+			{
+				for (int32 q = p + 1; q < N; ++q)
+				{
+					Off += S[p][q] * S[p][q];
+				}
+			}
+
+			if (Off < 1e-24)
+			{
+				break;
+			}
+
+			for (int32 p = 0; p < N; ++p)
+			{
+				for (int32 q = p + 1; q < N; ++q)
+				{
+					if (FMath::Abs(S[p][q]) < 1e-300)
+					{
+						continue;
+					}
+
+					const double Theta = 0.5 * (S[q][q] - S[p][p]) / S[p][q];
+					const double T = (Theta >= 0.0 ? 1.0 : -1.0) / (FMath::Abs(Theta) + FMath::Sqrt(Theta * Theta + 1.0));
+					const double C = 1.0 / FMath::Sqrt(T * T + 1.0);
+					const double Sn = T * C;
+
+					for (int32 k = 0; k < N; ++k)
+					{
+						const double Skp = S[k][p];
+						const double Skq = S[k][q];
+						S[k][p] = C * Skp - Sn * Skq;
+						S[k][q] = Sn * Skp + C * Skq;
+					}
+
+					for (int32 k = 0; k < N; ++k)
+					{
+						const double Spk = S[p][k];
+						const double Sqk = S[q][k];
+						S[p][k] = C * Spk - Sn * Sqk;
+						S[q][k] = Sn * Spk + C * Sqk;
+					}
+
+					for (int32 k = 0; k < N; ++k)
+					{
+						const double Qkp = Q[k][p];
+						const double Qkq = Q[k][q];
+						Q[k][p] = C * Qkp - Sn * Qkq;
+						Q[k][q] = Sn * Qkp + C * Qkq;
+					}
+				}
+			}
+		}
+
+		for (int32 i = 0; i < N; ++i)
+		{
+			Lambda[i] = S[i][i];
+		}
+	}
+
+	void PackMatrix(FVector4f Out[16], const double M[8][8], int32 N)
+	{
+		for (int32 i = 0; i < 16; ++i)
+		{
+			Out[i] = FVector4f::Zero();
+		}
+
+		for (int32 r = 0; r < N; ++r)
+		{
+			for (int32 c = 0; c < N; ++c)
+			{
+				const int32 Index = r * 8 + c;
+				Out[Index >> 2][Index & 3] = (float)M[r][c];
+			}
+		}
+	}
+
+	/** The stack's vertical structure. Layer k (0 on top) feels
+	 *  M_k = sum_j A_kj phi_j with A_kj = 1 + Stratification * min(k, j): the
+	 *  free surface, plus the density step of every interface above it. The
+	 *  implicit operator is diag(depth) A, similar to the symmetric
+	 *  D^1/2 A D^1/2, whose eigenvectors give the modes. Depths are scaled so
+	 *  the mode DeformationRadius names runs at its wave speed. */
+	FFlowSimStack BuildStack(const UFlowSimConfig& Config, float WaveSpeed)
+	{
+		const int32 N = LayerCountOf(Config);
+		const double Eps = FMath::Clamp(Config.Stratification, 0.01f, 1.0f);
+
+		double Share[8] = {};
+		double Total = 0.0;
+
+		for (int32 k = 0; k < N; ++k)
+		{
+			Share[k] = FMath::Max(LayerOf(Config, k).DepthScale, 0.1f);
+			Total += Share[k];
+		}
+
+		double A[8][8] = {};
+		double S[8][8] = {};
+
+		for (int32 k = 0; k < N; ++k)
+		{
+			Share[k] /= Total;
+		}
+
+		for (int32 k = 0; k < N; ++k)
+		{
+			for (int32 j = 0; j < N; ++j)
+			{
+				A[k][j] = 1.0 + Eps * FMath::Min(k, j);
+				S[k][j] = FMath::Sqrt(Share[k]) * A[k][j] * FMath::Sqrt(Share[j]);
+			}
+		}
+
+		double Lambda[8] = {};
+		double Q[8][8] = {};
+		SymmetricEigen(N, S, Lambda, Q);
+
+		// Fastest mode first, so slice 0 is the external mode.
+		int32 Order[8];
+
+		for (int32 m = 0; m < N; ++m)
+		{
+			Order[m] = m;
+		}
+
+		Algo::Sort(MakeArrayView(Order, N), [&Lambda](int32 L, int32 R) { return Lambda[L] > Lambda[R]; });
+
+		const double Design = (N > 1) ? Lambda[Order[1]] : Lambda[Order[0]];
+		const double Scale = (double)WaveSpeed * WaveSpeed / FMath::Max(Design, 1e-12);
+
+		FFlowSimStack Out;
+		Out.DesignSpeedSq = WaveSpeed * WaveSpeed;
+
+		double Depth[8] = {};
+		double R[8][8] = {};
+		double RInv[8][8] = {};
+		double AR[8][8] = {};
+		double AInv[8][8] = {};
+		double Speed[8] = {};
+
+		for (int32 k = 0; k < N; ++k)
+		{
+			Depth[k] = Share[k] * Scale;
+			Out.Depth[k] = (float)Depth[k];
+		}
+
+		for (int32 m = 0; m < N; ++m)
+		{
+			Speed[m] = Lambda[Order[m]] * Scale;
+			Out.ModeSpeedSq[m] = (float)Speed[m];
+
+			for (int32 k = 0; k < N; ++k)
+			{
+				R[k][m] = FMath::Sqrt(Depth[k]) * Q[k][Order[m]];
+				RInv[m][k] = Q[k][Order[m]] / FMath::Sqrt(Depth[k]);
+			}
+		}
+
+		// A R, and A^-1 = R Lambda^-1 R^-1 D.
+		for (int32 k = 0; k < N; ++k)
+		{
+			for (int32 m = 0; m < N; ++m)
+			{
+				for (int32 j = 0; j < N; ++j)
+				{
+					AR[k][m] += A[k][j] * R[j][m];
+					AInv[k][m] += R[k][j] / Speed[j] * RInv[j][m] * Depth[m];
+				}
+			}
+		}
+
+		PackMatrix(Out.Montgomery, A, N);
+		PackMatrix(Out.MontgomeryInverse, AInv, N);
+		PackMatrix(Out.ModeToLayer, R, N);
+		PackMatrix(Out.LayerToMode, RInv, N);
+		PackMatrix(Out.ModeToMontgomery, AR, N);
+
+		return Out;
+	}
+
+	float MatrixEntry(const FVector4f M[16], int32 Row, int32 Col)
+	{
+		const int32 Index = Row * 8 + Col;
+		return M[Index >> 2][Index & 3];
+	}
+}
+
+/** Peak angular rate the profile can reach in the fastest layer, shear
+ *  included. PITFALL: reading the shared profile alone under-reports a layer
+ *  with JetScale above 1 or the top of a sheared stack, and the Froude check
+ *  then passes a regime the sim cannot balance. */
 static float PeakRate(const UFlowSimConfig& Config)
 {
-	const int32 Layers = FMath::Clamp(Config.LayerCount, 1, 8);
+	const int32 Layers = LayerCountOf(Config);
 	const bool bBanded = (Config.ZonalProfile == EFlowZonalProfile::Banded);
 
 	float Peak = 0.0f;
 
 	for (int32 i = 0; i < Layers; ++i)
 	{
-		const FFlowLayerProfile P = Config.LayerProfiles.IsValidIndex(i)
-			? Config.LayerProfiles[i]
-			: FFlowLayerProfile();
+		const FFlowLayerProfile P = LayerOf(Config, i);
 
 		const float Boost = bBanded ? FMath::Max(Config.EquatorialBoost * P.BoostScale, 0.0f) : 0.0f;
 
-		Peak = FMath::Max(Peak, FMath::Abs(Config.JetStrength * P.JetScale) * (1.0f + Boost));
+		Peak = FMath::Max(Peak, FMath::Abs(Config.JetStrength * P.JetScale) * (1.0f + Boost)
+			+ ShearShare(i, Layers) * FMath::Abs(Config.ThermalShear));
 	}
 
 	return FMath::Max(Peak, 1e-6f);
@@ -237,10 +517,21 @@ static float ShearBands(const UFlowSimConfig& Config)
 	return (Config.ZonalProfile == EFlowZonalProfile::Banded) ? Config.BandCount : 2.0f;
 }
 
-/** Gravity-wave speed from the deformation radius at 45 degrees. */
+/** Wave speed from the deformation radius at 45 degrees. */
 static float WaveSpeed(const UFlowSimConfig& Config)
 {
 	return FMath::Max(Config.DeformationRadius * Config.PlanetaryVorticity * 0.70710678f, 1e-3f);
+}
+
+/** Implicit weight at a step: a stack at a large step runs at no less than
+ *  FlowSimStep::StackWeight. */
+static float ImplicitWeightAt(const UFlowSimConfig& Config, float Step)
+{
+	const float Authored = FMath::Clamp(Config.ImplicitWeight, 0.5f, 1.0f);
+
+	return (LayerCountOf(Config) > 1 && Step > FlowSimStep::StackLargeStep)
+		? FMath::Max(Authored, FlowSimStep::StackWeight)
+		: Authored;
 }
 
 void UFlowSimSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -300,6 +591,7 @@ void UFlowSimSubsystem::StartSimulation(UFlowSimConfig* InConfig)
 	PendingManualSteps = 0;
 
 	ReportCourant();
+	ReportStack();
 	ReportInertSettings();
 
 	// ResetSimulation owns the restore-or-seed decision, so starting and
@@ -336,11 +628,22 @@ void UFlowSimSubsystem::ReportInertSettings() const
 			Config->ForcingAmplitude);
 	}
 
-	if (Config->LayerCoupling > 0.0f && Config->LayerCount < 2)
+	if (LayerCountOf(*Config) < 2)
 	{
-		UE_LOG(LogFlowSim, Warning,
-			TEXT("LayerCoupling is %.3f but LayerCount is 1, so it does nothing."),
-			Config->LayerCoupling);
+		if (Config->LayerCoupling > 0.0f)
+		{
+			UE_LOG(LogFlowSim, Warning,
+				TEXT("LayerCoupling is %.3f but LayerCount is 1, so it does nothing."),
+				Config->LayerCoupling);
+		}
+
+		if (Config->ThermalShear != 0.0f)
+		{
+			UE_LOG(LogFlowSim, Warning,
+				TEXT("ThermalShear is %.3f but LayerCount is 1: a single layer has no ")
+				TEXT("vertical shear, so it does nothing."),
+				Config->ThermalShear);
+		}
 	}
 
 	if (Config->InitialState && Config->SpinUpSteps > 0)
@@ -364,6 +667,13 @@ void UFlowSimSubsystem::ReportInertSettings() const
 			TEXT("DragRate is 0: no Ekman convergence, so the vertical motion output ")
 			TEXT("carries only gravity waves and the unbalanced flow, and the ")
 			TEXT("stochastic forcing (scaled by drag) is off."));
+	}
+
+	if (Config->SurfaceEvaporation <= 0.0f)
+	{
+		UE_LOG(LogFlowSim, Warning,
+			TEXT("SurfaceEvaporation is 0: nothing replaces the vapour that rains out, ")
+			TEXT("so cloud and storms fade as the sky dries."));
 	}
 }
 
@@ -398,7 +708,7 @@ void UFlowSimSubsystem::ReportCourant() const
 		UE_LOG(LogFlowSim, Warning,
 			TEXT("Froude %.2f: the peak flow is too fast for the gravity-wave speed ")
 			TEXT("and will form hydraulic jumps. Raise DeformationRadius or ")
-			TEXT("PlanetaryVorticity, or lower JetStrength."),
+			TEXT("PlanetaryVorticity, or lower JetStrength or ThermalShear."),
 			Froude);
 	}
 
@@ -410,6 +720,107 @@ void UFlowSimSubsystem::ReportCourant() const
 			TEXT("balanced jets and radiating gravity waves. ")
 			TEXT("Lower PlanetaryVorticity."),
 			RotationPerStep);
+	}
+}
+
+void UFlowSimSubsystem::ReportStack() const
+{
+	if (!Config)
+	{
+		return;
+	}
+
+	const int32 N = LayerCountOf(*Config);
+	const FFlowSimStack Stack = BuildStack(*Config, WaveSpeed(*Config));
+
+	FString Speeds;
+
+	for (int32 m = 0; m < N; ++m)
+	{
+		Speeds += FString::Printf(TEXT("%s%.2f"), m ? TEXT(", ") : TEXT(""), FMath::Sqrt(Stack.ModeSpeedSq[m]));
+	}
+
+	UE_LOG(LogFlowSim, Log, TEXT("%d layer(s); mode wave speeds %s."), N, *Speeds);
+
+	if (N < 2)
+	{
+		return;
+	}
+
+	// Storms grow once the shear exceeds about beta times twice the square of
+	// the local deformation radius (two equal layers, the classic criterion).
+	const float Lat = FMath::DegreesToRadians(FMath::Clamp(Config->BaroclinicLatitude, 10.0f, 80.0f));
+	const float F = Config->PlanetaryVorticity * FMath::Sin(Lat);
+	const float Beta = Config->PlanetaryVorticity * FMath::Cos(Lat);
+	const float LocalRadius = WaveSpeed(*Config) / FMath::Max(F, 1e-3f);
+	const float Critical = 2.0f * Beta * LocalRadius * LocalRadius;
+	const float Drive = FMath::Abs(Config->ThermalShear) * FMath::Cos(Lat) / FMath::Max(Critical, 1e-6f);
+
+	UE_LOG(LogFlowSim, Log,
+		TEXT("Thermal shear %.2f against a critical %.2f at %.0f degrees: %.2fx. ")
+		TEXT("Storms grow from the shear above about 1."),
+		FMath::Abs(Config->ThermalShear) * FMath::Cos(Lat), Critical, Config->BaroclinicLatitude, Drive);
+
+	// The balanced interfaces, from the same profile the balance pass
+	// integrates: where a layer thins toward nothing, it has run into the top
+	// or bottom of the stack.
+	const int32 Rows = FlowSimShader::GridLatitude(Config->GridLatitude);
+	const float DMu = 2.0f / Rows;
+
+	TArray<float> M;
+	M.SetNumZeroed(N * Rows);
+
+	for (int32 k = 0; k < N; ++k)
+	{
+		float Sum = 0.0f;
+
+		for (int32 j = 1; j < Rows; ++j)
+		{
+			const float MuF = -1.0f + j * DMu;
+			const float R = LayerZonalRate(*Config, MuF, k);
+
+			M[k * Rows + j] = M[k * Rows + j - 1] - DMu * MuF * R * (Config->PlanetaryVorticity + R);
+			Sum += M[k * Rows + j];
+		}
+
+		for (int32 j = 0; j < Rows; ++j)
+		{
+			M[k * Rows + j] -= Sum / Rows;
+		}
+	}
+
+	float Thinnest = 1.0f;
+	int32 ThinLayer = 0;
+
+	for (int32 k = 0; k < N; ++k)
+	{
+		for (int32 j = 0; j < Rows; ++j)
+		{
+			float Phi = 0.0f;
+
+			for (int32 l = 0; l < N; ++l)
+			{
+				Phi += MatrixEntry(Stack.MontgomeryInverse, k, l) * M[l * Rows + j];
+			}
+
+			const float Relative = Phi / FMath::Max(Stack.Depth[k], 1e-6f);
+
+			if (Relative < Thinnest)
+			{
+				Thinnest = Relative;
+				ThinLayer = k;
+			}
+		}
+	}
+
+	if (Thinnest < -0.75f)
+	{
+		UE_LOG(LogFlowSim, Warning,
+			TEXT("At balance, layer %d thins to %.0f%% of its depth: the interface ")
+			TEXT("nearly reaches the edge of the stack, which the thickness floor ")
+			TEXT("clips. Lower ThermalShear, widen DeformationRadius, or deepen that ")
+			TEXT("layer with DepthScale."),
+			ThinLayer, 100.0f * (1.0f + Thinnest));
 	}
 }
 
@@ -474,18 +885,18 @@ bool UFlowSimSubsystem::QueueInitialState()
 	const FIntVector Grid(
 		FlowSimShader::GridLongitude(Config->GridLongitude),
 		FlowSimShader::GridLatitude(Config->GridLatitude),
-		FMath::Clamp(Config->LayerCount, 1, 8));
+		LayerCountOf(*Config));
 
 	if (!Snapshot->IsValidFor(Grid))
 	{
 		UE_LOG(LogFlowSim, Warning,
 			TEXT("InitialState '%s' does not match this solver's state at %dx%dx%d ")
-			TEXT("(captured at %dx%dx%d, %d floats; the solver stores %d per cell). ")
+			TEXT("(captured at %dx%dx%d, %d floats; the solver needs %d). ")
 			TEXT("Seeding instead."),
 			*Snapshot->GetName(),
 			Grid.X, Grid.Y, Grid.Z,
 			Snapshot->Grid.X, Snapshot->Grid.Y, Snapshot->Grid.Z,
-			Snapshot->State.Num(), UFlowSnapshot::FloatsPerCell);
+			Snapshot->State.Num(), FFlowSimulation::StateFloats(Grid));
 
 		return false;
 	}
@@ -499,6 +910,7 @@ bool UFlowSimSubsystem::QueueInitialState()
 	Now.Asymmetry = Config->Asymmetry;
 	Now.WidthBias = Config->WidthBias;
 	Now.PlanetaryVorticity = Config->PlanetaryVorticity;
+	Now.ThermalShear = Config->ThermalShear;
 
 	if (!Snapshot->Provenance.MatchesShape(Now))
 	{
@@ -538,8 +950,7 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 		return false;
 	}
 
-	const int32 Count = Params.GridSize.X * Params.GridSize.Y * Params.GridSize.Z
-		* FFlowSimulation::StateFloatsPerCell;
+	const int32 Count = FFlowSimulation::StateFloats(Params.GridSize);
 
 	FFlowSimulation* Sim = Simulation;
 
@@ -601,6 +1012,7 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 	Target->Provenance.Asymmetry = Config->Asymmetry;
 	Target->Provenance.WidthBias = Config->WidthBias;
 	Target->Provenance.PlanetaryVorticity = Config->PlanetaryVorticity;
+	Target->Provenance.ThermalShear = Config->ThermalShear;
 	Target->SimulatedTime = SimulatedTime;
 	Target->StepsCompleted = StepsCompleted;
 
@@ -637,7 +1049,7 @@ bool UFlowSimSubsystem::PrepareTargets() const
 
 	// Flow, weather, noise phase A and noise phase B slices, one of each per
 	// layer.
-	const int32 Slices = 4 * FMath::Clamp(Config->LayerCount, 1, 8);
+	const int32 Slices = 4 * LayerCountOf(*Config);
 
 	// -- Flow target --------------------------------------------------------
 
@@ -714,7 +1126,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	// Rounded to what the solver supports rather than refused.
 	const int32 W = FlowSimShader::GridLongitude(Config->GridLongitude);
 	const int32 H = FlowSimShader::GridLatitude(Config->GridLatitude);
-	const int32 Layers = FMath::Clamp(Config->LayerCount, 1, 8);
+	const int32 Layers = LayerCountOf(*Config);
 
 	Out.GridSize = FIntVector(W, H, Layers);
 
@@ -729,11 +1141,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 
 	for (int32 i = 0; i < 8; ++i)
 	{
-		// Layers past the authored list take an unscaled copy of the shared
-		// profile rather than zero, which would read as a sim bug.
-		const FFlowLayerProfile P = Config->LayerProfiles.IsValidIndex(i)
-			? Config->LayerProfiles[i]
-			: FFlowLayerProfile();
+		const FFlowLayerProfile P = LayerOf(*Config, i);
 
 		Out.LayerProfile[i] = FVector4f(P.JetScale, P.BoostScale, P.ForcingScale, P.DragScale);
 	}
@@ -741,16 +1149,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.DeltaTime = FMath::Clamp(Step, 0.0f, FlowSimStep::SpinUp);
 	Out.Time = SimulatedTime;
 	Out.PlanetaryVorticity = Config->PlanetaryVorticity;
-
-	// -- Gravity waves and the Helmholtz solve --------------------------------
-
-	const float C = WaveSpeed(*Config);
-
-	Out.WaveSpeedSq = C * C;
-	Out.ImplicitWeight = FMath::Clamp(Config->ImplicitWeight, 0.5f, 1.0f);
-
-	const float ImplicitStep = Out.ImplicitWeight * Out.DeltaTime * C;
-	Out.HelmholtzScale = ImplicitStep * ImplicitStep;
+	Out.ImplicitWeight = ImplicitWeightAt(*Config, Out.DeltaTime);
 
 	// -- Forcing ------------------------------------------------------------
 
@@ -764,11 +1163,65 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.DragRate = Config->DragRate;
 	Out.LayerCoupling = Config->LayerCoupling;
 	Out.DivergenceDamping = FMath::Clamp(Config->DivergenceDamping, 0.0f, 0.5f);
+
 	Out.ThermalRelaxation = FMath::Max(Config->ThermalRelaxation, 0.0f);
+	Out.ThermalParams = FVector4f(
+		Config->ThermalShear,
+		Config->ThermalShape == EFlowThermalShape::FollowJets ? 1.0f : 0.0f,
+		FMath::DegreesToRadians(FMath::Clamp(Config->BaroclinicLatitude, 0.0f, 90.0f)),
+		FMath::DegreesToRadians(FMath::Max(Config->BaroclinicWidth, 1.0f)));
+
+	// -- Moisture, cloud and storms -------------------------------------------
 
 	Out.CondensationRate = FMath::Max(Config->CondensationRate, 0.0f);
 	Out.EvaporationRate = FMath::Max(Config->EvaporationRate, 0.0f);
 	Out.CloudLifetime = FMath::Max(Config->CloudLifetime, 1e-3f);
+
+	Out.MoistureParams = FVector4f(
+		FMath::Max(Config->SaturationEquator, 0.0f),
+		FMath::Max(Config->SaturationPole, 0.0f),
+		FMath::Clamp(Config->CondensationOnset, 0.0f, 0.99f),
+		FMath::Max(Config->SurfaceEvaporation, 0.0f));
+
+	Out.LatentHeating = FMath::Max(Config->LatentHeating, 0.0f);
+	Out.WindEvaporation = FMath::Max(Config->WindEvaporation, 0.0f);
+
+	Out.StormParams = FVector4f(
+		FMath::Max(Config->StormRate, 0.0f),
+		FMath::Clamp(Config->StormThreshold, 0.0f, 0.99f),
+		FMath::Max(Config->StormSpin, 0.0f),
+		1.0f / FMath::Max(Config->StormLifetime, 1e-3f));
+
+	// -- Storm cells ------------------------------------------------------------
+
+	const float GenesisMin = FMath::DegreesToRadians(FMath::Clamp(Config->GenesisLatitudeMin, 0.0f, 90.0f));
+	const float GenesisMax = FMath::DegreesToRadians(FMath::Clamp(Config->GenesisLatitudeMax, 0.0f, 90.0f));
+
+	Out.CellShape = FVector4f(
+		FMath::DegreesToRadians(FMath::Clamp(Config->StormCellRadius, 0.5f, 30.0f)),
+		FMath::Max(Config->StormCellWind, 0.0f),
+		FMath::Clamp(Config->StormCellEye, 0.01f, 1.0f),
+		FMath::Max(Config->StormCellSpinUp, 0.0f));
+
+	Out.CellLife = FVector4f(
+		FMath::Max(Config->StormCellSpawnRate, 0.0f),
+		FMath::Max(Config->StormCellGrowth, 0.0f),
+		FMath::Max(Config->StormCellDecay, 0.0f),
+		FMath::Max(Config->StormCellLifetime, 0.01f));
+
+	Out.CellMotion = FVector4f(
+		FMath::Max(Config->StormCellDrift, 0.0f),
+		FMath::Clamp(Config->StormCellOutflow, 0.0f, 1.0f),
+		FMath::Min(GenesisMin, GenesisMax),
+		FMath::Max(GenesisMin, GenesisMax));
+
+	Out.CellGenesis = FVector4f(
+		FMath::Max(Config->GenesisShear, 0.01f),
+		FMath::Clamp(Config->GenesisHumidity, 0.0f, 1.0f),
+		(float)FMath::Clamp(Config->MaxStormCells, 0, FlowSimShader::MaxStormCells),
+		0.0f);
+
+	Out.StepIndex = StepsCompleted;
 
 	Out.NoiseDriftRate = Config->GetNoiseDriftRate();
 	Out.NoiseResetTime = Config->GetNoiseResetTime();
@@ -787,6 +1240,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	//              the band scale.
 	//   Divergence vorticity times the Rossby number, which is how much of the
 	//              flow is unbalanced.
+	//   Height     pressure over the density step an interface carries it by.
 	const float Peak = PeakRate(*Config);
 	const float ZetaScale = FMath::Max(Config->JetStrength * 0.6897f * ShearBands(*Config) * UE_PI, 1e-4f);
 	const float PsiScale = Peak / FMath::Max(ShearBands(*Config) * UE_PI, 1.0f);
@@ -796,6 +1250,32 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 
 	Out.OutputScales = FVector3f(PressureScale, ZetaScale, DivScale);
 	Out.AtlasFaceSize = FlowSimShader::AtlasFaceSize(W);
+
+	// -- The stack ------------------------------------------------------------
+
+	Out.Stack = BuildStack(*Config, WaveSpeed(*Config));
+
+	const float ImplicitStep = Out.ImplicitWeight * Out.DeltaTime;
+	const float Stratification = FMath::Clamp(Config->Stratification, 0.01f, 1.0f);
+
+	for (int32 k = 0; k < 8; ++k)
+	{
+		if (k >= Layers)
+		{
+			Out.LayerState[k] = FVector4f(1.0f, 0.0f, 1.0f, 1.0f);
+			continue;
+		}
+
+		const float Saturation = (Layers > 1)
+			? FMath::Pow(FMath::Clamp(Config->UpperSaturation, 0.0f, 1.0f), ShearShare(k, Layers))
+			: 1.0f;
+
+		Out.LayerState[k] = FVector4f(
+			Out.Stack.Depth[k],
+			ImplicitStep * ImplicitStep * Out.Stack.ModeSpeedSq[k],
+			Saturation,
+			(k == 0) ? PressureScale : PressureScale / Stratification);
+	}
 
 	// -- Debug --------------------------------------------------------------
 
@@ -827,13 +1307,18 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 			// Scaled hard so a residual that is merely small still reads.
 		case EFlowDebugMode::Residual:    Out.DebugScale = PressureScale * 0.01f; break;
 		case EFlowDebugMode::ZonalError:  Out.DebugScale = Peak * 0.05f; break;
-		case EFlowDebugMode::Vertical:    Out.DebugScale = DivScale; break;
+			// Already normalised and soft-saturated.
+		case EFlowDebugMode::Vertical:    Out.DebugScale = 1.0f; break;
 			// Saturates at Froude 1; the jump threshold is half way up.
 		case EFlowDebugMode::Froude:      Out.DebugScale = 1.0f; break;
 		case EFlowDebugMode::Cloud:
-		case EFlowDebugMode::CloudAscent: Out.DebugScale = 1.0f; break;
+		case EFlowDebugMode::CloudAscent:
+		case EFlowDebugMode::Storm:       Out.DebugScale = 1.0f; break;
 			// A quarter radian, about the displacement at mid-life.
 		case EFlowDebugMode::NoiseDisplacement: Out.DebugScale = 0.25f; break;
+			// From dry at zero onset to saturated at full red.
+		case EFlowDebugMode::Humidity:    Out.DebugScale = FMath::Max(1.0f - Config->CondensationOnset, 0.05f); break;
+		case EFlowDebugMode::LayerHeight: Out.DebugScale = (Out.DebugLayer == 0) ? PressureScale : PressureScale / Stratification; break;
 		default:                          Out.DebugScale = ZetaScale; break;
 		}
 
