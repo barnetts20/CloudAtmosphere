@@ -504,6 +504,56 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
 	float StormCellTopShare = 0.0f;
 
+	/** Inflow on the bottom layer and outflow on the top, as a fraction of the
+	 *  vortex's speed, pushed at the same rate. The storm's secondary
+	 *  circulation: it turns what the vortex alone winds into rings into
+	 *  trailing spiral bands, and lifts the core. Zero turns it off. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellInflow = 0.2f;
+
+	// -- Storm cloud ------------------------------------------------------------
+	//
+	// Each cell feeds its own cloud into the sim, so a storm has structure
+	// whatever weather it spawned in: a canopy on the top layer, a band zone on
+	// the bottom, the eye cleared in every layer. Cloud only rises toward the
+	// feed, and the storm tracer is not fed, so a cell still fades with its
+	// parent storm.
+
+	/** Cloud the top layer is held at across the canopy: the smooth shield of
+	 *  merged anvils over a storm's core. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellCanopy = 0.8f;
+
+	/** Canopy radius, as a fraction of the cell radius. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float StormCellCanopyRadius = 0.4f;
+
+	/** Cloud the bottom layer is held at in the fed patches of the band zone,
+	 *  which runs from the eyewall out and fades over the outer two thirds of
+	 *  the radius. The flow winds each patch into a band. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellFeed = 0.9f;
+
+	/** Cloud the rest of the band zone is held at: the lanes between bands,
+	 *  thinner but never empty. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellFeedFloor = 0.3f;
+
+	/** Fraction of the band zone fed at full strength. Lower gives fewer,
+	 *  more distinct bands. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellFeedFill = 0.4f;
+
+	/** Noise patches across the cell radius. More gives more, narrower bands. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.5"))
+	float StormCellPatchScale = 4.0f;
+
+	/** Rate cloud rises toward the feed and clears in the eye, per unit time.
+	 *  Against the flow's rotation it sets how far each band trails from its
+	 *  patch. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0"))
+	float StormCellFeedRate = 4.0f;
+
 	/** Vertical motion added with the vector strength, in W's units: rising
 	 *  air makes the column towering and fills it in. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
@@ -731,6 +781,8 @@ struct FFlowSimParams
 	FVector4f CellLife = FVector4f::Zero();
 	FVector4f CellMotion = FVector4f::Zero();
 	FVector4f CellGenesis = FVector4f::Zero();
+	FVector4f CellCloud = FVector4f::Zero();
+	FVector4f CellPatch = FVector4f::Zero();
 	int32 CellCount = 0;
 
 	/** Steps completed before the frame's first; seeds the cells' spawns. */

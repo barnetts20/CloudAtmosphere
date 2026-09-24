@@ -1235,6 +1235,18 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		FMath::Clamp(Config->GenesisStorm, 0.01f, 1.0f),
 		FMath::Max(Config->GenesisSpin, 0.0f));
 
+	Out.CellCloud = FVector4f(
+		FMath::Clamp(Config->StormCellCanopy, 0.0f, 1.0f),
+		FMath::Clamp(Config->StormCellCanopyRadius, 0.05f, 1.0f),
+		FMath::Clamp(Config->StormCellFeed, 0.0f, 1.0f),
+		FMath::Clamp(Config->StormCellFeedFloor, 0.0f, 1.0f));
+
+	Out.CellPatch = FVector4f(
+		FMath::Clamp(Config->StormCellFeedFill, 0.0f, 1.0f),
+		FMath::Max(Config->StormCellPatchScale, 0.5f),
+		FMath::Max(Config->StormCellFeedRate, 0.0f),
+		FMath::Clamp(Config->StormCellInflow, 0.0f, 1.0f));
+
 	Out.CellCount = FMath::Clamp(Config->MaxStormCells, 0, FlowSimShader::MaxStormCells);
 
 	Out.StepIndex = StepsCompleted;

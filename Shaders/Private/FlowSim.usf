@@ -160,13 +160,22 @@ float SimWindEvaporation;
  *    Motion   x poleward-west drift speed, y pull toward the parent storm,
  *             z and w genesis latitudes, radians.
  *    Genesis  x shear limit, y humidity threshold, z storm a seed needs,
- *             w cyclonic vorticity at which a seed counts fully. */
+ *             w cyclonic vorticity at which a seed counts fully.
+ *    Cloud    x canopy cloud on the top layer, y canopy radius as a fraction
+ *             of the radius, z cloud in the fed patches of the bottom layer,
+ *             w cloud across the rest of its band zone.
+ *    Patch    x fraction of the band zone fed, y patches across the radius,
+ *             z rate cloud rises toward the feed and clears in the eye,
+ *             w inflow below and outflow above, as a fraction of the vortex's
+ *             speed. */
 float4 SimCellShape;
 float4 SimCellVortex;
 float4 SimCellDraft;
 float4 SimCellLife;
 float4 SimCellMotion;
 float4 SimCellGenesis;
+float4 SimCellCloud;
+float4 SimCellPatch;
 
 /** Live cell slots, up to GG_SIM_MAX_CELLS. */
 int SimCellCount;
@@ -888,13 +897,137 @@ bool SimCellNear(float3 P)
     return false;
 }
 
-/** What the cells add to the output at N: the draft, and the intense band --
- *  where the storm cloud is raised to the deepest the deck builds. Strength is
- *  the largest vector strength, for the debug view. */
+/** Every live cell's velocity potential at P: its gradient runs the inflow
+ *  fraction of the vortex's speed toward the centre. Added below and
+ *  subtracted above, it is the storm's secondary circulation, which turns what
+ *  the vortex would wind into rings into trailing spiral bands. */
+float SimCellPotential(float3 P)
+{
+    const float Whole = SimCellIntegral(1.0f);
+
+    float Chi = 0.0f;
+
+	[loop]
+    for (int Slot = 0; Slot < SimCellCount; Slot++)
+    {
+        float3 Axis;
+        float Sense, Intensity, R;
+
+        if (SimCellReach((uint) Slot, P, false, Axis, Sense, Intensity, R))
+        {
+            Chi -= Intensity * (SimCellIntegral(R) - Whole);
+        }
+    }
+
+    return SimCellPatch.w * SimCellVortex.w * SimCellShape.x * Chi;
+}
+
+/** Hashed value noise on the integer lattice, two octaves, [0, 1]. */
+float SimLatticeValue(int3 I)
+{
+    return (float) SimHash(((uint) I.x * 73856093u) ^ ((uint) I.y * 19349663u) ^ ((uint) I.z * 83492791u))
+		* (1.0f / 4294967296.0f);
+}
+
+float SimValueOctave(float3 X)
+{
+    const int3 I = (int3) floor(X);
+    const float3 F = smoothstep(0.0f, 1.0f, X - floor(X));
+
+    const float X00 = lerp(SimLatticeValue(I), SimLatticeValue(I + int3(1, 0, 0)), F.x);
+    const float X10 = lerp(SimLatticeValue(I + int3(0, 1, 0)), SimLatticeValue(I + int3(1, 1, 0)), F.x);
+    const float X01 = lerp(SimLatticeValue(I + int3(0, 0, 1)), SimLatticeValue(I + int3(1, 0, 1)), F.x);
+    const float X11 = lerp(SimLatticeValue(I + int3(0, 1, 1)), SimLatticeValue(I + int3(1, 1, 1)), F.x);
+
+    return lerp(lerp(X00, X10, F.y), lerp(X01, X11, F.y), F.z);
+}
+
+float SimValueNoise(float3 X)
+{
+    return 0.65f * SimValueOctave(X) + 0.35f * SimValueOctave(X * 2.1f + 17.0f);
+}
+
+/** Noise lattice cells a cell's patches drift through per unit of its age. */
+#define SIM_CELL_PATCH_DRIFT 1.0f
+
+/** The cloud the cells hold a layer at, and how strongly each eye clears it.
+ *
+ *  THEY BRING THEIR OWN. The top layer takes the canopy, a smooth disc out to
+ *  the canopy radius: the merged anvils over a storm's core. The bottom layer
+ *  takes the band zone, from the eyewall out, fading over the outer part of the
+ *  radius: a floor everywhere, and more in noise patches fixed in the cell's
+ *  frame and drifting with its age. The vortex and the inflow wind each patch
+ *  into a trailing band, and the floor keeps the lanes between them from
+ *  emptying, so a cell has structure whatever weather it spawned in. Cloud
+ *  only rises toward the feed; the eye clears in every layer. */
+float2 SimCellCloudTarget(float3 P, uint Layer)
+{
+    const uint L = (uint) SimGridSize.z;
+    const bool bTop = Layer == 0u;
+    const bool bBottom = Layer + 1u == L;
+
+    const float Eye = SimCellShape.y;
+    const float Wall = max(SimCellShape.z, Eye + 1e-3f);
+    const float Canopy = SimCellCloud.y;
+
+    float Target = 0.0f;
+    float Clear = 0.0f;
+
+	[loop]
+    for (int Slot = 0; Slot < SimCellCount; Slot++)
+    {
+        float3 Axis;
+        float Sense, Intensity, R;
+
+        if (!SimCellReach((uint) Slot, P, false, Axis, Sense, Intensity, R))
+        {
+            continue;
+        }
+
+        const float InEye = 1.0f - smoothstep(0.7f * Eye, Eye, R);
+
+        if (bTop)
+        {
+            Target = max(Target, Intensity * SimCellCloud.x
+				* (1.0f - smoothstep(0.7f * Canopy, Canopy, R)) * (1.0f - InEye));
+        }
+
+        if (bBottom)
+        {
+            float3 East = cross(float3(0.0f, 0.0f, 1.0f), Axis);
+            East = (dot(East, East) > 1e-8f) ? normalize(East) : float3(1.0f, 0.0f, 0.0f);
+
+            const float3 Offset = (P - Axis) / max(SimCellShape.x, 1e-4f);
+            const float Age = SimCellSRV[2 * Slot + 1].x;
+
+            const float Noise = SimValueNoise(float3(
+				dot(Offset, East) * SimCellPatch.y,
+				dot(Offset, cross(Axis, East)) * SimCellPatch.y,
+				Age * SIM_CELL_PATCH_DRIFT + 17.3f * (float) Slot));
+
+            const float Fill = SimCellPatch.x;
+            const float Patch = smoothstep(0.85f - Fill, 1.15f - Fill, Noise);
+
+            const float Zone = smoothstep(Eye, Wall, R) * (1.0f - smoothstep(0.35f, 1.0f, R));
+
+            Target = max(Target, Intensity * Zone * lerp(SimCellCloud.w, SimCellCloud.z, Patch));
+        }
+
+        Clear = max(Clear, Intensity * InEye);
+    }
+
+    return float2(Target, Clear);
+}
+
+/** What the cells add to the output at N: the draft, the intense band --
+ *  where the storm cloud is raised to the deepest the deck builds -- and the
+ *  eye, cleared here at the atlas' resolution, finer than the sim's. Strength
+ *  is the largest vector strength, for the debug view. */
 struct SimStamp
 {
     float Draft;
     float Band;
+    float Eye;
     float Strength;
 };
 
@@ -903,6 +1036,7 @@ SimStamp SimCellStamp(float3 N)
     SimStamp S;
     S.Draft = 0.0f;
     S.Band = 0.0f;
+    S.Eye = 0.0f;
     S.Strength = 0.0f;
 
 	[loop]
@@ -921,6 +1055,7 @@ SimStamp SimCellStamp(float3 N)
 
         S.Draft += Intensity * (SimCellDraft.x * Profile + SimCellDraft.y * InEye);
         S.Band = max(S.Band, Intensity * smoothstep(SIM_CELL_BAND_FLOOR, 1.0f, Profile));
+        S.Eye = max(S.Eye, Intensity * InEye);
         S.Strength = max(S.Strength, Intensity * Profile);
     }
 
@@ -1658,8 +1793,9 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
  *  more so in cyclonic spin, and decay at their lifetime and in sinking air.
  *
  *  Storm cells: each layer is pushed along the live cells' vortices, all of the
- *  push on the bottom layer and SimCellVortex.z of it on top. The flow then
- *  carries cloud, storm and noise around each cell like any other swirl.
+ *  push on the bottom layer and SimCellVortex.z of it on top, plus inflow below
+ *  and outflow above. Each cell also feeds its own cloud (SimCellCloudTarget),
+ *  which the flow winds into bands like any other cloud.
  *
  *  Noise: each phase's displacement at the departure point, carried to this
  *  centre and turned by the drift over the step. A phase resets to zero at the
@@ -1700,6 +1836,12 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
     const bool bCellNear = SimCellCount > 0
 		&& SimCellNear(SimDirection(SimColumnToLon((float) C.x), SimRowToMu((float) C.y)));
 
+	// The secondary circulation's share: inflow on the bottom layer, outflow on
+	// the top, none on a single layer.
+    const float CellRadial = (L > 1u)
+		? SimCellVortex.y * Dt * (2.0f * (float) Layer / (float) (L - 1u) - 1.0f)
+		: 0.0f;
+
 	// -- u on the west face -------------------------------------------------
 
     float U;
@@ -1724,6 +1866,10 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
         if (bCellNear)
         {
             U -= CellShare * SimRowCos(C.y) * (SimCellCornerPsi(C.x, C.y + 1) - SimCellCornerPsi(C.x, C.y)) / SimDMu();
+
+            U += CellRadial * (SimCellPotential(SimDirection(SimColumnToLon((float) C.x), Mu))
+				- SimCellPotential(SimDirection(SimColumnToLon((float) C.x - 1.0f), Mu)))
+				/ (SimRowCos(C.y) * SimDLon());
         }
     }
 
@@ -1750,6 +1896,12 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
         {
             V += CellShare * (SimCellCornerPsi(C.x + 1, C.y) - SimCellCornerPsi(C.x, C.y))
 				/ (SimFaceCos(C.y) * SimDLon());
+
+            const float Lon = SimColumnToLon((float) C.x);
+
+            V += CellRadial * SimFaceCos(C.y)
+				* (SimCellPotential(SimDirection(Lon, SimRowToMu((float) C.y)))
+					- SimCellPotential(SimDirection(Lon, SimRowToMu((float) C.y - 1.0f)))) / SimDMu();
         }
     }
 
@@ -1809,7 +1961,16 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
     const float Formed = Condensing * (1.0f - Tracer.x);
     const float Loss = SimEvaporationRate * Sinking + SimCloudDecay;
 
-    const float Cloud = saturate(Tracer.x + Dt * (Formed - Loss * Tracer.x));
+    float Cloud = saturate(Tracer.x + Dt * (Formed - Loss * Tracer.x));
+
+	// The storm cells' own cloud: raised toward their feed, cleared in the eye.
+    if (bCellNear)
+    {
+        const float2 Feed = SimCellCloudTarget(P, Layer);
+
+        Cloud = saturate(Cloud + SimCellPatch.z * Dt * (max(Feed.x - Cloud, 0.0f) - Feed.y * Cloud));
+    }
+
     const float CloudAscent = clamp(Tracer.y + Dt * (Formed * Rising - Loss * Tracer.y), 0.0f, Cloud);
 
     float VapourRate = (SimEvaporationRate * Sinking * Tracer.x - Condensing) * Saturation;
@@ -2504,8 +2665,8 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
     const SimStamp Stamp = SimCellStamp(N);
 
     Weather.x = clamp(Weather.x + Stamp.Draft, -1.0f, 1.0f);
-    Weather.y = max(Weather.y, SimCellDraft.z * Stamp.Band);
-    Weather.w = max(Weather.w, SimCellDraft.z * Stamp.Band);
+    Weather.y = max(Weather.y, SimCellDraft.z * Stamp.Band) * (1.0f - Stamp.Eye);
+    Weather.w = max(Weather.w, SimCellDraft.z * Stamp.Band) * (1.0f - Stamp.Eye);
     Weather.yzw = saturate(Weather.yzw);
 
     Flow.z = clamp(Flow.z - SimCellDraft.w * Stamp.Band, -1.0f, 1.0f);
