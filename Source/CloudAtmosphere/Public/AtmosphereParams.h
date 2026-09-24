@@ -469,9 +469,33 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "1.0"))
 	float CoverageSoftness = 0.2f;
 
+	/** How system edges thin out as coverage falls: 1 frays them into
+	 *  scattered cores the noise picks, 0 fades them evenly. Inside a system,
+	 *  where coverage is full, the structure layer's erosion alone decides how
+	 *  much is cut clear. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CoverageFray = 0.5f;
+
 	/** Depth of a stratiform column as a fraction of a towering one. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StratusDepth = 0.25f;
+
+	/** How far column depth follows the sim's cloud amount (the field scaled by
+	 *  CoverageGain, before the threshold). At 1 depth is proportional to it, so
+	 *  the sim's gradients read as relief: spiral bands as ridges, storms rising
+	 *  toward the eyewall. At 0 every covered column is full depth, which reads
+	 *  as flat decks with cliff edges. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CloudRelief = 1.0f;
+
+	/** The sim layer the clouds are drawn from, -1 for the bottom. A layer's
+	 *  cloud is combined with every layer's above it, so the bottom reads the
+	 *  whole sky and 0 the top layer alone. Vertical motion, pressure and the
+	 *  noise's displacement come from the same layer, so the cloud and its
+	 *  breakup move together. The sim's Column cloud debug view at the same
+	 *  layer shows exactly the cover read. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-1", ClampMax = "7"))
+	int32 CloudLayer = -1;
 
 	/** Cloud type, 0 stratiform to 1 towering, is TypeBias + TypeAscent * rising
 	 *  air + TypeTropical * tropicality. Type sets column depth and blends the
@@ -487,9 +511,10 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 
 	// -- Breakup --------------------------------------------------------------
 
-	/** Multiplier on the structure layer's Erosion. Above 1 the noise cuts holes
-	 *  through fully covered columns, giving broken fields at high coverage;
-	 *  below 1 it smooths toward sheets. */
+	/** Multiplier on the structure layer's Erosion. Past about half the noise
+	 *  cuts holes through fully covered columns as well as shaping them, so a
+	 *  thick system breaks up as readily as a thin one; low values smooth
+	 *  toward sheets. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float ErosionGain = 1.0f;
 

@@ -815,16 +815,19 @@ static FTerrestrialFieldPins PackTerrestrialField(
     Out.DetailSampling = Sampling(Detail);
     Out.DetailWarp = Warp(Detail);
 
-    // The genus blend's subsidence rides in the structure warp's spare slot.
+    // The genus blend's subsidence and the cloud relief ride in the warps'
+    // spare slots.
     Out.StructureWarp.G = G.Subsidence;
+    Out.DetailWarp.G = P.CloudRelief;
 
     Out.CloudGenusStratus = G.Stratus;
     Out.CloudGenusStratocumulus = G.Stratocumulus;
     Out.CloudGenusCumulus = G.Cumulus;
     Out.CloudGenusCirrus = G.Cirrus;
 
+    // The cloud layer and coverage fray ride in the cascade pin's spare slots.
     Out.ShadowCascades = FLinearColor(
-        (float)ShadowCascadeRadii.X, (float)ShadowCascadeRadii.Y, 0.0f, 0.0f);
+        (float)ShadowCascadeRadii.X, (float)ShadowCascadeRadii.Y, (float)P.CloudLayer, P.CoverageFray);
 
     return Out;
 }

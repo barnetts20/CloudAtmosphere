@@ -46,13 +46,6 @@
 // height is a multiple of CloudThickness. Space is planet-local, spin axis on
 // Z, positions unit directions except in TR_Density.
 
-/** Which sim layer the field reads. Negative reads the bottom of the stack,
- *  whose weather slice is the whole column. A slice past the end reads clamped
- *  rather than failing. */
-#ifndef TR_FLOW_LAYER
-#define TR_FLOW_LAYER -1
-#endif
-
 /** How much of the density the detail layer can erode at full DetailErosion.
  *  Above about a half it eats whole thin clouds rather than their edges. */
 #ifndef TR_DETAIL_EROSION_SCALE
@@ -83,6 +76,13 @@
 #define TR_DETAIL_MEAN_MIPS 3
 #endif
 
+/** Share of the noise's range full structure erosion cuts away at full
+ *  coverage: the hole fraction a thick system breaks up into. Half leaves
+ *  about half of it clear, the survivors ramping from their edges to full. */
+#ifndef TR_EROSION_CUT
+#define TR_EROSION_CUT 0.5f
+#endif
+
 /** Coverage over which a column grows from no slab to its full depth. Sparse
  *  cloud is shallow cloud, and clear sky has no slab for the entry search to
  *  stop on. PITFALL: narrower makes the top a cliff at every coverage edge,
@@ -104,10 +104,13 @@
 #define TR_SLAB_ENTRY_PROBES 24
 #endif
 
-/** The sim layer TR_FLOW_LAYER names. */
-float TR_FlowLayer(Texture2DArray FlowField)
+/** The sim layer every column read comes from: CloudLayer, negative for the
+ *  bottom of the stack, clamped to the stack. */
+float TR_FlowLayer(Texture2DArray FlowField, float CloudLayer)
 {
-    return (TR_FLOW_LAYER < 0) ? Flow_LowestLayer(FlowField) : (float) TR_FLOW_LAYER;
+    const float Lowest = Flow_LowestLayer(FlowField);
+
+    return (CloudLayer < 0.0f) ? Lowest : min(floor(CloudLayer), Lowest);
 }
 
 /** Everything the field reads. Authored members carry their C++ property
@@ -138,13 +141,26 @@ struct TRFieldParams
     float CeilingFalloff;
 
 	/** Global coverage, 0.5 neutral, and how strongly the sim's cloud field
-	 *  maps to coverage. */
+	 *  maps to coverage. CoverageFray is how far low coverage raises the
+	 *  erosion threshold, fraying system edges, against fading them. */
     float CloudCover;
     float CoverageGain;
     float CoverageSoftness;
+    float CoverageFray;
 
 	/** Depth of a stratiform column as a fraction of a towering one. */
     float StratusDepth;
+
+	/** The sim layer the columns read, negative for the bottom. A layer's
+	 *  weather slice combines its cloud with every layer's above it, so the
+	 *  bottom's is the whole sky. Cloud, vertical motion, pressure and the noise
+	 *  displacement all come from it, so the cloud and the noise that breaks it
+	 *  up move with one flow. */
+    float CloudLayer;
+
+	/** How far column depth follows the scaled cloud amount: 0 every covered
+	 *  column is full depth, 1 depth is proportional to the amount. */
+    float CloudRelief;
 
 	/** Type = max(TypeBias + TypeAscent * W + TypeTropical * tropicality,
 	 *  storm). */
@@ -273,8 +289,10 @@ struct TRFieldParams
  *    CloudMotion       DriftAngle, NoisePhase, WarpShift, RotationWeight
  *    NoiseLevels       StructureMipBias, StructureAmount, DetailMipBias, DetailAmount
  *    <Layer>Sampling   Scale, Aspect, Erosion, FadeMean
- *    <Layer>Warp       FlowInherit, GenusSubsidence (structure), FadeNear, FadeSpan
- *    ShadowCascades    Cascade 1 half-width, cascade 2 half-width, -, -
+ *    <Layer>Warp       FlowInherit, GenusSubsidence (structure) or
+ *                      CloudRelief (detail), FadeNear, FadeSpan
+ *    ShadowCascades    Cascade 1 half-width, cascade 2 half-width, CloudLayer,
+ *                      CoverageFray
  *    CloudGenus<Name>  structure channel weights for that genus
  *
  *  RotationWeight is the planet's own rotation; the sim runs in the rotating
@@ -359,6 +377,7 @@ TRFieldParams TR_BuildField(
     F.DetailErosion = saturate(DetailSampling.z);
     F.DetailFadeMean = saturate(DetailSampling.w);
     F.DetailFlowInherit = DetailWarp.x;
+    F.CloudRelief = saturate(DetailWarp.y);
 
     F.Thickness = max(PlanetRadius * HeightScale, 1e-4f);
 
@@ -381,6 +400,9 @@ TRFieldParams TR_BuildField(
 
     F.ShadowCascade1 = max(ShadowCascades.x, 0.0f);
     F.ShadowCascade2 = max(ShadowCascades.y, 0.0f);
+
+    F.CloudLayer = ShadowCascades.z;
+    F.CoverageFray = saturate(ShadowCascades.w);
 
     F.StructureFade = 1.0f;
     F.DetailFade = 1.0f;
@@ -413,14 +435,17 @@ float TR_CeilingFade(float Height, TRFieldParams F)
  *  from the base, each peaking at exactly 1 with zero derivative at both ends.
  *  Zero outside the slab.
  *
- *  THE SPANS ARE CUT AGAINST THIS COLUMN'S OWN DEPTH, so a shallow column peaks
- *  below 1 instead of holding core density over no distance. */
+ *  A SHALLOW COLUMN SCALES BOTH RAMPS DOWN until they meet, so it still peaks
+ *  at 1 and is thin rather than faint. PITFALL: cutting each ramp against the
+ *  depth instead leaves a shallow column peaking near 0.15, which coverage and
+ *  erosion then remove entirely while deep columns barely change. */
 float TR_SlabDensity(float Height, float Top, float Base, TRFieldParams F)
 {
     const float Depth = max(Top - Base, 1e-4f);
+    const float Fit = min(Depth / max(F.SpanTop + F.SpanBase, 1e-4f), 1.0f);
 
-    const float FromTop = saturate((Top - Height) / min(F.SpanTop, Depth));
-    const float FromBase = saturate((Height - Base) / min(F.SpanBase, Depth));
+    const float FromTop = saturate((Top - Height) / max(F.SpanTop * Fit, 1e-5f));
+    const float FromBase = saturate((Height - Base) / max(F.SpanBase * Fit, 1e-5f));
 
     return smoothstep(0.0f, 1.0f, pow(FromTop, max(F.TopCurve, 1e-4f)))
 		* smoothstep(0.0f, 1.0f, pow(FromBase, max(F.BottomCurve, 1e-4f)));
@@ -468,8 +493,8 @@ struct TRColumn
     float4 Genus;
     float Cirrus;
 
-	/** How deeply the structure noise erodes the profile. Above 1 it cuts holes
-	 *  through a fully covered column. */
+	/** How deeply the structure noise erodes the profile, and from about half
+	 *  of it up, how much of a fully covered column it cuts clear. */
     float Erosion;
 
 	/** The slab, atmosphere fractions. Exact: nothing outside moves them. */
@@ -486,11 +511,11 @@ struct TRColumnInputs
     float4 Weather;
 };
 
-TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler, float3 N)
+TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, TRFieldParams F)
 {
     TRColumnInputs In;
 
-    const float Layer = TR_FlowLayer(FlowField);
+    const float Layer = TR_FlowLayer(FlowField, F.CloudLayer);
 
     In.Pressure = Flow_SampleSlice(FlowField, FlowSampler, N, Layer).z;
     In.Weather = Flow_SampleWeather(FlowField, FlowSampler, N, Layer);
@@ -528,6 +553,13 @@ TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler,
  *  layered cloud and cloud grown under weak lift stays low. No noise, which
  *  keeps the base exact.
  *
+ *  DEPTH FOLLOWS THE CLOUD AMOUNT, the scaled field before the threshold, by
+ *  CloudRelief. Coverage saturates across a narrow band, so without this every
+ *  covered column is full depth and the sim's gradients -- spiral bands, a
+ *  storm's rise toward its eyewall -- read as flat decks with cliff edges
+ *  rather than as relief. PITFALL: relief steepens the top wherever the cloud
+ *  field does; if cloud goes missing on grazing rays, raise CloudSlope.
+ *
  *  SPARSE COLUMNS ARE SHALLOW. Depth ramps in over TR_COVERAGE_DEPTH_RAMP of
  *  coverage, so clear sky has no slab for the entry search to stop on. */
 TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
@@ -545,6 +577,7 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
     Col.Altitude = saturate(F.AltitudeGain * Weather.z);
 
     const float Threshold = 1.0f - F.CloudCover;
+    const float Amount = saturate(F.CoverageGain * Weather.y);
 
     Col.Coverage = smoothstep(
 		Threshold - F.CoverageSoftness, Threshold + F.CoverageSoftness, F.CoverageGain * Weather.y);
@@ -572,6 +605,7 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
     const float Lid = F.CeilingDepth * (1.0f + F.CeilingPressure * Col.Pressure);
 
     const float Depth = D * lerp(F.StratusDepth, 1.0f, Col.Type) * Lid
+		* lerp(1.0f, Amount, F.CloudRelief)
 		* smoothstep(0.0f, TR_COVERAGE_DEPTH_RAMP, Col.Coverage);
 
 	// Capped at the shell, where the ceiling fade has already taken density to
@@ -583,7 +617,7 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
 
 TRColumn TR_Column(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, TRFieldParams F)
 {
-    return TR_ColumnFromInputs(TR_ReadColumn(FlowField, FlowSampler, N), N, F);
+    return TR_ColumnFromInputs(TR_ReadColumn(FlowField, FlowSampler, N, F), N, F);
 }
 
 /** The column at a planet-local position, spun. For what varies over a system's
@@ -854,13 +888,18 @@ float4 TR_DensityInColumn(
         Shape *= saturate(1.0f + Col.Erosion * (Noise - 1.0f));
     }
 
-	// COVERAGE AS A THRESHOLD ON THE SHAPE, then as a scale. At low coverage
-	// only the shape's densest cores survive -- and since the profile falls off
-	// toward the top, the tops go first, leaving low scattered cloud. Near 1 the
-	// whole column survives.
+	// A THRESHOLD ON THE SHAPE, then coverage as a scale. Erosion sets the
+	// threshold everywhere, so a thick system breaks up as much as a thin one;
+	// CoverageFray raises it as coverage falls, so edges fray into scattered
+	// cores rather than fading. PITFALL: a threshold driven by coverage alone
+	// never cuts a fully covered column and wipes out partly covered ones, and
+	// since thick cloud stays opaque at a fraction of its density, erosion then
+	// reads as erasing thin cloud and leaving thick cloud untouched.
     const float Coverage = Col.Coverage;
+    const float Cut = TR_EROSION_CUT * saturate(Col.Erosion);
+    const float Threshold = Cut + (1.0f - Cut) * (1.0f - Coverage) * F.CoverageFray;
 
-    float Density = saturate((Shape - (1.0f - Coverage)) / max(Coverage, 1e-3f)) * Coverage;
+    float Density = saturate((Shape - Threshold) / max(1.0f - Threshold, 1e-3f)) * Coverage;
 
 	// -- Detail: erosion of the edges ------------------------------------------
 
@@ -931,7 +970,7 @@ float4 TR_Density(
 
     const float3 N = normalize(Atmo_RotateZ(LocalPos / max(Radius, 1e-4f), F.SpinAngle));
 
-    const TRColumn Col = TR_ColumnFromInputs(TR_ReadColumn(FlowField, FlowSampler, N), N, F);
+    const TRColumn Col = TR_ColumnFromInputs(TR_ReadColumn(FlowField, FlowSampler, N, F), N, F);
 
     BRANCH
 
@@ -941,7 +980,7 @@ float4 TR_Density(
     }
 
     float3 DisplacementA, DisplacementB;
-    Flow_SampleNoise(FlowField, FlowSampler, N, TR_FlowLayer(FlowField), DisplacementA, DisplacementB);
+    Flow_SampleNoise(FlowField, FlowSampler, N, TR_FlowLayer(FlowField, F.CloudLayer), DisplacementA, DisplacementB);
 
     return TR_DensityInColumn(
 		DetailVolume, DetailSampler, StructureVolume, StructureSampler,
@@ -1029,8 +1068,9 @@ TRColumnKey TR_ReadKey(
 
     TRColumnKey Key;
 
-    Key.Inputs = TR_ReadColumn(FlowField, FlowSampler, N);
-    Flow_SampleNoise(FlowField, FlowSampler, N, TR_FlowLayer(FlowField), Key.DisplacementA, Key.DisplacementB);
+    Key.Inputs = TR_ReadColumn(FlowField, FlowSampler, N, F);
+    Flow_SampleNoise(FlowField, FlowSampler, N, TR_FlowLayer(FlowField, F.CloudLayer),
+		Key.DisplacementA, Key.DisplacementB);
 
     return Key;
 }

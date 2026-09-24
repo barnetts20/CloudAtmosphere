@@ -153,7 +153,7 @@ float SimWindEvaporation;
  *    Vortex   x falloff exponent past the eyewall, y forcing rate, z the top
  *             layer's share of the forcing (the bottom's is 1), w peak wind.
  *    Draft    x draft at full strength, y draft in the eye, both W units;
- *             z storm and cloud raised in the intense band, w pressure drop
+ *             z storm raised in the intense band, w pressure drop
  *             there, in the output's normalised units.
  *    Life     x spawn attempts per unit time, y growth rate, z decay rate,
  *             w lifetime.
@@ -637,8 +637,9 @@ float SimInterfaceFlux(int2 C, uint Interface)
 // spawns on a storm with cyclonic spin in the genesis band, follows it with the
 // stack's mean flow, and fades once the storm beneath it is gone. While alive
 // it pushes the flow around it toward a vortex (SimCellStream), which the flow
-// then carries its cloud, storm and noise around, and it raises the deepest
-// storm cloud in its eyewall band on the output (SimCellStamp).
+// then carries its cloud, storm and noise around, and on the output it raises
+// the storm in its eyewall band, deepening the cloud already there
+// (SimCellStamp).
 
 /** Latitude, radians, over which the genesis band fades out equatorward and
  *  poleward of its limits. */
@@ -963,9 +964,9 @@ float2 SimCellCloudTarget(float3 P, uint Layer)
 }
 
 /** What the cells add to the output at N: the draft, the intense band --
- *  where the storm cloud is raised to the deepest the deck builds -- and the
- *  eye, cleared here at the atlas' resolution, finer than the sim's. Strength
- *  is the largest vector strength, for the debug view. */
+ *  where the storm is raised, so the deck builds the cloud there deepest --
+ *  and the eye, cleared here at the atlas' resolution, finer than the sim's.
+ *  Strength is the largest vector strength, for the debug view. */
 struct SimStamp
 {
     float Draft;
@@ -2616,8 +2617,12 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 
     const SimStamp Stamp = SimCellStamp(N);
 
+	// THE BAND INTENSIFIES, IT DOES NOT ADD. Storm deepens and darkens cloud
+	// the column already has; the cloud itself is the sim's, which carries the
+	// cell's own. PITFALL: raising cover here stamps a solid disc over the
+	// eyewall region that ignores the cloud the vortex actually winds.
     Weather.x = clamp(Weather.x + Stamp.Draft, -1.0f, 1.0f);
-    Weather.y = max(Weather.y, SimCellDraft.z * Stamp.Band) * (1.0f - Stamp.Eye);
+    Weather.y *= 1.0f - Stamp.Eye;
     Weather.w = max(Weather.w, SimCellDraft.z * Stamp.Band) * (1.0f - Stamp.Eye);
     Weather.yzw = saturate(Weather.yzw);
 

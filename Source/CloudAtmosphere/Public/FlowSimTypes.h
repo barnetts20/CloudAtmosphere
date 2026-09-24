@@ -552,8 +552,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
 	float StormCellEyeDraft = -0.5f;
 
-	/** Cloud cover and storm intensity the eyewall band is raised to: the band
-	 *  runs from 40% of peak vector strength inward to the eyewall. */
+	/** Storm intensity the eyewall band is raised to, which deepens and darkens
+	 *  the cloud already there without adding any: the band runs from 40% of
+	 *  peak vector strength inward to the eyewall. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellBandStorm = 1.0f;
 
