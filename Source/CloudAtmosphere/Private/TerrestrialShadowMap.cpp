@@ -74,6 +74,7 @@ namespace TerrestrialShadow
 		P->CloudGenusCumulus = Params.CloudGenusCumulus;
 		P->CloudGenusCirrus = Params.CloudGenusCirrus;
 		P->ShadowCascades = Params.ShadowCascades;
+		P->CloudResponse = Params.CloudResponse;
 
 		P->CloudExtinction = Params.CloudExtinction;
 		P->StormExtinction = Params.StormExtinction;

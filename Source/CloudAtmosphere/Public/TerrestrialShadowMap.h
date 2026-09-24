@@ -78,6 +78,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	FVector4f CloudGenusCumulus = FVector4f::Zero();
 	FVector4f CloudGenusCirrus = FVector4f::Zero();
 	FVector4f ShadowCascades = FVector4f::Zero();
+	FVector4f CloudResponse = FVector4f::Zero();
 
 	// -- Extinction ---------------------------------------------------------
 	//
@@ -183,6 +184,7 @@ SHADER_PARAMETER(FVector4f, CloudGenusStratocumulus)
 SHADER_PARAMETER(FVector4f, CloudGenusCumulus)
 SHADER_PARAMETER(FVector4f, CloudGenusCirrus)
 SHADER_PARAMETER(FVector4f, ShadowCascades)
+SHADER_PARAMETER(FVector4f, CloudResponse)
 
 SHADER_PARAMETER(FVector4f, CloudExtinction)
 SHADER_PARAMETER(FVector4f, StormExtinction)

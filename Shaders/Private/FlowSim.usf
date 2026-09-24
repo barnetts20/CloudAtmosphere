@@ -153,8 +153,9 @@ float SimWindEvaporation;
  *    Vortex   x falloff exponent past the eyewall, y forcing rate, z the top
  *             layer's share of the forcing (the bottom's is 1), w peak wind.
  *    Draft    x draft at full strength, y draft in the eye, both W units;
- *             z storm raised in the intense band, w pressure drop
- *             there, in the output's normalised units.
+ *             z storm raised in the intense band, w pressure drop through
+ *             the eyewall, easing to none at the radius, in the output's
+ *             normalised units.
  *    Life     x spawn attempts per unit time, y growth rate, z decay rate,
  *             w lifetime.
  *    Motion   x poleward-west drift speed, y pull toward the parent storm,
@@ -163,7 +164,8 @@ float SimWindEvaporation;
  *             w cyclonic vorticity at which a seed counts fully.
  *    Cloud    x cloud the bottom layer is raised to at the eyewall, y rate it
  *             rises toward that and clears in the eye, z inflow below and
- *             outflow above as a fraction of the vortex's speed, w unused. */
+ *             outflow above as a fraction of the vortex's speed, w storm
+ *             raised across the whole storm. */
 float4 SimCellShape;
 float4 SimCellVortex;
 float4 SimCellDraft;
@@ -638,8 +640,8 @@ float SimInterfaceFlux(int2 C, uint Interface)
 // stack's mean flow, and fades once the storm beneath it is gone. While alive
 // it pushes the flow around it toward a vortex (SimCellStream), which the flow
 // then carries its cloud, storm and noise around, and on the output it raises
-// the storm in its eyewall band, deepening the cloud already there
-// (SimCellStamp).
+// the storm across the whole storm, most in its eyewall band, deepening the
+// cloud already there (SimCellStamp).
 
 /** Latitude, radians, over which the genesis band fades out equatorward and
  *  poleward of its limits. */
@@ -649,6 +651,10 @@ float SimInterfaceFlux(int2 C, uint Interface)
 /** Vector strength, as a fraction of the eyewall's, above which the band
  *  counts as intense: storm cloud rises across it to full at the eyewall. */
 #define SIM_CELL_BAND_FLOOR 0.4f
+
+/** Width of the smooth max joining a cell's storm to the sim's: storms within
+ *  this of each other blend rather than meeting at a crease. */
+#define SIM_CELL_STORM_BLEND 0.25f
 
 /** Candidate points a spawn attempt draws in the genesis band. */
 #define SIM_CELL_SPAWN_DRAWS 8
@@ -963,23 +969,40 @@ float2 SimCellCloudTarget(float3 P, uint Layer)
     return float2(Target, Clear);
 }
 
-/** What the cells add to the output at N: the draft, the intense band --
- *  where the storm is raised, so the deck builds the cloud there deepest --
- *  and the eye, cleared here at the atlas' resolution, finer than the sim's.
- *  Strength is the largest vector strength, for the debug view. */
+/** What the cells add to the output at N: the draft; the storm, over the
+ *  whole storm and highest across the intense band, so the deck builds the
+ *  cloud there deepest and darkest; the low, full through the eyewall and
+ *  easing to none at the radius; and the eye, cleared here at the atlas'
+ *  resolution, finer than the sim's. Strength is the largest vector strength,
+ *  for the debug view.
+ *
+ *  THE WHOLE STORM IS STORM: full from the centre through the eyewall, easing
+ *  to none at the radius. PITFALL: raised across the band alone, the rest of a
+ *  hurricane takes whatever storm the sim has under it and reads as part storm
+ *  and part fair-weather cloud. */
 struct SimStamp
 {
     float Draft;
-    float Band;
+    float Storm;
+    float Low;
     float Eye;
     float Strength;
 };
+
+/** max(A, B) with its crease rounded over a width K. */
+float SimSmoothMax(float A, float B, float K)
+{
+    const float H = max(K - abs(A - B), 0.0f) / max(K, 1e-4f);
+
+    return max(A, B) + 0.25f * K * H * H;
+}
 
 SimStamp SimCellStamp(float3 N)
 {
     SimStamp S;
     S.Draft = 0.0f;
-    S.Band = 0.0f;
+    S.Storm = 0.0f;
+    S.Low = 0.0f;
     S.Eye = 0.0f;
     S.Strength = 0.0f;
 
@@ -998,7 +1021,11 @@ SimStamp SimCellStamp(float3 N)
         const float InEye = 1.0f - smoothstep(0.7f, 1.0f, R / max(SimCellShape.y, 1e-4f));
 
         S.Draft += Intensity * (SimCellDraft.x * Profile + SimCellDraft.y * InEye);
-        S.Band = max(S.Band, Intensity * smoothstep(SIM_CELL_BAND_FLOOR, 1.0f, Profile));
+        const float Band = smoothstep(SIM_CELL_BAND_FLOOR, 1.0f, Profile);
+        const float Whole = 1.0f - smoothstep(SimCellShape.z, 1.0f, R);
+
+        S.Storm = max(S.Storm, Intensity * max(SimCellCloud.w * Whole, SimCellDraft.z * Band));
+        S.Low = max(S.Low, Intensity * Whole);
         S.Eye = max(S.Eye, Intensity * InEye);
         S.Strength = max(S.Strength, Intensity * Profile);
     }
@@ -2581,9 +2608,11 @@ float4 SimResampleOutput(float3 N, uint Slice)
  *  is written in the face's basis. The cubic can overshoot, so the weather's
  *  bounded channels are clamped.
  *
- *  STORM CELLS add their draft to W, and across their intense band raise cover
- *  and storm and lower the pressure, which the deck builds into its deepest
- *  cloud. Their spin is already in the flow, forced in Predict. */
+ *  STORM CELLS add their draft to W, raise storm across the whole storm and
+ *  most across their intense band, and lower the pressure across the whole
+ *  storm, which the deck builds into its deepest cloud from the cover already
+ *  there. Their spin is already in the flow, forced in
+ *  Predict. */
 [numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
 void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 {
@@ -2623,10 +2652,10 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 	// eyewall region that ignores the cloud the vortex actually winds.
     Weather.x = clamp(Weather.x + Stamp.Draft, -1.0f, 1.0f);
     Weather.y *= 1.0f - Stamp.Eye;
-    Weather.w = max(Weather.w, SimCellDraft.z * Stamp.Band) * (1.0f - Stamp.Eye);
+    Weather.w = SimSmoothMax(Weather.w, Stamp.Storm, SIM_CELL_STORM_BLEND) * (1.0f - Stamp.Eye);
     Weather.yzw = saturate(Weather.yzw);
 
-    Flow.z = clamp(Flow.z - SimCellDraft.w * Stamp.Band, -1.0f, 1.0f);
+    Flow.z = clamp(Flow.z - SimCellDraft.w * Stamp.Low, -1.0f, 1.0f);
 
     // -- Write ---------------------------------------------------------------------
 
@@ -2669,6 +2698,7 @@ int2 SimDebugSize;
 #define SIM_DEBUG_HUMIDITY     12
 #define SIM_DEBUG_STORM        13
 #define SIM_DEBUG_HEIGHT       14
+#define SIM_DEBUG_COLUMN_CLOUD 15
 
 /** Diverging ramp, blue negative, red positive, dark at zero so a collapsed
  *  field reads as an empty frame rather than a plausible mid-grey. */
@@ -2789,6 +2819,20 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
         const float Strength = SimCellStamp(N).Strength;
 
         Value = (Strength > Tracer.w) ? -Strength : Tracer.w;
+    }
+    else if (SimDebugMode == SIM_DEBUG_COLUMN_CLOUD)
+    {
+		// Cover of this layer and every layer above it: the cover the terrestrial
+		// deck reads with its CloudLayer set to this layer.
+        float Clear = 1.0f;
+
+		[loop]
+        for (uint K = 0; K <= Layer; K++)
+        {
+            Clear *= 1.0f - SimTracerSRV.Load(int4(C, K, 0)).x;
+        }
+
+        Value = 1.0f - Clear;
     }
     else if (SimDebugMode == SIM_DEBUG_HEIGHT)
     {

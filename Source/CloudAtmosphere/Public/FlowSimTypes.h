@@ -83,6 +83,10 @@ enum class EFlowDebugMode : uint8
 	/** Height of the layer's top: the free surface on layer 0, an interface
 	 *  below it. */
 	LayerHeight UMETA(DisplayName = "Layer top height"),
+
+	/** Cloud cover of the layer and every layer above it, 0 to 1: what the
+	 *  terrestrial deck reads with its CloudLayer set to this layer. */
+	ColumnCloud UMETA(DisplayName = "Column cloud"),
 };
 
 /** Per-layer settings. Profile values are multipliers on the shared jet
@@ -552,16 +556,24 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
 	float StormCellEyeDraft = -0.5f;
 
-	/** Storm intensity the eyewall band is raised to, which deepens and darkens
-	 *  the cloud already there without adding any: the band runs from 40% of
-	 *  peak vector strength inward to the eyewall. */
+	/** Storm intensity raised across the whole storm, full from the centre
+	 *  through the eyewall and easing to none at the radius, joined to the
+	 *  sim's own by a smooth max. Storm deepens and darkens the cloud already
+	 *  there without adding any, so a hurricane reads as storm throughout; with
+	 *  the sim's storm tuned lower, the cells make the heaviest storm anywhere. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellStorm = 0.6f;
+
+	/** Storm intensity the eyewall band is raised to, on top of StormCellStorm:
+	 *  the band runs from 40% of peak vector strength inward to the eyewall. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellBandStorm = 1.0f;
 
-	/** Pressure drop across the eyewall band, in the output's normalised
-	 *  units. The deck deepens low-pressure columns. */
+	/** Pressure drop full through the eyewall and easing to none at the
+	 *  radius, in the output's normalised units: the whole storm is a low. The
+	 *  deck raises the lid and lowers the base under lows. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "2.0"))
-	float StormCellBandPressure = 0.5f;
+	float StormCellPressure = 0.5f;
 
 	// -- Noise coordinates --------------------------------------------------
 

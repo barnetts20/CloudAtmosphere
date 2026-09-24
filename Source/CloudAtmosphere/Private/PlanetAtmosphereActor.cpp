@@ -750,6 +750,7 @@ struct FTerrestrialFieldPins
     FLinearColor CloudGenusCumulus;
     FLinearColor CloudGenusCirrus;
     FLinearColor ShadowCascades;
+    FLinearColor CloudResponse;
 };
 
 /** The sim's noise drift angle and phase A's position in its reset cycle, at
@@ -832,6 +833,8 @@ static FTerrestrialFieldPins PackTerrestrialField(
     // The cloud layer and coverage fray ride in the cascade pin's spare slots.
     Out.ShadowCascades = FLinearColor(
         (float)ShadowCascadeRadii.X, (float)ShadowCascadeRadii.Y, (float)P.CloudLayer, P.CoverageFray);
+
+    Out.CloudResponse = FLinearColor(P.CloudFull, P.TypeCurve, 0.0f, 0.0f);
 
     return Out;
 }
@@ -1061,6 +1064,7 @@ void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
     SetVectorChecked(MID_Atmosphere, TEXT("CloudGenusCumulus"), Pins.CloudGenusCumulus);
     SetVectorChecked(MID_Atmosphere, TEXT("CloudGenusCirrus"), Pins.CloudGenusCirrus);
     SetVectorChecked(MID_Atmosphere, TEXT("ShadowCascades"), Pins.ShadowCascades);
+    SetVectorChecked(MID_Atmosphere, TEXT("CloudResponse"), Pins.CloudResponse);
 
     SetScalarChecked(MID_Atmosphere, TEXT("CloudOpticalDepth"), TerrestrialProfile.CloudOpticalDepth);
 
@@ -1964,6 +1968,7 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.CloudGenusCumulus = ToVector4(Pins.CloudGenusCumulus);
         Params.CloudGenusCirrus = ToVector4(Pins.CloudGenusCirrus);
         Params.ShadowCascades = ToVector4(Pins.ShadowCascades);
+        Params.CloudResponse = ToVector4(Pins.CloudResponse);
 
         Params.CloudOpticalDepth = TerrestrialProfile.CloudOpticalDepth;
         Params.CloudExtinction = ToVector4(TerrestrialCloudMaterial.CloudExtinction);

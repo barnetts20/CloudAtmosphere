@@ -80,7 +80,7 @@
  *  coverage: the hole fraction a thick system breaks up into. Half leaves
  *  about half of it clear, the survivors ramping from their edges to full. */
 #ifndef TR_EROSION_CUT
-#define TR_EROSION_CUT 0.5f
+#define TR_EROSION_CUT 0.0f
 #endif
 
 /** How far the noise stretches vertically with column depth, 0 to 1. At 1 a
@@ -90,7 +90,7 @@
  *  always meets one, and it reads solid at any erosion while thin cloud
  *  breaks up. */
 #ifndef TR_COLUMN_COHERENCE
-#define TR_COLUMN_COHERENCE 1.0f
+#define TR_COLUMN_COHERENCE 0.0f
 #endif
 
 /** Coverage over which a column grows from no slab to its full depth. Sparse
@@ -157,6 +157,12 @@ struct TRFieldParams
     float CoverageGain;
     float CoverageSoftness;
     float CoverageFray;
+
+	/** The sim cloud amount at which relief and type reach full, and the
+	 *  exponent type builds with: above 1 only the densest and stormiest columns
+	 *  approach full towering storm cloud. */
+    float CloudFull;
+    float TypeCurve;
 
 	/** Depth of a stratiform column as a fraction of a towering one. */
     float StratusDepth;
@@ -306,6 +312,7 @@ struct TRFieldParams
  *    ShadowCascades    Cascade 1 half-width, cascade 2 half-width, CloudLayer,
  *                      CoverageFray
  *    CloudGenus<Name>  structure channel weights for that genus
+ *    CloudResponse     CloudFull, TypeCurve, -, -
  *
  *  RotationWeight is the planet's own rotation; the sim runs in the rotating
  *  frame, so it applies to the sampling position, negated because rotating the
@@ -330,7 +337,8 @@ TRFieldParams TR_BuildField(
 	float4 CloudGenusStratocumulus,
 	float4 CloudGenusCumulus,
 	float4 CloudGenusCirrus,
-	float4 ShadowCascades)
+	float4 ShadowCascades,
+	float4 CloudResponse)
 {
     TRFieldParams F;
 
@@ -417,6 +425,9 @@ TRFieldParams TR_BuildField(
     F.CloudLayer = ShadowCascades.z;
     F.CoverageFray = saturate(ShadowCascades.w);
 
+    F.CloudFull = max(CloudResponse.x, 1e-3f);
+    F.TypeCurve = max(CloudResponse.y, 0.1f);
+
     F.StructureFade = 1.0f;
     F.DetailFade = 1.0f;
     F.PixelFootprint = 0.0f;
@@ -435,7 +446,7 @@ TRFieldParams TR_BuildField(
 	NoiseLevels, StructureSampling, StructureWarp, \
 	DetailSampling, DetailWarp, \
 	CloudGenusStratus, CloudGenusStratocumulus, CloudGenusCumulus, CloudGenusCirrus, \
-	ShadowCascades)
+	ShadowCascades, CloudResponse)
 
 /** The shell's ceiling: 1 below the falloff band, 0 at the atmosphere top,
  *  smoothstep between, so a tower that would cross it softens into a cap. */
@@ -571,8 +582,10 @@ TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler,
  *  layered cloud and cloud grown under weak lift stays low. No noise, which
  *  keeps the base exact.
  *
- *  DEPTH FOLLOWS THE CLOUD AMOUNT, the scaled field before the threshold, by
- *  CloudRelief. Coverage saturates across a narrow band, so without this every
+ *  DEPTH FOLLOWS THE CLOUD AMOUNT, the sim's cloud over CloudFull, by
+ *  CloudRelief. Separate from CoverageGain, which only places the edges: the
+ *  amount must span the sim's range, or relief and type saturate across whole
+ *  systems and every column reads as full towering storm cloud. Coverage saturates across a narrow band, so without this every
  *  covered column is full depth and the sim's gradients -- spiral bands, a
  *  storm's rise toward its eyewall -- read as flat decks with cliff edges
  *  rather than as relief. PITFALL: relief steepens the top wherever the cloud
@@ -595,13 +608,14 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
     Col.Altitude = saturate(F.AltitudeGain * Weather.z);
 
     const float Threshold = 1.0f - F.CloudCover;
-    const float Amount = saturate(F.CoverageGain * Weather.y);
+    const float Amount = saturate(Weather.y / F.CloudFull);
 
     Col.Coverage = smoothstep(
 		Threshold - F.CoverageSoftness, Threshold + F.CoverageSoftness, F.CoverageGain * Weather.y);
 
-    Col.Type = saturate(F.TypeBias + F.TypeCloud * Amount + F.TypeTropical * Tropical
-		+ F.TypeStorm * saturate(Weather.w));
+    Col.Type = saturate(F.TypeBias + F.TypeTropical * Tropical
+		+ F.TypeCloud * pow(Amount, F.TypeCurve)
+		+ F.TypeStorm * pow(saturate(Weather.w), F.TypeCurve));
 
 	// Layered cloud is stratus, cellular where the air sinks, and cirrus as it
 	// rises; towering cloud is cumulus at any height.

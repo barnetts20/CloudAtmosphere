@@ -1216,7 +1216,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		FMath::Clamp(Config->StormCellDraft, -1.0f, 1.0f),
 		FMath::Clamp(Config->StormCellEyeDraft, -1.0f, 1.0f),
 		FMath::Clamp(Config->StormCellBandStorm, 0.0f, 1.0f),
-		FMath::Clamp(Config->StormCellBandPressure, 0.0f, 2.0f));
+		FMath::Clamp(Config->StormCellPressure, 0.0f, 2.0f));
 
 	Out.CellLife = FVector4f(
 		FMath::Max(Config->StormCellSpawnRate, 0.0f),
@@ -1240,7 +1240,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		FMath::Clamp(Config->StormCellCloud, 0.0f, 1.0f),
 		FMath::Max(Config->StormCellCloudRate, 0.0f),
 		FMath::Clamp(Config->StormCellInflow, 0.0f, 1.0f),
-		0.0f);
+		FMath::Clamp(Config->StormCellStorm, 0.0f, 1.0f));
 
 	Out.CellCount = FMath::Clamp(Config->MaxStormCells, 0, FlowSimShader::MaxStormCells);
 
@@ -1335,6 +1335,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 			// Saturates at Froude 1; the jump threshold is half way up.
 		case EFlowDebugMode::Froude:      Out.DebugScale = 1.0f; break;
 		case EFlowDebugMode::Cloud:
+		case EFlowDebugMode::ColumnCloud:
 		case EFlowDebugMode::CloudAscent:
 		case EFlowDebugMode::Storm:       Out.DebugScale = 1.0f; break;
 			// A quarter radian, about the displacement at mid-life.

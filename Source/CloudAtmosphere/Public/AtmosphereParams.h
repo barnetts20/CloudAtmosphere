@@ -480,13 +480,21 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StratusDepth = 0.25f;
 
-	/** How far column depth follows the sim's cloud amount (the field scaled by
-	 *  CoverageGain, before the threshold). At 1 depth is proportional to it, so
+	/** How far column depth follows the sim's cloud amount (the field over
+	 *  CloudFull). At 1 depth is proportional to it, so
 	 *  the sim's gradients read as relief: spiral bands as ridges, storms rising
 	 *  toward the eyewall. At 0 every covered column is full depth, which reads
 	 *  as flat decks with cliff edges. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float CloudRelief = 1.0f;
+
+	/** The sim cloud value at which relief and type reach full, in the sim's
+	 *  own units (read it off the Column cloud debug view). Set it near the top
+	 *  of the sim's range so only the densest cloud builds full; at or below the
+	 *  typical value whole systems saturate into flat, full-height storm cloud.
+	 *  Independent of CoverageGain, which only places the edges. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001"))
+	float CloudFull = 0.4f;
 
 	/** The sim layer the clouds are drawn from, -1 for the bottom. A layer's
 	 *  cloud is combined with every layer's above it, so the bottom reads the
@@ -498,8 +506,8 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	int32 CloudLayer = -1;
 
 	/** Cloud type, 0 stratiform to 1 towering, is TypeBias + TypeCloud * cloud
-	 *  amount (the field scaled by CoverageGain) + TypeTropical * tropicality +
-	 *  TypeStorm * the sim's storm. Type sets column depth and the noise genus,
+	 *  amount^TypeCurve + TypeTropical * tropicality + TypeStorm *
+	 *  storm^TypeCurve, the amount being the sim's cloud over CloudFull. Type sets column depth and the noise genus,
 	 *  and blends the material from fair-weather to storm. Driven by the cloud
 	 *  itself, so towers move and wind with the flow's structure. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
@@ -516,6 +524,12 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	 *  stormy column into a full tower. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float TypeStorm = 0.5f;
+
+	/** Exponent the cloud and storm terms of type build with. 1 is linear;
+	 *  higher keeps most cloud layered and fair-weather and lets only the
+	 *  densest, stormiest columns approach full towering storm cloud. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1", ClampMax = "8.0"))
+	float TypeCurve = 2.0f;
 
 	// -- Breakup --------------------------------------------------------------
 
