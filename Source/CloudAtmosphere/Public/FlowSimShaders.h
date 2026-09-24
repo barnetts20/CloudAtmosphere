@@ -80,6 +80,8 @@ SHADER_PARAMETER(int32, SimStepIndex)
 // -- Noise coordinates --------------------------------------------------
 SHADER_PARAMETER(float, SimNoiseDriftRate)
 SHADER_PARAMETER(float, SimNoiseResetTime)
+SHADER_PARAMETER(float, SimNoiseMaxStretch)
+SHADER_PARAMETER(float, SimNoiseRelax)
 
 // -- Polar filter -------------------------------------------------------
 SHADER_PARAMETER(float, SimFilterLatitude)

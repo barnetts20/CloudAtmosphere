@@ -1240,7 +1240,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		FMath::Clamp(Config->StormCellCloud, 0.0f, 1.0f),
 		FMath::Max(Config->StormCellCloudRate, 0.0f),
 		FMath::Clamp(Config->StormCellInflow, 0.0f, 1.0f),
-		0.0f);
+		FMath::Clamp(Config->StormCellCover, 0.0f, 1.0f));
 
 	Out.CellCount = FMath::Clamp(Config->MaxStormCells, 0, FlowSimShader::MaxStormCells);
 
@@ -1248,6 +1248,8 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 
 	Out.NoiseDriftRate = Config->GetNoiseDriftRate();
 	Out.NoiseResetTime = Config->GetNoiseResetTime();
+	Out.NoiseMaxStretch = FMath::Max(Config->NoiseMaxStretch, 1.1f);
+	Out.NoiseRelax = FMath::Max(Config->NoiseStretchRelax, 0.0f) / FMath::Max(Out.NoiseResetTime, 1e-3f);
 
 	Out.FilterLatitude = FMath::Clamp(Config->FilterLatitude, 0.0f, 1.0f);
 	Out.FilterMaxHalfWidth = FMath::Clamp(Config->FilterMaxHalfWidth, 1, 256);

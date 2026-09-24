@@ -163,7 +163,8 @@ float SimWindEvaporation;
  *             w cyclonic vorticity at which a seed counts fully.
  *    Cloud    x cloud the bottom layer is raised to at the eyewall, y rate it
  *             rises toward that and clears in the eye, z inflow below and
- *             outflow above as a fraction of the vortex's speed, w unused. */
+ *             outflow above as a fraction of the vortex's speed, w output
+ *             cover under the storm at the eyewall. */
 float4 SimCellShape;
 float4 SimCellVortex;
 float4 SimCellDraft;
@@ -182,6 +183,11 @@ int SimStepIndex;
  *  time a displacement accumulates before it resets. */
 float SimNoiseDriftRate;
 float SimNoiseResetTime;
+
+/** Aspect ratio past which a phase's coordinates relax, and the rate they
+ *  relax at per unit of excess; see SimNoiseStretch. Zero rate disables. */
+float SimNoiseMaxStretch;
+float SimNoiseRelax;
 
 /** Cloud fraction below which the formation altitude fades to zero instead of
  *  being divided out, so the ratio stays smooth where cloud is thin. */
@@ -556,6 +562,51 @@ bool SimNoiseResets(uint Phase)
     return floor(After) != floor(Before);
 }
 
+/** A phase's noise coordinate at a centre: its position plus the stored
+ *  displacement. The column wraps; rows are the caller's to keep in range. */
+float3 SimNoiseCoordinate(int2 C, uint Slice)
+{
+    return normalize(SimDirection(SimColumnToLon((float) C.x), SimRowToMu((float) C.y))
+		+ SimLoad4(SimNoiseSRV, C, Slice).xyz);
+}
+
+/** How far a phase's coordinates have been stretched at a centre: the aspect
+ *  ratio a small circle of noise has been drawn out to, from the coordinate
+ *  map's gradient across the neighbouring centres. Measured in the tangent
+ *  plane at the coordinate itself, so rotation of any amount reads as 1 and
+ *  only shear counts: a spinning core keeps its swirl. */
+float SimNoiseStretch(int2 C, uint Slice)
+{
+    const int South = max(C.y - 1, 0);
+    const int North = min(C.y + 1, SimGridSize.y - 1);
+
+    const float3 East = (SimNoiseCoordinate(C + int2(1, 0), Slice) - SimNoiseCoordinate(C - int2(1, 0), Slice))
+		/ (2.0f * SimRowCos(C.y) * SimDLon());
+
+    const float3 Northward = (SimNoiseCoordinate(int2(C.x, North), Slice) - SimNoiseCoordinate(int2(C.x, South), Slice))
+		/ max((SimRowToMu((float) North) - SimRowToMu((float) South)) / SimRowCos(C.y), 1e-6f);
+
+    const float3 Centre = SimNoiseCoordinate(C, Slice);
+
+    float3 U = cross(Centre, float3(0.0f, 0.0f, 1.0f));
+    U = (dot(U, U) > 1e-8f) ? normalize(U) : float3(1.0f, 0.0f, 0.0f);
+
+    const float3 V = cross(Centre, U);
+
+	// Singular values of the 2x2 Jacobian [a b; c d], from its Frobenius norm
+	// and determinant.
+    const float A = dot(East, U);
+    const float B = dot(Northward, U);
+    const float Cc = dot(East, V);
+    const float D = dot(Northward, V);
+
+    const float Sum = A * A + B * B + Cc * Cc + D * D;
+    const float Det = abs(A * D - B * Cc);
+    const float Root = sqrt(max(Sum * Sum - 4.0f * Det * Det, 0.0f));
+
+    return sqrt(0.5f * (Sum + Root)) / sqrt(max(0.5f * (Sum - Root), 1e-12f));
+}
+
 // -- Moisture ---------------------------------------------------------------
 
 /** Saturation vapour amount of a layer at a latitude. */
@@ -876,6 +927,27 @@ float SimCellCornerPsi(int I, int J)
     return SimCellStream(SimDirection(SimColumnToLon((float) I - 0.5f), SimFaceToMu((float) J)));
 }
 
+/** How far inside the live cells P is, 1 within 80% of a radius fading to 0
+ *  at the edge: where storms keep their noise swirl whatever the stretch. */
+float SimCellInterior(float3 P)
+{
+    float Inside = 0.0f;
+
+	[loop]
+    for (int Slot = 0; Slot < SimCellCount; Slot++)
+    {
+        float3 Axis;
+        float Sense, Intensity, R;
+
+        if (SimCellReach((uint) Slot, P, false, Axis, Sense, Intensity, R))
+        {
+            Inside = max(Inside, 1.0f - smoothstep(0.8f, 1.0f, R));
+        }
+    }
+
+    return Inside;
+}
+
 /** Whether any live cell reaches within a cell radius and a grid cell of P:
  *  the gate on the corner reads. */
 bool SimCellNear(float3 P)
@@ -962,7 +1034,9 @@ float2 SimCellCloudTarget(float3 P, uint Layer)
     return float2(Target, Clear);
 }
 
-/** What the cells add to the output at N: the draft, the intense band --
+/** What the cells add to the output at N: the draft; the cover ramp, cloud on
+ *  the same ramp as the vectors, which the deck's swirled noise erodes into
+ *  bands and which the sim's weather cannot carry away; the intense band --
  *  where the storm cloud is raised to the deepest the deck builds -- and the
  *  eye, cleared here at the atlas' resolution, finer than the sim's. Strength
  *  is the largest vector strength, for the debug view. */
@@ -971,6 +1045,7 @@ struct SimStamp
     float Draft;
     float Band;
     float Eye;
+    float Cover;
     float Strength;
 };
 
@@ -980,6 +1055,7 @@ SimStamp SimCellStamp(float3 N)
     S.Draft = 0.0f;
     S.Band = 0.0f;
     S.Eye = 0.0f;
+    S.Cover = 0.0f;
     S.Strength = 0.0f;
 
 	[loop]
@@ -999,6 +1075,7 @@ SimStamp SimCellStamp(float3 N)
         S.Draft += Intensity * (SimCellDraft.x * Profile + SimCellDraft.y * InEye);
         S.Band = max(S.Band, Intensity * smoothstep(SIM_CELL_BAND_FLOOR, 1.0f, Profile));
         S.Eye = max(S.Eye, Intensity * InEye);
+        S.Cover = max(S.Cover, Intensity * Profile);
         S.Strength = max(S.Strength, Intensity * Profile);
     }
 
@@ -1750,7 +1827,8 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
  *  vector ramp (SimCellCloudTarget), which the flow winds like any other.
  *
  *  Noise: each phase's displacement at the departure point, carried to this
- *  centre and turned by the drift over the step. A phase resets to zero at the
+ *  centre and turned by the drift over the step, then relaxed where the
+ *  phase has been sheared past SimNoiseMaxStretch. A phase resets to zero at the
  *  step its clock wraps, which is where the reader's weight for it is zero.
  *
  *  DRAG ON THE EDDY PART OF u AND ALL OF v. The zonal mean of u belongs to the
@@ -1971,9 +2049,32 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
         {
 			// Normalised: the coordinate is a direction, and interpolation
 			// and the rotation both drift it off the sphere.
-            const float3 Coordinate = normalize(SimRotateZ(
+            float3 Coordinate = normalize(SimRotateZ(
 				SimSampleCubic4(SimNoiseSRV, DepartureGrid, Slice).xyz + T.Departure,
 				SimNoiseDriftRate * Dt));
+
+			// Past the stretch limit the coordinate relaxes toward where the
+			// drift alone would have carried it since the phase reset, faster
+			// the further past: shear zones slip back toward fresh noise
+			// instead of drawing it into strands. Not inside storm cells.
+            BRANCH
+
+            if (SimNoiseRelax > 0.0f)
+            {
+				// Storms are exempt: their swirl is the point.
+                const float Exempt = bCellNear ? SimCellInterior(P) : 0.0f;
+
+                const float Excess = max(SimNoiseStretch(C, Slice) / SimNoiseMaxStretch - 1.0f, 0.0f)
+					* (1.0f - Exempt);
+
+                if (Excess > 0.0f)
+                {
+                    const float Age = frac(SimTime / SimNoiseResetTime + 0.5f * (float) Phase) * SimNoiseResetTime + Dt;
+                    const float3 Rest = SimRotateZ(P, SimNoiseDriftRate * Age);
+
+                    Coordinate = normalize(lerp(Rest, Coordinate, 1.0f / (1.0f + SimNoiseRelax * Excess * Dt)));
+                }
+            }
 
             Displacement = Coordinate - P;
         }
@@ -2617,7 +2718,7 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
     const SimStamp Stamp = SimCellStamp(N);
 
     Weather.x = clamp(Weather.x + Stamp.Draft, -1.0f, 1.0f);
-    Weather.y = max(Weather.y, SimCellDraft.z * Stamp.Band) * (1.0f - Stamp.Eye);
+    Weather.y = max(Weather.y, max(SimCellCloud.w * Stamp.Cover, SimCellDraft.z * Stamp.Band)) * (1.0f - Stamp.Eye);
     Weather.w = max(Weather.w, SimCellDraft.z * Stamp.Band) * (1.0f - Stamp.Eye);
     Weather.yzw = saturate(Weather.yzw);
 

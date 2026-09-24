@@ -155,6 +155,8 @@ namespace
 
 		P.SimNoiseDriftRate = Params.NoiseDriftRate;
 		P.SimNoiseResetTime = FMath::Max(Params.NoiseResetTime, 1e-3f);
+		P.SimNoiseMaxStretch = FMath::Max(Params.NoiseMaxStretch, 1.1f);
+		P.SimNoiseRelax = FMath::Max(Params.NoiseRelax, 0.0f);
 
 		P.SimFilterLatitude = Params.FilterLatitude;
 		P.SimFilterMaxHalfWidth = Params.FilterMaxHalfWidth;

@@ -542,6 +542,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0"))
 	float StormCellCloudRate = 4.0f;
 
+	/** Cloud cover the output holds under the storm at the eyewall, on the same
+	 *  ramp. Drawn where the storm is shown each frame, so the weather cannot
+	 *  carry it off; the deck's noise, swirled by the vortex, erodes it into
+	 *  bands. The same saturation pitfall as StormCellCloud applies. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellCover = 0.3f;
+
 	/** Vertical motion added with the vector strength, in W's units: rising
 	 *  air makes the column towering and fills it in. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
@@ -573,6 +580,19 @@ public:
 	 *  times (1 / jet angular rate). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Coordinates", meta = (ClampMin = "0.05"))
 	float NoiseResetPeriod = 0.5f;
+
+	/** How far the flow may stretch the noise before it relaxes: the aspect
+	 *  ratio a small round feature has been drawn out to. Rotation does not
+	 *  count, only shear, so a spinning storm keeps its swirl while its bands
+	 *  stop drawing the noise into strands. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Coordinates", meta = (ClampMin = "1.1"))
+	float NoiseMaxStretch = 3.0f;
+
+	/** How hard over-stretched noise relaxes back toward fresh noise: e-folds
+	 *  per reset period for each whole multiple of NoiseMaxStretch it is past.
+	 *  Zero lets the flow stretch it until the phase resets. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Coordinates", meta = (ClampMin = "0.0"))
+	float NoiseStretchRelax = 4.0f;
 
 	/** The westerly jet's angular rate: JetStrength times layer 0's JetScale. */
 	float GetJetRate() const
@@ -779,6 +799,11 @@ struct FFlowSimParams
 	/** Radians per unit sim time, and sim time. */
 	float NoiseDriftRate = 0.0f;
 	float NoiseResetTime = 1.0f;
+
+	/** Aspect ratio past which noise coordinates relax, and the rate per unit
+	 *  sim time at one multiple past it. */
+	float NoiseMaxStretch = 3.0f;
+	float NoiseRelax = 0.0f;
 
 
 	float FilterLatitude = 0.9f;
