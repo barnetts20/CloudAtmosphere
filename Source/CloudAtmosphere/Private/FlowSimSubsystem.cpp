@@ -445,6 +445,16 @@ void UFlowSimSubsystem::ResetSimulation()
 
 	SpinUpTarget = (bRestored || !Config) ? 0 : FMath::Max(Config->SpinUpSteps, 0);
 
+	// Said every time: a missing or broken InitialState reference falls back to
+	// a seed, which is otherwise indistinguishable from a restore gone wrong.
+	if (!bRestored && Config)
+	{
+		UE_LOG(LogFlowSim, Display, TEXT("Reseeding '%s' (InitialState %s); %d spin-up steps."),
+			*Config->GetName(),
+			Config->InitialState ? TEXT("refused, see above") : TEXT("not bound"),
+			SpinUpTarget);
+	}
+
 	if (bRestored)
 	{
 		SimulatedTime = Config->InitialState->SimulatedTime;
@@ -470,11 +480,12 @@ bool UFlowSimSubsystem::QueueInitialState()
 	{
 		UE_LOG(LogFlowSim, Warning,
 			TEXT("InitialState '%s' does not match this solver's state at %dx%dx%d ")
-			TEXT("(captured at %dx%dx%d, %d floats). Seeding instead."),
+			TEXT("(captured at %dx%dx%d, %d floats; the solver stores %d per cell). ")
+			TEXT("Seeding instead."),
 			*Snapshot->GetName(),
 			Grid.X, Grid.Y, Grid.Z,
 			Snapshot->Grid.X, Snapshot->Grid.Y, Snapshot->Grid.Z,
-			Snapshot->State.Num());
+			Snapshot->State.Num(), UFlowSnapshot::FloatsPerCell);
 
 		return false;
 	}

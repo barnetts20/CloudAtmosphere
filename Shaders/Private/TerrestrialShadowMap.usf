@@ -61,10 +61,23 @@ float4 CloudGenusStratus;
 float4 CloudGenusStratocumulus;
 float4 CloudGenusCumulus;
 float4 CloudGenusCirrus;
+float4 ShadowCascades;
+
+/** First cascade that samples the detail volume. Coarser levels take the
+ *  detail layer's mean erosion without a fetch: their texels span more than a
+ *  detail feature, so the subsamples could only alias it. */
+#ifndef TR_SHADOW_DETAIL_LEVEL
+#define TR_SHADOW_DETAIL_LEVEL 2
+#endif
 
 TRFieldParams TRShadow_Field()
 {
-    return TR_BUILD_FIELD();
+    TRFieldParams F = TR_BUILD_FIELD();
+
+	// One dispatch per level, so the level being baked is ShadowFirstLevel.
+    F.DetailFade = (ShadowFirstLevel >= TR_SHADOW_DETAIL_LEVEL) ? 1.0f : 0.0f;
+
+    return F;
 }
 
 /** Extinction amount at a cloud type. Mirrors TR_TypeTint on the a channel.
@@ -91,12 +104,11 @@ static TRRayCache TRShadow_Ray;
  *  part of the reconstruction through the mean and reintroduce the bias the map
  *  exists to remove.
  *
- *  BOTH LAYERS, IN EVERY CASCADE. Detail erosion lowers mean density rather
- *  than only adding variation, so dropping it would leave the shadowing cloud
- *  uniformly denser than the visible one. The subsamples band-limit it against
- *  the texel instead, reading the noise at the mip their spacing resolves --
- *  four samples cannot average the octaves finer than that, and a coarse
- *  cascade texel spans dozens of detail texels. */
+ *  BOTH LAYERS, IN EVERY CASCADE, the detail at least as its mean. Detail
+ *  erosion lowers mean density rather than only adding variation, so dropping
+ *  it would leave the shadowing cloud uniformly denser than the visible one.
+ *  Where it is fetched, the subsamples band-limit it against the texel, reading
+ *  the noise at the mip their spacing resolves. See TR_SHADOW_DETAIL_LEVEL. */
 float TRShadow_Sigma(
 	float3 Pos,
 	float3 BasisU,

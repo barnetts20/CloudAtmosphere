@@ -1301,8 +1301,9 @@ void MainCorrectCS(uint3 Id : SV_DispatchThreadID)
 // ---------------------------------------------------------------------------
 // Snapshot capture and restore
 //
-// Faces and phi are the complete state: everything else is derived within a
-// step. Capturing them restores the sim precisely rather than statistically.
+// Faces, phi and the cloud and noise tracers are the complete state: everything
+// else is derived within a step. Capturing them restores the sim precisely
+// rather than statistically. One plane per float; see UFlowSnapshot.
 // ---------------------------------------------------------------------------
 
 int SimFlatIndex(uint3 Id)
@@ -1325,10 +1326,22 @@ void MainCaptureCS(uint3 Id : SV_DispatchThreadID)
     const int Total = SimGridSize.x * SimGridSize.y * SimGridSize.z;
 
     const float2 F = SimFaceSRV.Load(int4(Id, 0));
+    const float2 Cloud = SimCloudSRV.Load(int4(Id, 0));
+    const float3 NoiseA = SimNoiseSRV.Load(int4(Id, 0)).xyz;
+    const float3 NoiseB = SimNoiseSRV.Load(int4(Id.xy, Id.z + (uint) SimGridSize.z, 0)).xyz;
 
     SimCaptureBuffer[Index] = F.x;
     SimCaptureBuffer[Total + Index] = F.y;
     SimCaptureBuffer[2 * Total + Index] = SimPhiSRV.Load(int4(Id, 0));
+    SimCaptureBuffer[3 * Total + Index] = Cloud.x;
+    SimCaptureBuffer[4 * Total + Index] = Cloud.y;
+
+    [unroll]
+    for (int C = 0; C < 3; C++)
+    {
+        SimCaptureBuffer[(5 + C) * Total + Index] = NoiseA[C];
+        SimCaptureBuffer[(8 + C) * Total + Index] = NoiseB[C];
+    }
 }
 
 /** Dispatch (N_lon, N_lat, LayerCount). Replaces the seeding passes when a
@@ -1346,12 +1359,19 @@ void MainRestoreCS(uint3 Id : SV_DispatchThreadID)
 
     SimFaceUAV[int3(Id)] = float2(SimRestoreBuffer[Index], SimRestoreBuffer[Total + Index]);
     SimPhiUAV[int3(Id)] = SimRestoreBuffer[2 * Total + Index];
+    SimCloudUAV[int3(Id)] = float2(SimRestoreBuffer[3 * Total + Index], SimRestoreBuffer[4 * Total + Index]);
 
-	// Not in the snapshot: cloud re-forms from the flow within a lifetime, and
-	// the noise displacements within a reset period.
-    SimCloudUAV[int3(Id)] = float2(0.0f, 0.0f);
-    SimNoiseUAV[int3(Id)] = float4(0.0f, 0.0f, 0.0f, 0.0f);
-    SimNoiseUAV[int3(Id.xy, Id.z + (uint) SimGridSize.z)] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float3 NoiseA, NoiseB;
+
+    [unroll]
+    for (int C = 0; C < 3; C++)
+    {
+        NoiseA[C] = SimRestoreBuffer[(5 + C) * Total + Index];
+        NoiseB[C] = SimRestoreBuffer[(8 + C) * Total + Index];
+    }
+
+    SimNoiseUAV[int3(Id)] = float4(NoiseA, 0.0f);
+    SimNoiseUAV[int3(Id.xy, Id.z + (uint) SimGridSize.z)] = float4(NoiseB, 0.0f);
 }
 
 // ---------------------------------------------------------------------------

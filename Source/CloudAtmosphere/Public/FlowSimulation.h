@@ -31,8 +31,9 @@ DECLARE_LOG_CATEGORY_EXTERN(LogFlowSim, Log, All);
 class CLOUDATMOSPHERE_API FFlowSimulation
 {
 public:
-	/** Floats per cell in a snapshot: u, v, phi. */
-	static constexpr int32 StateFloatsPerCell = 3;
+	/** Floats per cell in a snapshot: u, v, phi, the cloud pair, and both
+	 *  noise phases' displacements (xyz each). */
+	static constexpr int32 StateFloatsPerCell = 11;
 
 	/** Discard all state. The next Enqueue rebuilds and re-seeds. */
 	void RequestReset();

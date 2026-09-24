@@ -55,9 +55,14 @@ struct FFlowSnapshotProvenance
  *  mip settings, and any one applied to a physical field destroys it in a way
  *  that presents as the sim misbehaving. A float array round-trips exactly.
  *
- *  THE LAYOUT IS THE SOLVER'S STATE: u faces, then v faces, then the
- *  geopotential, each layer-major, then row, then column. See
- *  FFlowSimulation::StateFloatsPerCell. */
+ *  THE LAYOUT IS THE SOLVER'S STATE, one plane per float: u faces, v faces,
+ *  the geopotential, cloud fraction, cloud times formation ascent, then noise
+ *  phase A's displacement xyz and phase B's, each plane layer-major, then row,
+ *  then column. See FFlowSimulation::StateFloatsPerCell.
+ *
+ *  PITFALL: THE TRACERS ARE STATE TOO. The clouds and noise the deck draws are
+ *  carried by the sim, not derived from the flow; a snapshot without them
+ *  restores the winds under an empty sky, which reads as a fresh seed. */
 UCLASS(BlueprintType)
 class CLOUDATMOSPHERE_API UFlowSnapshot : public UDataAsset
 {
@@ -69,7 +74,7 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Snapshot")
 	FIntVector Grid = FIntVector::ZeroValue;
 
-	/** Length Grid.X * Grid.Y * Grid.Z * 3. */
+	/** Length Grid.X * Grid.Y * Grid.Z * FloatsPerCell. */
 	UPROPERTY()
 	TArray<float> State;
 
@@ -87,7 +92,7 @@ public:
 	/** Floats per cell the current solver stores. Matches
 	 *  FFlowSimulation::StateFloatsPerCell; duplicated so this header stays free
 	 *  of the render-side one. */
-	static constexpr int32 FloatsPerCell = 3;
+	static constexpr int32 FloatsPerCell = 11;
 
 	bool IsValidFor(const FIntVector& InGrid) const
 	{

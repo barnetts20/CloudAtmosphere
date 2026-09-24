@@ -372,6 +372,8 @@ void FFlowSimulation::AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, con
 
 	FRDGTextureRef Face = GraphBuilder.RegisterExternalTexture(PooledFace[CurrentFace]);
 	FRDGTextureRef Phi = GraphBuilder.RegisterExternalTexture(PooledPhi);
+	FRDGTextureRef Cloud = GraphBuilder.RegisterExternalTexture(PooledCloud[CurrentCloud]);
+	FRDGTextureRef Noise = GraphBuilder.RegisterExternalTexture(PooledNoise[CurrentCloud]);
 
 	FRDGBufferRef Capture = GraphBuilder.CreateBuffer(
 		FRDGBufferDesc::CreateStructuredDesc(sizeof(float), Total * StateFloatsPerCell),
@@ -380,6 +382,8 @@ void FFlowSimulation::AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, con
 	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
 	P->SimFaceSRV = GraphBuilder.CreateSRV(Face);
 	P->SimPhiSRV = GraphBuilder.CreateSRV(Phi);
+	P->SimCloudSRV = GraphBuilder.CreateSRV(Cloud);
+	P->SimNoiseSRV = GraphBuilder.CreateSRV(Noise);
 	P->SimCaptureBuffer = GraphBuilder.CreateUAV(Capture);
 
 	AddSimPass<FFlowSimCaptureCS>(GraphBuilder, TEXT("FlowSim.Capture"), P, GroupCount2D(AllocatedGrid));

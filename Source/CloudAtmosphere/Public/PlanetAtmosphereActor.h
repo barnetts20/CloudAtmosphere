@@ -137,6 +137,14 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "1", ClampMax = "3"))
     int32 ShadowLevelsPerFrame = 1;
 
+    /** Half-widths of the terrestrial map's inner cascades around the camera,
+     *  in planet radii: X for level 1, Y for level 2, each held inside the one
+     *  outside it. Narrower is sharper near the camera and hands over to the
+     *  coarser level sooner. Zero collapses a level. The gas giant sizes its
+     *  cascades from its noise layers' fade distances. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "0.0"))
+    FVector2D ShadowCascadeRadii = FVector2D(0.9, 0.3);
+
     /** Opaque geometry casting into the deck shadow map. PARKED, so it carries
      *  no edit specifier and reaches neither the details panel nor Blueprint;
      *  FGasGiantOccluderShadowParams::IsEnabled answers false whatever a saved

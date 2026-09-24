@@ -48,15 +48,14 @@ float TR_ShadowCullRadius(TRFieldParams F)
     return F.PlanetRadius + F.Thickness * TR_TopMax(F);
 }
 
-/** Half-width of a cascade: level 1 reaches StructureFadeFar and level 2
- *  DetailFadeFar, in planet radii. RESOLUTION TIERS ONLY -- both layers are
- *  baked into every level, so a finer level resolves the same field more finely
- *  around the camera rather than adding a layer the coarse one lacks.
+/** Half-width of a cascade, from the authored ShadowCascades in planet radii.
+ *  RESOLUTION TIERS ONLY: every level carries the whole field, a finer one
+ *  resolving it more finely around the camera.
  *
- *  STRICTLY ORDERED, because nothing makes the authored ranges so: a detail range
- *  wider than the structure range would put the coarse slice inside the fine
- *  one, which reads as the fine slice not working. A zero extent collapses that
- *  level and the walk skips it. */
+ *  STRICTLY ORDERED, because nothing makes the authored values so: a level 2
+ *  wider than level 1 would put the coarse slice inside the fine one, which
+ *  reads as the fine slice not working. A zero extent collapses that level and
+ *  the walk skips it. */
 float TR_ShadowCascadeExtent(TRFieldParams F, int Level)
 {
     const float Disc = TR_ShadowCullRadius(F) * ATMO_SHADOW_EXTENT_MARGIN;
@@ -66,14 +65,14 @@ float TR_ShadowCascadeExtent(TRFieldParams F, int Level)
         return Disc;
     }
 
-    const float Structure = min(F.PlanetRadius * max(F.StructureFadeFar, 0.0f), Disc);
+    const float Level1 = min(F.PlanetRadius * F.ShadowCascade1, Disc);
 
     if (Level == 1)
     {
-        return Structure;
+        return Level1;
     }
 
-    return min(F.PlanetRadius * max(F.DetailFadeFar, 0.0f), Structure);
+    return min(F.PlanetRadius * F.ShadowCascade2, Level1);
 }
 
 /** The deck's contribution to a shared frame. THE ONLY PLACE THIS MODEL MEETS

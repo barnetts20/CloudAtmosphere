@@ -749,6 +749,7 @@ struct FTerrestrialFieldPins
     FLinearColor CloudGenusStratocumulus;
     FLinearColor CloudGenusCumulus;
     FLinearColor CloudGenusCirrus;
+    FLinearColor ShadowCascades;
 };
 
 /** The sim's noise drift angle and phase A's position in its reset cycle, at
@@ -778,7 +779,7 @@ static FTerrestrialFieldPins PackTerrestrialField(
     const FTerrestrialProfileParams& P, const FTerrestrialMotionParams& M,
     const FTerrestrialGenusParams& G,
     const FAtmosphereNoiseLayerParams& Structure, const FAtmosphereNoiseLayerParams& Detail,
-    const UFlowSimConfig* SimConfig, float Time)
+    const FVector2D& ShadowCascadeRadii, const UFlowSimConfig* SimConfig, float Time)
 {
     FTerrestrialFieldPins Out;
 
@@ -821,6 +822,9 @@ static FTerrestrialFieldPins PackTerrestrialField(
     Out.CloudGenusStratocumulus = G.Stratocumulus;
     Out.CloudGenusCumulus = G.Cumulus;
     Out.CloudGenusCirrus = G.Cirrus;
+
+    Out.ShadowCascades = FLinearColor(
+        (float)ShadowCascadeRadii.X, (float)ShadowCascadeRadii.Y, 0.0f, 0.0f);
 
     return Out;
 }
@@ -1031,7 +1035,7 @@ void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
     const FTerrestrialFieldPins Pins = PackTerrestrialField(
         TerrestrialProfile, TerrestrialMotion, TerrestrialGenus,
         TerrestrialStructureLayer, TerrestrialDetailLayer,
-        Simulation.Config, GetGasGiantTime());
+        ShadowCascadeRadii, Simulation.Config, GetGasGiantTime());
 
     SetVectorChecked(MID_Atmosphere, TEXT("CloudProfile"), Pins.CloudProfile);
     SetVectorChecked(MID_Atmosphere, TEXT("CloudCurves"), Pins.CloudCurves);
@@ -1049,6 +1053,7 @@ void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
     SetVectorChecked(MID_Atmosphere, TEXT("CloudGenusStratocumulus"), Pins.CloudGenusStratocumulus);
     SetVectorChecked(MID_Atmosphere, TEXT("CloudGenusCumulus"), Pins.CloudGenusCumulus);
     SetVectorChecked(MID_Atmosphere, TEXT("CloudGenusCirrus"), Pins.CloudGenusCirrus);
+    SetVectorChecked(MID_Atmosphere, TEXT("ShadowCascades"), Pins.ShadowCascades);
 
     SetScalarChecked(MID_Atmosphere, TEXT("CloudOpticalDepth"), TerrestrialProfile.CloudOpticalDepth);
 
@@ -1900,7 +1905,7 @@ void APlanetAtmosphereActor::RequestShadowBake(
         const FTerrestrialFieldPins Pins = PackTerrestrialField(
             TerrestrialProfile, TerrestrialMotion, TerrestrialGenus,
             TerrestrialStructureLayer, TerrestrialDetailLayer,
-            Simulation.Config, Params.Time);
+            ShadowCascadeRadii, Simulation.Config, Params.Time);
 
         Params.CloudProfile = ToVector4(Pins.CloudProfile);
         Params.CloudCurves = ToVector4(Pins.CloudCurves);
@@ -1918,6 +1923,7 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.CloudGenusStratocumulus = ToVector4(Pins.CloudGenusStratocumulus);
         Params.CloudGenusCumulus = ToVector4(Pins.CloudGenusCumulus);
         Params.CloudGenusCirrus = ToVector4(Pins.CloudGenusCirrus);
+        Params.ShadowCascades = ToVector4(Pins.ShadowCascades);
 
         Params.CloudOpticalDepth = TerrestrialProfile.CloudOpticalDepth;
         Params.CloudExtinction = ToVector4(TerrestrialCloudMaterial.CloudExtinction);

@@ -227,18 +227,21 @@ struct TRFieldParams
     float DetailVertical;
 
 	/** Per-layer fade range, in planet radii from the camera. The march reads
-	 *  both edges to set the per-sample fades; the far edges are also the shadow
-	 *  map's cascade half-widths. */
+	 *  both edges to set the per-sample fades. */
     float StructureFadeNear;
     float StructureFadeFar;
     float DetailFadeNear;
     float DetailFadeFar;
 
+	/** Half-widths of the shadow map's two inner cascades, in planet radii. */
+    float ShadowCascade1;
+    float ShadowCascade2;
+
 	// -- Per sample ----------------------------------------------------------
 
 	/** Per-layer level of detail, 1 near and 0 far, written per sample by the
-	 *  march; left at 1 by TR_BuildField, which is what the bake reads. Only
-	 *  DetailFade is read here. */
+	 *  march; left at 1 by TR_BuildField. The bake sets DetailFade per cascade.
+	 *  Only DetailFade is read here. */
     float StructureFade;
     float DetailFade;
 
@@ -263,6 +266,7 @@ struct TRFieldParams
  *    NoiseLevels       StructureMipBias, StructureAmount, DetailMipBias, DetailAmount
  *    <Layer>Sampling   Scale, Aspect, Erosion, FadeMean
  *    <Layer>Warp       FlowInherit, GenusSubsidence (structure), FadeNear, FadeSpan
+ *    ShadowCascades    Cascade 1 half-width, cascade 2 half-width, -, -
  *    CloudGenus<Name>  structure channel weights for that genus
  *
  *  RotationWeight is the planet's own rotation; the sim runs in the rotating
@@ -287,7 +291,8 @@ TRFieldParams TR_BuildField(
 	float4 CloudGenusStratus,
 	float4 CloudGenusStratocumulus,
 	float4 CloudGenusCumulus,
-	float4 CloudGenusCirrus)
+	float4 CloudGenusCirrus,
+	float4 ShadowCascades)
 {
     TRFieldParams F;
 
@@ -366,6 +371,9 @@ TRFieldParams TR_BuildField(
     F.DetailFadeNear = max(DetailWarp.z, 0.0f);
     F.DetailFadeFar = F.DetailFadeNear + max(DetailWarp.w, 1e-4f);
 
+    F.ShadowCascade1 = max(ShadowCascades.x, 0.0f);
+    F.ShadowCascade2 = max(ShadowCascades.y, 0.0f);
+
     F.StructureFade = 1.0f;
     F.DetailFade = 1.0f;
     F.PixelFootprint = 0.0f;
@@ -383,7 +391,8 @@ TRFieldParams TR_BuildField(
 	CloudLid, CloudLift, CloudMotion, \
 	NoiseLevels, StructureSampling, StructureWarp, \
 	DetailSampling, DetailWarp, \
-	CloudGenusStratus, CloudGenusStratocumulus, CloudGenusCumulus, CloudGenusCirrus)
+	CloudGenusStratus, CloudGenusStratocumulus, CloudGenusCumulus, CloudGenusCirrus, \
+	ShadowCascades)
 
 /** The shell's ceiling: 1 below the falloff band, 0 at the atmosphere top,
  *  smoothstep between, so a tower that would cross it softens into a cap. */
