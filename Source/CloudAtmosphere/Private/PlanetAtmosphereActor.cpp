@@ -834,7 +834,7 @@ static FTerrestrialFieldPins PackTerrestrialField(
     Out.ShadowCascades = FLinearColor(
         (float)ShadowCascadeRadii.X, (float)ShadowCascadeRadii.Y, (float)P.CloudLayer, P.CoverageFray);
 
-    Out.CloudResponse = FLinearColor(P.CloudFull, P.TypeCurve, 0.0f, 0.0f);
+    Out.CloudResponse = FLinearColor(P.CloudFull, P.TypeCurve, P.StormBalance, P.StormBlend);
 
     return Out;
 }

@@ -58,9 +58,9 @@
 #define FIELD_TEXTURE_ARGS \
 	FlowField, FlowSampler, DetailVolume, DetailSampler, StructureVolume, StructureSampler
 
-/** The clouds' material and how they are lit. Two sets, blended by cloud type:
- *  fair-weather cloud at type 0 and storm cloud at type 1, because a towering
- *  column is darker material and not only more of it.
+/** The clouds' material and how they are lit. Two sets, blended by the
+ *  column's material coordinate: fair-weather cloud at 0 and storm cloud at 1,
+ *  which follows the sim's storm rather than how tall the cloud builds.
  *
  *  Scatter     Single-scattering albedo: what fraction of extinction is
  *              scattered rather than absorbed, per channel.
@@ -106,21 +106,21 @@ struct TRScatterParams
     float LobeShadowPower;
 };
 
-/** Albedo at a cloud type. */
+/** Albedo at a material coordinate. */
 float3 TR_TypeScatter(float Type, TRScatterParams S)
 {
     return lerp(S.CloudScatter, S.StormScatter, saturate(Type));
 }
 
-/** Extinction multiplier at a cloud type, tint times amount: what the view ray
- *  applies to the solved coefficient. */
+/** Extinction multiplier at a material coordinate, tint times amount: what the
+ *  view ray applies to the solved coefficient. */
 float3 TR_TypeExtinction(float Type, TRScatterParams S)
 {
     return lerp(S.CloudExtinction.rgb * S.CloudExtinction.a,
 		S.StormExtinction.rgb * S.StormExtinction.a, saturate(Type));
 }
 
-/** Extinction tint alone at a cloud type. The light ray's AMOUNTS are already
+/** Extinction tint alone at a material coordinate. The light ray's AMOUNTS are already
  *  in the shadow map's depth; its colour is applied where the depth is read. */
 float3 TR_TypeTint(float Type, TRScatterParams S)
 {
@@ -463,13 +463,13 @@ void Field_Terminus(
     }
 }
 
-/** Density and material at a planet-local point, as (density, type, pressure,
- *  top). StepHalfHeight is the sample's own half-extent along the radius, which
+/** Density and material at a planet-local point, as (density, material,
+ *  pressure, top). StepHalfHeight is the sample's own half-extent along the radius, which
  *  the field integrates its height profile across.
  *
  *  THE SECOND CHANNEL IS OPAQUE TO THE MARCH. It carries it from here to
  *  Field_Albedo and Field_Extinction without interpreting it; on this field it
- *  is the cloud type. */
+ *  is fair-weather to storm. */
 float4 Field_Sample(
 	FIELD_TEXTURE_DECL,
 	float3 LocalPos,
@@ -523,7 +523,7 @@ float3 Field_Extinction(float Material, FieldMaterialParams S)
  *  THE RECEIVER'S OWN MATERIAL COLOURS WHAT SHADOWED IT. The map holds one
  *  depth, not the colours of everything the light crossed, and weather systems
  *  are far wider than the cloud is deep, so the path stays mostly in the
- *  receiver's cloud type. Off at a system's edge at low sun. */
+ *  receiver's material. Off at a system's edge at low sun. */
 float3 Field_LightTint(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
@@ -535,7 +535,7 @@ float3 Field_LightTint(
 }
 
 /** Field_LightTint from a sample already taken at the receiver: its second
- *  channel is the cloud type TR_TypeCoarse would read, so no second column. */
+ *  channel is the material TR_TypeCoarse would read, so no second column. */
 #define FIELD_SAMPLE_TINT 1
 
 float3 Field_SampleLightTint(float4 Sample, FieldMaterialParams S)

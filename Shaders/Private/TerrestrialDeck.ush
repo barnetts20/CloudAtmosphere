@@ -166,6 +166,11 @@ struct TRFieldParams
     float CloudFull;
     float TypeCurve;
 
+	/** Where the storm threshold sits in the storm index, 0 none to 1 all
+	 *  cloud, and the half-width of its blend. */
+    float StormBalance;
+    float StormBlend;
+
 	/** Depth of a stratiform column as a fraction of a towering one. */
     float StratusDepth;
 
@@ -314,7 +319,7 @@ struct TRFieldParams
  *    ShadowCascades    Cascade 1 half-width, cascade 2 half-width, CloudLayer,
  *                      CoverageFray
  *    CloudGenus<Name>  structure channel weights for that genus
- *    CloudResponse     CloudFull, TypeCurve, -, -
+ *    CloudResponse     CloudFull, TypeCurve, StormBalance, StormBlend
  *
  *  RotationWeight is the planet's own rotation; the sim runs in the rotating
  *  frame, so it applies to the sampling position, negated because rotating the
@@ -429,6 +434,8 @@ TRFieldParams TR_BuildField(
 
     F.CloudFull = max(CloudResponse.x, 1e-3f);
     F.TypeCurve = max(CloudResponse.y, 0.1f);
+    F.StormBalance = saturate(CloudResponse.z);
+    F.StormBlend = max(CloudResponse.w, 1e-3f);
 
     F.StructureFade = 1.0f;
     F.DetailFade = 1.0f;
@@ -502,8 +509,12 @@ struct TRColumn
 	/** How much of the shape noise survives, [0, 1]. */
     float Coverage;
 
-	/** 0 stratiform to 1 towering. Also the material coordinate. */
+	/** 0 stratiform to 1 towering: depth and genus. */
     float Type;
+
+	/** 0 fair-weather to 1 storm material, from the storm index: the larger of
+	 *  the raw column cloud and the storm, thresholded by StormBalance. */
+    float Material;
 
 	/** Lows positive, bounded to (-1, 1). */
     float Pressure;
@@ -567,7 +578,9 @@ TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler,
  *
  *  TYPE IS HOW MUCH CLOUD THERE IS, plus the tropics and the sim's storm
  *  intensity: dense cloud builds towering, thin cloud stays layered, and storm
- *  deepens and darkens cloud in proportion. A towering column is
+ *  deepens cloud in proportion. The MATERIAL, fair-weather to storm, follows a
+ *  storm index of raw cloud and storm, set by StormBalance and StormBlend
+ *  alone. A towering column is
  *  CloudThickness deep, a stratiform one StratusDepth of that; the pressure lid
  *  then scales both, so highs flatten into sheets and lows build. PITFALL: type
  *  from the local W draws the sim's vertical-motion waves, which travel through
@@ -628,6 +641,22 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
 		+ F.TypeCloud * pow(Amount, F.TypeCurve)
 		+ F.TypeStorm * pow(Storm, F.TypeCurve));
 
+	// MATERIAL FROM A STORM INDEX: the raw column cloud, which grades from a
+	// system's edge to its core, or the storm where larger, which puts storm
+	// cells at the top. StormBalance sweeps a threshold down through it, from
+	// none at 0 to all cloud at 1, and StormBlend is the ramp's half-width.
+	// Nothing that shapes the density reads it.
+	//
+	// PITFALL: an index scaled by CloudFull saturates wherever the deck is
+	// dense, so the threshold stops moving anything and only the density
+	// settings change the balance. Taken from Type, the tropics term paints
+	// every tropical cloud storm-coloured, fading uniformly with latitude.
+    const float StormIndex = max(saturate(Weather.y), Storm);
+    const float Blend = F.StormBlend;
+    const float StormThreshold = lerp(1.0f + Blend, -Blend, F.StormBalance);
+
+    Col.Material = smoothstep(StormThreshold - Blend, StormThreshold + Blend, StormIndex);
+
 	// Layered cloud is stratus, cellular where the air sinks, and cirrus as it
 	// rises; towering cloud is cumulus at any height.
     const float Breakup = saturate(-Weather.x * F.GenusSubsidence);
@@ -664,13 +693,14 @@ TRColumn TR_Column(Texture2DArray FlowField, SamplerState FlowSampler, float3 N,
     return TR_ColumnFromInputs(TR_ReadColumn(FlowField, FlowSampler, N, F), N, F);
 }
 
-/** The column at a planet-local position, spun. For what varies over a system's
- *  width rather than a feature's: the tint of extinction a light ray crossed. */
+/** The column's material coordinate at a planet-local position, spun. For what
+ *  varies over a system's width rather than a feature's: the tint of
+ *  extinction a light ray crossed. */
 float TR_TypeCoarse(Texture2DArray FlowField, SamplerState FlowSampler, float3 LocalPos, TRFieldParams F)
 {
     const float3 N = normalize(Atmo_RotateZ(normalize(LocalPos), F.SpinAngle));
 
-    return TR_Column(FlowField, FlowSampler, N, F).Type;
+    return TR_Column(FlowField, FlowSampler, N, F).Material;
 }
 
 /** Distance along a ray at which it first reaches a slab, from either side.
@@ -876,7 +906,7 @@ bool TR_SlabMissed(TRColumn Col, float Height, float HalfStep)
  *
  *  Returns:
  *    x  Density in [0, 1]. Multiply by an extinction coefficient in the march.
- *    y  Cloud type, [0, 1]: the material coordinate.
+ *    y  Material coordinate, [0, 1]: fair-weather to storm.
  *    z  Pressure, lows positive.
  *    w  The column's top. */
 float4 TR_DensityInColumn(
@@ -993,7 +1023,7 @@ float4 TR_DensityInColumn(
         Density = saturate((Density - Erode) / max(1.0f - Erode, 1e-3f));
     }
 
-    return float4(Density, Col.Type, Col.Pressure, Col.Top);
+    return float4(Density, Col.Material, Col.Pressure, Col.Top);
 }
 
 /** Density at a planet-local point, the column read where it stands. LocalPos
@@ -1025,7 +1055,7 @@ float4 TR_Density(
 
     if (TR_SlabMissed(Col, Height, HalfStep))
     {
-        return float4(0.0f, Col.Type, Col.Pressure, Col.Top);
+        return float4(0.0f, Col.Material, Col.Pressure, Col.Top);
     }
 
     float3 DisplacementA, DisplacementB;
@@ -1178,7 +1208,7 @@ float4 TR_DensityOnRay(
 
     if (TR_SlabMissed(Col, Height, HalfStep))
     {
-        return float4(0.0f, Col.Type, Col.Pressure, Col.Top);
+        return float4(0.0f, Col.Material, Col.Pressure, Col.Top);
     }
 
     return TR_DensityInColumn(

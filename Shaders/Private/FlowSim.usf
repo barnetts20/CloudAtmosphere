@@ -984,9 +984,10 @@ float2 SimCellCloudFeed(float3 P, uint Layer)
  *  resolution, finer than the sim's. Strength is the largest vector strength,
  *  for the debug view.
  *
- *  THE EYE IS A BOWL: cleared inside the eye radius and ramping back to full
- *  at the eyewall, so the deck, whose height follows the cloud amount, slopes
- *  up to the eyewall. PITFALL: a cut confined to the eye radius drops the
+ *  THE EYE IS A BOWL: cover cleared inside the eye radius and ramping back to
+ *  full at the eyewall, so the deck, whose height follows the cloud amount,
+ *  slopes up to the eyewall. Storm is not cut: the cloud lining the eye is
+ *  storm cloud, and a cut draws a clean fair-weather ring around the eye. PITFALL: a cut confined to the eye radius drops the
  *  cloud from full to none over a few texels and draws a vertical shaft.
  *
  *  THE WHOLE STORM IS STORM: full from the centre through the eyewall, easing
@@ -1035,7 +1036,10 @@ SimStamp SimCellStamp(float3 N)
         const float Bowl = 1.0f - smoothstep(SimCellShape.y, max(SimCellShape.z, SimCellShape.y + 1e-3f), R);
 
         S.Draft += Intensity * (SimCellDraft.x * Profile + SimCellDraft.y * InEye);
-        const float Band = smoothstep(SIM_CELL_BAND_FLOOR, 1.0f, Profile);
+        // Held full inside the eyewall: the vector profile falls toward the
+        // eye, and a band read from it leaves the eye and its lining at the
+        // whole-storm level, a clean disc inside the eyewall.
+        const float Band = (R <= SimCellShape.z) ? 1.0f : smoothstep(SIM_CELL_BAND_FLOOR, 1.0f, Profile);
         const float Whole = 1.0f - smoothstep(SimCellShape.z, 1.0f, R);
 
         S.Storm = max(S.Storm, Intensity * max(SimCellCloud.w * Whole, SimCellDraft.z * Band));
@@ -2748,7 +2752,7 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 	// eyewall region that ignores the cloud the vortex actually winds.
     Weather.x = clamp(Weather.x + Stamp.Draft, -1.0f, 1.0f);
     Weather.y *= 1.0f - Stamp.Eye;
-    Weather.w = SimSmoothMax(Weather.w, Stamp.Storm, SIM_CELL_STORM_BLEND) * (1.0f - Stamp.Eye);
+    Weather.w = SimSmoothMax(Weather.w, Stamp.Storm, SIM_CELL_STORM_BLEND);
     Weather.yzw = saturate(Weather.yzw);
 
     Flow.z = clamp(Flow.z - SimCellDraft.w * Stamp.Low, -1.0f, 1.0f);

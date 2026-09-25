@@ -511,9 +511,10 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 
 	/** Cloud type, 0 stratiform to 1 towering, is TypeBias + TypeCloud * cloud
 	 *  amount^TypeCurve + TypeTropical * tropicality + TypeStorm *
-	 *  storm^TypeCurve, the amount being the sim's cloud over CloudFull. Type sets column depth and the noise genus,
-	 *  and blends the material from fair-weather to storm. Driven by the cloud
-	 *  itself, so towers move and wind with the flow's structure. */
+	 *  storm^TypeCurve, the amount being the sim's cloud over CloudFull. Type
+	 *  sets column depth and the noise genus, not the material, which follows
+	 *  storm alone. Driven by the cloud itself, so towers move and wind with
+	 *  the flow's structure. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float TypeBias = 0.2f;
 
@@ -534,6 +535,20 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	 *  densest, stormiest columns approach full towering storm cloud. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1", ClampMax = "8.0"))
 	float TypeCurve = 2.0f;
+
+	/** How much of the cloud is storm material: 0 none, 1 all. Each column
+	 *  ranks by a storm index, the larger of its raw sim cloud and its storm, so
+	 *  storm cells rank highest, then thick system cores, and the threshold
+	 *  sweeps down through that. Reads nothing the density does, so it changes
+	 *  the storm/fair-weather balance without touching the deck's shape. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StormBalance = 0.5f;
+
+	/** Half-width of the storm threshold, in storm index: how gradually cloud
+	 *  scatter ramps into storm scatter from a system's edge toward its core.
+	 *  Small is a crisp split; large, a long gradient. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "1.0"))
+	float StormBlend = 0.15f;
 
 	// -- Breakup --------------------------------------------------------------
 
@@ -671,8 +686,8 @@ struct CLOUDATMOSPHERE_API FTerrestrialGenusParams
 	float Subsidence = 3.0f;
 };
 
-/** The clouds' material: fair-weather cloud at type 0, storm cloud at type 1,
- *  blended by type. Scatter is single-scattering albedo; Extinction is RGB tint
+/** The clouds' material: fair-weather cloud at 0, storm cloud at 1, blended by
+ *  the storm index StormBalance and StormBlend threshold, not by cloud type. Scatter is single-scattering albedo; Extinction is RGB tint
  *  with the amount in A, multiplying the solved extinction, 1 neutral. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FTerrestrialCloudMaterialParams

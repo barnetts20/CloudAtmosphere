@@ -577,7 +577,7 @@ public:
 	 *  there without adding any, so a hurricane reads as storm throughout; with
 	 *  the sim's storm tuned lower, the cells make the heaviest storm anywhere. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float StormCellStorm = 0.6f;
+	float StormCellStorm = 1.0f;
 
 	/** Storm intensity the eyewall band is raised to, on top of StormCellStorm:
 	 *  the band runs from 40% of peak vector strength inward to the eyewall. */
