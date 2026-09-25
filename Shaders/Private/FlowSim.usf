@@ -118,6 +118,11 @@ float SimLayerCoupling;
 /** Fraction of grid-scale divergence removed per substep, in [0, 0.5]. */
 float SimDivergenceDamping;
 
+/** Bore suppression: the speed ceiling in Froude number, and the gain of the
+ *  compression-activated damping. See SimSpeedCeiling and SimFaceDamping. */
+float SimFroudeCeiling;
+float SimShockDamping;
+
 /** Rate interfaces relax toward the profile's balanced heights. */
 float SimThermalRelaxation;
 
@@ -975,6 +980,11 @@ float2 SimCellCloudFeed(float3 P, uint Layer)
  *  resolution, finer than the sim's. Strength is the largest vector strength,
  *  for the debug view.
  *
+ *  THE EYE IS A BOWL: cleared inside the eye radius and ramping back to full
+ *  at the eyewall, so the deck, whose height follows the cloud amount, slopes
+ *  up to the eyewall. PITFALL: a cut confined to the eye radius drops the
+ *  cloud from full to none over a few texels and draws a vertical shaft.
+ *
  *  THE WHOLE STORM IS STORM: full from the centre through the eyewall, easing
  *  to none at the radius. PITFALL: raised across the band alone, the rest of a
  *  hurricane takes whatever storm the sim has under it and reads as part storm
@@ -1018,6 +1028,7 @@ SimStamp SimCellStamp(float3 N)
 
         const float Profile = SimCellProfile(R);
         const float InEye = 1.0f - smoothstep(0.7f, 1.0f, R / max(SimCellShape.y, 1e-4f));
+        const float Bowl = 1.0f - smoothstep(SimCellShape.y, max(SimCellShape.z, SimCellShape.y + 1e-3f), R);
 
         S.Draft += Intensity * (SimCellDraft.x * Profile + SimCellDraft.y * InEye);
         const float Band = smoothstep(SIM_CELL_BAND_FLOOR, 1.0f, Profile);
@@ -1025,7 +1036,7 @@ SimStamp SimCellStamp(float3 N)
 
         S.Storm = max(S.Storm, Intensity * max(SimCellCloud.w * Whole, SimCellDraft.z * Band));
         S.Low = max(S.Low, Intensity * Whole);
-        S.Eye = max(S.Eye, Intensity * InEye);
+        S.Eye = max(S.Eye, Intensity * Bowl);
         S.Strength = max(S.Strength, Intensity * Profile);
     }
 
@@ -1165,26 +1176,27 @@ float SimRowStiffness(int Row)
 // A shallow-water flow near its wave speed steepens into bores: hydraulic
 // jumps that travel through the field as sharp lines. Two structural guards
 // keep any combination of forcing, jets and storm cells clear of them, each
-// set by one dimensionless constant rather than tuned against the others.
+// set by one dimensionless value rather than tuned against the others:
+// SimFroudeCeiling and SimShockDamping.
 
-/** Speed ceiling in Froude number against the first internal mode's wave
- *  speed, and the share of it below which the flow is untouched. */
-#define SIM_FROUDE_CEILING 0.6f
+/** Share of the ceiling below which the flow is untouched. */
 #define SIM_FROUDE_KNEE 0.7f
 
-/** Compression-activated damping, von Neumann-Richtmyer style: the grid-scale
- *  divergence a step removes grows by this times the local compression per
- *  step, so it engages only where a front steepens and in proportion to how
- *  sharply. Capped under the explicit scheme's stability bound. */
-#define SIM_SHOCK_DAMPING 2.0f
+/** Cap on the total damping fraction: the explicit scheme's stability bound. */
 #define SIM_DAMPING_MAX 0.45f
 
 /** Factor on a face velocity of the given speed: 1 below the knee, then a
- *  tanh approach to the ceiling, C1 at the knee. Acts after all forcing, so
- *  whatever pushes the flow saturates smoothly short of critical. */
+ *  tanh approach to SimFroudeCeiling times the first internal mode's wave
+ *  speed, C1 at the knee. Acts after all forcing, so whatever pushes the flow
+ *  saturates smoothly short of critical. Zero is no ceiling. */
 float SimSpeedCeiling(float Speed)
 {
-    const float Cap = SIM_FROUDE_CEILING * sqrt(max(SimWaveSpeedSq, 1e-8f));
+    if (SimFroudeCeiling <= 0.0f)
+    {
+        return 1.0f;
+    }
+
+    const float Cap = SimFroudeCeiling * sqrt(max(SimWaveSpeedSq, 1e-8f));
     const float Knee = SIM_FROUDE_KNEE * Cap;
 
     if (Speed <= Knee)
@@ -1198,12 +1210,14 @@ float SimSpeedCeiling(float Speed)
 }
 
 /** Damping fraction across a face between two centres: the authored
- *  background plus the shock term from the stronger compression of the two. */
+ *  background plus SimShockDamping times the stronger compression of the two
+ *  per step. Von Neumann-Richtmyer style: it engages only where a front
+ *  steepens, in proportion to how sharply. */
 float SimFaceDamping(float DivA, float DivB)
 {
     const float Compression = max(-min(DivA, DivB), 0.0f) * SimDeltaTime;
 
-    return min(SimDivergenceDamping + SIM_SHOCK_DAMPING * Compression, SIM_DAMPING_MAX);
+    return min(SimDivergenceDamping + SimShockDamping * Compression, SIM_DAMPING_MAX);
 }
 
 /** Divergence damping at a u face, per step: grad(div V) scaled so the

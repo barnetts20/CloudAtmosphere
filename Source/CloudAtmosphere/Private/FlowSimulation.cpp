@@ -131,6 +131,8 @@ namespace
 		P.SimDragRate = Params.DragRate;
 		P.SimLayerCoupling = Params.LayerCoupling;
 		P.SimDivergenceDamping = Params.DivergenceDamping;
+		P.SimFroudeCeiling = Params.FroudeCeiling;
+		P.SimShockDamping = Params.ShockDamping;
 		P.SimSharpCentre = Params.bSharpCentreVelocity ? 1 : 0;
 		P.SimThermalRelaxation = Params.ThermalRelaxation;
 		P.SimThermalParams = Params.ThermalParams;

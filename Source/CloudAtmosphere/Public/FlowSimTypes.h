@@ -278,8 +278,8 @@ public:
 
 	/** Fraction of grid-scale divergence removed per step, scaled per row
 	 *  against the grid spacing there. The background: where a front
-	 *  compresses, the sim adds a term in the compression itself
-	 *  (SIM_SHOCK_DAMPING), so bores are damped without raising this. */
+	 *  compresses, ShockDamping adds a term in the compression itself, so
+	 *  bores are damped without raising this. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing", meta = (ClampMin = "0.0", ClampMax = "0.5"))
 	float DivergenceDamping = 0.05f;
 
@@ -484,7 +484,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.5", ClampMax = "45.0"))
 	float StormCellRadius = 8.0f;
 
-	/** Eye radius, as a fraction of the radius. */
+	/** Eye radius, as a fraction of the radius: clear inside it, the cloud
+	 *  ramping up to full at the eyewall, so the eye is a bowl. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "0.9"))
 	float StormCellEye = 0.08f;
 
@@ -627,6 +628,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "0.5", ClampMax = "1.0"))
 	float ImplicitWeight = 0.6f;
 
+	/** Speed ceiling, in Froude number against the first internal mode's wave
+	 *  speed. After all forcing every face velocity eases toward it from 70%
+	 *  of it, so however jets, forcing and storm cells are set the flow stays
+	 *  short of the speeds where shallow water steepens into bores. Lower
+	 *  holds it further from them at the cost of peak wind; 0 is no ceiling. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "0.0", ClampMax = "1.5"))
+	float FroudeCeiling = 0.6f;
+
+	/** Gain of the compression-activated divergence damping: where a front
+	 *  steepens, the grid-scale divergence a step removes grows by this times
+	 *  the local compression per step. Higher widens and softens travelling
+	 *  fronts more; 0 leaves only DivergenceDamping. The total is capped at
+	 *  the explicit scheme's stability bound, so any value is stable. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "0.0", ClampMax = "50.0"))
+	float ShockDamping = 2.0f;
+
 	// -- Forcing volume -----------------------------------------------------
 
 	/** Band-limited tiling noise, read as a forcing streamfunction. Optional:
@@ -758,6 +775,8 @@ struct FFlowSimParams
 	float DragRate = 1.5f;
 	float LayerCoupling = 0.1f;
 	float DivergenceDamping = 0.05f;
+	float FroudeCeiling = 0.6f;
+	float ShockDamping = 2.0f;
 	bool bSharpCentreVelocity = false;
 
 	float ThermalRelaxation = 0.5f;

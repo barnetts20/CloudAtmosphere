@@ -1163,6 +1163,8 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.DragRate = Config->DragRate;
 	Out.LayerCoupling = Config->LayerCoupling;
 	Out.DivergenceDamping = FMath::Clamp(Config->DivergenceDamping, 0.0f, 0.5f);
+	Out.FroudeCeiling = FMath::Max(Config->FroudeCeiling, 0.0f);
+	Out.ShockDamping = FMath::Max(Config->ShockDamping, 0.0f);
 	Out.bSharpCentreVelocity = Config->bSharpCentreVelocity;
 
 	Out.ThermalRelaxation = FMath::Max(Config->ThermalRelaxation, 0.0f);
