@@ -277,7 +277,9 @@ public:
 	float LayerCoupling = 0.1f;
 
 	/** Fraction of grid-scale divergence removed per step, scaled per row
-	 *  against the grid spacing there. */
+	 *  against the grid spacing there. The background: where a front
+	 *  compresses, the sim adds a term in the compression itself
+	 *  (SIM_SHOCK_DAMPING), so bores are damped without raising this. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing", meta = (ClampMin = "0.0", ClampMax = "0.5"))
 	float DivergenceDamping = 0.05f;
 
@@ -510,14 +512,6 @@ public:
 	 *  carries away. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
 	float StormCellForcing = 1.5f;
-
-	/** Froude number at which the cells stop pushing the flow, fading from
-	 *  three quarters of it: the vortex speed limit, whatever the wind and
-	 *  forcing ask for. A flow near its wave speed steepens into bores that
-	 *  travel through the field as sharp lines; the Froude number debug view
-	 *  shows where it gets close. Zero turns the limit off. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "2.0"))
-	float StormCellMaxFroude = 0.5f;
 
 	/** The top layer's share of the push; the bottom layer's is 1, and those
 	 *  between are linear. Negative spins the top the other way, as a storm's
@@ -793,7 +787,6 @@ struct FFlowSimParams
 	FVector4f CellMotion = FVector4f::Zero();
 	FVector4f CellGenesis = FVector4f::Zero();
 	FVector4f CellCloud = FVector4f::Zero();
-	float CellMaxFroude = 0.0f;
 	int32 CellCount = 0;
 
 	/** Steps completed before the frame's first; seeds the cells' spawns. */

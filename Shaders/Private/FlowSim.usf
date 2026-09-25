@@ -177,10 +177,6 @@ float4 SimCellCloud;
 /** Live cell slots, up to GG_SIM_MAX_CELLS. */
 int SimCellCount;
 
-/** Froude number, against SimWaveSpeedSq, at which the cells stop pushing the
- *  flow. Zero never stops them. */
-float SimCellMaxFroude;
-
 /** Steps completed before this one: seeds the cells' spawn draws. */
 int SimStepIndex;
 
@@ -907,25 +903,6 @@ bool SimCellNear(float3 P)
     return false;
 }
 
-/** How much of the cells' push a face takes, from the flow arriving at it:
- *  1 well below SimCellMaxFroude, fading to 0 at it.
- *
- *  PITFALL: A SHALLOW-WATER FLOW NEAR ITS WAVE SPEED STEEPENS INTO BORES --
- *  hydraulic jumps that travel through the field as sharp lines. A cell's
- *  vortex is the fastest flow on the planet, so an unlimited push drives it
- *  there and sheds them. */
-float SimCellFroudeGate(float3 Arrival)
-{
-    if (SimCellMaxFroude <= 0.0f)
-    {
-        return 1.0f;
-    }
-
-    const float Froude = length(Arrival) * rsqrt(max(SimWaveSpeedSq, 1e-8f));
-
-    return 1.0f - smoothstep(0.75f * SimCellMaxFroude, SimCellMaxFroude, Froude);
-}
-
 /** Every live cell's velocity potential at P: its gradient runs the inflow
  *  fraction of the vortex's speed toward the centre. Added below and
  *  subtracted above, it is the storm's secondary circulation, which draws what
@@ -1183,27 +1160,77 @@ float SimRowStiffness(int Row)
     return 2.0f * CLon + ALo + AHi;
 }
 
+// -- Bore suppression --------------------------------------------------------
+//
+// A shallow-water flow near its wave speed steepens into bores: hydraulic
+// jumps that travel through the field as sharp lines. Two structural guards
+// keep any combination of forcing, jets and storm cells clear of them, each
+// set by one dimensionless constant rather than tuned against the others.
+
+/** Speed ceiling in Froude number against the first internal mode's wave
+ *  speed, and the share of it below which the flow is untouched. */
+#define SIM_FROUDE_CEILING 0.6f
+#define SIM_FROUDE_KNEE 0.7f
+
+/** Compression-activated damping, von Neumann-Richtmyer style: the grid-scale
+ *  divergence a step removes grows by this times the local compression per
+ *  step, so it engages only where a front steepens and in proportion to how
+ *  sharply. Capped under the explicit scheme's stability bound. */
+#define SIM_SHOCK_DAMPING 2.0f
+#define SIM_DAMPING_MAX 0.45f
+
+/** Factor on a face velocity of the given speed: 1 below the knee, then a
+ *  tanh approach to the ceiling, C1 at the knee. Acts after all forcing, so
+ *  whatever pushes the flow saturates smoothly short of critical. */
+float SimSpeedCeiling(float Speed)
+{
+    const float Cap = SIM_FROUDE_CEILING * sqrt(max(SimWaveSpeedSq, 1e-8f));
+    const float Knee = SIM_FROUDE_KNEE * Cap;
+
+    if (Speed <= Knee)
+    {
+        return 1.0f;
+    }
+
+    const float Span = Cap - Knee;
+
+    return (Knee + Span * tanh((Speed - Knee) / Span)) / Speed;
+}
+
+/** Damping fraction across a face between two centres: the authored
+ *  background plus the shock term from the stronger compression of the two. */
+float SimFaceDamping(float DivA, float DivB)
+{
+    const float Compression = max(-min(DivA, DivB), 0.0f) * SimDeltaTime;
+
+    return min(SimDivergenceDamping + SIM_SHOCK_DAMPING * Compression, SIM_DAMPING_MAX);
+}
+
 /** Divergence damping at a u face, per step: grad(div V) scaled so the
- *  grid-scale mode on this row loses SimDivergenceDamping of itself.
+ *  grid-scale mode on this row loses SimFaceDamping of itself.
  *
  *  PER ROW, BECAUSE AN EXPLICIT DIFFUSION IS STABLE ONLY BELOW A RATE THE GRID
  *  SETS. A single coefficient tuned at the equator is thousands of times too
  *  strong for the polar rows, and blows up there first. */
 float SimDampEast(int2 C, uint Layer)
 {
-    const float Gradient = (SimLoad4(SimCentreSRV, C, Layer).w - SimLoad4(SimCentreSRV, C + int2(-1, 0), Layer).w)
-		/ (SimRowCos(C.y) * SimDLon());
+    const float Here = SimLoad4(SimCentreSRV, C, Layer).w;
+    const float West = SimLoad4(SimCentreSRV, C + int2(-1, 0), Layer).w;
 
-    return SimDivergenceDamping * Gradient / SimRowStiffness(C.y);
+    const float Gradient = (Here - West) / (SimRowCos(C.y) * SimDLon());
+
+    return SimFaceDamping(Here, West) * Gradient / SimRowStiffness(C.y);
 }
 
 /** As SimDampEast at a v face, against the stiffer of the two rows it joins. */
 float SimDampNorth(int2 C, uint Layer)
 {
-    const float Gradient = SimFaceCos(C.y) * (SimLoad4(SimCentreSRV, C, Layer).w - SimLoad4(SimCentreSRV, C + int2(0, -1), Layer).w)
-		/ SimDMu();
+    const float Here = SimLoad4(SimCentreSRV, C, Layer).w;
+    const float South = SimLoad4(SimCentreSRV, C + int2(0, -1), Layer).w;
 
-    return SimDivergenceDamping * Gradient / max(SimRowStiffness(C.y), SimRowStiffness(C.y - 1));
+    const float Gradient = SimFaceCos(C.y) * (Here - South) / SimDMu();
+
+    return SimFaceDamping(Here, South) * Gradient / max(SimRowStiffness(C.y), SimRowStiffness(C.y - 1));
 }
 
 /** Mean of a face component over the genuine vertical neighbours, minus this
@@ -1796,9 +1823,11 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
  *
  *  Storm cells: each layer is pushed along the live cells' vortices, all of the
  *  push on the bottom layer and SimCellVortex.z of it on top, plus inflow below
- *  and outflow above, faded out as the flow nears SimCellMaxFroude. Each cell
- *  also lifts every layer's cloud toward full along its vector ramp
- *  (SimCellCloudFeed), which the flow winds like any other.
+ *  and outflow above. Each cell also lifts every layer's cloud toward full
+ *  along its vector ramp (SimCellCloudFeed), which the flow winds like any
+ *  other.
+ *
+ *  Every face then passes through the speed ceiling (SimSpeedCeiling).
  *
  *  Noise: each phase's displacement at the departure point, carried to this
  *  centre and turned by the drift over the step. A phase resets to zero at the
@@ -1868,14 +1897,16 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
         if (bCellNear)
         {
-            const float Gate = SimCellFroudeGate(Arrival);
+            U -= CellShare * SimRowCos(C.y) * (SimCellCornerPsi(C.x, C.y + 1) - SimCellCornerPsi(C.x, C.y)) / SimDMu();
 
-            U -= Gate * CellShare * SimRowCos(C.y) * (SimCellCornerPsi(C.x, C.y + 1) - SimCellCornerPsi(C.x, C.y)) / SimDMu();
-
-            U += Gate * CellRadial * (SimCellPotential(SimDirection(SimColumnToLon((float) C.x), Mu))
+            U += CellRadial * (SimCellPotential(SimDirection(SimColumnToLon((float) C.x), Mu))
 				- SimCellPotential(SimDirection(SimColumnToLon((float) C.x - 1.0f), Mu)))
 				/ (SimRowCos(C.y) * SimDLon());
         }
+
+        const float Across = dot(Arrival, SimNorth(P));
+
+        U *= SimSpeedCeiling(sqrt(U * U + Across * Across));
     }
 
 	// -- v on the south face ------------------------------------------------
@@ -1899,17 +1930,19 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
         if (bCellNear)
         {
-            const float Gate = SimCellFroudeGate(Arrival);
-
-            V += Gate * CellShare * (SimCellCornerPsi(C.x + 1, C.y) - SimCellCornerPsi(C.x, C.y))
+            V += CellShare * (SimCellCornerPsi(C.x + 1, C.y) - SimCellCornerPsi(C.x, C.y))
 				/ (SimFaceCos(C.y) * SimDLon());
 
             const float Lon = SimColumnToLon((float) C.x);
 
-            V += Gate * CellRadial * SimFaceCos(C.y)
+            V += CellRadial * SimFaceCos(C.y)
 				* (SimCellPotential(SimDirection(Lon, SimRowToMu((float) C.y)))
 					- SimCellPotential(SimDirection(Lon, SimRowToMu((float) C.y - 1.0f)))) / SimDMu();
         }
+
+        const float Across = dot(Arrival, SimEast(P));
+
+        V *= SimSpeedCeiling(sqrt(V * V + Across * Across));
     }
 
     SimFaceUAV[int3(C, Layer)] = float2(U, V);

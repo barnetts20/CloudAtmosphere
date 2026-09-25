@@ -151,7 +151,6 @@ namespace
 		P.SimCellGenesis = Params.CellGenesis;
 		P.SimCellCloud = Params.CellCloud;
 		P.SimCellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
-		P.SimCellMaxFroude = Params.CellMaxFroude;
 		P.SimStepIndex = Params.StepIndex;
 
 		P.SimNoiseDriftRate = Params.NoiseDriftRate;
