@@ -145,6 +145,10 @@ float4 SimMoistureParams;
  *  of vapour condensed. */
 float SimLatentHeating;
 
+/** Time constant of the vertical motion's low-pass along the flow; zero reads
+ *  it raw. See MainReconstructCS. */
+float SimAscentSmoothing;
+
 /** x formation rate, y intensity threshold, z vorticity gain, w decay rate. */
 float4 SimStormParams;
 
@@ -1578,8 +1582,20 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
         Storm = max(Storm, T.w);
     }
 
+	// VERTICAL MOTION LOW-PASSED ALONG THE FLOW: the value Predict carried from
+	// the departure point in noise phase A's w, eased toward this step's. What
+	// moves with the air -- fronts, lows, storm updraughts -- holds; gravity
+	// waves and bores move through the air, pass each parcel briefly and
+	// average out. PITFALL: condensation reads max(W, 0), so read raw, every
+	// passing wave condenses cloud along its crest and draws itself into the
+	// cloud field as a travelling line.
+    const float Ascent = SimLayerVerticalMotion(C, Layer);
+    const float Carried = SimNoiseSRV.Load(int4(C, Layer, 0)).w;
+
+    const float Weight = (SimAscentSmoothing > 0.0f) ? saturate(SimDeltaTime / SimAscentSmoothing) : 1.0f;
+
     SimLatLonUAV[int3(C, Layer + L)] = float4(
-		SimLayerVerticalMotion(C, Layer),
+		lerp(Carried, Ascent, Weight),
 		1.0f - Clear,
 		saturate(Altitude / max(Cover, SIM_CLOUD_ASCENT_FLOOR)),
 		Storm);
@@ -1846,6 +1862,8 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
  *  Noise: each phase's displacement at the departure point, carried to this
  *  centre and turned by the drift over the step. A phase resets to zero at the
  *  step its clock wraps, which is where the reader's weight for it is zero.
+ *  Phase A's w carries the low-passed vertical motion from the departure
+ *  point, whatever the reset.
  *
  *  DRAG ON THE EDDY PART OF u AND ALL OF v. The zonal mean of u belongs to the
  *  nudge, and dragging it too makes the two settle at a compromise below the
@@ -2080,7 +2098,11 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
             Displacement = Coordinate - P;
         }
 
-        SimNoiseUAV[int3(C, Slice)] = float4(Displacement, 0.0f);
+        const float CarriedAscent = (Phase == 0u)
+			? clamp(SimSampleCubic4(SimLatLonSRV, DepartureGrid, Layer + L).x, -1.0f, 1.0f)
+			: 0.0f;
+
+        SimNoiseUAV[int3(C, Slice)] = float4(Displacement, CarriedAscent);
     }
 }
 

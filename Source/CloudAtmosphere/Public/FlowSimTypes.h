@@ -364,6 +364,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0"))
 	float LatentHeating = 0.1f;
 
+	/** Time constant, in simulated time, of the low-pass the vertical motion
+	 *  takes along the flow before anything reads it: condensation, latent heat,
+	 *  the deck. What moves with the air holds; gravity waves and bores, which
+	 *  move through it, average out instead of condensing cloud along their
+	 *  crests and drawing travelling lines into the cloud field. Longer is
+	 *  cleaner and makes cloud respond more slowly to new ascent; condensation
+	 *  from passing waves goes too, so cloud amount falls (about half at 0.3)
+	 *  and the deck's CloudFull wants lowering to match. 0 reads it raw. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	float AscentSmoothing = 0.3f;
+
 	// -- Cloud --------------------------------------------------------------
 	//
 	// An advected cloud fraction fed by condensation, cleared by sinking air,
@@ -794,6 +805,7 @@ struct FFlowSimParams
 	FVector4f MoistureParams = FVector4f(1.0f, 0.25f, 0.7f, 2.0f);
 	float WindEvaporation = 1.0f;
 	float LatentHeating = 0.1f;
+	float AscentSmoothing = 0.3f;
 
 	/** x rate, y threshold, z spin, w decay rate. */
 	FVector4f StormParams = FVector4f(4.0f, 0.1f, 2.0f, 1.0f);

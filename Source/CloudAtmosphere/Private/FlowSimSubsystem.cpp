@@ -1187,6 +1187,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		FMath::Max(Config->SurfaceEvaporation, 0.0f));
 
 	Out.LatentHeating = FMath::Max(Config->LatentHeating, 0.0f);
+	Out.AscentSmoothing = FMath::Max(Config->AscentSmoothing, 0.0f);
 	Out.WindEvaporation = FMath::Max(Config->WindEvaporation, 0.0f);
 
 	Out.StormParams = FVector4f(

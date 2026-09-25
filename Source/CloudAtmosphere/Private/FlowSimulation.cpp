@@ -142,6 +142,7 @@ namespace
 		P.SimCloudDecay = 1.0f / FMath::Max(Params.CloudLifetime, 1e-3f);
 		P.SimMoistureParams = Params.MoistureParams;
 		P.SimLatentHeating = Params.LatentHeating;
+		P.SimAscentSmoothing = Params.AscentSmoothing;
 		P.SimStormParams = Params.StormParams;
 		P.SimWindEvaporation = Params.WindEvaporation;
 

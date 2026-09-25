@@ -65,6 +65,7 @@ SHADER_PARAMETER(float, SimEvaporationRate)
 SHADER_PARAMETER(float, SimCloudDecay)
 SHADER_PARAMETER(FVector4f, SimMoistureParams)
 SHADER_PARAMETER(float, SimLatentHeating)
+SHADER_PARAMETER(float, SimAscentSmoothing)
 SHADER_PARAMETER(FVector4f, SimStormParams)
 SHADER_PARAMETER(float, SimWindEvaporation)
 
