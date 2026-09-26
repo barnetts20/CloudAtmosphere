@@ -153,6 +153,7 @@ namespace
 		P.SimCellMotion = Params.CellMotion;
 		P.SimCellGenesis = Params.CellGenesis;
 		P.SimCellCloud = Params.CellCloud;
+		P.SimCellInflowReach = Params.CellInflowReach;
 		P.SimCellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
 		P.SimStepIndex = Params.StepIndex;
 

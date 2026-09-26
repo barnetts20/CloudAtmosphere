@@ -584,6 +584,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellInflow = 0.2f;
 
+	/** How far the inflow draws from and the outflow spreads to, in cell
+	 *  radii. The circulation converges only in the eyewall and returns its
+	 *  mass between the radius and here, so wider spreads the sinking air
+	 *  around the storm thinner. Cost grows with its square. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "1.25", ClampMax = "4.0"))
+	float StormCellInflowReach = 2.0f;
+
 	// -- Storm cloud ------------------------------------------------------------
 	//
 	// Each cell carries its own cloud on the same ramp as its vectors: none at
@@ -906,6 +913,9 @@ struct FFlowSimParams
 	FVector4f CellMotion = FVector4f::Zero();
 	FVector4f CellGenesis = FVector4f::Zero();
 	FVector4f CellCloud = FVector4f::Zero();
+
+	/** Cell radii the secondary circulation reaches; see SimCellInflowReach. */
+	float CellInflowReach = 2.0f;
 	int32 CellCount = 0;
 
 	/** Steps completed before the frame's first; seeds the cells' spawns. */

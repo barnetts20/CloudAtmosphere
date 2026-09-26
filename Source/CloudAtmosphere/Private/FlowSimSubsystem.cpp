@@ -1238,6 +1238,11 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		FMath::Clamp(Config->StormCellInflow, 0.0f, 1.0f),
 		FMath::Clamp(Config->StormCellStorm, 0.0f, 1.0f));
 
+	// The reach stays short of the antipode, where the shape's arc coordinate
+	// diverges.
+	Out.CellInflowReach = FMath::Min(FMath::Clamp(Config->StormCellInflowReach, 1.25f, 4.0f),
+		0.9f * UE_PI / FMath::Max(Out.CellShape.X, 1e-3f));
+
 	Out.CellCount = FMath::Clamp(Config->MaxStormCells, 0, FlowSimShader::MaxStormCells);
 
 	Out.StepIndex = StepsCompleted;
