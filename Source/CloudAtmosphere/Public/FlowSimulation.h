@@ -97,7 +97,8 @@ private:
 	TRefCountPtr<IPooledRenderTarget> PooledTracer[2];
 
 	/** Storm cells: two float4 of state per slot, advanced in place, then two
-	 *  float4 of vortex gains per slot, rewritten every substep. */
+	 *  float4 of vortex gains, two of inflow gains and one of health per slot,
+	 *  rewritten every substep. */
 	TRefCountPtr<FRDGPooledBuffer> PooledCells;
 
 	/** Noise displacements, phase A slices then phase B. Flips with the

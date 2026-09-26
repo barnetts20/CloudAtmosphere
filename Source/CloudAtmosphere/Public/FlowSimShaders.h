@@ -78,6 +78,8 @@ SHADER_PARAMETER(FVector4f, SimCellMotion)
 SHADER_PARAMETER(FVector4f, SimCellGenesis)
 SHADER_PARAMETER(FVector4f, SimCellCloud)
 SHADER_PARAMETER(float, SimCellWindBreadth)
+SHADER_PARAMETER(float, SimCellSustain)
+SHADER_PARAMETER(float, SimCellEyeDepth)
 SHADER_PARAMETER(int32, SimCellCount)
 SHADER_PARAMETER(int32, SimStepIndex)
 

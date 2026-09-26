@@ -455,8 +455,8 @@ float Flow_SampleLayerHeight(Texture2DArray FlowField, SamplerState FlowSampler,
 }
 
 /** Samples the deck depth factor from phase B's w, [0, 1]: 1, falling across
- *  a storm cell's eye toward 1 - its intensity. A deck scales its column
- *  depth by it, so an eye is a bowl sloping to its floor. */
+ *  a storm cell's eye on an S curve toward 1 - StormCellEyeDepth times its
+ *  intensity. A deck scales its column depth by it. */
 float Flow_SampleDepth(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
 {
     return saturate(Flow_SampleSlice(FlowField, FlowSampler, N, Layer + 3.0f * Flow_LayerCount(FlowField)).w);

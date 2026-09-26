@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
+#include "Engine/EngineBaseTypes.h"
 #include "GasGiantShadowMap.h"
 #include "TerrestrialShadowMap.h"
 #include "FlowSimTypes.h"
@@ -9,6 +10,7 @@
 
 class FFlowSimulation;
 class UFlowSnapshot;
+class UWorld;
 
 /** Game-thread driver for the flow sim.
  *
@@ -106,7 +108,12 @@ public:
 	float GetSimulatedTime() const { return SimulatedTime; }
 
 	/** Sim time of the state the output shows, one step or less behind
-	 *  GetSimulatedTime. Anything animated alongside the field clocks off this. */
+	 *  GetSimulatedTime. Anything animated alongside the field clocks off this.
+	 *  The sim steps before actors tick, so an actor reads the state this frame
+	 *  renders.
+	 *  PITFALL: READ BEFORE THE STEP, IT LAGS THE RENDERED FIELD BY A FRAME. At a
+	 *  high SimSpeed the noise phases the renderer weights then no longer reach
+	 *  zero where the sim resets them, and the whole field snaps. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	float GetDisplayTime() const { return SimulatedTime - (1.0f - StateBlend) * CurrentStep; }
 
@@ -138,9 +145,21 @@ public:
 	}
 
 private:
-	/** The sim's half of Tick. Every early-out here is a reason the field should
-	 *  not advance, which is why the bake is not inside it. */
+	/** Steps the sim ahead of every actor's tick; Tick steps instead on a frame
+	 *  that has no actor ticks. */
+	void OnPreActorTick(UWorld* InWorld, ELevelTick TickType, float DeltaTime);
+
+	/** Auto-start on first use, then StepSimulation. Once per frame. */
+	void Advance(float DeltaTime);
+
+	/** The sim's half of the frame. Every early-out here is a reason the field
+	 *  should not advance, which is why the bake is not inside it. */
 	void StepSimulation(float DeltaTime);
+
+	FDelegateHandle PreActorTickHandle;
+
+	/** Set by OnPreActorTick, cleared by Tick. */
+	bool bSteppedThisFrame = false;
 
 	/** Drains ShadowRequests into one render command each. */
 	void BakeShadowMap();

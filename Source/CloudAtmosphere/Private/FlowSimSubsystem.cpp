@@ -31,7 +31,7 @@ static TAutoConsoleVariable<int32> CVarGasGiantDebugMode(
 	TEXT("Override the config's debug view. -1 uses the config.\n")
 	TEXT("0 Vorticity, 1 Pressure, 2 Speed, 3 East, 4 North,\n")
 	TEXT("5 Helmholtz residual, 6 Zonal profile error, 7 Vertical motion, 8 Froude, 9 Cloud, 10 Cloud formation ascent, 11 Noise displacement,\n")
-	TEXT("12 Relative humidity, 13 Storm, 14 Layer top height, 15 Column cloud, 16 Storm eye."),
+	TEXT("12 Relative humidity, 13 Storm, 14 Layer top height, 15 Column cloud, 16 Storm eye, 17 Storm cell health, 18 Storm genesis."),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarGasGiantDebugLayer(
@@ -485,10 +485,14 @@ void UFlowSimSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Super::Initialize(Collection);
 
 	Simulation = new FFlowSimulation();
+
+	PreActorTickHandle = FWorldDelegates::OnWorldPreActorTick.AddUObject(this, &UFlowSimSubsystem::OnPreActorTick);
 }
 
 void UFlowSimSubsystem::Deinitialize()
 {
+	FWorldDelegates::OnWorldPreActorTick.Remove(PreActorTickHandle);
+
 	if (Simulation)
 	{
 		// The render thread owns the pooled allocations, so they are released
@@ -708,9 +712,8 @@ void UFlowSimSubsystem::ReportCourant() const
 
 	UE_LOG(LogFlowSim, Log,
 		TEXT("Speed root %.3f, turnover %.3f. Of the root: top layer's jets and shear %.2f, ")
-		TEXT("its eddies %.2f, storm cells %.2f with inflow %.2f; the ceiling eases in from 0.7."),
-		Speeds.Root, Speeds.Turnover, TopWind, TopEddies,
-		Config->MaxStormCells > 0 ? Cells : 0.0f, Config->MaxStormCells > 0 ? Config->StormCellInflow : 0.0f);
+		TEXT("its eddies %.2f, storm cells %.2f; the ceiling eases in from 0.7."),
+		Speeds.Root, Speeds.Turnover, TopWind, TopEddies, Config->MaxStormCells > 0 ? Cells : 0.0f);
 
 	if (TopWind + TopEddies > 0.7f || (Config->MaxStormCells > 0 && Cells > 0.7f))
 	{
@@ -1251,10 +1254,12 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.CellCloud = FVector4f(
 		FMath::Clamp(Config->StormCellCloud, 0.0f, 1.0f),
 		FMath::Max(Config->StormCellCloudRate, 0.0f),
-		Speeds.CellInflow,
+		FMath::Clamp(Config->StormCellInflow, 0.0f, 1.0f),
 		FMath::Clamp(Config->StormCellStorm, 0.0f, 1.0f));
 
 	Out.CellWindBreadth = FMath::Clamp(Config->StormCellWindBreadth, 0.0f, 0.95f);
+	Out.CellSustain = FMath::Clamp(Config->StormCellSustain, 0.0f, 1.0f);
+	Out.CellEyeDepth = FMath::Clamp(Config->StormCellEyeDepth, 0.0f, 1.0f);
 
 	Out.CellCount = FMath::Clamp(Config->MaxStormCells, 0, FlowSimShader::MaxStormCells);
 
@@ -1353,7 +1358,9 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		case EFlowDebugMode::ColumnCloud:
 		case EFlowDebugMode::CloudAscent:
 		case EFlowDebugMode::Storm:
-		case EFlowDebugMode::Eye:         Out.DebugScale = 1.0f; break;
+		case EFlowDebugMode::Eye:
+		case EFlowDebugMode::CellHealth:
+		case EFlowDebugMode::Genesis:     Out.DebugScale = 1.0f; break;
 			// A quarter radian, about the displacement at mid-life.
 		case EFlowDebugMode::NoiseDisplacement: Out.DebugScale = 0.25f; break;
 			// From dry at zero onset to saturated at full red.
@@ -1429,6 +1436,31 @@ void UFlowSimSubsystem::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// A frame without actor ticks steps here instead.
+	if (!bSteppedThisFrame)
+	{
+		Advance(DeltaTime);
+	}
+
+	bSteppedThisFrame = false;
+
+	// AFTER, AND NOT INSIDE. The bake reads the flow texture the step writes, and
+	// render commands run in enqueue order. Outside StepSimulation because a
+	// stopped or paused sim still has a deck to shadow.
+	BakeShadowMap();
+}
+
+void UFlowSimSubsystem::OnPreActorTick(UWorld* InWorld, ELevelTick TickType, float DeltaTime)
+{
+	if (InWorld == GetWorld())
+	{
+		Advance(DeltaTime);
+		bSteppedThisFrame = true;
+	}
+}
+
+void UFlowSimSubsystem::Advance(float DeltaTime)
+{
 	// On the first tick rather than in Initialize: resolving a soft reference
 	// during subsystem construction can run before the asset registry is usable.
 	if (!bTriedAutoStart)
@@ -1438,11 +1470,6 @@ void UFlowSimSubsystem::Tick(float DeltaTime)
 	}
 
 	StepSimulation(DeltaTime);
-
-	// AFTER, AND NOT INSIDE. The bake reads the flow texture the step writes, and
-	// render commands run in enqueue order. Outside StepSimulation because a
-	// stopped or paused sim still has a deck to shadow.
-	BakeShadowMap();
 }
 
 void UFlowSimSubsystem::StepSimulation(float DeltaTime)

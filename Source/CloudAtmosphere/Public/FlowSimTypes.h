@@ -90,6 +90,16 @@ enum class EFlowDebugMode : uint8
 	/** The eye tracer, 0 to 1: clear air fed at storm cells' cores and carried
 	 *  by the flow, which is how far their eyes thin the deck. */
 	Eye         UMETA(DisplayName = "Storm eye"),
+
+	/** Each storm cell's disc in its conditions: red the genesis window, green
+	 *  the humidity, blue the parent storm, so a missing colour names what is
+	 *  failing. The eyewall disc is the cell's favour in grey. */
+	CellHealth  UMETA(DisplayName = "Storm cell health"),
+
+	/** What a storm seed at each point is judged on, each against its gate:
+	 *  red the genesis window, green the humidity, blue the storm. Bright where
+	 *  all three pass, dim where any fails, dimmer near a live cell. */
+	Genesis     UMETA(DisplayName = "Storm genesis"),
 };
 
 /** Per-layer settings. Profile values are multipliers on the shared jet
@@ -167,11 +177,10 @@ struct FFlowSimSpeeds
 	float JetStrength = 0.0f;
 	float ThermalShear = 0.0f;
 
-	/** Speeds: eddies per unit forcing slope, the storm cells' vortex, inflow
-	 *  and drift, and the shear that closes genesis. */
+	/** Speeds: eddies per unit forcing slope, the storm cells' vortex scale and
+	 *  drift, and the shear that closes genesis. */
 	float EddySpeed = 0.0f;
 	float CellWind = 0.0f;
-	float CellInflow = 0.0f;
 	float CellDrift = 0.0f;
 	float GenesisShear = 1.0f;
 
@@ -508,6 +517,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.01"))
 	float StormCellLifetime = 3.0f;
 
+	/** Storm tracer a mature cell holds its eyewall at, at least, on the
+	 *  stamp's profile, topped up at StormRate. Zero leaves the storm to the
+	 *  weather, so a cell lives only as long as its parent storm does. At or
+	 *  above GenesisStorm the cell keeps its own parent alive, and it ends
+	 *  when the genesis window or humidity fails, or at StormCellLifetime. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellSustain = 0.0f;
+
 	/** Poleward-west drift on top of the steering flow, as a fraction of the
 	 *  speed root. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
@@ -533,8 +550,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.5", ClampMax = "45.0"))
 	float StormCellRadius = 8.0f;
 
-	/** Eye radius, as a fraction of the radius: clear inside it, the cloud
-	 *  ramping up to full at the eyewall, so the eye is a bowl. */
+	/** Eye radius, as a fraction of the radius: the deck thins toward the
+	 *  centre on an S curve out to it, carried and wound by the flow. The eye
+	 *  reads at about half this radius. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "0.9"))
 	float StormCellEye = 0.08f;
 
@@ -545,6 +563,11 @@ public:
 	/** Vector strength at the eye's edge, as a fraction of the eyewall's. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellEyeStrength = 0.2f;
+
+	/** Share of the deck's column depth a full-intensity eye removes at its
+	 *  centre: 1 thins it to nothing, lower leaves a floor of cloud. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellEyeDepth = 0.8f;
 
 	/** How fast the vectors fall from the eyewall to the radius, as the power
 	 *  of the remaining distance: 1 is linear, higher tightens the storm onto
@@ -572,9 +595,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
 	float StormCellSpeed = 0.6f;
 
-	/** Rate the flow relaxes toward the cell's vortex, per unit time: higher
-	 *  spins a cell up faster and holds it tighter against the flow around it.
-	 *  Also the rate of the open-loop inflow push. */
+	/** Rate the flow relaxes toward the cell's vortex and inflow, per unit
+	 *  time: higher spins a cell up faster and holds it tighter against the
+	 *  flow around it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
 	float StormCellForcing = 1.5f;
 
@@ -584,14 +607,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
 	float StormCellTopShare = 0.0f;
 
-	/** Inflow speed on the bottom layer and outflow on the top at the eyewall,
-	 *  as a fraction of the speed root, pushed open-loop at StormCellForcing
-	 *  per unit time on the stamp's profile; ramps in with the cell's strength
-	 *  like the vortex. The storm's secondary circulation: it turns what the
-	 *  vortex alone winds into rings into trailing spiral bands, and its
-	 *  convergence under the core condenses and keeps the storm there alive.
-	 *  Independent of StormCellSpeed. Zero turns it off. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", UIMax = "4.0"))
+	/** Inflow on the bottom layer and outflow on the top at the eyewall, as a
+	 *  fraction of the target wind: the tangent of the spiral's inflow angle
+	 *  (0.2 about 11 degrees, 0.4 about 22). Closed-loop like the vortex, on
+	 *  the stamp's profile; the target gives way to the vortex's under the
+	 *  speed ceiling. The storm's secondary circulation: it turns what the
+	 *  vortex alone winds into rings into trailing spiral bands. Zero turns it
+	 *  off. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellInflow = 0.2f;
 
 	// -- Storm cloud ------------------------------------------------------------
@@ -946,6 +969,12 @@ struct FFlowSimParams
 
 	/** Share of the span past the eyewall the vortex's wind holds its peak. */
 	float CellWindBreadth = 0.0f;
+
+	/** Storm tracer a mature cell holds its eyewall at, at least. */
+	float CellSustain = 0.0f;
+
+	/** Share of the deck's depth a full-intensity eye removes. */
+	float CellEyeDepth = 0.8f;
 	int32 CellCount = 0;
 
 	/** Steps completed before the frame's first; seeds the cells' spawns. */

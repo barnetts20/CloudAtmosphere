@@ -22,7 +22,10 @@ namespace
 			/** Storm cell inflow authored as a fraction of the speed root. */
 			InflowSpeed = 3,
 
-			Latest = InflowSpeed
+			/** Storm cell inflow authored as a fraction of the target wind. */
+			InflowRatio = 4,
+
+			Latest = InflowRatio
 		};
 
 		static const FGuid Guid;
@@ -196,7 +199,6 @@ FFlowSimSpeeds UFlowSimConfig::ResolveSpeeds() const
 
 	S.EddySpeed = FMath::Max(EddySpeed, 0.0f) * S.Root;
 	S.CellWind = FMath::Max(StormCellSpeed, 0.0f) * S.Root;
-	S.CellInflow = FMath::Max(StormCellInflow, 0.0f) * S.Root;
 	S.CellDrift = FMath::Max(StormCellDriftSpeed, 0.0f) * S.Root;
 	S.GenesisShear = FMath::Max(GenesisShearSpeed * S.Root, 0.01f);
 
@@ -299,13 +301,14 @@ void UFlowSimConfig::PostLoad()
 			*GetName(), GridDamping, Step);
 	}
 
-	if (Version < FFlowSimConfigVersion::InflowSpeed)
+	// Earlier versions store the inflow as a fraction of the target wind
+	// already; only the speed-root form needs converting.
+	if (Version == FFlowSimConfigVersion::InflowSpeed)
 	{
-		// The fraction of the target wind as a fraction of the root.
-		StormCellInflow *= FMath::Max(StormCellSpeed, 0.0f);
+		StormCellInflow = FMath::Clamp(StormCellInflow / FMath::Max(StormCellSpeed, 1e-3f), 0.0f, 1.0f);
 
 		UE_LOG(LogFlowSim, Display,
-			TEXT("Converted '%s' to StormCellInflow %.3f of the speed root. Save the asset to keep the conversion."),
+			TEXT("Converted '%s' to StormCellInflow %.3f of the target wind. Save the asset to keep the conversion."),
 			*GetName(), StormCellInflow);
 	}
 }
