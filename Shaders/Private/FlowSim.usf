@@ -201,6 +201,9 @@ float SimCellSustain;
 /** Share of the deck's depth a full-intensity eye removes at its centre. */
 float SimCellEyeDepth;
 
+/** Rate a cell is pulled onto its vortex's core, per unit time. */
+float SimCellCoreFollow;
+
 /** Live cell slots, up to GG_SIM_MAX_CELLS. */
 int SimCellCount;
 
@@ -2027,6 +2030,34 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
         Centroid += Storm * Q;
     }
 
+    // -- Vortex core -------------------------------------------------------------
+
+	// The bottom layer's cyclonic vorticity, squared to favour the peak, weighted
+	// over three rings out to the eyewall: the core of the vortex the flow has.
+	// The cell follows it, so the push, the stamp and the eye sit on the flow's
+	// own centre of rotation.
+	// PITFALL: THE FLOW'S VORTEX DRIFTS ON ITS OWN, poleward and west on a
+	// rotating planet, and the one-sided push never drags it back. A cell left
+	// to the environment's steering slides off its core, and the eye it feeds
+	// is swept round a centre it is not on.
+    const float CoreReach = max(max(SimCellShape.z, SimCellShape.y + 1e-3f) * Radius, SIM_CELL_RING_CELLS * SimDLon());
+
+    const float CoreSpin = SimCellParent(Cell.xyz).y;
+    float3 Core = CoreSpin * CoreSpin * Cell.xyz;
+
+	[loop]
+    for (int CoreRing = 1; CoreRing <= 3; CoreRing++)
+    {
+		[unroll]
+        for (int K = 0; K < 6; K++)
+        {
+            const float3 Q = SimCellRingPoint(Cell.xyz, CoreReach * (float) CoreRing / 3.0f, K);
+            const float Cyclonic = SimCellParent(Q).y;
+
+            Core += Cyclonic * Cyclonic * Q;
+        }
+    }
+
     // -- Move ------------------------------------------------------------------
 
 	// The layers' mean flow over the half-radius ring: the environment's
@@ -2057,6 +2088,11 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
     if (dot(Centroid, Centroid) > 1e-12f)
     {
         Steering += SimCellMotion.y * (normalize(Centroid) - Cell.xyz);
+    }
+
+    if (dot(Core, Core) > 1e-12f)
+    {
+        Steering += SimCellCoreFollow * (normalize(Core) - Cell.xyz);
     }
 
     Steering -= Cell.xyz * dot(Cell.xyz, Steering);
@@ -2396,7 +2432,13 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
     const float4 Weather = SimLatLonSRV.Load(int4(C, Layer + L, 0));
     const float Vorticity = SimLatLonSRV.Load(int4(C, Layer, 0)).w;
 
-    const float W = Weather.x;
+	// THE EYE SINKS: the eye tracer times StormCellEyeDraft joins the vertical
+	// motion the moisture sees, so cloud carried through the eye evaporates and
+	// none condenses there. The clear core is the sim's own, and the flow winds
+	// what it clears; the deck's depth factor thins what is left.
+    const float Eye = bCellNear ? saturate(SimNoiseSRV.Load(int4(C.x, C.y, Layer + L, 0)).w) : 0.0f;
+
+    const float W = Weather.x + SimCellDraft.y * Eye;
     const float Rising = max(W, 0.0f);
     const float Sinking = max(-W, 0.0f);
 
@@ -2411,7 +2453,7 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 	// The storm cells' own cloud: lifted toward full, less where the eye is calm.
     if (bCellNear)
     {
-        const float Feed = SimCellCloudFeed(P, saturate(SimNoiseSRV.Load(int4(C.x, C.y, Layer + L, 0)).w));
+        const float Feed = SimCellCloudFeed(P, Eye);
 
         Cloud = saturate(Cloud + SimCellCloud.y * Dt * Feed * (1.0f - Cloud));
     }

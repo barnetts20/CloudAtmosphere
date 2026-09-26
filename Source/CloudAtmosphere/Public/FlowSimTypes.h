@@ -535,6 +535,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
 	float StormCellFollow = 2.0f;
 
+	/** Rate a cell is pulled onto the core of the vortex in the flow, the
+	 *  cyclonic vorticity peak within its eyewall, per unit time. Keeps the eye
+	 *  on the centre of rotation as the vortex drifts; zero leaves the cell to
+	 *  the steering flow. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
+	float StormCellCoreFollow = 8.0f;
+
 	// -- Storm stamp ------------------------------------------------------------
 	//
 	// A cell's vortex: vectors tangent to circles about its centre, cyclonic,
@@ -644,8 +651,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
 	float StormCellDraft = 0.5f;
 
-	/** Vertical motion in the eye. Negative sinks, which breaks the cloud
-	 *  there up. */
+	/** Vertical motion in the eye, in W's units, carried with the eye tracer.
+	 *  Negative sinks: in the sim the cloud the flow carries through the eye
+	 *  evaporates and none condenses there, at a rate EvaporationRate times
+	 *  this sets, so the eye clears and the flow winds what it clears; on the
+	 *  output it adds to W. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
 	float StormCellEyeDraft = -0.5f;
 
@@ -978,6 +988,9 @@ struct FFlowSimParams
 
 	/** Share of the deck's depth a full-intensity eye removes. */
 	float CellEyeDepth = 0.8f;
+
+	/** Rate a cell is pulled onto its vortex's core. */
+	float CellCoreFollow = 8.0f;
 	int32 CellCount = 0;
 
 	/** Steps completed before the frame's first; seeds the cells' spawns. */

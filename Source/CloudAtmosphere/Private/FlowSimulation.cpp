@@ -160,6 +160,7 @@ namespace
 		P.SimCellWindBreadth = Params.CellWindBreadth;
 		P.SimCellSustain = Params.CellSustain;
 		P.SimCellEyeDepth = Params.CellEyeDepth;
+		P.SimCellCoreFollow = Params.CellCoreFollow;
 		P.SimCellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
 		P.SimStepIndex = Params.StepIndex;
 
