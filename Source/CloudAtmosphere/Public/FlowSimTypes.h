@@ -315,13 +315,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
 	float LayerCoupling = 0.1f;
 
-	/** Fraction of grid-scale divergence removed per step, scaled per row
-	 *  against the grid spacing there. The background: where a front
-	 *  compresses, ShockDamping adds a term in the compression itself, so
-	 *  bores are damped without raising this. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing", meta = (ClampMin = "0.0", ClampMax = "0.5"))
-	float DivergenceDamping = 0.05f;
-
 	/** Rebuild centre velocities to fourth order from the faces rather than as
 	 *  a two-face average. Keeps a compact vortex from bleeding into a cross
 	 *  along the grid axes. PITFALL: it also damps fast motion far less --
@@ -554,17 +547,28 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.1"))
 	float StormCellFalloff = 1.5f;
 
+	/** Share of the span from the eyewall to the radius over which the wind
+	 *  holds its peak before StormCellFalloff takes it to zero: the breadth of
+	 *  the band of strongest winds, which a storm needs to read as a
+	 *  hurricane. Shapes the vortex push only; the cloud, storm and draft
+	 *  still peak at the eyewall. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "0.95"))
+	float StormCellWindBreadth = 0.0f;
+
 	/** Eyewall wind a cell at full intensity holds on the bottom layer, as a
 	 *  fraction of the speed root. The push is closed-loop: each step it closes
 	 *  part of the gap between the flow's measured cyclonic wind and this, so a
 	 *  cell settles here against drag and the flow around it. Keep it under the
-	 *  ceiling's knee, 0.7, less the background wind the cell rides on. */
+	 *  ceiling's knee, 0.7, less the background wind the cell rides on.
+	 *  PITFALL: far past the ceiling the clip flattens the vortex into a broad
+	 *  band at the cap, but the push then runs pinned at its limit and nothing
+	 *  regulates it; StormCellWindBreadth widens the band. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
 	float StormCellSpeed = 0.6f;
 
-	/** Rate the flow relaxes toward the cell's vortex and inflow, per unit
-	 *  time: higher spins a cell up faster and holds it tighter against the
-	 *  flow around it. */
+	/** Rate the flow relaxes toward the cell's vortex, per unit time: higher
+	 *  spins a cell up faster and holds it tighter against the flow around it.
+	 *  Also the rate of the open-loop inflow push. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
 	float StormCellForcing = 1.5f;
 
@@ -574,22 +578,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
 	float StormCellTopShare = 0.0f;
 
-	/** Inflow the bottom layer holds at the eyewall, as a fraction of
-	 *  StormCellSpeed, relaxed toward like the vortex. Layers above run less,
-	 *  then outflow on top, scaled by depth so the outflow carries off the
-	 *  mass the inflow brings; what converges under the core rises into the
-	 *  outflow and sinks around the storm rather than filling it. The storm's
-	 *  secondary circulation: it turns what the vortex alone winds into rings
-	 *  into trailing spiral bands, and lifts the core. Zero turns it off. */
+	/** Inflow on the bottom layer and outflow on the top, pushed open-loop at
+	 *  StormCellForcing times this fraction of StormCellSpeed times the
+	 *  intensity per unit time, on the stamp's profile. The storm's secondary
+	 *  circulation: it turns what the vortex alone winds into rings into
+	 *  trailing spiral bands, and its convergence under the core condenses and
+	 *  keeps the storm there alive. Zero turns it off. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellInflow = 0.2f;
-
-	/** How far the inflow draws from and the outflow spreads to, in cell
-	 *  radii. The circulation converges only in the eyewall and returns its
-	 *  mass between the radius and here, so wider spreads the sinking air
-	 *  around the storm thinner. Cost grows with its square. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "1.25", ClampMax = "4.0"))
-	float StormCellInflowReach = 2.0f;
 
 	// -- Storm cloud ------------------------------------------------------------
 	//
@@ -670,6 +666,19 @@ public:
 	 *  the jet and shear rates that give their profiles those peak winds. */
 	FFlowSimSpeeds ResolveSpeeds() const;
 
+	/** ImplicitWeight at a step: at least FlowSimStep::StackWeight for a stack
+	 *  at a large step. */
+	float GetImplicitWeight(float Step) const;
+
+	/** Rate the implicit scheme alone damps the first internal mode's
+	 *  grid-scale waves at a step, per unit sim time. */
+	float GetImplicitDampingRate(float Step) const;
+
+	/** Fraction of grid-scale divergence the divergence damping removes per
+	 *  step: GridDamping less the implicit scheme's share, as a fraction of
+	 *  that step. */
+	float GetDivergenceDamping(float Step) const;
+
 	// -- Polar filter -------------------------------------------------------
 
 	/** cos(latitude) below which the longitudinal filter engages. */
@@ -684,15 +693,25 @@ public:
 	// -- Solver -------------------------------------------------------------
 
 	/** Weight of the implicit half of the gravity-wave terms. 0.5 is neutral;
-	 *  above it gravity waves are damped. A stack runs at least
+	 *  above it gravity waves are damped, by an amount that grows with the
+	 *  step, and that damping counts toward GridDamping. A stack runs at least
 	 *  FlowSimStep::StackWeight at large steps. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "0.5", ClampMax = "1.0"))
 	float ImplicitWeight = 0.6f;
 
+	/** Rate, per unit sim time, at which grid-scale waves of the first internal
+	 *  mode decay, whatever the step: the implicit scheme's own damping at the
+	 *  step, and divergence damping making up the rest. Smooths W, ripples and
+	 *  bores at the grid scale; longer waves lose less, as their scale squared.
+	 *  Where the implicit scheme alone damps more (a large step, a high
+	 *  ImplicitWeight) that wins, and the start log says so. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "0.0"))
+	float GridDamping = 20.0f;
+
 	/** Gain of the compression-activated divergence damping: where a front
 	 *  steepens, the grid-scale divergence a step removes grows by this times
 	 *  the local compression per step. Higher widens and softens travelling
-	 *  fronts more; 0 leaves only DivergenceDamping. The total is capped at
+	 *  fronts more; 0 leaves only GridDamping. The total is capped at
 	 *  the explicit scheme's stability bound, so any value is stable. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "0.0", ClampMax = "50.0"))
 	float ShockDamping = 2.0f;
@@ -768,11 +787,11 @@ public:
 
 	virtual void Serialize(FArchive& Ar) override;
 
-	/** Converts a config saved before the speed root, at the regime it was
-	 *  saved with, so it runs as it did. */
+	/** Converts a config saved before the speed root or before GridDamping, at
+	 *  the regime and step it was saved with, so it runs as it did. */
 	virtual void PostLoad() override;
 
-	// -- Values of configs saved before the speed root --------------------------
+	// -- Values of configs saved before the speed root and GridDamping ----------
 	//
 	// PostLoad converts them. Each defaults to its old default, since a value
 	// equal to that was never saved.
@@ -803,6 +822,9 @@ public:
 
 	UPROPERTY()
 	float NoiseResetPeriod_DEPRECATED = 0.5f;
+
+	UPROPERTY()
+	float DivergenceDamping_DEPRECATED = 0.05f;
 };
 
 /** The zonal profiles on the CPU, mirroring FlowSim.usf, for the speed root and
@@ -880,7 +902,8 @@ struct FFlowSimParams
 	float ForcingLifetime = 0.5f;
 	float DragRate = 1.5f;
 	float LayerCoupling = 0.1f;
-	float DivergenceDamping = 0.05f;
+	/** Fraction of grid-scale divergence removed per step. */
+	float DivergenceDamping = 0.0f;
 	float FroudeCeiling = 0.6f;
 	float ShockDamping = 2.0f;
 	bool bSharpCentreVelocity = false;
@@ -914,8 +937,8 @@ struct FFlowSimParams
 	FVector4f CellGenesis = FVector4f::Zero();
 	FVector4f CellCloud = FVector4f::Zero();
 
-	/** Cell radii the secondary circulation reaches; see SimCellInflowReach. */
-	float CellInflowReach = 2.0f;
+	/** Share of the span past the eyewall the vortex's wind holds its peak. */
+	float CellWindBreadth = 0.0f;
 	int32 CellCount = 0;
 
 	/** Steps completed before the frame's first; seeds the cells' spawns. */

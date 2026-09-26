@@ -1,5 +1,6 @@
 #include "FlowSimTypes.h"
 
+#include "FlowSimShaders.h"
 #include "FlowSimulation.h"
 #include "Serialization/CustomVersion.h"
 
@@ -15,7 +16,10 @@ namespace
 			/** Winds authored as fractions of the speed root. */
 			SpeedRoot = 1,
 
-			Latest = SpeedRoot
+			/** Grid-scale damping authored per unit time. */
+			DampingRate = 2,
+
+			Latest = DampingRate
 		};
 
 		static const FGuid Guid;
@@ -54,6 +58,20 @@ namespace
 	{
 		return PeakWind([&Config](float Mu) { return FlowSimProfile::ThermalShape(Config, Mu); });
 	}
+
+	/** SimRowStiffness at the equator: the Laplacian's diagonal there, the
+	 *  eigenvalue of the grid-scale mode that divergence damping's fraction
+	 *  refers to. */
+	float EquatorStiffness(const UFlowSimConfig& Config)
+	{
+		const float DLon = 2.0f * UE_PI / FlowSimShader::GridLongitude(Config.GridLongitude);
+		const float DMu = 2.0f / FlowSimShader::GridLatitude(Config.GridLatitude);
+
+		return 2.0f / (DLon * DLon) + 2.0f / (DMu * DMu);
+	}
+
+	/** Most of the grid-scale divergence one step may remove: SIM_DAMPING_MAX. */
+	constexpr float MaxDampingFraction = 0.45f;
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +144,42 @@ float UFlowSimConfig::GetNoiseResetTime() const
 	return FMath::Max(NoiseResetTurnovers, 0.05f) * FMath::Max(DeformationRadius, 0.01f) / GetSpeedRoot();
 }
 
+// ---------------------------------------------------------------------------
+// Grid damping
+// ---------------------------------------------------------------------------
+
+float UFlowSimConfig::GetImplicitWeight(float Step) const
+{
+	const float Authored = FMath::Clamp(ImplicitWeight, 0.5f, 1.0f);
+
+	return (FMath::Clamp(LayerCount, 1, 8) > 1 && Step > FlowSimStep::StackLargeStep)
+		? FMath::Max(Authored, FlowSimStep::StackWeight)
+		: Authored;
+}
+
+float UFlowSimConfig::GetImplicitDampingRate(float Step) const
+{
+	if (Step <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	// Per step the off-centred scheme scales a gravity wave by |g|, with
+	// |g|^2 = (1 + (1 - a)^2 A) / (1 + a^2 A) and A = (c dt)^2 k^2.
+	const float C = FlowSimProfile::WaveSpeed(*this);
+	const float A = C * C * Step * Step * EquatorStiffness(*this);
+	const float Alpha = GetImplicitWeight(Step);
+
+	return FMath::Loge((1.0f + Alpha * Alpha * A) / (1.0f + (1.0f - Alpha) * (1.0f - Alpha) * A)) / (2.0f * Step);
+}
+
+float UFlowSimConfig::GetDivergenceDamping(float Step) const
+{
+	const float Rate = FMath::Max(GridDamping - GetImplicitDampingRate(Step), 0.0f);
+
+	return FMath::Min(1.0f - FMath::Exp(-Rate * FMath::Max(Step, 0.0f)), MaxDampingFraction);
+}
+
 FFlowSimSpeeds UFlowSimConfig::ResolveSpeeds() const
 {
 	FFlowSimSpeeds S;
@@ -151,6 +205,59 @@ FFlowSimSpeeds UFlowSimConfig::ResolveSpeeds() const
 // Loading
 // ---------------------------------------------------------------------------
 
+namespace
+{
+	/** Winds from the values saved before the speed root. */
+	void ConvertToSpeedRoot(UFlowSimConfig& Config)
+	{
+		// A ceiling of 0 turned the ceiling off; the root needs one, so it takes
+		// the loosest.
+		if (Config.FroudeCeiling <= 0.0f)
+		{
+			Config.FroudeCeiling = 1.0f;
+		}
+
+		// EVERY VALUE AT THE REGIME IT WAS SAVED WITH: the fractions reproduce the
+		// same rates, so the converted config runs exactly as it did.
+		const float Root = Config.GetSpeedRoot();
+		const float Turnover = FMath::Max(Config.DeformationRadius, 0.01f) / Root;
+
+		Config.JetSpeed = Config.JetStrength_DEPRECATED * JetPeak(Config) / Root;
+		Config.ShearSpeed = Config.ThermalShear_DEPRECATED * ShapePeak(Config) / Root;
+
+		// Layer 0's forcing-to-drag ratio becomes EddySpeed, and each layer's
+		// ratio against it that layer's EddyScale.
+		float Reference = 1.0f;
+
+		if (Config.LayerProfiles.Num() > 0 && Config.LayerProfiles[0].ForcingScale_DEPRECATED > 0.0f)
+		{
+			Reference = Config.LayerProfiles[0].ForcingScale_DEPRECATED / FMath::Max(Config.LayerProfiles[0].DragScale, 1e-3f);
+		}
+
+		Config.EddySpeed = Config.ForcingAmplitude_DEPRECATED * Reference / Root;
+
+		for (FFlowLayerProfile& Layer : Config.LayerProfiles)
+		{
+			Layer.EddyScale = Layer.ForcingScale_DEPRECATED / FMath::Max(Layer.DragScale, 1e-3f) / Reference;
+		}
+
+		Config.StormCellSpeed = Config.StormCellWind_DEPRECATED / Root;
+		Config.StormCellDriftSpeed = Config.StormCellDrift_DEPRECATED / Root;
+		Config.GenesisShearSpeed = Config.GenesisShear_DEPRECATED / Root;
+		Config.WindEvaporationGain = Config.WindEvaporation_DEPRECATED * Root;
+
+		const float JetRate = Config.JetStrength_DEPRECATED * (Config.LayerProfiles.Num() > 0 ? Config.LayerProfiles[0].JetScale : 1.0f);
+
+		Config.NoiseDriftSpeed = Config.NoiseDrift_DEPRECATED * JetRate / Root;
+		Config.NoiseResetTurnovers = FMath::Max(Config.NoiseResetPeriod_DEPRECATED, 0.05f) / FMath::Max(FMath::Abs(JetRate), 1e-3f) / Turnover;
+
+		UE_LOG(LogFlowSim, Display,
+			TEXT("Converted '%s' to the speed root (%.3f): jet %.3f, shear %.3f, eddies %.3f, storm cells %.3f of it. ")
+			TEXT("Save the asset to keep the conversion."),
+			*Config.GetName(), Root, Config.JetSpeed, Config.ShearSpeed, Config.EddySpeed, Config.StormCellSpeed);
+	}
+}
+
 void UFlowSimConfig::Serialize(FArchive& Ar)
 {
 	Ar.UsingCustomVersion(FFlowSimConfigVersion::Guid);
@@ -162,55 +269,29 @@ void UFlowSimConfig::PostLoad()
 {
 	Super::PostLoad();
 
-	if (HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject)
-		|| GetLinkerCustomVersion(FFlowSimConfigVersion::Guid) >= FFlowSimConfigVersion::SpeedRoot)
+	if (HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject))
 	{
 		return;
 	}
 
-	// A ceiling of 0 turned the ceiling off; the root needs one, so it takes
-	// the loosest.
-	if (FroudeCeiling <= 0.0f)
+	const int32 Version = GetLinkerCustomVersion(FFlowSimConfigVersion::Guid);
+
+	if (Version < FFlowSimConfigVersion::SpeedRoot)
 	{
-		FroudeCeiling = 1.0f;
+		ConvertToSpeedRoot(*this);
 	}
 
-	// EVERY VALUE AT THE REGIME IT WAS SAVED WITH: the fractions reproduce the
-	// same rates, so the converted config runs exactly as it did.
-	const float Root = GetSpeedRoot();
-	const float Turnover = FMath::Max(DeformationRadius, 0.01f) / Root;
-
-	JetSpeed = JetStrength_DEPRECATED * JetPeak(*this) / Root;
-	ShearSpeed = ThermalShear_DEPRECATED * ShapePeak(*this) / Root;
-
-	// Layer 0's forcing-to-drag ratio becomes EddySpeed, and each layer's ratio
-	// against it that layer's EddyScale.
-	float Reference = 1.0f;
-
-	if (LayerProfiles.Num() > 0 && LayerProfiles[0].ForcingScale_DEPRECATED > 0.0f)
+	if (Version < FFlowSimConfigVersion::DampingRate)
 	{
-		Reference = LayerProfiles[0].ForcingScale_DEPRECATED / FMath::Max(LayerProfiles[0].DragScale, 1e-3f);
+		// The per-step fraction as a rate at the step it was saved with, plus
+		// the implicit scheme's share there, which it was adding to.
+		const float Step = GetStepSize();
+		const float Fraction = FMath::Clamp(DivergenceDamping_DEPRECATED, 0.0f, MaxDampingFraction);
+
+		GridDamping = -FMath::Loge(1.0f - Fraction) / Step + GetImplicitDampingRate(Step);
+
+		UE_LOG(LogFlowSim, Display,
+			TEXT("Converted '%s' to GridDamping %.3f per unit time (step %g). Save the asset to keep the conversion."),
+			*GetName(), GridDamping, Step);
 	}
-
-	EddySpeed = ForcingAmplitude_DEPRECATED * Reference / Root;
-
-	for (FFlowLayerProfile& Layer : LayerProfiles)
-	{
-		Layer.EddyScale = Layer.ForcingScale_DEPRECATED / FMath::Max(Layer.DragScale, 1e-3f) / Reference;
-	}
-
-	StormCellSpeed = StormCellWind_DEPRECATED / Root;
-	StormCellDriftSpeed = StormCellDrift_DEPRECATED / Root;
-	GenesisShearSpeed = GenesisShear_DEPRECATED / Root;
-	WindEvaporationGain = WindEvaporation_DEPRECATED * Root;
-
-	const float JetRate = JetStrength_DEPRECATED * (LayerProfiles.Num() > 0 ? LayerProfiles[0].JetScale : 1.0f);
-
-	NoiseDriftSpeed = NoiseDrift_DEPRECATED * JetRate / Root;
-	NoiseResetTurnovers = FMath::Max(NoiseResetPeriod_DEPRECATED, 0.05f) / FMath::Max(FMath::Abs(JetRate), 1e-3f) / Turnover;
-
-	UE_LOG(LogFlowSim, Display,
-		TEXT("Converted '%s' to the speed root (%.3f): jet %.3f, shear %.3f, eddies %.3f, storm cells %.3f of it. ")
-		TEXT("Save the asset to keep the conversion."),
-		*GetName(), Root, JetSpeed, ShearSpeed, EddySpeed, StormCellSpeed);
 }

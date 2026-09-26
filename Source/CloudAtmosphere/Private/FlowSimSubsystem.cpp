@@ -480,17 +480,6 @@ namespace FlowSimOutput
 	constexpr float Divergence = 0.664986f;
 }
 
-/** Implicit weight at a step: a stack at a large step runs at no less than
- *  FlowSimStep::StackWeight. */
-static float ImplicitWeightAt(const UFlowSimConfig& Config, float Step)
-{
-	const float Authored = FMath::Clamp(Config.ImplicitWeight, 0.5f, 1.0f);
-
-	return (LayerCountOf(Config) > 1 && Step > FlowSimStep::StackLargeStep)
-		? FMath::Max(Authored, FlowSimStep::StackWeight)
-		: Authored;
-}
-
 void UFlowSimSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
@@ -660,6 +649,32 @@ void UFlowSimSubsystem::ReportCourant() const
 		TEXT("Froude %.2f, Coriolis %.3f rad/step, wave speed %.3f."),
 		Config->SimSpeed, Steps, Step,
 		Advective, Gravity, Froude, RotationPerStep, C);
+
+	// GRID DAMPING, per unit time: the implicit scheme's share at this step, and
+	// the divergence damping's per-step fraction that makes up the rest.
+	const float Implicit = Config->GetImplicitDampingRate(Step);
+	const float Fraction = Config->GetDivergenceDamping(Step);
+
+	UE_LOG(LogFlowSim, Log,
+		TEXT("Grid damping %.2f per unit time: implicit scheme %.2f at this step, ")
+		TEXT("divergence damping %.5f of grid-scale divergence per step."),
+		Config->GridDamping, Implicit, Fraction);
+
+	if (Implicit > Config->GridDamping * 1.05f)
+	{
+		UE_LOG(LogFlowSim, Log,
+			TEXT("The implicit scheme alone damps %.2f per unit time at this step, past ")
+			TEXT("GridDamping %.2f. Lower ImplicitWeight toward 0.5 or the step for the authored rate."),
+			Implicit, Config->GridDamping);
+	}
+
+	if (Fraction >= 0.449f)
+	{
+		UE_LOG(LogFlowSim, Warning,
+			TEXT("GridDamping %.2f needs more divergence damping per step than the explicit ")
+			TEXT("scheme allows at step %g, so it is capped. Lower GridDamping or the step."),
+			Config->GridDamping, Step);
+	}
 
 	if (Froude > 0.5f)
 	{
@@ -1142,7 +1157,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.DeltaTime = FMath::Clamp(Step, 0.0f, FlowSimStep::SpinUp);
 	Out.Time = SimulatedTime;
 	Out.PlanetaryVorticity = Config->PlanetaryVorticity;
-	Out.ImplicitWeight = ImplicitWeightAt(*Config, Out.DeltaTime);
+	Out.ImplicitWeight = Config->GetImplicitWeight(Out.DeltaTime);
 
 	// -- Forcing ------------------------------------------------------------
 
@@ -1155,7 +1170,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.ForcingLifetime = FMath::Max(Config->ForcingLifetime, 0.01f);
 	Out.DragRate = Config->DragRate;
 	Out.LayerCoupling = Config->LayerCoupling;
-	Out.DivergenceDamping = FMath::Clamp(Config->DivergenceDamping, 0.0f, 0.5f);
+	Out.DivergenceDamping = Config->GetDivergenceDamping(Out.DeltaTime);
 	Out.FroudeCeiling = FMath::Max(Config->FroudeCeiling, 0.1f);
 	Out.ShockDamping = FMath::Max(Config->ShockDamping, 0.0f);
 	Out.bSharpCentreVelocity = Config->bSharpCentreVelocity;
@@ -1238,10 +1253,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		FMath::Clamp(Config->StormCellInflow, 0.0f, 1.0f),
 		FMath::Clamp(Config->StormCellStorm, 0.0f, 1.0f));
 
-	// The reach stays short of the antipode, where the shape's arc coordinate
-	// diverges.
-	Out.CellInflowReach = FMath::Min(FMath::Clamp(Config->StormCellInflowReach, 1.25f, 4.0f),
-		0.9f * UE_PI / FMath::Max(Out.CellShape.X, 1e-3f));
+	Out.CellWindBreadth = FMath::Clamp(Config->StormCellWindBreadth, 0.0f, 0.95f);
 
 	Out.CellCount = FMath::Clamp(Config->MaxStormCells, 0, FlowSimShader::MaxStormCells);
 

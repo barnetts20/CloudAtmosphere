@@ -96,9 +96,8 @@ private:
 	/** Cloud, cloud ascent, vapour and storm per layer. */
 	TRefCountPtr<IPooledRenderTarget> PooledTracer[2];
 
-	/** Storm cells: two float4 of state per slot, advanced in place, then five
-	 *  float4 of push gains and chimney share per slot, rewritten every
-	 *  substep. */
+	/** Storm cells: two float4 of state per slot, advanced in place, then two
+	 *  float4 of vortex gains per slot, rewritten every substep. */
 	TRefCountPtr<FRDGPooledBuffer> PooledCells;
 
 	/** Noise displacements, phase A slices then phase B. Flips with the

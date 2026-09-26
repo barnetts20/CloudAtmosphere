@@ -10,8 +10,11 @@
 #include "JsonObjectConverter.h"
 #include "Misc/DateTime.h"
 #include "Misc/FileHelper.h"
+#include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "PlanetAtmosphereActor.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "UObject/UnrealType.h"
 
 #include <cstdio>
@@ -24,6 +27,11 @@
 // Values and its Overrides: every member that differs from the C++ defaults,
 // with both values, so the tuned assets can be told apart from the class
 // defaults and read back as the source of new defaults and presets.
+//
+// CloudAtmosphere.LoadParams FileName [Sim|Atmospheres]
+//
+// Reads a file in the same layout back into the running sim config and the
+// world's atmosphere actors. See AtmosphereLoad.
 
 DEFINE_LOG_CATEGORY_STATIC(LogAtmosphereDump, Log, All);
 
@@ -163,6 +171,8 @@ namespace AtmosphereDump
 		TSharedRef<FJsonObject> Derived = MakeShared<FJsonObject>();
 		Derived->SetNumberField(TEXT("Step"), Params.DeltaTime);
 		Derived->SetNumberField(TEXT("ImplicitWeight"), Params.ImplicitWeight);
+		Derived->SetNumberField(TEXT("ImplicitDampingRate"), Config->GetImplicitDampingRate(Params.DeltaTime));
+		Derived->SetNumberField(TEXT("DivergenceDampingPerStep"), Params.DivergenceDamping);
 		Derived->SetNumberField(TEXT("PressureScale"), Params.OutputScales.X);
 		Derived->SetNumberField(TEXT("VorticityScale"), Params.OutputScales.Y);
 		Derived->SetNumberField(TEXT("DivergenceScale"), Params.OutputScales.Z);
@@ -401,8 +411,343 @@ namespace AtmosphereDump
 	}
 }
 
+namespace AtmosphereLoad
+{
+	using AtmosphereDump::IsGroup;
+
+	struct FReport
+	{
+		int32 Applied = 0;
+		int32 Unchanged = 0;
+		TArray<FString> Skipped;
+	};
+
+	/** Members the panel edits, less those kept only to load old data. */
+	bool Loadable(const FProperty* Property)
+	{
+		return Property->HasAnyPropertyFlags(CPF_Edit)
+			&& !Property->HasAnyPropertyFlags(CPF_Deprecated | CPF_Transient | CPF_EditConst);
+	}
+
+	/** An object reference from its dumped path. False, leaving Out alone, when
+	 *  the asset does not exist here. */
+	bool ResolveObject(const FObjectPropertyBase* Property, const FString& Text, UObject*& Out)
+	{
+		if (Text.IsEmpty() || Text == TEXT("None"))
+		{
+			Out = nullptr;
+			return true;
+		}
+
+		const FString Path = FPackageName::ExportTextPathToObjectPath(Text);
+		UObject* Object = LoadObject<UObject>(nullptr, *Path, nullptr, LOAD_NoWarn | LOAD_Quiet);
+
+		if (!Object || !Object->IsA(Property->PropertyClass))
+		{
+			return false;
+		}
+
+		Out = Object;
+		return true;
+	}
+
+	/** One member from its JSON value. Parsed into a scratch copy, so a value
+	 *  that fails to parse or names a missing asset leaves the member as it
+	 *  was. */
+	void SetValue(FProperty* Property, void* Value, const TSharedPtr<FJsonValue>& Json, const FString& Name, FReport& Report)
+	{
+		void* Scratch = FMemory::Malloc(Property->GetSize(), Property->GetMinAlignment());
+		Property->InitializeValue(Scratch);
+		Property->CopyCompleteValue(Scratch, Value);
+
+		bool bParsed;
+
+		if (const FObjectPropertyBase* Object = CastField<FObjectPropertyBase>(Property);
+			Object && Property->ArrayDim == 1 && Json.IsValid() && Json->Type == EJson::String)
+		{
+			UObject* Resolved = nullptr;
+			bParsed = ResolveObject(Object, Json->AsString(), Resolved);
+
+			if (bParsed)
+			{
+				Object->SetObjectPropertyValue(Scratch, Resolved);
+			}
+			else
+			{
+				Report.Skipped.Add(FString::Printf(TEXT("%s (no asset %s here)"), *Name, *Json->AsString()));
+			}
+		}
+		else
+		{
+			bParsed = FJsonObjectConverter::JsonValueToUProperty(Json, Property, Scratch);
+
+			if (!bParsed)
+			{
+				Report.Skipped.Add(Name + TEXT(" (unreadable value)"));
+			}
+		}
+
+		if (bParsed && !Property->Identical(Value, Scratch))
+		{
+			Property->CopyCompleteValue(Value, Scratch);
+			++Report.Applied;
+		}
+		else if (bParsed)
+		{
+			++Report.Unchanged;
+		}
+
+		Property->DestroyValue(Scratch);
+		FMemory::Free(Scratch);
+	}
+
+	/** A member of Type by name, or null with the reason recorded. */
+	FProperty* Find(const UStruct* Type, const FString& Key, bool bTop, const FString& Name, FReport& Report)
+	{
+		FProperty* Property = FindFProperty<FProperty>(Type, *Key);
+
+		if (!Property || (bTop ? !Loadable(Property) : Property->HasAnyPropertyFlags(CPF_Deprecated)))
+		{
+			Report.Skipped.Add(Name + (Property ? TEXT(" (not editable)") : TEXT(" (unknown)")));
+			return nullptr;
+		}
+
+		return Property;
+	}
+
+	/** A Values object: parameter groups member by member, so a file may carry
+	 *  any subset of a group; everything else as a whole. */
+	void ApplyValues(const UStruct* Type, void* Container, const FJsonObject& Json, const FString& Prefix, bool bTop, FReport& Report)
+	{
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Json.Values)
+		{
+			const FString Name = Prefix + Field.Key;
+			FProperty* Property = Find(Type, Field.Key, bTop, Name, Report);
+
+			if (!Property)
+			{
+				continue;
+			}
+
+			void* Value = Property->ContainerPtrToValuePtr<void>(Container);
+
+			if (IsGroup(Property) && Field.Value.IsValid() && Field.Value->Type == EJson::Object)
+			{
+				ApplyValues(CastFieldChecked<FStructProperty>(Property)->Struct, Value, *Field.Value->AsObject(), Name + TEXT("."), false, Report);
+			}
+			else
+			{
+				SetValue(Property, Value, Field.Value, Name, Report);
+			}
+		}
+	}
+
+	/** An Overrides object: "Group.Member" keys, each holding its Value. */
+	void ApplyOverrides(const UStruct* Type, void* Container, const FJsonObject& Json, FReport& Report)
+	{
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Json.Values)
+		{
+			TArray<FString> Parts;
+			Field.Key.ParseIntoArray(Parts, TEXT("."));
+
+			const TSharedPtr<FJsonObject>* Pair = nullptr;
+
+			if (Parts.Num() == 0 || !Field.Value.IsValid() || !Field.Value->TryGetObject(Pair) || !(*Pair)->HasField(TEXT("Value")))
+			{
+				Report.Skipped.Add(Field.Key + TEXT(" (no Value)"));
+				continue;
+			}
+
+			const UStruct* Scope = Type;
+			void* Owner = Container;
+			FProperty* Property = nullptr;
+
+			for (int32 i = 0; i < Parts.Num(); ++i)
+			{
+				Property = Find(Scope, Parts[i], i == 0, Field.Key, Report);
+
+				if (!Property || i + 1 == Parts.Num())
+				{
+					break;
+				}
+
+				if (!IsGroup(Property))
+				{
+					Report.Skipped.Add(Field.Key + TEXT(" (not a group)"));
+					Property = nullptr;
+					break;
+				}
+
+				Owner = Property->ContainerPtrToValuePtr<void>(Owner);
+				Scope = CastFieldChecked<FStructProperty>(Property)->Struct;
+			}
+
+			if (Property)
+			{
+				SetValue(Property, Property->ContainerPtrToValuePtr<void>(Owner), (*Pair)->TryGetField(TEXT("Value")), Field.Key, Report);
+			}
+		}
+	}
+
+	/** One section onto one object: its Values when the section has them, the
+	 *  full state, otherwise its Overrides of the C++ defaults over what the
+	 *  object already holds. */
+	void ApplySection(UObject& Target, const UStruct* Type, const FJsonObject& Section, const FString& Label)
+	{
+		const TSharedPtr<FJsonObject>* Values = nullptr;
+		const TSharedPtr<FJsonObject>* Overrides = nullptr;
+
+		if (!Section.TryGetObjectField(TEXT("Values"), Values) && !Section.TryGetObjectField(TEXT("Overrides"), Overrides))
+		{
+			UE_LOG(LogAtmosphereDump, Warning, TEXT("%s: no Values or Overrides."), *Label);
+			return;
+		}
+
+#if WITH_EDITOR
+		Target.Modify();
+#endif
+
+		FReport Report;
+
+		if (Values)
+		{
+			ApplyValues(Type, &Target, **Values, FString(), true, Report);
+		}
+		else
+		{
+			ApplyOverrides(Type, &Target, **Overrides, Report);
+		}
+
+#if WITH_EDITOR
+		Target.PostEditChange();
+#endif
+		Target.MarkPackageDirty();
+
+		UE_LOG(LogAtmosphereDump, Display, TEXT("%s: applied %d value(s) from %s, %d already matched, %d skipped."),
+			*Label, Report.Applied, Values ? TEXT("Values") : TEXT("Overrides"), Report.Unchanged, Report.Skipped.Num());
+
+		for (const FString& Skipped : Report.Skipped)
+		{
+			UE_LOG(LogAtmosphereDump, Warning, TEXT("  skipped %s"), *Skipped);
+		}
+	}
+
+	/** The file as given, or under Saved/CloudAtmosphere, with or without its
+	 *  extension. */
+	FString Locate(FString Name)
+	{
+		if (!Name.EndsWith(TEXT(".json")))
+		{
+			Name += TEXT(".json");
+		}
+
+		if (FPaths::FileExists(Name))
+		{
+			return Name;
+		}
+
+		return FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CloudAtmosphere"), Name));
+	}
+
+	/** Each atmosphere in the file onto the world's actor of the same name, or
+	 *  onto the only actor when both hold exactly one. */
+	void ApplyAtmospheres(const TArray<TSharedPtr<FJsonValue>>& Entries, UWorld& World)
+	{
+		TArray<APlanetAtmosphereActor*> Actors;
+
+		for (TActorIterator<APlanetAtmosphereActor> It(&World); It; ++It)
+		{
+			Actors.Add(*It);
+		}
+
+		for (const TSharedPtr<FJsonValue>& Entry : Entries)
+		{
+			const TSharedPtr<FJsonObject>* Section = nullptr;
+
+			if (!Entry.IsValid() || !Entry->TryGetObject(Section))
+			{
+				continue;
+			}
+
+			FString Name;
+			(*Section)->TryGetStringField(TEXT("Actor"), Name);
+
+			APlanetAtmosphereActor* const* Match = Actors.FindByPredicate(
+				[&Name](const APlanetAtmosphereActor* Actor) { return Actor->GetActorNameOrLabel() == Name; });
+
+			APlanetAtmosphereActor* Target = Match ? *Match : (Actors.Num() == 1 && Entries.Num() == 1 ? Actors[0] : nullptr);
+
+			if (!Target)
+			{
+				UE_LOG(LogAtmosphereDump, Warning, TEXT("No atmosphere actor named '%s' in this world."), *Name);
+				continue;
+			}
+
+			ApplySection(*Target, APlanetAtmosphereActor::StaticClass(), **Section,
+				FString::Printf(TEXT("Atmosphere '%s'"), *Target->GetActorNameOrLabel()));
+		}
+	}
+
+	void Load(const TArray<FString>& Args, UWorld* World)
+	{
+		if (Args.Num() == 0 || !World)
+		{
+			UE_LOG(LogAtmosphereDump, Error, TEXT("Usage: CloudAtmosphere.LoadParams FileName [Sim|Atmospheres]"));
+			return;
+		}
+
+		const FString Path = Locate(Args[0]);
+		const FString Scope = Args.Num() > 1 ? Args[1] : FString();
+		const bool bSim = Scope.IsEmpty() || Scope.Equals(TEXT("Sim"), ESearchCase::IgnoreCase);
+		const bool bAtmospheres = Scope.IsEmpty() || Scope.Equals(TEXT("Atmospheres"), ESearchCase::IgnoreCase);
+
+		FString Text;
+		TSharedPtr<FJsonObject> Root;
+
+		if (!FFileHelper::LoadFileToString(Text, *Path)
+			|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Root) || !Root.IsValid())
+		{
+			UE_LOG(LogAtmosphereDump, Error, TEXT("Could not read %s"), *Path);
+			return;
+		}
+
+		const TSharedPtr<FJsonObject>* Sim = nullptr;
+
+		if (bSim && Root->TryGetObjectField(TEXT("Sim"), Sim))
+		{
+			const UFlowSimSubsystem* Sub = World->GetSubsystem<UFlowSimSubsystem>();
+			UFlowSimConfig* Config = Sub ? Sub->GetConfig() : nullptr;
+
+			if (Config)
+			{
+				ApplySection(*Config, UFlowSimConfig::StaticClass(), **Sim, FString::Printf(TEXT("Sim config '%s'"), *Config->GetName()));
+			}
+			else
+			{
+				UE_LOG(LogAtmosphereDump, Warning, TEXT("No sim config is running, so the Sim section is not applied."));
+			}
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Atmospheres = nullptr;
+
+		if (bAtmospheres && Root->TryGetArrayField(TEXT("Atmospheres"), Atmospheres))
+		{
+			ApplyAtmospheres(*Atmospheres, *World);
+		}
+
+		UE_LOG(LogAtmosphereDump, Display, TEXT("Loaded %s. Save the changed assets to keep the values."), *Path);
+	}
+}
+
 static FAutoConsoleCommandWithWorldAndArgs GAtmosphereDumpParamsCmd(
 	TEXT("CloudAtmosphere.DumpParams"),
 	TEXT("Write the running sim config, the sim settings and every atmosphere actor's parameters, ")
 	TEXT("each with its overrides of the C++ defaults, to Saved/CloudAtmosphere. Optional argument is the file name."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AtmosphereDump::Dump));
+
+static FAutoConsoleCommandWithWorldAndArgs GAtmosphereLoadParamsCmd(
+	TEXT("CloudAtmosphere.LoadParams"),
+	TEXT("Apply a parameter file in DumpParams' layout to the running sim config and the world's atmosphere actors: ")
+	TEXT("each section's Values, or its Overrides when it has no Values. Any subset of members may be given. ")
+	TEXT("File from Saved/CloudAtmosphere or a full path; optional second argument Sim or Atmospheres limits it."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AtmosphereLoad::Load));

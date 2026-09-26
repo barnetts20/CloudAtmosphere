@@ -173,9 +173,9 @@ float SimWindEvaporation;
  *    Genesis  x shear limit, y humidity threshold, z storm a seed needs,
  *             w cyclonic vorticity at which a seed counts fully.
  *    Cloud    x share of the way to full cover each layer's cloud is lifted
- *             at the eyewall, y rate of the lift and the eye's clearing, z the
- *             bottom layer's target inflow as a fraction of the target wind,
- *             w storm raised across the whole storm. */
+ *             at the eyewall, y rate of the lift and the eye's clearing, z
+ *             inflow below and outflow above as a fraction of the target
+ *             wind, pushed open-loop, w storm raised across the whole storm. */
 float4 SimCellShape;
 float4 SimCellVortex;
 float4 SimCellDraft;
@@ -184,9 +184,9 @@ float4 SimCellMotion;
 float4 SimCellGenesis;
 float4 SimCellCloud;
 
-/** How far the secondary circulation reaches, in cell radii: its return
- *  flow spreads from the radius out to here. */
-float SimCellInflowReach;
+/** Share of the span from the eyewall to the radius over which the vortex's
+ *  wind holds its peak before falling off. The stamp's profile is unaffected. */
+float SimCellWindBreadth;
 
 /** Live cell slots, up to GG_SIM_MAX_CELLS. */
 int SimCellCount;
@@ -308,7 +308,7 @@ Texture3D<float4> SimForcingNoise;
 SamplerState SimForcingNoiseSampler;
 
 /** Storm cells: two float4 of state per slot (position and intensity, 0 is a
- *  free slot; age and the last move), then the control block
+ *  free slot; age and the last move), then the vortex gains
  *  (SIM_CELL_CONTROL_BASE). */
 StructuredBuffer<float4> SimCellSRV;
 RWStructuredBuffer<float4> SimCellUAV;
@@ -762,45 +762,72 @@ float3 SimCellRingPoint(float3 P, float Angle, int K)
 //
 // A cell's vortex is a field of vectors tangent to circles about its centre,
 // cyclonic in sense, whose strength runs up from zero at the centre to the
-// eye's edge, peaks at the eyewall and falls to zero at the radius. The flow
+// eye's edge, peaks at the eyewall, holds its peak across SimCellWindBreadth
+// and falls to zero at the radius. The flow
 // is pushed along it as the curl of its streamfunction taken at the cell
 // corners, which on the C-grid is exactly divergence-free: it spins the flow
 // without raising or lowering the surface, and the flow's own advection winds
 // the weather under the cell into spiral bands.
 //
-// The secondary circulation runs along the gradient of a potential with its
-// own shape (SimInflowShape): inflow on the bottom layer, outflow above,
-// weighted by depth so the outflow carries off exactly the mass the inflow
-// brings. Both
-// pushes are closed-loop. MainCellsCS measures each layer's cyclonic and
-// inward wind on a ring about the centre and stores per-layer gains, the gaps
-// to the targets as shares of the target wind; each push is its gain times
-// its field, so the flow relaxes toward the targets and a storm already at
-// speed is left alone.
+// The push is closed-loop. MainCellsCS measures each layer's cyclonic wind on
+// a ring about the centre and stores a per-layer gain, the gap to the target
+// as a share of the target wind; the push is that gain times the vortex, so
+// the flow relaxes toward the target, and a storm already at or past it is
+// left alone (SimCellTowardTarget).
 //
-// THE CHIMNEY closes the circulation in mass. What the inflow converges in the
-// eyewall rises across the interfaces into the outflow, and what the outflow
-// spreads sinks far around the storm (SimCellChimney), so the core does not
-// fill and push the inflow back.
+// The secondary circulation is open-loop: inflow below and outflow above
+// along the gradient of a potential on the stamp's profile (SimCellPotential).
+// Its convergence across the core condenses, and the latent heat lifts the
+// mass across the interfaces: the storm's own chimney.
+//
+// PITFALL: CONVERGENCE CONFINED TO THE EYEWALL STARVES THE CELL. The storm
+// tracer under the whole core is what keeps a cell alive; an inflow that
+// converges only in a thin eyewall band, with the mass vented by a separate
+// flux, leaves the core's storm to decay and the cell with it.
 
-/** The control block follows the cells' 2 GG_SIM_MAX_CELLS state entries,
- *  SIM_CELL_CONTROL_STRIDE float4 per slot: vortex gains for layers 0-3 and
- *  4-7, inflow gains for layers 0-3 and 4-7, then x the share of its target
- *  the bottom layer's inflow reaches, which scales the chimney. */
+/** The vortex gains follow the cells' 2 GG_SIM_MAX_CELLS state entries, two
+ *  float4 per slot, one component per layer. */
 #define SIM_CELL_CONTROL_BASE (2 * GG_SIM_MAX_CELLS)
-#define SIM_CELL_CONTROL_STRIDE 5
+#define SIM_CELL_CONTROL_STRIDE 2
 #define SIM_CELL_BUFFER_SIZE (SIM_CELL_CONTROL_BASE + SIM_CELL_CONTROL_STRIDE * GG_SIM_MAX_CELLS)
 
-/** Largest gain either way, in target winds: bounds the push while the flow is
- *  far from the target. */
+/** Largest gain, in target winds: bounds the push while the flow is far from
+ *  the target. */
 #define SIM_CELL_GAIN_LIMIT 2.0f
+
+/** A push's gain toward Target from Measured, in units of what the push adds
+ *  at gain 1. One-sided: it only ever pushes toward the target's sign, so flow
+ *  already past the target is left alone.
+ *
+ *  PITFALL: A TWO-SIDED LOOP BRAKES THE STORM A CELL SPAWNS ON. A young cell's
+ *  targets scale with its low intensity, far below the parent storm's own
+ *  spin and convergence, so it spins the storm down and pushes its air
+ *  outward: the parent dies, the cell with it, and the outflow's sinking air
+ *  cuts holes in the cloud. */
+float SimCellTowardTarget(float Target, float Measured, float Unit)
+{
+    const float Gain = clamp((Target - Measured) / Unit, -SIM_CELL_GAIN_LIMIT, SIM_CELL_GAIN_LIMIT);
+
+    return (Target > 0.0f) ? max(Gain, 0.0f) : ((Target < 0.0f) ? min(Gain, 0.0f) : 0.0f);
+}
 
 /** Grid cells the measuring ring sits out from the centre at least, so the
  *  vortex it reads is resolved. */
 #define SIM_CELL_RING_CELLS 2.0f
 
-/** Vector strength at R, a distance from the centre in cell radii, [0, 1]. */
-float SimCellProfile(float R)
+/** Radius, in cell radii, where the vortex's wind starts to fall: the eyewall
+ *  plus SimCellWindBreadth of the span beyond it. */
+float SimCellWindHold()
+{
+    const float Wall = max(SimCellShape.z, SimCellShape.y + 1e-3f);
+
+    return min(lerp(Wall, 1.0f, saturate(SimCellWindBreadth)), 0.999f);
+}
+
+/** Vector strength at R, a distance from the centre in cell radii, [0, 1]:
+ *  rising through the eye to 1 at the eyewall, holding to Hold, then falling
+ *  to 0 at the radius as the power SimCellVortex.x of the distance left. */
+float SimCellProfileHeld(float R, float Hold)
 {
     const float Eye = SimCellShape.y;
     const float Wall = max(SimCellShape.z, Eye + 1e-3f);
@@ -821,17 +848,36 @@ float SimCellProfile(float R)
         return lerp(EyeStrength, 1.0f, smoothstep(Eye, Wall, R));
     }
 
-    const float T = (R - Wall) / max(1.0f - Wall, 1e-4f);
+    if (R < Hold)
+    {
+        return 1.0f;
+    }
+
+    const float T = (R - Hold) / max(1.0f - Hold, 1e-4f);
 
     return pow(1.0f - T, SimCellVortex.x);
 }
 
-/** The profile integrated from the centre to R, in closed form piece by
- *  piece: what the streamfunction is built from. */
-float SimCellIntegral(float R)
+/** The stamp's profile: cloud, storm and draft peak at the eyewall. */
+float SimCellProfile(float R)
+{
+    return SimCellProfileHeld(R, max(SimCellShape.z, SimCellShape.y + 1e-3f));
+}
+
+/** The vortex's wind profile, holding its peak across SimCellWindBreadth. */
+float SimCellWindProfile(float R)
+{
+    return SimCellProfileHeld(R, SimCellWindHold());
+}
+
+/** SimCellProfileHeld integrated from the centre to R, in closed form piece
+ *  by piece: what the vortex's streamfunction and the inflow's potential are
+ *  built from. */
+float SimCellIntegralHeld(float R, float Hold)
 {
     const float Eye = SimCellShape.y;
     const float Wall = max(SimCellShape.z, Eye + 1e-3f);
+    Hold = max(Hold, Wall);
     const float EyeStrength = SimCellShape.w;
     const float Falloff = SimCellVortex.x;
 
@@ -843,150 +889,24 @@ float SimCellIntegral(float R)
     const float U = saturate((R - Eye) / (Wall - Eye));
     const float InWall = (Wall - Eye) * (EyeStrength * U + (1.0f - EyeStrength) * (U * U * U - 0.5f * U * U * U * U));
 
-    const float T = saturate((R - Wall) / max(1.0f - Wall, 1e-4f));
-    const float Outside = (1.0f - Wall) * (1.0f - pow(1.0f - T, Falloff + 1.0f)) / (Falloff + 1.0f);
+    const float Held = clamp(R, Wall, Hold) - Wall;
 
-    return InEye + InWall + Outside;
+    const float T = saturate((R - Hold) / max(1.0f - Hold, 1e-4f));
+    const float Outside = (1.0f - Hold) * (1.0f - pow(1.0f - T, Falloff + 1.0f)) / (Falloff + 1.0f);
+
+    return InEye + InWall + Held + Outside;
 }
 
-/** Eye radius the circulation's convergence starts from at least, as a
- *  fraction of the eyewall's: keeps the band it converges in resolvable. */
-#define SIM_CELL_INFLOW_EYE 0.25f
-
-/** The secondary circulation's shape, in u = ln tan(theta / 2), theta the arc
- *  from the centre. Its flux sin(theta) v rises from 0 at the eye to its full
- *  value at the eyewall, holds to the cell radius and eases to 0 at the reach,
- *  each ramp a smoothstep in u. So it converges only in the eyewall band, is
- *  divergence-free out to the radius, and returns its mass thinly between the
- *  radius and the reach: no draining ring or rim inside the storm. Since
- *  du = dtheta / sin(theta), the potential and the divergence are closed-form
- *  and mass-exact on the sphere. */
-struct SimInflowShape
+/** The wind profile's integral: the vortex. */
+float SimCellWindIntegral(float R)
 {
-    float Eye, Wall, Radius, Reach;
-    float SinWall;
-};
-
-float SimLogTanHalf(float Theta)
-{
-    return log(tan(0.5f * Theta));
+    return SimCellIntegralHeld(R, SimCellWindHold());
 }
 
-SimInflowShape SimCellInflowShape()
+/** The stamp profile's integral: the inflow. */
+float SimCellIntegral(float R)
 {
-    const float Radius = max(SimCellShape.x, 1e-4f);
-    const float Wall = max(SimCellShape.z, SimCellShape.y + 1e-3f);
-
-    SimInflowShape S;
-    S.Eye = SimLogTanHalf(max(SimCellShape.y, SIM_CELL_INFLOW_EYE * Wall) * Radius);
-    S.Wall = SimLogTanHalf(Wall * Radius);
-    S.Radius = SimLogTanHalf(Radius);
-    S.Reach = SimLogTanHalf(max(SimCellInflowReach, 1.25f) * Radius);
-    S.SinWall = sin(Wall * Radius);
-
-    return S;
-}
-
-/** The flux at u, [0, 1]. */
-float SimInflowFlux(SimInflowShape S, float U)
-{
-    return smoothstep(S.Eye, S.Wall, U) * (1.0f - smoothstep(S.Radius, S.Reach, U));
-}
-
-/** The flux integrated from u out to the reach. */
-float SimInflowIntegral(SimInflowShape S, float U)
-{
-    const float Rise = S.Wall - S.Eye;
-    const float Fall = S.Reach - S.Radius;
-
-    const float T1 = saturate((U - S.Eye) / Rise);
-    const float T3 = saturate((U - S.Radius) / Fall);
-
-    const float Below = Rise * (T1 * T1 * T1 - 0.5f * T1 * T1 * T1 * T1)
-		+ clamp(U, S.Wall, S.Radius) - S.Wall
-		+ Fall * (T3 - T3 * T3 * T3 + 0.5f * T3 * T3 * T3 * T3);
-
-    return 0.5f * Rise + (S.Radius - S.Wall) + 0.5f * Fall - Below;
-}
-
-/** Inward speed at arc Theta per unit gain and target wind: 1 at the eyewall,
- *  falling as 1 / sin(theta) beyond it. */
-float SimInflowSpeed(SimInflowShape S, float Theta)
-{
-    return S.SinWall * SimInflowFlux(S, SimLogTanHalf(max(Theta, 1e-5f))) / max(sin(Theta), 1e-5f);
-}
-
-/** Divergence of the inward field at arc Theta per unit gain and target wind:
- *  -(sin wall / sin^2 theta) dFlux/du. Negative in the eyewall band, slightly
- *  positive beyond the radius, zero over the whole shape. */
-float SimInflowDivergence(SimInflowShape S, float Theta)
-{
-    const float U = SimLogTanHalf(max(Theta, 1e-5f));
-
-    const float T1 = saturate((U - S.Eye) / (S.Wall - S.Eye));
-    const float T3 = saturate((U - S.Radius) / (S.Reach - S.Radius));
-
-    const float Slope = 6.0f * T1 * (1.0f - T1) / (S.Wall - S.Eye) * (1.0f - smoothstep(S.Radius, S.Reach, U))
-		- smoothstep(S.Eye, S.Wall, U) * 6.0f * T3 * (1.0f - T3) / (S.Reach - S.Radius);
-
-    const float SinTheta = max(sin(Theta), 1e-5f);
-
-    return -S.SinWall * Slope / (SinTheta * SinTheta);
-}
-
-/** A live cell within Reach radians of N: its intensity and the arc to it. */
-bool SimCellWithin(uint Slot, float3 N, float Reach, out float Intensity, out float Theta)
-{
-    const float4 Cell = SimCellSRV[2u * Slot];
-
-    Intensity = Cell.w;
-    Theta = acos(clamp(dot(Cell.xyz, N), -1.0f, 1.0f));
-
-    return Cell.w > 0.0f && Theta < Reach;
-}
-
-/** A layer's inward share of the secondary circulation: 1 on the bottom
- *  layer, falling linearly to outflow on top, the outflow side scaled so that
- *  depth times share sums to zero over the stack. Zero on a single layer. */
-float SimCellRadialShare(uint Layer)
-{
-    const uint L = (uint) SimGridSize.z;
-
-    if (L <= 1u)
-    {
-        return 0.0f;
-    }
-
-    float In = 0.0f;
-    float Out = 0.0f;
-
-	[loop]
-    for (uint J = 0; J < L; J++)
-    {
-        const float S = 2.0f * (float) J / (float) (L - 1u) - 1.0f;
-
-        In += SimLayerDepth(J) * max(S, 0.0f);
-        Out += SimLayerDepth(J) * max(-S, 0.0f);
-    }
-
-    const float Share = 2.0f * (float) Layer / (float) (L - 1u) - 1.0f;
-
-    return (Share >= 0.0f) ? Share : Share * In / max(Out, 1e-6f);
-}
-
-/** Depth times radial share summed from layer I to the bottom: what the
- *  chimney carries up across interface I per unit convergence. */
-float SimCellColumnShare(uint Interface)
-{
-    float Sum = 0.0f;
-
-	[loop]
-    for (uint J = Interface; J < (uint) SimGridSize.z; J++)
-    {
-        Sum += SimLayerDepth(J) * SimCellRadialShare(J);
-    }
-
-    return Sum;
+    return SimCellIntegralHeld(R, max(SimCellShape.z, SimCellShape.y + 1e-3f));
 }
 
 /** A cell's centre at the output's time: its latest position backed off by
@@ -1044,19 +964,14 @@ float SimCellGain(uint Slot, uint Layer)
     return SimCellControl(Slot, Layer >> 2)[Layer & 3u];
 }
 
-/** A cell's inflow gain on a layer. */
-float SimCellInflowGain(uint Slot, uint Layer)
-{
-    return SimCellControl(Slot, 2u + (Layer >> 2))[Layer & 3u];
-}
-
 /** Every live cell's streamfunction at P on a layer: the target wind times the
- *  cell radius times the profile's integral out to P, less the whole
+ *  cell radius times the wind profile's integral out to P, less the whole
  *  integral, times the layer's gain. It is zero outside the cell and its curl
- *  runs gain times target wind times the profile along the cyclonic tangent. */
+ *  runs gain times target wind times the wind profile along the cyclonic
+ *  tangent. */
 float SimCellStream(float3 P, uint Layer)
 {
-    const float Whole = SimCellIntegral(1.0f);
+    const float Whole = SimCellWindIntegral(1.0f);
 
     float Psi = 0.0f;
 
@@ -1068,7 +983,7 @@ float SimCellStream(float3 P, uint Layer)
 
         if (SimCellReach((uint) Slot, P, false, Axis, Sense, Intensity, R))
         {
-            Psi += Sense * SimCellGain((uint) Slot, Layer) * (SimCellIntegral(R) - Whole);
+            Psi += Sense * SimCellGain((uint) Slot, Layer) * (SimCellWindIntegral(R) - Whole);
         }
     }
 
@@ -1107,49 +1022,30 @@ bool SimCellNear(float3 P, float Reach)
     return false;
 }
 
-/** Every live cell's velocity potential at P on a layer: its gradient runs
- *  the layer's inflow gain times the target wind times SimInflowSpeed toward
- *  the centre. The storm's secondary circulation, which draws what the vortex
- *  would wind into rings into trailing spiral bands. */
-float SimCellPotential(float3 P, uint Layer, SimInflowShape S, float Reach)
+/** Every live cell's velocity potential at P: its gradient runs the inflow
+ *  fraction of the target wind toward the centre, on the stamp's profile.
+ *  Added below and subtracted above, it is the storm's secondary
+ *  circulation, which draws what the vortex would wind into rings into
+ *  trailing spiral bands and converges under the core. */
+float SimCellPotential(float3 P)
 {
+    const float Whole = SimCellIntegral(1.0f);
+
     float Chi = 0.0f;
 
 	[loop]
     for (int Slot = 0; Slot < SimCellCount; Slot++)
     {
-        float Intensity, Theta;
+        float3 Axis;
+        float Sense, Intensity, R;
 
-        if (SimCellWithin((uint) Slot, P, Reach, Intensity, Theta))
+        if (SimCellReach((uint) Slot, P, false, Axis, Sense, Intensity, R))
         {
-            Chi += SimCellInflowGain((uint) Slot, Layer) * SimInflowIntegral(S, SimLogTanHalf(max(Theta, 1e-5f)));
+            Chi -= Intensity * (SimCellIntegral(R) - Whole);
         }
     }
 
-    return SimCellVortex.w * S.SinWall * Chi;
-}
-
-/** The divergence, per unit radial share, of every live cell's secondary
- *  circulation at P as far as the bottom layer's inflow has reached its
- *  target: the target inflow times the reached share times
- *  SimInflowDivergence. A layer's velocity divergence is its radial share
- *  times this; the chimney cancels it in mass. */
-float SimCellChimney(float3 P, SimInflowShape S, float Reach)
-{
-    float Divergence = 0.0f;
-
-	[loop]
-    for (int Slot = 0; Slot < SimCellCount; Slot++)
-    {
-        float Intensity, Theta;
-
-        if (SimCellWithin((uint) Slot, P, Reach, Intensity, Theta))
-        {
-            Divergence += SimCellControl((uint) Slot, 4u).x * Intensity * SimInflowDivergence(S, Theta);
-        }
-    }
-
-    return SimCellCloud.z * SimCellVortex.w * Divergence;
+    return SimCellCloud.z * SimCellVortex.w * SimCellShape.x * Chi;
 }
 
 /** How far the cells lift each layer's cloud toward full cover, and how
@@ -1858,19 +1754,18 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
  *  A LIVE CELL moves with the mean of the layers' flow, a drift poleward and
  *  west, and a pull toward the storm-weighted centre of a ring half its radius
  *  out, which keeps it on its parent storm. Its intensity relaxes toward 1
- *  while the window, the humidity and the parent storm hold, toward 0 once any
- *  fails or its lifetime is past, and toward 0 inside the radius of a stronger
- *  cell, so two that meet merge. Below 0.05 the slot frees.
+ *  while the window, the humidity and the parent storm hold -- the strongest
+ *  storm at the centre, on that ring or on the eyewall, where the cell's own
+ *  inflow converges -- toward 0 once any fails or its lifetime is past, and
+ *  toward 0 inside the radius of a stronger cell, so two that meet merge.
+ *  Below 0.05 the slot frees.
  *
- *  THE CONTROL BLOCK (SIM_CELL_CONTROL_BASE): a live cell reads each layer's
- *  cyclonic and inward wind on a ring at the eyewall, or as close in as the
- *  grid resolves, where the full ring cancels the cell's own motion. Each gain
- *  is the gap to the layer's target, in units of what its push adds at gain 1:
- *  the vortex's share of Intensity times the target wind, and the inflow's
- *  radial share of Intensity times the inflow fraction of it, each at the
- *  ring through its own shape. The bottom
- *  layer's reached share of its inflow target scales the chimney. Every other
- *  slot's block is zero. */
+ *  THE VORTEX GAINS (SIM_CELL_CONTROL_BASE): a live cell reads each layer's
+ *  cyclonic wind on a ring at the eyewall, or as close in as the grid
+ *  resolves, where the full ring cancels the cell's own motion. Each gain is
+ *  the gap to the layer's share of Intensity times the target wind,
+ *  one-sided, in units of the vortex the push adds at gain 1
+ *  (SimCellTowardTarget). Every other slot's gains are zero. */
 groupshared float4 SimCellShared[GG_SIM_MAX_CELLS];
 
 [numthreads(GG_SIM_MAX_CELLS, 1, 1)]
@@ -1986,6 +1881,10 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 
     // -- Parent storm ------------------------------------------------------------
 
+	// The eyewall, or as close in as the grid resolves: where the gains are
+	// measured, and where the storm the cell's own inflow feeds sits.
+    const float Ring = clamp(SIM_CELL_RING_CELLS * SimDLon() / max(Radius, 1e-4f), min(SimCellShape.z, 0.9f), 0.9f);
+
     float ParentPeak = SimCellParent(Cell.xyz).x;
     float3 Centroid = ParentPeak * Cell.xyz;
 
@@ -1995,7 +1894,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
         const float3 Q = SimCellRingPoint(Cell.xyz, 0.5f * Radius, K);
         const float Storm = SimCellParent(Q).x;
 
-        ParentPeak = max(ParentPeak, Storm);
+        ParentPeak = max(ParentPeak, max(Storm, SimCellParent(SimCellRingPoint(Cell.xyz, Ring * Radius, K)).x));
         Centroid += Storm * Q;
     }
 
@@ -2070,13 +1969,10 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
     const uint L = (uint) SimGridSize.z;
     const float Sense = (P.z >= 0.0f) ? 1.0f : -1.0f;
 
-    const float Ring = clamp(SIM_CELL_RING_CELLS * SimDLon() / max(Radius, 1e-4f), min(SimCellShape.z, 0.9f), 0.9f);
-    const float Unit = max(SimCellVortex.w * SimCellProfile(Ring), 1e-4f);
-    const float InflowUnit = max(SimCellVortex.w * SimInflowSpeed(SimCellInflowShape(), Ring * Radius), 1e-4f);
+    const float Unit = max(SimCellVortex.w * SimCellWindProfile(Ring), 1e-4f);
 
     float2 RingGrid[6];
     float3 RingTangent[6];
-    float3 RingInward[6];
 
 	[unroll]
     for (int K = 0; K < 6; K++)
@@ -2085,12 +1981,9 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 
         RingGrid[K] = SimDirectionToGrid(Q);
         RingTangent[K] = Sense * normalize(cross(P, Q));
-        RingInward[K] = normalize(P - Q * dot(P, Q));
     }
 
     float4 Spin[2] = { float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f) };
-    float4 Inflow[2] = { float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f) };
-    float Reached = 0.0f;
 
 	[unroll]
     for (uint Layer = 0; Layer < 8u; Layer++)
@@ -2098,33 +1991,16 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
         if (Layer < L)
         {
             float Cyclonic = 0.0f;
-            float Inward = 0.0f;
 
 			[unroll]
             for (int K = 0; K < 6; K++)
             {
-                const float3 V = SimSampleBilinear4(SimCentreSRV, RingGrid[K], Layer).xyz;
-
-                Cyclonic += dot(V, RingTangent[K]) / 6.0f;
-                Inward += dot(V, RingInward[K]) / 6.0f;
+                Cyclonic += dot(SimSampleBilinear4(SimCentreSRV, RingGrid[K], Layer).xyz, RingTangent[K]) / 6.0f;
             }
 
             const float Share = (L > 1u) ? lerp(SimCellVortex.z, 1.0f, (float) Layer / (float) (L - 1u)) : 1.0f;
-            const float InflowTarget = SimCellRadialShare(Layer) * SimCellCloud.z * Intensity * InflowUnit;
 
-            Spin[Layer >> 2][Layer & 3u] = clamp((Share * Intensity * Unit - Cyclonic) / Unit,
-				-SIM_CELL_GAIN_LIMIT, SIM_CELL_GAIN_LIMIT);
-
-            if (L > 1u)
-            {
-                Inflow[Layer >> 2][Layer & 3u] = clamp((InflowTarget - Inward) / InflowUnit,
-					-SIM_CELL_GAIN_LIMIT, SIM_CELL_GAIN_LIMIT);
-            }
-
-            if (Layer + 1u == L && InflowTarget > 1e-6f)
-            {
-                Reached = saturate(Inward / InflowTarget);
-            }
+            Spin[Layer >> 2][Layer & 3u] = SimCellTowardTarget(Share * Intensity * Unit, Cyclonic, Unit);
         }
     }
 
@@ -2132,9 +2008,6 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 
     SimCellUAV[Block] = Spin[0];
     SimCellUAV[Block + 1] = Spin[1];
-    SimCellUAV[Block + 2] = Inflow[0];
-    SimCellUAV[Block + 3] = Inflow[1];
-    SimCellUAV[Block + 4] = float4(Reached, 0.0f, 0.0f, 0.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -2162,12 +2035,10 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
  *  or down with the mass it moves. Storms grow where condensation is intense,
  *  more so in cyclonic spin, and decay at their lifetime and in sinking air.
  *
- *  Storm cells: each layer is pushed along the live cells' vortices and
- *  secondary circulations by its gains, relaxing its cyclonic wind toward its
- *  share of the target (all of it on the bottom layer, SimCellVortex.z of it
- *  on top) and its inward wind toward inflow below and outflow above. The
- *  chimney adds to the interface fluxes what cancels the circulation's
- *  convergence in mass. Each cell also lifts every layer's cloud toward full
+ *  Storm cells: each layer is pushed along the live cells' vortices by its
+ *  gain, relaxing its cyclonic wind toward its share of the target (all of it
+ *  on the bottom layer, SimCellVortex.z of it on top), plus open-loop inflow
+ *  below and outflow above. Each cell also lifts every layer's cloud toward full
  *  along its vector ramp (SimCellCloudFeed), which the flow winds like any
  *  other.
  *
@@ -2213,12 +2084,11 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
     const bool bCellNear = SimCellCount > 0 && SimCellNear(CellP, SimCellShape.x);
 
-	// The secondary circulation reaches past the radius; none on a single layer.
-    const SimInflowShape Inflow = SimCellInflowShape();
-    const float InflowReach = max(SimCellInflowReach, 1.25f) * SimCellShape.x;
-
-    const bool bCellRadial = SimCellCount > 0 && L > 1u && SimCellCloud.z > 0.0f
-		&& SimCellNear(CellP, InflowReach);
+	// The secondary circulation's share: inflow on the bottom layer, outflow on
+	// the top, none on a single layer.
+    const float CellRadial = (L > 1u)
+		? SimCellVortex.y * Dt * (2.0f * (float) Layer / (float) (L - 1u) - 1.0f)
+		: 0.0f;
 
 	// -- u on the west face -------------------------------------------------
 
@@ -2244,12 +2114,9 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
         if (bCellNear)
         {
             U -= CellShare * SimRowCos(C.y) * (SimCellCornerPsi(C.x, C.y + 1, Layer) - SimCellCornerPsi(C.x, C.y, Layer)) / SimDMu();
-        }
 
-        if (bCellRadial)
-        {
-            U += CellShare * (SimCellPotential(SimDirection(SimColumnToLon((float) C.x), Mu), Layer, Inflow, InflowReach)
-				- SimCellPotential(SimDirection(SimColumnToLon((float) C.x - 1.0f), Mu), Layer, Inflow, InflowReach))
+            U += CellRadial * (SimCellPotential(SimDirection(SimColumnToLon((float) C.x), Mu))
+				- SimCellPotential(SimDirection(SimColumnToLon((float) C.x - 1.0f), Mu)))
 				/ (SimRowCos(C.y) * SimDLon());
         }
 
@@ -2281,15 +2148,12 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
         {
             V += CellShare * (SimCellCornerPsi(C.x + 1, C.y, Layer) - SimCellCornerPsi(C.x, C.y, Layer))
 				/ (SimFaceCos(C.y) * SimDLon());
-        }
 
-        if (bCellRadial)
-        {
             const float Lon = SimColumnToLon((float) C.x);
 
-            V += CellShare * SimFaceCos(C.y)
-				* (SimCellPotential(SimDirection(Lon, SimRowToMu((float) C.y)), Layer, Inflow, InflowReach)
-					- SimCellPotential(SimDirection(Lon, SimRowToMu((float) C.y - 1.0f)), Layer, Inflow, InflowReach)) / SimDMu();
+            V += CellRadial * SimFaceCos(C.y)
+				* (SimCellPotential(SimDirection(Lon, SimRowToMu((float) C.y)))
+					- SimCellPotential(SimDirection(Lon, SimRowToMu((float) C.y - 1.0f)))) / SimDMu();
         }
 
         const float Across = dot(Arrival, SimEast(P));
@@ -2326,15 +2190,6 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
     {
         FluxIn = (Layer + 1u < L) ? SimInterfaceFlux(C, Layer + 1u) : 0.0f;
         FluxOut = (Layer > 0u) ? SimInterfaceFlux(C, Layer) : 0.0f;
-
-		// The chimney: up through the core, down around it.
-        if (bCellRadial)
-        {
-            const float Chimney = SimCellChimney(P, Inflow, InflowReach);
-
-            FluxIn -= (Layer + 1u < L) ? Chimney * SimCellColumnShare(Layer + 1u) : 0.0f;
-            FluxOut -= (Layer > 0u) ? Chimney * SimCellColumnShare(Layer) : 0.0f;
-        }
     }
 
     float PhiStar = SimSampleCubic4(SimExplicitSRV, DepartureGrid, Layer).w

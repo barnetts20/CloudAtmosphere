@@ -153,7 +153,7 @@ namespace
 		P.SimCellMotion = Params.CellMotion;
 		P.SimCellGenesis = Params.CellGenesis;
 		P.SimCellCloud = Params.CellCloud;
-		P.SimCellInflowReach = Params.CellInflowReach;
+		P.SimCellWindBreadth = Params.CellWindBreadth;
 		P.SimCellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
 		P.SimStepIndex = Params.StepIndex;
 
@@ -335,10 +335,10 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 		FRDGTextureDesc::Create2D(FIntPoint(1, Slices), PF_R32_FLOAT, FClearValueBinding::Black, Flags),
 		TEXT("FlowSim.GlobalMean"));
 
-	// Two float4 of state per slot (captured in snapshots), then five of control
-	// per slot (rewritten each step). Must match SIM_CELL_BUFFER_SIZE.
+	// Two float4 of state per slot (captured in snapshots), then two of vortex
+	// gains per slot (rewritten each step). Must match SIM_CELL_BUFFER_SIZE.
 	PooledCells = AllocatePooledBuffer(
-		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), 7 * FlowSimShader::MaxStormCells),
+		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), 4 * FlowSimShader::MaxStormCells),
 		TEXT("FlowSim.Cells"));
 
 	AllocatedGrid = Params.GridSize;
