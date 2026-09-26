@@ -31,7 +31,11 @@ namespace AtmosphereDump
 {
 	using FFilter = TFunctionRef<bool(const FProperty*)>;
 
-	bool Any(const FProperty*) { return true; }
+	/** Every property but those kept only to load old data. */
+	bool Current(const FProperty* Property)
+	{
+		return !Property->HasAnyPropertyFlags(CPF_Deprecated);
+	}
 
 	/** The actor's panel: edited members only, which leaves out the parked
 	 *  occluder group and the transient readouts. */
@@ -88,7 +92,7 @@ namespace AtmosphereDump
 
 			if (IsGroup(Property))
 			{
-				Overrides(CastFieldChecked<FStructProperty>(Property)->Struct, Value, Base, Name + TEXT("."), Any, Out);
+				Overrides(CastFieldChecked<FStructProperty>(Property)->Struct, Value, Base, Name + TEXT("."), Current, Out);
 				continue;
 			}
 
@@ -170,7 +174,7 @@ namespace AtmosphereDump
 		Derived->SetField(TEXT("ModeWaveSpeed"), Floats(Speeds));
 		Out->SetObjectField(TEXT("Derived"), Derived);
 
-		Describe(UFlowSimConfig::StaticClass(), Config, GetDefault<UFlowSimConfig>(), Any, *Out);
+		Describe(UFlowSimConfig::StaticClass(), Config, GetDefault<UFlowSimConfig>(), Current, *Out);
 		return Out;
 	}
 
@@ -359,7 +363,7 @@ namespace AtmosphereDump
 		Root->SetObjectField(TEXT("Sim"), DescribeSim(*Sub));
 
 		const UFlowSimSettings* Settings = GetDefault<UFlowSimSettings>();
-		Root->SetObjectField(TEXT("Settings"), Values(UFlowSimSettings::StaticClass(), Settings, Any));
+		Root->SetObjectField(TEXT("Settings"), Values(UFlowSimSettings::StaticClass(), Settings, Current));
 
 		TArray<TSharedPtr<FJsonValue>> Actors;
 

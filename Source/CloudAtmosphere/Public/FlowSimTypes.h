@@ -17,9 +17,8 @@ enum class EFlowZonalProfile : uint8
 	Banded      UMETA(DisplayName = "Banded"),
 
 	/** Earth's three cells: easterly trades to about 25 degrees, a westerly jet
-	 *  peaking at 45, polar easterlies past about 65. JetStrength is the jet's
-	 *  peak rate; BandCount, EquatorialBoost, Asymmetry and WidthBias are
-	 *  unused. */
+	 *  peaking at 45, polar easterlies past about 65. BandCount, EquatorialBoost,
+	 *  Asymmetry and WidthBias are unused. */
 	ThreeCell   UMETA(DisplayName = "Three cell (terrestrial)"),
 };
 
@@ -96,7 +95,7 @@ struct FFlowLayerProfile
 {
 	GENERATED_BODY()
 
-	/** Scales JetStrength. */
+	/** Scales the jets, JetSpeed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer")
 	float JetScale = 1.0f;
 
@@ -104,9 +103,9 @@ struct FFlowLayerProfile
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer")
 	float BoostScale = 1.0f;
 
-	/** Scales the stochastic forcing amplitude. A MULTIPLIER: 1 is neutral. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer")
-	float ForcingScale = 1.0f;
+	/** This layer's equilibrium eddy speed as a multiple of EddySpeed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer", meta = (ClampMin = "0.0"))
+	float EddyScale = 1.0f;
 
 	/** Scales the drag. The bottom layer carries the surface drag; layers above
 	 *  it want little. */
@@ -117,6 +116,11 @@ struct FFlowLayerProfile
 	 *  interface more room to rise toward the poles before it reaches the top. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer", meta = (ClampMin = "0.1"))
 	float DepthScale = 1.0f;
+
+	/** The forcing multiplier of configs saved before the speed root, converted
+	 *  into EddyScale by UFlowSimConfig::PostLoad. */
+	UPROPERTY()
+	float ForcingScale_DEPRECATED = 1.0f;
 };
 
 namespace FlowSimStep
@@ -145,15 +149,40 @@ namespace FlowSimStep
 	static constexpr float StackWeight = 0.75f;
 }
 
+/** The sim's rates, resolved from a config's authored speeds; see
+ *  UFlowSimConfig::ResolveSpeeds. */
+struct FFlowSimSpeeds
+{
+	/** First internal mode's wave speed, the speed root, and the eddy turnover
+	 *  time DeformationRadius / Root. */
+	float WaveSpeed = 1.0f;
+	float Root = 1.0f;
+	float Turnover = 1.0f;
+
+	/** Angular rates for profiles that peak at 1. */
+	float JetStrength = 0.0f;
+	float ThermalShear = 0.0f;
+
+	/** Speeds: eddies per unit forcing slope, the storm cells' vortex scale and
+	 *  drift, and the shear that closes genesis. */
+	float EddySpeed = 0.0f;
+	float CellWind = 0.0f;
+	float CellDrift = 0.0f;
+	float GenesisShear = 1.0f;
+
+	/** Surface evaporation gain per unit wind speed. */
+	float WindEvaporation = 0.0f;
+};
+
 /** Everything the sim needs, authored. Re-read at the top of each frame, so the
  *  asset can be edited while the sim runs; only the grid dimensions are latched.
  *
- *  THE REGIME IS SET BY THREE RATIOS, and every look control sits inside it:
- *    Rossby   JetStrength / PlanetaryVorticity. Low is Earth-like.
- *    Froude   peak speed / gravity-wave speed. Must stay below about 0.5.
- *    Size     DeformationRadius. The eddy scale.
- *  On a stack, the thermal shear against the deformation radius sets how
- *  readily the shear breaks into storms. The start log reports all of them. */
+ *  EVERY WIND IS A FRACTION OF ONE SPEED, the root: FroudeCeiling times the
+ *  wave speed DeformationRadius and PlanetaryVorticity set. The ceiling caps
+ *  faces at the root, easing in from 0.7 of it, so winds authored under 0.7
+ *  are not clipped, and a config holds its look as the regime changes. The
+ *  Rossby number of the fastest flow is FroudeCeiling itself. The start log
+ *  reports the wave speeds, the budget against 0.7 and the storm criterion. */
 UCLASS(BlueprintType)
 class CLOUDATMOSPHERE_API UFlowSimConfig : public UDataAsset
 {
@@ -188,9 +217,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile", meta = (ClampMin = "1.0"))
 	float BandCount = 3.0f;
 
-	/** Peak angular rate, radians per unit time on a unit sphere. */
+	/** The jets' peak eastward wind as a fraction of the speed root, on a layer
+	 *  whose JetScale and BoostScale are 1. Negative reverses them. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile")
-	float JetStrength = 1.0f;
+	float JetSpeed = 0.35f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile")
 	float EquatorialBoost = 0.5f;
@@ -204,8 +234,8 @@ public:
 
 	// -- Physics ------------------------------------------------------------
 
-	/** 2 * Omega. Sets the Rossby number against JetStrength and the beta
-	 *  effect that arrests the inverse cascade into jets.
+	/** 2 * Omega. Sets the beta effect that arrests the inverse cascade into
+	 *  jets, and with DeformationRadius the wave speed the speed root scales.
 	 *
 	 *  PITFALL: also the explicit Coriolis step. Above about 0.5 radians of
 	 *  rotation per step the split between explicit rotation and implicit
@@ -218,6 +248,14 @@ public:
 	 *  systems grow at; the stack's depth follows from it and Stratification. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.01"))
 	float DeformationRadius = 0.2f;
+
+	/** THE SPEED ROOT, in Froude number against the first internal mode's wave
+	 *  speed: every authored wind is a fraction of this times that speed. After
+	 *  all forcing every face eases toward it from 0.7 of it, so the flow stays
+	 *  short of the speeds where shallow water steepens into bores. About 0.6
+	 *  is the top of the usable range; lower slows the whole system. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float FroudeCeiling = 0.6f;
 
 	/** Density step at each interface, as a fraction of the surface's. Small
 	 *  keeps the free surface nearly flat, so pressure systems are carried by
@@ -252,10 +290,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
 	float NudgeRate = 1.0f;
 
-	/** Equilibrium eddy speed the stochastic forcing sustains against the drag,
-	 *  per unit slope of the forcing noise. Divergence-free. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
-	float ForcingAmplitude = 0.3f;
+	/** Equilibrium eddy speed the stochastic stirring sustains against the drag,
+	 *  as a fraction of the speed root per unit slope of the forcing noise; each
+	 *  layer scales it by its EddyScale. Divergence-free. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing", meta = (ClampMin = "0.0"))
+	float EddySpeed = 0.15f;
 
 	/** Forcing noise frequency, in volume UVW per unit sphere. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
@@ -295,7 +334,7 @@ public:
 
 	// -- Thermal forcing ----------------------------------------------------
 	//
-	// Each layer's target is the jet profile plus its share of ThermalShear:
+	// Each layer's target is the jet profile plus its share of ShearSpeed:
 	// all of it on the top layer, none on the bottom. The nudge holds the
 	// winds to it and the relaxation holds the interfaces at the heights in
 	// balance with it, which is the temperature contrast storms draw on.
@@ -306,11 +345,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Thermal Forcing", meta = (ClampMin = "0.0"))
 	float ThermalRelaxation = 0.5f;
 
-	/** Vertical shear between the top and bottom layer, angular rate. Storms
-	 *  grow once it exceeds about PlanetaryVorticity * DeformationRadius^2 at
-	 *  the zone; well past that the interface reaches the top of the stack. */
+	/** Peak eastward wind of the top layer over the bottom's, as a fraction of
+	 *  the speed root. Storms grow from it past the criterion the start log
+	 *  reports; well past that the interface reaches the top of the stack. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Thermal Forcing")
-	float ThermalShear = 1.5f;
+	float ShearSpeed = 0.2f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Thermal Forcing")
 	EFlowThermalShape ThermalShape = EFlowThermalShape::Midlatitude;
@@ -351,10 +390,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0"))
 	float SurfaceEvaporation = 2.0f;
 
-	/** How much the bottom layer's wind speed raises surface evaporation, per
-	 *  unit speed: the moisture supply under a storm's own winds. */
+	/** How much the bottom layer's wind raises surface evaporation, as the gain
+	 *  at the speed root: the moisture supply under a storm's own winds. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0"))
-	float WindEvaporation = 1.0f;
+	float WindEvaporationGain = 1.0f;
 
 	/** Share of a layer's depth moved up across the interface above it per
 	 *  unit of vapour condensed: the latent heat that deepens lows under
@@ -440,9 +479,9 @@ public:
 	float GenesisLatitudeMax = 22.0f;
 
 	/** Speed difference between the top and bottom layers at which the window
-	 *  closes: shear tears a storm apart. */
+	 *  closes, as a fraction of the speed root: shear tears a storm apart. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.01"))
-	float GenesisShear = 1.0f;
+	float GenesisShearSpeed = 0.5f;
 
 	/** Bottom layer's relative humidity a cell needs to form; it weakens below
 	 *  0.15 under this. */
@@ -471,9 +510,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.01"))
 	float StormCellLifetime = 3.0f;
 
-	/** Poleward-west drift on top of the steering flow, in the jet's units. */
+	/** Poleward-west drift on top of the steering flow, as a fraction of the
+	 *  speed root. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
-	float StormCellDrift = 0.05f;
+	float StormCellDriftSpeed = 0.05f;
 
 	/** Rate a cell is pulled toward the centre of the storm beneath it, per
 	 *  unit time. Keeps it on its parent. */
@@ -514,14 +554,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.1"))
 	float StormCellFalloff = 1.5f;
 
-	/** Peak wind of the vortex the flow is pushed toward, in the jet's units. */
+	/** Scale of the vortex push, as a fraction of the speed root: at the
+	 *  eyewall the flow gains this times StormCellForcing per unit time. The
+	 *  push is open-loop, so the vortex does not settle at this speed; drag,
+	 *  the flow around it and the speed ceiling bound it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
-	float StormCellWind = 2.0f;
+	float StormCellSpeed = 0.6f;
 
-	/** Rate of the push, per unit time: the flow gains StormCellWind times this
-	 *  per unit time at the eyewall. Against the bottom layer's drag it settles
-	 *  near this over DragRate of the peak wind, less what the flow around it
-	 *  carries away. */
+	/** Rate of the push, per unit time. Only its product with StormCellSpeed
+	 *  acts. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
 	float StormCellForcing = 1.5f;
 
@@ -593,32 +634,30 @@ public:
 	// -- Noise coordinates --------------------------------------------------
 
 	/** Solid-body drift the noise carries on its own, as a fraction of the
-	 *  westerly jet's angular rate. */
+	 *  speed root: an angular rate on the unit sphere. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Coordinates")
-	float NoiseDrift = 0.5f;
+	float NoiseDriftSpeed = 0.3f;
 
-	/** How long a displacement accumulates before it resets, in jet turnover
-	 *  times (1 / jet angular rate). */
+	/** How long a displacement accumulates before it resets, in eddy turnovers
+	 *  (DeformationRadius over the speed root). The noise's warp grows with the
+	 *  flow's strain times the reset time, and strain scales with the root, so
+	 *  this holds the winding per reset at any speed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Coordinates", meta = (ClampMin = "0.05"))
-	float NoiseResetPeriod = 0.5f;
+	float NoiseResetTurnovers = 3.0f;
 
-	/** The westerly jet's angular rate: JetStrength times layer 0's JetScale. */
-	float GetJetRate() const
-	{
-		return JetStrength * (LayerProfiles.Num() > 0 ? LayerProfiles[0].JetScale : 1.0f);
-	}
+	/** NoiseDriftSpeed as an angular rate, radians per unit sim time. */
+	float GetNoiseDriftRate() const;
 
-	/** NoiseDrift as an angular rate, radians per unit sim time. */
-	float GetNoiseDriftRate() const
-	{
-		return NoiseDrift * GetJetRate();
-	}
+	/** NoiseResetTurnovers in sim time. */
+	float GetNoiseResetTime() const;
 
-	/** NoiseResetPeriod in sim time. */
-	float GetNoiseResetTime() const
-	{
-		return FMath::Max(NoiseResetPeriod, 0.05f) / FMath::Max(FMath::Abs(GetJetRate()), 1e-3f);
-	}
+	/** The speed root: FroudeCeiling times the first internal mode's wave
+	 *  speed. */
+	float GetSpeedRoot() const;
+
+	/** The sim's rates from the authored speeds: each speed times the root, and
+	 *  the jet and shear rates that give their profiles those peak winds. */
+	FFlowSimSpeeds ResolveSpeeds() const;
 
 	// -- Polar filter -------------------------------------------------------
 
@@ -638,14 +677,6 @@ public:
 	 *  FlowSimStep::StackWeight at large steps. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "0.5", ClampMax = "1.0"))
 	float ImplicitWeight = 0.6f;
-
-	/** Speed ceiling, in Froude number against the first internal mode's wave
-	 *  speed. After all forcing every face velocity eases toward it from 70%
-	 *  of it, so however jets, forcing and storm cells are set the flow stays
-	 *  short of the speeds where shallow water steepens into bores. Lower
-	 *  holds it further from them at the cost of peak wind; 0 is no ceiling. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "0.0", ClampMax = "1.5"))
-	float FroudeCeiling = 0.6f;
 
 	/** Gain of the compression-activated divergence damping: where a front
 	 *  steepens, the grid-scale divergence a step removes grows by this times
@@ -723,7 +754,60 @@ public:
 	 *  updating. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
 	bool bPaused = false;
+
+	virtual void Serialize(FArchive& Ar) override;
+
+	/** Converts a config saved before the speed root, at the regime it was
+	 *  saved with, so it runs as it did. */
+	virtual void PostLoad() override;
+
+	// -- Values of configs saved before the speed root --------------------------
+	//
+	// PostLoad converts them. Each defaults to its old default, since a value
+	// equal to that was never saved.
+
+	UPROPERTY()
+	float JetStrength_DEPRECATED = 1.0f;
+
+	UPROPERTY()
+	float ThermalShear_DEPRECATED = 1.5f;
+
+	UPROPERTY()
+	float ForcingAmplitude_DEPRECATED = 0.3f;
+
+	UPROPERTY()
+	float WindEvaporation_DEPRECATED = 1.0f;
+
+	UPROPERTY()
+	float GenesisShear_DEPRECATED = 1.0f;
+
+	UPROPERTY()
+	float StormCellDrift_DEPRECATED = 0.05f;
+
+	UPROPERTY()
+	float StormCellWind_DEPRECATED = 2.0f;
+
+	UPROPERTY()
+	float NoiseDrift_DEPRECATED = 0.5f;
+
+	UPROPERTY()
+	float NoiseResetPeriod_DEPRECATED = 0.5f;
 };
+
+/** The zonal profiles on the CPU, mirroring FlowSim.usf, for the speed root and
+ *  the start log. */
+namespace FlowSimProfile
+{
+	/** A layer's jets: SimThreeCellRate or GG_ZonalRate at a strength and boost. */
+	float JetRate(const UFlowSimConfig& Config, float Mu, float Strength, float Boost);
+
+	/** SimThermalShape: the thermal shear's latitude shape, peaking at 1. */
+	float ThermalShape(const UFlowSimConfig& Config, float Mu);
+
+	/** Wave speed of the first internal mode, from the deformation radius at
+	 *  45 degrees. */
+	float WaveSpeed(const UFlowSimConfig& Config);
+}
 
 /** The stack's vertical structure, derived from the config: every layer's
  *  depth and every coupling matrix, 8 x 8 row-major in 16 float4s. */
