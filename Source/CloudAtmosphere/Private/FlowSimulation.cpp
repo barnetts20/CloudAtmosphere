@@ -334,10 +334,10 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 		FRDGTextureDesc::Create2D(FIntPoint(1, Slices), PF_R32_FLOAT, FClearValueBinding::Black, Flags),
 		TEXT("FlowSim.GlobalMean"));
 
-	// Per slot: two float4 of state (captured in snapshots), then after every
-	// slot's state two float4 of per-layer push gains (rewritten each step).
+	// Two float4 of state per slot (captured in snapshots), then five of control
+	// per slot (rewritten each step). Must match SIM_CELL_BUFFER_SIZE.
 	PooledCells = AllocatePooledBuffer(
-		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), 4 * FlowSimShader::MaxStormCells),
+		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), 7 * FlowSimShader::MaxStormCells),
 		TEXT("FlowSim.Cells"));
 
 	AllocatedGrid = Params.GridSize;

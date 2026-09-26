@@ -562,9 +562,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
 	float StormCellSpeed = 0.6f;
 
-	/** Rate the flow relaxes toward the cell's vortex, per unit time: higher
-	 *  spins a cell up faster and holds it tighter against the flow around it.
-	 *  Also the rate of the inflow push. */
+	/** Rate the flow relaxes toward the cell's vortex and inflow, per unit
+	 *  time: higher spins a cell up faster and holds it tighter against the
+	 *  flow around it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
 	float StormCellForcing = 1.5f;
 
@@ -574,11 +574,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
 	float StormCellTopShare = 0.0f;
 
-	/** Inflow on the bottom layer and outflow on the top, pushed open-loop at
-	 *  StormCellForcing times this fraction of StormCellSpeed per unit time, so
-	 *  it scales with both. The storm's secondary
-	 *  circulation: it turns what the vortex alone winds into rings into
-	 *  trailing spiral bands, and lifts the core. Zero turns it off. */
+	/** Inflow the bottom layer holds at the eyewall, as a fraction of
+	 *  StormCellSpeed, relaxed toward like the vortex. Layers above run less,
+	 *  then outflow on top, scaled by depth so the outflow carries off the
+	 *  mass the inflow brings; what converges under the core rises into the
+	 *  outflow and sinks around the storm rather than filling it. The storm's
+	 *  secondary circulation: it turns what the vortex alone winds into rings
+	 *  into trailing spiral bands, and lifts the core. Zero turns it off. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellInflow = 0.2f;
 
