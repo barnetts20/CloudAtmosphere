@@ -173,9 +173,9 @@ float SimWindEvaporation;
  *    Genesis  x shear limit, y humidity threshold, z storm a seed needs,
  *             w cyclonic vorticity at which a seed counts fully.
  *    Cloud    x share of the way to full cover each layer's cloud is lifted
- *             at the eyewall, y rate of the lift and the eye's clearing, z
- *             inflow below and outflow above as a fraction of the target
- *             wind, pushed open-loop, w storm raised across the whole storm. */
+ *             at the eyewall, y rate of the lift, z inflow speed below and
+ *             outflow above at full strength, pushed open-loop, w storm raised
+ *             across the whole storm. */
 float4 SimCellShape;
 float4 SimCellVortex;
 float4 SimCellDraft;
@@ -795,6 +795,16 @@ float3 SimCellRingPoint(float3 P, float Angle, int K)
  *  the target. */
 #define SIM_CELL_GAIN_LIMIT 2.0f
 
+/** Intensity at which a cell pushes at full strength. The push ramps up to it
+ *  rather than scaling with intensity throughout, so a young cell spins up its
+ *  parent storm while it still has one to grow on. */
+#define SIM_CELL_MATURITY 0.25f
+
+float SimCellStrength(float Intensity)
+{
+    return saturate(Intensity / SIM_CELL_MATURITY);
+}
+
 /** A push's gain toward Target from Measured, in units of what the push adds
  *  at gain 1. One-sided: it only ever pushes toward the target's sign, so flow
  *  already past the target is left alone.
@@ -916,8 +926,16 @@ float3 SimCellDisplayCentre(float4 Cell, float4 Life)
     return normalize(Cell.xyz - (1.0f - SimStateBlend) * Life.yzw);
 }
 
-/** A cell's reach at N: its centre, the hemisphere's rotation sense, its
- *  intensity and the distance in cell radii. False outside the cell. The sim
+/** How sharply a cell's rotation sense turns over at the equator: the push
+ *  is 0.8 of full 2 degrees out, 0.96 at 5.
+ *
+ *  PITFALL: A HARD SIGN FLIPS A CELL DRIFTING ALONG THE EQUATOR BETWEEN SPIN
+ *  DIRECTIONS AT FULL STRENGTH, step after step, and every reversal sends a
+ *  wave through the whole layer. */
+#define SIM_CELL_HEMISPHERE_SHARPNESS 40.0f
+
+/** A cell's reach at N: its centre, the hemisphere's rotation sense, easing
+ *  through zero at the equator, its intensity and the distance in cell radii. False outside the cell. The sim
  *  reads the latest centre; the output reads the displayed one. */
 bool SimCellReach(uint Slot, float3 N, bool bDisplay,
 	out float3 Axis, out float Sense, out float Intensity, out float R)
@@ -946,7 +964,7 @@ bool SimCellReach(uint Slot, float3 N, bool bDisplay,
         return false;
     }
 
-    Sense = (Axis.z >= 0.0f) ? 1.0f : -1.0f;
+    Sense = SimSoftSat(Axis.z * SIM_CELL_HEMISPHERE_SHARPNESS);
     R = acos(clamp(CosD, -1.0f, 1.0f)) / max(SimCellShape.x, 1e-4f);
 
     return R < 1.0f;
@@ -962,6 +980,44 @@ float4 SimCellControl(uint Slot, uint K)
 float SimCellGain(uint Slot, uint Layer)
 {
     return SimCellControl(Slot, Layer >> 2)[Layer & 3u];
+}
+
+/** Rate, per unit time, at which a cell's core fills the eye tracer with
+ *  clear air at full intensity, and rate at which the tracer fades back. The
+ *  fade against the eye's spin sets how far the flow winds it: about a
+ *  quarter turn of the eyewall at the defaults. */
+#define SIM_CELL_EYE_RATE 16.0f
+#define SIM_CELL_EYE_DECAY 4.0f
+
+/** Where the cells' cores feed the eye tracer at P, [0, 1]: each cell's
+ *  intensity on an S curve from its centre to the eye radius.
+ *
+ *  THE EYE IS A TRACER THE FLOW CARRIES, fed at each core and fading back
+ *  (MainPredictCS, noise phase B's w). The flow deforms it, drags it with the
+ *  storm's motion and winds it into streaks at its edge, so its shape is the
+ *  flow's, and having memory it cannot blink out between steps.
+ *
+ *  PITFALL: AN EYE MEASURED FROM THE FLOW EACH STEP IS NOT A STABLE THING. The
+ *  eye's calm core is a grid cell or two across: judged against any estimate
+ *  of the storm's motion it slides into a crescent, and a centre found from
+ *  it wanders and loses it. */
+float SimCellEyeSource(float3 P)
+{
+    float Source = 0.0f;
+
+	[loop]
+    for (int Slot = 0; Slot < SimCellCount; Slot++)
+    {
+        float3 Axis;
+        float Sense, Intensity, R;
+
+        if (SimCellReach((uint) Slot, P, false, Axis, Sense, Intensity, R))
+        {
+            Source = max(Source, Intensity * (1.0f - smoothstep(0.0f, max(SimCellShape.y, 1e-4f), R)));
+        }
+    }
+
+    return Source;
 }
 
 /** Every live cell's streamfunction at P on a layer: the target wind times the
@@ -1023,7 +1079,7 @@ bool SimCellNear(float3 P, float Reach)
 }
 
 /** Every live cell's velocity potential at P: its gradient runs the inflow
- *  fraction of the target wind toward the centre, on the stamp's profile.
+ *  speed toward the centre, on the stamp's profile.
  *  Added below and subtracted above, it is the storm's secondary
  *  circulation, which draws what the vortex would wind into rings into
  *  trailing spiral bands and converges under the core. */
@@ -1041,31 +1097,32 @@ float SimCellPotential(float3 P)
 
         if (SimCellReach((uint) Slot, P, false, Axis, Sense, Intensity, R))
         {
-            Chi -= Intensity * (SimCellIntegral(R) - Whole);
+            Chi -= SimCellStrength(Intensity) * (SimCellIntegral(R) - Whole);
         }
     }
 
-    return SimCellCloud.z * SimCellVortex.w * SimCellShape.x * Chi;
+    return SimCellCloud.z * SimCellShape.x * Chi;
 }
 
-/** How far the cells lift each layer's cloud toward full cover, and how
- *  strongly each eye clears it.
+/** How far the cells lift each layer's cloud toward full cover.
  *
  *  THE STAMP CARRIES ITS OWN CLOUD, on the same ramp as its vectors: none at
- *  the centre, the most at the eyewall, none at the radius. A lift toward full
- *  rather than a fixed target, so it adds to whatever weather is there and a
- *  hurricane always holds more cloud than its surroundings: the last feature
- *  cover or erosion removes. PITFALL: a fixed target below the ambient cloud
- *  does nothing, and the hurricane culls with, or before, the cloud around
- *  it. EVERY LAYER, so the hurricane holds its cloud whichever layer the deck
- *  reads, and its upper cloud spreads with the outflow as a canopy. The flow
- *  winds the lifted cloud, and the deck's noise breaks it up. */
-float2 SimCellCloudFeed(float3 P, uint Layer)
+ *  the centre, the most at the eyewall, none at the radius, and less where
+ *  the eye tracer is clear. A lift toward full rather than a fixed
+ *  target, so it adds to whatever weather is there and a hurricane always
+ *  holds more cloud than its surroundings: the last feature cover or erosion
+ *  removes. PITFALL: a fixed target below the ambient cloud does nothing, and
+ *  the hurricane culls with, or before, the cloud around it. EVERY LAYER, so
+ *  the hurricane holds its cloud whichever layer the deck reads, and its upper
+ *  cloud spreads with the outflow as a canopy. The flow winds the lifted
+ *  cloud, and the deck's noise breaks it up.
+ *
+ *  THE EYE IS NOT CLEARED HERE: the deck thins it by depth. PITFALL: a
+ *  clearing that takes cloud to zero draws an edge along the contour where it
+ *  does, in any deck that saturates the cloud amount. */
+float SimCellCloudFeed(float3 P, float Eye)
 {
-    const float Eye = SimCellShape.y;
-
     float Target = 0.0f;
-    float Clear = 0.0f;
 
 	[loop]
     for (int Slot = 0; Slot < SimCellCount; Slot++)
@@ -1078,28 +1135,25 @@ float2 SimCellCloudFeed(float3 P, uint Layer)
             continue;
         }
 
-        const float InEye = 1.0f - smoothstep(0.7f * Eye, Eye, R);
-
-        Target = max(Target, Intensity * SimCellCloud.x * SimCellProfile(R) * (1.0f - InEye));
-
-        Clear = max(Clear, Intensity * InEye);
+        Target = max(Target, Intensity * SimCellCloud.x * SimCellProfile(R) * (1.0f - Eye));
     }
 
-    return float2(Target, Clear);
+    return Target;
 }
 
 /** What the cells add to the output at N: the draft; the storm, over the
  *  whole storm and highest across the intense band, so the deck builds the
  *  cloud there deepest and darkest; the low, full through the eyewall and
- *  easing to none at the radius; and the eye, cleared here at the atlas'
- *  resolution, finer than the sim's. Strength is the largest vector strength,
- *  for the debug view.
+ *  easing to none at the radius; and the eye, at the atlas' resolution, finer
+ *  than the sim's. Strength is the largest vector strength, for the debug view.
  *
- *  THE EYE IS A BOWL: cover cleared inside the eye radius and ramping back to
- *  full at the eyewall, so the deck, whose height follows the cloud amount,
- *  slopes up to the eyewall. Storm is not cut: the cloud lining the eye is
- *  storm cloud, and a cut draws a clean fair-weather ring around the eye. PITFALL: a cut confined to the eye radius drops the
- *  cloud from full to none over a few texels and draws a vertical shaft.
+ *  THE EYE IS THE ADVECTED EYE TRACER (SimCellEyeSource), which the resample
+ *  carries into the deck as depth, not cover, with its sinking draft. Storm is
+ *  not cut: the cloud lining the eye is storm cloud.
+ *
+ *  PITFALL: A DRAWN EYE READS AS A GEOMETRIC CUTOUT OF AN ORGANIC SYSTEM. A
+ *  circle, however soft or wobbled, is a shape the flow did not make; cut in
+ *  cover, a deck that saturates the cloud amount turns it into a hole punch.
  *
  *  THE WHOLE STORM IS STORM: full from the centre through the eyewall, easing
  *  to none at the radius. PITFALL: raised across the band alone, the rest of a
@@ -1110,7 +1164,6 @@ struct SimStamp
     float Draft;
     float Storm;
     float Low;
-    float Eye;
     float Strength;
 };
 
@@ -1128,7 +1181,6 @@ SimStamp SimCellStamp(float3 N)
     S.Draft = 0.0f;
     S.Storm = 0.0f;
     S.Low = 0.0f;
-    S.Eye = 0.0f;
     S.Strength = 0.0f;
 
 	[loop]
@@ -1143,10 +1195,8 @@ SimStamp SimCellStamp(float3 N)
         }
 
         const float Profile = SimCellProfile(R);
-        const float InEye = 1.0f - smoothstep(0.7f, 1.0f, R / max(SimCellShape.y, 1e-4f));
-        const float Bowl = 1.0f - smoothstep(SimCellShape.y, max(SimCellShape.z, SimCellShape.y + 1e-3f), R);
 
-        S.Draft += Intensity * (SimCellDraft.x * Profile + SimCellDraft.y * InEye);
+        S.Draft += Intensity * SimCellDraft.x * Profile;
         // Held full inside the eyewall: the vector profile falls toward the
         // eye, and a band read from it leaves the eye and its lining at the
         // whole-storm level, a clean disc inside the eyewall.
@@ -1155,7 +1205,6 @@ SimStamp SimCellStamp(float3 N)
 
         S.Storm = max(S.Storm, Intensity * max(SimCellCloud.w * Whole, SimCellDraft.z * Band));
         S.Low = max(S.Low, Intensity * Whole);
-        S.Eye = max(S.Eye, Intensity * Bowl);
         S.Strength = max(S.Strength, Intensity * Profile);
     }
 
@@ -1881,8 +1930,8 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 
     // -- Parent storm ------------------------------------------------------------
 
-	// The eyewall, or as close in as the grid resolves: where the gains are
-	// measured, and where the storm the cell's own inflow feeds sits.
+	// The eyewall, or as close in as the grid resolves: where the eyewall's
+	// gain is measured, and where the storm the cell's own inflow feeds sits.
     const float Ring = clamp(SIM_CELL_RING_CELLS * SimDLon() / max(Radius, 1e-4f), min(SimCellShape.z, 0.9f), 0.9f);
 
     float ParentPeak = SimCellParent(Cell.xyz).x;
@@ -1969,18 +2018,30 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
     const uint L = (uint) SimGridSize.z;
     const float Sense = (P.z >= 0.0f) ? 1.0f : -1.0f;
 
-    const float Unit = max(SimCellVortex.w * SimCellWindProfile(Ring), 1e-4f);
+	// Measured at the eyewall and out in the band, each against its own target:
+	// the gain is whichever asks for more, so the outer band is held against
+	// the environment it mixes with as well as the eyewall.
+    const float Outer = min(max(Ring, 0.5f * (SimCellWindHold() + 1.0f)), 0.9f);
+    const float Strength = SimCellStrength(Intensity);
 
-    float2 RingGrid[6];
-    float3 RingTangent[6];
+    const float RingAt[2] = { Ring, Outer };
+    float Unit[2];
+    float2 RingGrid[2][6];
+    float3 RingTangent[2][6];
 
 	[unroll]
-    for (int K = 0; K < 6; K++)
+    for (int Band = 0; Band < 2; Band++)
     {
-        const float3 Q = SimCellRingPoint(P, Ring * Radius, K);
+        Unit[Band] = max(SimCellVortex.w * SimCellWindProfile(RingAt[Band]), 1e-4f);
 
-        RingGrid[K] = SimDirectionToGrid(Q);
-        RingTangent[K] = Sense * normalize(cross(P, Q));
+		[unroll]
+        for (int K = 0; K < 6; K++)
+        {
+            const float3 Q = SimCellRingPoint(P, RingAt[Band] * Radius, K);
+
+            RingGrid[Band][K] = SimDirectionToGrid(Q);
+            RingTangent[Band][K] = Sense * normalize(cross(P, Q));
+        }
     }
 
     float4 Spin[2] = { float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f) };
@@ -1990,17 +2051,27 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
     {
         if (Layer < L)
         {
-            float Cyclonic = 0.0f;
-
-			[unroll]
-            for (int K = 0; K < 6; K++)
-            {
-                Cyclonic += dot(SimSampleBilinear4(SimCentreSRV, RingGrid[K], Layer).xyz, RingTangent[K]) / 6.0f;
-            }
-
             const float Share = (L > 1u) ? lerp(SimCellVortex.z, 1.0f, (float) Layer / (float) (L - 1u)) : 1.0f;
 
-            Spin[Layer >> 2][Layer & 3u] = SimCellTowardTarget(Share * Intensity * Unit, Cyclonic, Unit);
+            float Gain = 0.0f;
+
+			[unroll]
+            for (int Band = 0; Band < 2; Band++)
+            {
+                float Cyclonic = 0.0f;
+
+				[unroll]
+                for (int K = 0; K < 6; K++)
+                {
+                    Cyclonic += dot(SimSampleBilinear4(SimCentreSRV, RingGrid[Band][K], Layer).xyz, RingTangent[Band][K]) / 6.0f;
+                }
+
+                const float BandGain = SimCellTowardTarget(Share * Strength * Unit[Band], Cyclonic, Unit[Band]);
+
+                Gain = (abs(BandGain) > abs(Gain)) ? BandGain : Gain;
+            }
+
+            Spin[Layer >> 2][Layer & 3u] = Gain;
         }
     }
 
@@ -2219,12 +2290,12 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
     float Cloud = saturate(Tracer.x + Dt * (Formed - Loss * Tracer.x));
 
-	// The storm cells' own cloud: lifted toward full, cleared in the eye.
+	// The storm cells' own cloud: lifted toward full, less where the eye is calm.
     if (bCellNear)
     {
-        const float2 Feed = SimCellCloudFeed(P, Layer);
+        const float Feed = SimCellCloudFeed(P, saturate(SimNoiseSRV.Load(int4(C.x, C.y, Layer + L, 0)).w));
 
-        Cloud = saturate(Cloud + SimCellCloud.y * Dt * (Feed.x * (1.0f - Cloud) - Feed.y * Cloud));
+        Cloud = saturate(Cloud + SimCellCloud.y * Dt * Feed * (1.0f - Cloud));
     }
 
     const float CloudAscent = clamp(Tracer.y + Dt * (Formed * Rising - Loss * Tracer.y), 0.0f, Cloud);
@@ -2282,11 +2353,24 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
             Displacement = Coordinate - P;
         }
 
-        const float CarriedAscent = (Phase == 0u)
-			? clamp(SimSampleCubic4(SimLatLonSRV, DepartureGrid, Layer + L).x, -1.0f, 1.0f)
-			: 0.0f;
+		// Phase A's w carries the low-passed ascent, phase B's the eye tracer,
+		// fed at the cells' cores and fading back.
+        float Carried;
 
-        SimNoiseUAV[int3(C, Slice)] = float4(Displacement, CarriedAscent);
+        if (Phase == 0u)
+        {
+            Carried = clamp(SimSampleCubic4(SimLatLonSRV, DepartureGrid, Layer + L).x, -1.0f, 1.0f);
+        }
+        else
+        {
+            Carried = saturate(SimSampleCubic4(SimNoiseSRV, DepartureGrid, Slice).w);
+
+            const float Source = bCellNear ? SimCellEyeSource(P) : 0.0f;
+
+            Carried = saturate(Carried + Dt * (SIM_CELL_EYE_RATE * Source * (1.0f - Carried) - SIM_CELL_EYE_DECAY * Carried));
+        }
+
+        SimNoiseUAV[int3(C, Slice)] = float4(Displacement, Carried);
     }
 }
 
@@ -2898,8 +2982,12 @@ float4 SimResampleOutput(float3 N, uint Slice)
  *  STORM CELLS add their draft to W, raise storm across the whole storm and
  *  most across their intense band, and lower the pressure across the whole
  *  storm, which the deck builds into its deepest cloud from the cover already
- *  there. Their spin is already in the flow, forced in
- *  Predict. */
+ *  there. Their spin is already in the flow, forced in Predict.
+ *
+ *  THE ATLAS'S NOISE B w IS THE DECK'S DEPTH FACTOR, not the humidity the
+ *  lat-lon output carries there for the cells: 1, falling across each cell's
+ *  eye tracer. The deck thins its columns by it, so the eye is a bowl of
+ *  thinning cloud the flow shapes; cover is left as the sim has it. */
 [numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
 void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 {
@@ -2927,18 +3015,21 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
     float4 Weather = SimResampleOutput(N, Layer + L);
     float4 NoiseB = SimResampleOutput(N, Layer + 3u * L);
 
-    NoiseB.w = max(NoiseB.w, 0.0f);
-
     // -- Storm cells --------------------------------------------------------------
 
     const SimStamp Stamp = SimCellStamp(N);
+
+	// The eye tracer, from the latest state.
+    const float Eye = saturate(SimSampleMeridian4(SimNoiseSRV, N, Layer + L).w);
 
 	// THE BAND INTENSIFIES, IT DOES NOT ADD. Storm deepens and darkens cloud
 	// the column already has; the cloud itself is the sim's, which carries the
 	// cell's own. PITFALL: raising cover here stamps a solid disc over the
 	// eyewall region that ignores the cloud the vortex actually winds.
-    Weather.x = clamp(Weather.x + Stamp.Draft, -1.0f, 1.0f);
-    Weather.y *= 1.0f - Stamp.Eye;
+    Weather.x = clamp(Weather.x + Stamp.Draft + SimCellDraft.y * Eye, -1.0f, 1.0f);
+
+	// The eye as depth alone; see SimCellEyeSource.
+    NoiseB.w = 1.0f - Eye;
     Weather.w = SimSmoothMax(Weather.w, Stamp.Storm, SIM_CELL_STORM_BLEND);
     Weather.yzw = saturate(Weather.yzw);
 
@@ -2986,6 +3077,7 @@ int2 SimDebugSize;
 #define SIM_DEBUG_STORM        13
 #define SIM_DEBUG_HEIGHT       14
 #define SIM_DEBUG_COLUMN_CLOUD 15
+#define SIM_DEBUG_EYE          16
 
 /** Diverging ramp, blue negative, red positive, dark at zero so a collapsed
  *  field reads as an empty frame rather than a plausible mid-grey. */
@@ -3120,6 +3212,11 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
         }
 
         Value = 1.0f - Clear;
+    }
+    else if (SimDebugMode == SIM_DEBUG_EYE)
+    {
+		// The eye tracer: how far the storm cells' eyes thin the deck.
+        Value = SimNoiseSRV.Load(int4(C, Layer + (uint) SimGridSize.z, 0)).w;
     }
     else if (SimDebugMode == SIM_DEBUG_HEIGHT)
     {

@@ -86,6 +86,10 @@ enum class EFlowDebugMode : uint8
 	/** Cloud cover of the layer and every layer above it, 0 to 1: what the
 	 *  terrestrial deck reads with its CloudLayer set to this layer. */
 	ColumnCloud UMETA(DisplayName = "Column cloud"),
+
+	/** The eye tracer, 0 to 1: clear air fed at storm cells' cores and carried
+	 *  by the flow, which is how far their eyes thin the deck. */
+	Eye         UMETA(DisplayName = "Storm eye"),
 };
 
 /** Per-layer settings. Profile values are multipliers on the shared jet
@@ -163,10 +167,11 @@ struct FFlowSimSpeeds
 	float JetStrength = 0.0f;
 	float ThermalShear = 0.0f;
 
-	/** Speeds: eddies per unit forcing slope, the storm cells' vortex scale and
-	 *  drift, and the shear that closes genesis. */
+	/** Speeds: eddies per unit forcing slope, the storm cells' vortex, inflow
+	 *  and drift, and the shear that closes genesis. */
 	float EddySpeed = 0.0f;
 	float CellWind = 0.0f;
+	float CellInflow = 0.0f;
 	float CellDrift = 0.0f;
 	float GenesisShear = 1.0f;
 
@@ -555,14 +560,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "0.95"))
 	float StormCellWindBreadth = 0.0f;
 
-	/** Eyewall wind a cell at full intensity holds on the bottom layer, as a
-	 *  fraction of the speed root. The push is closed-loop: each step it closes
-	 *  part of the gap between the flow's measured cyclonic wind and this, so a
-	 *  cell settles here against drag and the flow around it. Keep it under the
-	 *  ceiling's knee, 0.7, less the background wind the cell rides on.
-	 *  PITFALL: far past the ceiling the clip flattens the vortex into a broad
-	 *  band at the cap, but the push then runs pinned at its limit and nothing
-	 *  regulates it; StormCellWindBreadth widens the band. */
+	/** Eyewall wind a mature cell holds on the bottom layer, as a fraction of
+	 *  the speed root. The push is closed-loop: each step it closes part of the
+	 *  gap between the flow's cyclonic wind and this profile, measured at the
+	 *  eyewall and out in the band, so a cell settles here against drag and
+	 *  the flow around it. A cell pushes at full strength from intensity 0.25.
+	 *  Keep it under the ceiling's knee, 0.7, less the background wind the cell
+	 *  rides on; StormCellWindBreadth widens the band of peak wind.
+	 *  PITFALL: far past the ceiling the push runs pinned at its limit, the clip
+	 *  flattens the whole vortex to the cap, and nothing regulates it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
 	float StormCellSpeed = 0.6f;
 
@@ -578,13 +584,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
 	float StormCellTopShare = 0.0f;
 
-	/** Inflow on the bottom layer and outflow on the top, pushed open-loop at
-	 *  StormCellForcing times this fraction of StormCellSpeed times the
-	 *  intensity per unit time, on the stamp's profile. The storm's secondary
-	 *  circulation: it turns what the vortex alone winds into rings into
-	 *  trailing spiral bands, and its convergence under the core condenses and
-	 *  keeps the storm there alive. Zero turns it off. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	/** Inflow speed on the bottom layer and outflow on the top at the eyewall,
+	 *  as a fraction of the speed root, pushed open-loop at StormCellForcing
+	 *  per unit time on the stamp's profile; ramps in with the cell's strength
+	 *  like the vortex. The storm's secondary circulation: it turns what the
+	 *  vortex alone winds into rings into trailing spiral bands, and its
+	 *  convergence under the core condenses and keeps the storm there alive.
+	 *  Independent of StormCellSpeed. Zero turns it off. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", UIMax = "4.0"))
 	float StormCellInflow = 0.2f;
 
 	// -- Storm cloud ------------------------------------------------------------
@@ -604,8 +611,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellCloud = 0.25f;
 
-	/** Rate of that lift and of the eye's clearing, per unit time. Against the
-	 *  flow's rotation it sets how far the cloud trails. */
+	/** Rate of that lift, per unit time. Against the flow's rotation it sets
+	 *  how far the cloud trails. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0"))
 	float StormCellCloudRate = 4.0f;
 

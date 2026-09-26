@@ -601,6 +601,9 @@ void FFlowSimulation::AddResamplePass(FRDGBuilder& GraphBuilder, const FFlowSimP
 	P->SimCentreLatestSRV = GraphBuilder.CreateSRV(R.CentreLatest);
 	P->SimLatLonLatestSRV = GraphBuilder.CreateSRV(R.LatLonLatest);
 	P->SimCellSRV = GraphBuilder.CreateSRV(R.Cells);
+
+	// The latest noise state, whose phase B w is the eye tracer.
+	P->SimNoiseSRV = GraphBuilder.CreateSRV(R.NoiseSource());
 	P->SimOutputUAV = GraphBuilder.CreateUAV(R.Output);
 
 	AddSimPass<FFlowSimResampleCS>(GraphBuilder, TEXT("FlowSim.Resample"), P, Groups);
@@ -627,8 +630,10 @@ void FFlowSimulation::AddDebugPass(FRDGBuilder& GraphBuilder, const FFlowSimPara
 	P->SimTracerSRV = GraphBuilder.CreateSRV(R.TracerSource());
 	P->SimNoiseSRV = GraphBuilder.CreateSRV(R.NoiseSource());
 
-	// The frame's last Reconstruct wrote the latest state's output.
+	// The frame's last Reconstruct wrote the latest state's output and centre
+	// fields; the storm views read the bottom layer's velocity from the latter.
 	P->SimLatLonSRV = GraphBuilder.CreateSRV(R.LatLonLatest);
+	P->SimCentreSRV = GraphBuilder.CreateSRV(R.CentreLatest);
 	P->SimCellSRV = GraphBuilder.CreateSRV(R.Cells);
 	P->SimDebugUAV = GraphBuilder.CreateUAV(R.Debug);
 

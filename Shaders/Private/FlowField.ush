@@ -26,7 +26,8 @@
 //
 // THE LAYERS ARE A STACK, 0 ON TOP. The weather slice of a layer describes the
 // column from the top of the stack down to it, so the lowest layer's is the
-// whole sky seen from above; the noise slices' w carry the layer's own state.
+// whole sky seen from above; phase A's w carries the layer's top height and
+// phase B's the deck depth factor (Flow_SampleDepth).
 
 /** What the interpretation functions read. A FIELD SUPPLIES IT RATHER THAN
  *  EMBEDDING THE MATH: the sense of a rotation and the width of the band where
@@ -444,19 +445,21 @@ void Flow_SampleNoise(
     }
 }
 
-/** Samples a layer's own state from the noise slices' w. Returns (height,
- *  humidity):
- *    x  Height of the layer's top surface, soft-saturated into (-1, 1): the
- *       free surface for layer 0, the interface above it for the rest. Raised
- *       positive. What a deck's relief can take its height from.
- *    y  Relative humidity, 0 dry, 1 saturated. */
-float2 Flow_SampleLayerState(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
+/** Samples a layer's top height from phase A's w: the layer's top surface,
+ *  soft-saturated into (-1, 1), the free surface for layer 0 and the interface
+ *  above it for the rest, raised positive. What a deck's relief can take its
+ *  height from. */
+float Flow_SampleLayerHeight(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
 {
-    const float L = Flow_LayerCount(FlowField);
+    return Flow_SampleSlice(FlowField, FlowSampler, N, Layer + 2.0f * Flow_LayerCount(FlowField)).w;
+}
 
-    return float2(
-		Flow_SampleSlice(FlowField, FlowSampler, N, Layer + 2.0f * L).w,
-		Flow_SampleSlice(FlowField, FlowSampler, N, Layer + 3.0f * L).w);
+/** Samples the deck depth factor from phase B's w, [0, 1]: 1, falling across
+ *  a storm cell's eye toward 1 - its intensity. A deck scales its column
+ *  depth by it, so an eye is a bowl sloping to its floor. */
+float Flow_SampleDepth(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
+{
+    return saturate(Flow_SampleSlice(FlowField, FlowSampler, N, Layer + 3.0f * Flow_LayerCount(FlowField)).w);
 }
 
 /** Phase A's crossfade weight from its phase in [0, 1): zero at the reset,

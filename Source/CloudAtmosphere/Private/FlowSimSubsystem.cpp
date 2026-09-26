@@ -31,7 +31,7 @@ static TAutoConsoleVariable<int32> CVarGasGiantDebugMode(
 	TEXT("Override the config's debug view. -1 uses the config.\n")
 	TEXT("0 Vorticity, 1 Pressure, 2 Speed, 3 East, 4 North,\n")
 	TEXT("5 Helmholtz residual, 6 Zonal profile error, 7 Vertical motion, 8 Froude, 9 Cloud, 10 Cloud formation ascent, 11 Noise displacement,\n")
-	TEXT("12 Relative humidity, 13 Storm, 14 Layer top height."),
+	TEXT("12 Relative humidity, 13 Storm, 14 Layer top height, 15 Column cloud, 16 Storm eye."),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarGasGiantDebugLayer(
@@ -708,8 +708,9 @@ void UFlowSimSubsystem::ReportCourant() const
 
 	UE_LOG(LogFlowSim, Log,
 		TEXT("Speed root %.3f, turnover %.3f. Of the root: top layer's jets and shear %.2f, ")
-		TEXT("its eddies %.2f, storm cells %.2f; the ceiling eases in from 0.7."),
-		Speeds.Root, Speeds.Turnover, TopWind, TopEddies, Config->MaxStormCells > 0 ? Cells : 0.0f);
+		TEXT("its eddies %.2f, storm cells %.2f with inflow %.2f; the ceiling eases in from 0.7."),
+		Speeds.Root, Speeds.Turnover, TopWind, TopEddies,
+		Config->MaxStormCells > 0 ? Cells : 0.0f, Config->MaxStormCells > 0 ? Config->StormCellInflow : 0.0f);
 
 	if (TopWind + TopEddies > 0.7f || (Config->MaxStormCells > 0 && Cells > 0.7f))
 	{
@@ -1250,7 +1251,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.CellCloud = FVector4f(
 		FMath::Clamp(Config->StormCellCloud, 0.0f, 1.0f),
 		FMath::Max(Config->StormCellCloudRate, 0.0f),
-		FMath::Clamp(Config->StormCellInflow, 0.0f, 1.0f),
+		Speeds.CellInflow,
 		FMath::Clamp(Config->StormCellStorm, 0.0f, 1.0f));
 
 	Out.CellWindBreadth = FMath::Clamp(Config->StormCellWindBreadth, 0.0f, 0.95f);
@@ -1351,7 +1352,8 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		case EFlowDebugMode::Cloud:
 		case EFlowDebugMode::ColumnCloud:
 		case EFlowDebugMode::CloudAscent:
-		case EFlowDebugMode::Storm:       Out.DebugScale = 1.0f; break;
+		case EFlowDebugMode::Storm:
+		case EFlowDebugMode::Eye:         Out.DebugScale = 1.0f; break;
 			// A quarter radian, about the displacement at mid-life.
 		case EFlowDebugMode::NoiseDisplacement: Out.DebugScale = 0.25f; break;
 			// From dry at zero onset to saturated at full red.

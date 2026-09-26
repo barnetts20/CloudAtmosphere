@@ -19,7 +19,10 @@ namespace
 			/** Grid-scale damping authored per unit time. */
 			DampingRate = 2,
 
-			Latest = DampingRate
+			/** Storm cell inflow authored as a fraction of the speed root. */
+			InflowSpeed = 3,
+
+			Latest = InflowSpeed
 		};
 
 		static const FGuid Guid;
@@ -193,6 +196,7 @@ FFlowSimSpeeds UFlowSimConfig::ResolveSpeeds() const
 
 	S.EddySpeed = FMath::Max(EddySpeed, 0.0f) * S.Root;
 	S.CellWind = FMath::Max(StormCellSpeed, 0.0f) * S.Root;
+	S.CellInflow = FMath::Max(StormCellInflow, 0.0f) * S.Root;
 	S.CellDrift = FMath::Max(StormCellDriftSpeed, 0.0f) * S.Root;
 	S.GenesisShear = FMath::Max(GenesisShearSpeed * S.Root, 0.01f);
 
@@ -293,5 +297,15 @@ void UFlowSimConfig::PostLoad()
 		UE_LOG(LogFlowSim, Display,
 			TEXT("Converted '%s' to GridDamping %.3f per unit time (step %g). Save the asset to keep the conversion."),
 			*GetName(), GridDamping, Step);
+	}
+
+	if (Version < FFlowSimConfigVersion::InflowSpeed)
+	{
+		// The fraction of the target wind as a fraction of the root.
+		StormCellInflow *= FMath::Max(StormCellSpeed, 0.0f);
+
+		UE_LOG(LogFlowSim, Display,
+			TEXT("Converted '%s' to StormCellInflow %.3f of the speed root. Save the asset to keep the conversion."),
+			*GetName(), StormCellInflow);
 	}
 }

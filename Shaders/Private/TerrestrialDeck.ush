@@ -541,11 +541,13 @@ struct TRColumn
 
 /** What a column is built from: the sim read at one spun direction. Only the
  *  flow slice's pressure is used, so it is read raw rather than through
- *  Flow_Sample's velocity rotation. Weather is (W, cloud, altitude, storm). */
+ *  Flow_Sample's velocity rotation. Weather is (W, cloud, altitude, storm);
+ *  Depth the sim's depth factor, which thins storm cells' eyes. */
 struct TRColumnInputs
 {
     float Pressure;
     float4 Weather;
+    float Depth;
 };
 
 TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, TRFieldParams F)
@@ -556,6 +558,7 @@ TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler,
 
     In.Pressure = Flow_SampleSlice(FlowField, FlowSampler, N, Layer).z;
     In.Weather = Flow_SampleWeather(FlowField, FlowSampler, N, Layer);
+    In.Depth = Flow_SampleDepth(FlowField, FlowSampler, N, Layer);
 
     return In;
 }
@@ -610,7 +613,11 @@ TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler,
  *  field does; if cloud goes missing on grazing rays, raise CloudSlope.
  *
  *  SPARSE COLUMNS ARE SHALLOW. Depth ramps in over TR_COVERAGE_DEPTH_RAMP of
- *  coverage, so clear sky has no slab for the entry search to stop on. */
+ *  coverage, so clear sky has no slab for the entry search to stop on.
+ *
+ *  THE SIM'S DEPTH FACTOR SCALES THE REST, so a storm cell's eye is a bowl
+ *  sloping from the eyewall to its floor, whatever CloudFull does to the
+ *  cloud amount. */
 TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
 {
     TRColumn Col;
@@ -679,7 +686,8 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
 
     const float Depth = D * lerp(F.StratusDepth, 1.0f, Col.Type) * Lid
 		* lerp(1.0f, Amount, F.CloudRelief)
-		* smoothstep(0.0f, TR_COVERAGE_DEPTH_RAMP, Col.Coverage);
+		* smoothstep(0.0f, TR_COVERAGE_DEPTH_RAMP, Col.Coverage)
+		* In.Depth;
 
 	// Capped at the shell, where the ceiling fade has already taken density to
 	// zero.
@@ -1201,6 +1209,7 @@ float4 TR_DensityOnRay(
     TRColumnInputs In;
     In.Pressure = lerp(C.KeyA.Inputs.Pressure, C.KeyB.Inputs.Pressure, W);
     In.Weather = lerp(C.KeyA.Inputs.Weather, C.KeyB.Inputs.Weather, W);
+    In.Depth = lerp(C.KeyA.Inputs.Depth, C.KeyB.Inputs.Depth, W);
 
     const TRColumn Col = TR_ColumnFromInputs(In, N, F);
 
