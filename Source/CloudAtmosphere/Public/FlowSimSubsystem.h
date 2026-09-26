@@ -105,7 +105,7 @@ public:
 
 	/** Simulated time elapsed. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
-	float GetSimulatedTime() const { return SimulatedTime; }
+	float GetSimulatedTime() const { return (float)SimulatedTime; }
 
 	/** Sim time of the state the output shows, one step or less behind
 	 *  GetSimulatedTime. Anything animated alongside the field clocks off this.
@@ -115,7 +115,7 @@ public:
 	 *  high SimSpeed the noise phases the renderer weights then no longer reach
 	 *  zero where the sim resets them, and the whole field snaps. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
-	float GetDisplayTime() const { return SimulatedTime - (1.0f - StateBlend) * CurrentStep; }
+	float GetDisplayTime() const { return (float)(SimulatedTime - (1.0 - StateBlend) * CurrentStep); }
 
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	int32 GetStepsCompleted() const { return StepsCompleted; }
@@ -228,8 +228,13 @@ private:
 	 *  when it changes. */
 	int32 StepLoadLevel = 0;
 
-	float SimulatedTime = 0.0f;
+	/** Double precision: a float stops resolving a small step within hours. */
+	double SimulatedTime = 0.0;
 	int32 StepsCompleted = 0;
+
+	/** The grid the running state was reset at. A config grid that differs
+	 *  resets the sim, since the state is reallocated either way. */
+	FIntVector RunningGrid = FIntVector::ZeroValue;
 
 	/** Substeps to run before free-running. Set from SpinUpSteps at start. */
 	int32 SpinUpTarget = 0;

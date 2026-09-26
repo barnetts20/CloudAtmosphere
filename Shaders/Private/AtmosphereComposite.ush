@@ -151,6 +151,11 @@ float4 Atmo_Composite(
 				abs(centerDepth - sampleDepth),
 				abs(predicted - sampleDepth)) / max(centerDepth, 1.0);
 
+			// Bounded before squaring: against a sky tap the difference is
+			// ~1e26 and its square overflows, which times a zero sharpness is
+			// NaN. The bound still weights such a tap to zero.
+            depthDiff = min(depthDiff, 1e3);
+
             float depthW = exp(-depthDiff * depthDiff * depthSharpness);
 
             float w = spatialW * depthW * edgeW;

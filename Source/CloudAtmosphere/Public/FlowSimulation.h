@@ -49,13 +49,16 @@ public:
 	void RequestReset();
 
 	/** Hand the next initialisation a captured state to upload instead of
-	 *  seeding. Consumed once. Not routed through FFlowSimParams, which is
-	 *  copied into a render command every frame. */
+	 *  seeding. Consumed once; an empty array cancels a pending one. Not routed
+	 *  through FFlowSimParams, which is copied into a render command every
+	 *  frame. */
 	void QueueRestore_RenderThread(TArray<float>&& InData);
 
 	/** Adds a pass copying the live state into a buffer, and enqueues a
-	 *  readback. Editor-side capture path; the caller flushes and reads. */
-	void AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, class FRHIGPUBufferReadback* Readback);
+	 *  readback. Editor-side capture path; the caller flushes and reads.
+	 *  Returns false, with nothing enqueued, when there is no state. OutGrid is
+	 *  the grid the state is allocated at, which the capture's layout follows. */
+	bool AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, class FRHIGPUBufferReadback* Readback, FIntVector& OutGrid);
 
 	bool IsInitialised() const { return bInitialised; }
 

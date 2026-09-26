@@ -368,28 +368,13 @@ void APlanetAtmosphereActor::PostEditChangeProperty(FPropertyChangedEvent& Prope
         return;
     }
 
+    // Everything else reaches the materials on the next Tick. PITFALL: pushing
+    // here too requests a second shadow bake that frame, and the subsystem runs
+    // both.
     if (bInitialized)
     {
-        UpdateMaterialParameters();
         UpdateLightFromRotation();
     }
-}
-
-bool APlanetAtmosphereActor::CanEditChange(const FProperty* InProperty) const
-{
-    if (!Super::CanEditChange(InProperty))
-        return false;
-
-    if (bIsPlanetOwned && InProperty)
-    {
-        const FName PropName = InProperty->GetFName();
-        // Lock location and scale -- driven by the planet.
-        // Rotation remains editable (controls light direction).
-        if (PropName == TEXT("RelativeLocation") || PropName == TEXT("RelativeScale3D"))
-            return false;
-    }
-
-    return true;
 }
 
 void APlanetAtmosphereActor::EditorApplyTranslation(const FVector& DeltaTranslation, bool bAltDown, bool bShiftDown, bool bCtrlDown)
@@ -864,10 +849,10 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
     // world time, which diverges the moment the sim pauses or restores.
     SetScalarChecked(MID_Atmosphere, TEXT("Time"), GetGasGiantTime());
 
-    // The planet's orientation as a quaternion; GGAtmo_WorldToLocal rebuilds
-    // the rotation from it. The field is defined with the spin axis on Z; the
-    // march runs world-oriented.
-    const FQuat Rotation = GetActorQuat();
+    // The field's frame as a quaternion, which the material rebuilds the
+    // rotation from. The field is defined with the spin axis on Z; the march
+    // runs world-oriented.
+    const FQuat Rotation = GetFieldFrame();
 
     SetVectorChecked(MID_Atmosphere, TEXT("PlanetRotation"),
         FLinearColor(Rotation.X, Rotation.Y, Rotation.Z, Rotation.W));
@@ -1360,9 +1345,10 @@ void APlanetAtmosphereActor::UpdateOccluderCaptures(
         return;
     }
 
-    const FVector AxisX = GetActorForwardVector();
-    const FVector AxisY = GetActorRightVector();
-    const FVector AxisZ = GetActorUpVector();
+    const FQuat FieldFrame = GetFieldFrame();
+    const FVector AxisX = FieldFrame.GetForwardVector();
+    const FVector AxisY = FieldFrame.GetRightVector();
+    const FVector AxisZ = FieldFrame.GetUpVector();
 
     auto ToLocal = [&AxisX, &AxisY, &AxisZ](const FVector& V)
         {
@@ -1676,9 +1662,10 @@ bool APlanetAtmosphereActor::FillSharedShadowParams(
     // receives them, so the light and the camera arrive in the frame the field
     // is defined in. Spin is not applied here: GG_FlowProbe applies it.
 
-    const FVector AxisX = GetActorForwardVector();
-    const FVector AxisY = GetActorRightVector();
-    const FVector AxisZ = GetActorUpVector();
+    const FQuat FieldFrame = GetFieldFrame();
+    const FVector AxisX = FieldFrame.GetForwardVector();
+    const FVector AxisY = FieldFrame.GetRightVector();
+    const FVector AxisZ = FieldFrame.GetUpVector();
 
     auto ToLocal = [&AxisX, &AxisY, &AxisZ](const FVector& V)
         {
@@ -2020,19 +2007,25 @@ float APlanetAtmosphereActor::GetGasGiantTime() const
 
 void APlanetAtmosphereActor::OrientToStar(const FVector& StarWorldPos)
 {
-    // Point the atmosphere's forward at the star, then let the existing rotation->light
-    // sync propagate it to the directional light + raymarch MIDs. If illumination ends
-    // up inverted, negate ToStar: a directional light's forward is the *travel*
-    // direction (away from the star), not the direction toward it.
+    // RELATIVE, because the light reads the relative rotation as a world
+    // direction: a world rotation under a rotated planet would aim it off by
+    // the planet's own rotation.
     //
-    // PITFALL for gas giants: this also rotates the planet's local frame, which
-    // is what localAxisX/Y/Z carry. Aiming the actor at a moving star therefore
-    // spins the deck's spin axis with it. A planet whose axis must stay fixed
-    // needs the light on a separate transform from the field's frame.
+    // PITFALL: the field's frame is the planet's (GetFieldFrame), never this
+    // rotation. Taken from the actor, aiming at a moving star turns the clouds
+    // and their spin axis with the light.
     const FVector ToStar = StarWorldPos - GetActorLocation();
     if (ToStar.IsNearlyZero()) return;
-    SetActorRotation(ToStar.Rotation());
+    SetActorRelativeRotation(ToStar.Rotation());
     UpdateLightFromRotation();
+}
+
+FQuat APlanetAtmosphereActor::GetFieldFrame() const
+{
+    const USceneComponent* Root = GetRootComponent();
+    const USceneComponent* Parent = Root ? Root->GetAttachParent() : nullptr;
+
+    return Parent ? Parent->GetComponentQuat() : FQuat::Identity;
 }
 
 void APlanetAtmosphereActor::UpdateLightFromRotation()

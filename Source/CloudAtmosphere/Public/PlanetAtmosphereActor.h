@@ -195,9 +195,10 @@ public:
      *  tinting the whole screen. */
     void SetAtmosphereActive(bool bActive);
 
-    /** Aim the light and the march at the star: points the actor's forward at
-     *  StarWorldPos and runs the rotation-to-light sync. Called each frame by the
-     *  owning planet from IStarLit::SetStarWorldPosition. */
+    /** Aim the light and the march at the star: sets the actor's relative
+     *  rotation, which is the light direction, toward StarWorldPos and runs the
+     *  rotation-to-light sync. The cloud field keeps the planet's frame. Called
+     *  each frame by the owning planet from IStarLit::SetStarWorldPosition. */
     void OrientToStar(const FVector& StarWorldPos);
 
     // --- Parameters ---
@@ -384,7 +385,6 @@ public:
 
 #if WITH_EDITOR
     virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
-    virtual bool CanEditChange(const FProperty* InProperty) const override;
     virtual void PostEditMove(bool bFinished) override;
     virtual void EditorApplyTranslation(const FVector& DeltaTranslation, bool bAltDown, bool bShiftDown, bool bCtrlDown) override;
     virtual void EditorApplyScale(const FVector& DeltaScale, const FVector* PivotLocation, bool bAltDown, bool bShiftDown, bool bCtrlDown) override;
@@ -609,6 +609,11 @@ private:
     /** Syncs the directional light's rotation, colour and intensity from the
      *  actor's rotation and the LightColor property. */
     void UpdateLightFromRotation();
+
+    /** The frame the cloud field is defined in: the planet's, which the
+     *  atmosphere is attached to, or the world's when it stands alone. The
+     *  actor's own rotation is the light direction and never turns the field. */
+    FQuat GetFieldFrame() const;
 
     /** Resolves a soft material reference, logging which one failed. */
     static UMaterialInterface* LoadMaterialAsset(const TSoftObjectPtr<UMaterialInterface>& Ref, const TCHAR* Label);

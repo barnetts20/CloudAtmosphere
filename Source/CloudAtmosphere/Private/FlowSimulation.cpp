@@ -115,7 +115,11 @@ namespace
 		}
 
 		P.SimDeltaTime = Params.DeltaTime;
-		P.SimTime = Params.Time;
+
+		// Wrapped in double: the forcing's pattern seeds repeat after 4096
+		// lifetimes, and the reset test needs only the phase.
+		P.SimForcingClock = (float)FMath::Fmod(Params.Time / FMath::Max((double)Params.ForcingLifetime, 1e-3), 4096.0);
+		P.SimNoiseClock = (float)FMath::Fmod(Params.Time / FMath::Max((double)Params.NoiseResetTime, 1e-6), 2.0);
 		P.SimPlanetaryVorticity = Params.PlanetaryVorticity;
 		P.SimWaveSpeedSq = Params.Stack.DesignSpeedSq;
 		P.SimImplicitWeight = Params.ImplicitWeight;
@@ -398,20 +402,22 @@ void FFlowSimulation::AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimPa
 	AddSimPass<FFlowSimRestoreCS>(GraphBuilder, TEXT("FlowSim.Restore"), P, GroupCount2D(Params.GridSize));
 }
 
-void FFlowSimulation::AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, FRHIGPUBufferReadback* Readback)
+bool FFlowSimulation::AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, FRHIGPUBufferReadback* Readback, FIntVector& OutGrid)
 {
 	check(IsInRenderingThread());
 
+	OutGrid = AllocatedGrid;
+
 	if (!Readback || !PooledPhi.IsValid())
 	{
-		return;
+		return false;
 	}
 
 	const int32 Total = AllocatedGrid.X * AllocatedGrid.Y * AllocatedGrid.Z;
 
 	if (Total <= 0)
 	{
-		return;
+		return false;
 	}
 
 	FRDGTextureRef Face = GraphBuilder.RegisterExternalTexture(PooledFace[CurrentFace]);
@@ -427,6 +433,12 @@ void FFlowSimulation::AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, con
 		TEXT("FlowSim.Capture"));
 
 	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+
+	// THE ALLOCATED GRID, NOT THE CONFIG'S: a grid edit is not reallocated
+	// until the next step, and the capture indexes the state as it is.
+	P->SimGridSize = AllocatedGrid;
+	P->SimInvGridSize = FVector3f(1.0f / AllocatedGrid.X, 1.0f / AllocatedGrid.Y, 1.0f / AllocatedGrid.Z);
+
 	P->SimFaceSRV = GraphBuilder.CreateSRV(Face);
 	P->SimPhiSRV = GraphBuilder.CreateSRV(Phi);
 	P->SimTracerSRV = GraphBuilder.CreateSRV(Tracer);
@@ -437,6 +449,8 @@ void FFlowSimulation::AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, con
 	AddSimPass<FFlowSimCaptureCS>(GraphBuilder, TEXT("FlowSim.Capture"), P, GroupCount2D(AllocatedGrid));
 
 	AddEnqueueCopyPass(GraphBuilder, Readback, Capture, Floats * sizeof(float));
+
+	return true;
 }
 
 void FFlowSimulation::AddReducePasses(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
@@ -729,7 +743,7 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	for (int32 Step = 0; Step < NumSubsteps; ++Step)
 	{
 		FFlowSimParams StepParams = Params;
-		StepParams.Time = Params.Time + (float)Step * Params.DeltaTime;
+		StepParams.Time = Params.Time + (double)Step * Params.DeltaTime;
 		StepParams.StepIndex = Params.StepIndex + Step;
 
 		AddSubstep(GraphBuilder, StepParams, R);

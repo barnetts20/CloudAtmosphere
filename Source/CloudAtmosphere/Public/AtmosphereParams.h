@@ -877,8 +877,9 @@ struct CLOUDATMOSPHERE_API FAtmosphereFlowParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float PressureRelief = 0.1f;
 
-	/** Vortex strength above which storm towers are allowed. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	/** Vortex strength above which storm towers are allowed. Below 1: the gate
+	 *  ramps from here to 1, and equal ends make it undefined. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "0.99"))
 	float VortexThreshold = 0.9f;
 
 	/** How far the strongest vortices move the deck, where VortexThreshold's gate

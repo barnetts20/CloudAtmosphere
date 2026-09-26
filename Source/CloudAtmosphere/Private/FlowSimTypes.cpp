@@ -128,7 +128,7 @@ float FlowSimProfile::ThermalShape(const UFlowSimConfig& Config, float Mu)
 
 float FlowSimProfile::WaveSpeed(const UFlowSimConfig& Config)
 {
-	return FMath::Max(Config.DeformationRadius * Config.PlanetaryVorticity * 0.70710678f, 1e-3f);
+	return FMath::Max(Config.DeformationRadius * FMath::Max(Config.PlanetaryVorticity, 0.1f) * 0.70710678f, 1e-3f);
 }
 
 // ---------------------------------------------------------------------------

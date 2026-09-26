@@ -254,7 +254,7 @@ public:
 	 *  PITFALL: also the explicit Coriolis step. Above about 0.5 radians of
 	 *  rotation per step the split between explicit rotation and implicit
 	 *  pressure radiates gravity waves. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.1"))
 	float PlanetaryVorticity = 24.0f;
 
 	/** Rossby deformation radius at 45 degrees, in planet radii: the size eddies
@@ -919,7 +919,10 @@ struct FFlowSimParams
 	FFlowSimStack Stack;
 
 	float DeltaTime = 0.0086f;
-	float Time = 0.0f;
+
+	/** Sim time at the start of the step, in double precision; the shader gets
+	 *  it wrapped by each clock's period. */
+	double Time = 0.0;
 	float PlanetaryVorticity = 24.0f;
 	float ImplicitWeight = 0.6f;
 

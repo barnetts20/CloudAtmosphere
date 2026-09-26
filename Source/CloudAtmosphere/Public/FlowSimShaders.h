@@ -35,7 +35,8 @@ SHADER_PARAMETER_ARRAY(FVector4f, SimMatModeToMontgomery, [16])
 
 // -- Time, rotation and gravity waves -----------------------------------
 SHADER_PARAMETER(float, SimDeltaTime)
-SHADER_PARAMETER(float, SimTime)
+SHADER_PARAMETER(float, SimForcingClock)
+SHADER_PARAMETER(float, SimNoiseClock)
 SHADER_PARAMETER(float, SimPlanetaryVorticity)
 SHADER_PARAMETER(float, SimWaveSpeedSq)
 SHADER_PARAMETER(float, SimImplicitWeight)

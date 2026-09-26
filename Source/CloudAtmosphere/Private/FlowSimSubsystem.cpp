@@ -117,7 +117,7 @@ static FAutoConsoleCommandWithWorldAndArgs GFlowSimStartCmd(
 
 static FAutoConsoleCommandWithWorldAndArgs GFlowSimStopCmd(
 	TEXT("FlowSim.Stop"),
-	TEXT("Stop stepping. State is kept, so FlowSim.Start resumes rather than reseeds."),
+	TEXT("Stop stepping. The state is kept for the debug view; FlowSim.Start reseeds or restores."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
 		[](const TArray<FString>&, UWorld* World)
 		{
@@ -129,8 +129,7 @@ static FAutoConsoleCommandWithWorldAndArgs GFlowSimStopCmd(
 
 static FAutoConsoleCommandWithWorldAndArgs GFlowSimResetCmd(
 	TEXT("FlowSim.Reset"),
-	TEXT("Discard the field and reseed from the current config. Also the way to ")
-	TEXT("pick up a changed grid size."),
+	TEXT("Discard the field and reseed from the current config, or restore its InitialState."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
 		[](const TArray<FString>&, UWorld* World)
 		{
@@ -219,6 +218,16 @@ namespace
 		// Layers past the authored list take an unscaled copy of the shared
 		// profile rather than zero, which would read as a sim bug.
 		return Config.LayerProfiles.IsValidIndex(Layer) ? Config.LayerProfiles[Layer] : FFlowLayerProfile();
+	}
+
+	/** The grid a config runs at: the dimensions rounded to what the solver
+	 *  supports. */
+	FIntVector GridOf(const UFlowSimConfig& Config)
+	{
+		return FIntVector(
+			FlowSimShader::GridLongitude(Config.GridLongitude),
+			FlowSimShader::GridLatitude(Config.GridLatitude),
+			LayerCountOf(Config));
 	}
 
 	/** Share of the thermal shear a layer carries: 1 on top, 0 at the bottom. */
@@ -852,9 +861,22 @@ void UFlowSimSubsystem::ResetSimulation()
 			Sim->RequestReset();
 		});
 
+	RunningGrid = Config ? GridOf(*Config) : FIntVector::ZeroValue;
+
 	// Then hand back the start state, if there is one. Render commands run in
 	// order, so the payload arrives after the reset flag and survives it.
 	const bool bRestored = QueueInitialState();
+
+	// An empty payload cancels one still pending from an earlier reset, which
+	// the next initialisation would otherwise restore.
+	if (!bRestored)
+	{
+		ENQUEUE_RENDER_COMMAND(FlowSimClearRestore)(
+			[Sim](FRHICommandListImmediate&)
+			{
+				Sim->QueueRestore_RenderThread(TArray<float>());
+			});
+	}
 
 	SpinUpTarget = (bRestored || !Config) ? 0 : FMath::Max(Config->SpinUpSteps, 0);
 
@@ -884,10 +906,7 @@ bool UFlowSimSubsystem::QueueInitialState()
 
 	UFlowSnapshot* Snapshot = Config->InitialState;
 
-	const FIntVector Grid(
-		FlowSimShader::GridLongitude(Config->GridLongitude),
-		FlowSimShader::GridLatitude(Config->GridLatitude),
-		LayerCountOf(*Config));
+	const FIntVector Grid = GridOf(*Config);
 
 	if (!Snapshot->IsValidFor(Grid))
 	{
@@ -954,8 +973,6 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 		return false;
 	}
 
-	const int32 Count = FFlowSimulation::StateFloats(Params.GridSize);
-
 	FFlowSimulation* Sim = Simulation;
 
 	// THE READBACK MUST BE LOCKED ON THE RENDER THREAD. FRHIGPUBufferReadback::Lock
@@ -964,19 +981,26 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 	// crosses back; the captures by reference are safe because the flush below
 	// blocks until the command has run.
 	TArray<float> Result;
+	FIntVector Grid = FIntVector::ZeroValue;
 	bool bSucceeded = false;
 
 	ENQUEUE_RENDER_COMMAND(FlowSimCapture)(
-		[Sim, Params, Count, &Result, &bSucceeded](FRHICommandListImmediate& RHICmdList)
+		[Sim, Params, &Result, &Grid, &bSucceeded](FRHICommandListImmediate& RHICmdList)
 		{
 			FRHIGPUBufferReadback Readback(TEXT("FlowSim.SnapshotReadback"));
+			bool bCaptured = false;
 
 			{
 				FRDGBuilder GraphBuilder(RHICmdList);
 
-				Sim->AddCapturePass_RenderThread(GraphBuilder, Params, &Readback);
+				bCaptured = Sim->AddCapturePass_RenderThread(GraphBuilder, Params, &Readback, Grid);
 
 				GraphBuilder.Execute();
+			}
+
+			if (!bCaptured)
+			{
+				return;
 			}
 
 			RHICmdList.BlockUntilGPUIdle();
@@ -986,6 +1010,9 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 				return;
 			}
 
+			// Sized by the grid the state is allocated at, which the capture
+			// followed.
+			const int32 Count = FFlowSimulation::StateFloats(Grid);
 			const uint32 Bytes = (uint32)Count * sizeof(float);
 
 			if (const void* Data = Readback.Lock(Bytes))
@@ -993,21 +1020,21 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 				Result.SetNumUninitialized(Count);
 				FMemory::Memcpy(Result.GetData(), Data, Bytes);
 				bSucceeded = true;
-			}
 
-			Readback.Unlock();
+				Readback.Unlock();
+			}
 		});
 
 	FlushRenderingCommands();
 
-	if (!bSucceeded || Result.Num() != Count)
+	if (!bSucceeded)
 	{
 		UE_LOG(LogFlowSim, Error,
 			TEXT("Snapshot readback failed. Is the sim initialised and running?"));
 		return false;
 	}
 
-	Target->Grid = Params.GridSize;
+	Target->Grid = Grid;
 	Target->State = MoveTemp(Result);
 
 	Target->Provenance.BandCount = Config->BandCount;
@@ -1019,7 +1046,7 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 	Target->Provenance.WidthBias = Config->WidthBias;
 	Target->Provenance.PlanetaryVorticity = Config->PlanetaryVorticity;
 	Target->Provenance.ThermalShear = Speeds.ThermalShear;
-	Target->SimulatedTime = SimulatedTime;
+	Target->SimulatedTime = (float)SimulatedTime;
 	Target->StepsCompleted = StepsCompleted;
 
 	Target->MarkPackageDirty();
@@ -1130,11 +1157,10 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	}
 
 	// Rounded to what the solver supports rather than refused.
-	const int32 W = FlowSimShader::GridLongitude(Config->GridLongitude);
-	const int32 H = FlowSimShader::GridLatitude(Config->GridLatitude);
-	const int32 Layers = LayerCountOf(*Config);
+	Out.GridSize = GridOf(*Config);
 
-	Out.GridSize = FIntVector(W, H, Layers);
+	const int32 W = Out.GridSize.X;
+	const int32 Layers = Out.GridSize.Z;
 
 	// Every wind from the speed root.
 	const FFlowSimSpeeds Speeds = Config->ResolveSpeeds();
@@ -1160,7 +1186,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 
 	Out.DeltaTime = FMath::Clamp(Step, 0.0f, FlowSimStep::SpinUp);
 	Out.Time = SimulatedTime;
-	Out.PlanetaryVorticity = Config->PlanetaryVorticity;
+	Out.PlanetaryVorticity = FMath::Max(Config->PlanetaryVorticity, 0.1f);
 	Out.ImplicitWeight = Config->GetImplicitWeight(Out.DeltaTime);
 
 	// -- Forcing ------------------------------------------------------------
@@ -1387,7 +1413,9 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		}
 	}
 
-	if (Config->DebugTarget)
+	// Only with UAV support, which the debug pass writes through;
+	// bAutoResizeTargets is what sets it.
+	if (Config->DebugTarget && Config->DebugTarget->bCanCreateUAV)
 	{
 		if (FTextureRenderTargetResource* Res = Config->DebugTarget->GameThread_GetRenderTargetResource())
 		{
@@ -1482,6 +1510,17 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 	if (!PrepareTargets())
 	{
 		return;
+	}
+
+	// A grid edit reallocates the state, so it goes through a reset and time,
+	// steps, spin-up and the start state follow the new field.
+	const FIntVector Grid = GridOf(*Config);
+
+	if (Grid != RunningGrid)
+	{
+		UE_LOG(LogFlowSim, Display, TEXT("Grid changed to %dx%dx%d; resetting."), Grid.X, Grid.Y, Grid.Z);
+
+		ResetSimulation();
 	}
 
 	const int32 PauseOverride = CVarGasGiantPaused.GetValueOnGameThread();

@@ -172,24 +172,23 @@ float OccluderFalloff;
  *  crossing is a root rather than a ratio. Constant density instead makes the
  *  crossing first-order, and the residual moves whenever the subdivision level
  *  changes -- which it does at fixed radii from the sub-light point, obliquity
- *  being radially symmetric there, so the result is concentric rings. Falls back
- *  to the linear solve where the ends agree, which is also where the quadratic
- *  form loses conditioning. */
+ *  being radially symmetric there, so the result is concentric rings. The root
+ *  is taken in its rationalised form, which stays conditioned as the ends
+ *  agree and reduces to the linear solve there.
+ *
+ *  PITFALL: SOLVE IN OPTICAL DEPTH PER STEP. Sigma is per world unit and a
+ *  step spans thousands of them, so any absolute threshold on the curvature
+ *  in world units picks the wrong form everywhere. */
 float AtmoBake_Crossing(float Target, float Tau, float SigmaA, float SigmaB, float Step)
 {
-    const float Remaining = Target - Tau;
-    const float Curve = 0.5f * (SigmaB - SigmaA) / max(Step, 1e-6f);
+	// tau(x) = A x + (B - A) x^2 / 2 over the step fraction x.
+    const float A = SigmaA * Step;
+    const float B = SigmaB * Step;
+    const float Remaining = max(Target - Tau, 0.0f);
 
-    if (abs(Curve) < 1e-8f)
-    {
-        return saturate(Remaining / max(SigmaA * Step, 1e-8f));
-    }
+    const float Disc = A * A + 2.0f * (B - A) * Remaining;
 
-    const float Disc = SigmaA * SigmaA + 4.0f * Curve * Remaining;
-
-    const float Root = (-SigmaA + sqrt(max(Disc, 0.0f))) / (2.0f * Curve);
-
-    return saturate(Root / max(Step, 1e-6f));
+    return saturate(2.0f * Remaining / max(A + sqrt(max(Disc, 0.0f)), 1e-8f));
 }
 
 /** Blends a texel's fresh crossing depths with the level's previous bake along

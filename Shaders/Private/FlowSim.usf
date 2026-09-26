@@ -95,7 +95,14 @@ float4 SimMatLayerToMode[16];
 float4 SimMatModeToMontgomery[16];
 
 float SimDeltaTime;
-float SimTime;
+
+/** The step's start in forcing lifetimes and in noise reset periods, wrapped
+ *  in double precision on the CPU.
+ *  PITFALL: AN ABSOLUTE TIME IN FLOAT32 STOPS RESOLVING THE STEP after a few
+ *  hundred time units at small steps: resets stop firing and the forcing's
+ *  phases quantise. */
+float SimForcingClock;
+float SimNoiseClock;
 
 /** 2 * Omega; f = SimPlanetaryVorticity * mu. */
 float SimPlanetaryVorticity;
@@ -533,7 +540,7 @@ float SimForcingSlope(float3 P, float3 Dir, uint Layer, float Rate)
         return 0.0f;
     }
 
-    const float Clock = SimTime / max(SimForcingLifetime, 1e-3f);
+    const float Clock = SimForcingClock;
 
     const float WeightA = 1.0f - abs(2.0f * frac(Clock) - 1.0f);
     const float WeightB = 1.0f - WeightA;
@@ -567,14 +574,12 @@ float3 SimRotateZ(float3 V, float Angle)
     return float3(V.x * C - V.y * S, V.x * S + V.y * C, V.z);
 }
 
-/** Whether a noise phase resets during the step starting at SimTime. Phase 1
- *  runs half a period behind phase 0. */
+/** Whether a noise phase resets during the step. Phase 1 runs half a period
+ *  behind phase 0. */
 bool SimNoiseResets(uint Phase)
 {
-    const float Offset = 0.5f * (float) Phase;
-
-    const float Before = SimTime / SimNoiseResetTime + Offset;
-    const float After = (SimTime + SimDeltaTime) / SimNoiseResetTime + Offset;
+    const float Before = SimNoiseClock + 0.5f * (float) Phase;
+    const float After = Before + SimDeltaTime / SimNoiseResetTime;
 
     return floor(After) != floor(Before);
 }

@@ -33,8 +33,8 @@
  *  different is what produces vertical wind shear rather than one sheet dragged
  *  around.
  *
- *  Pitfall: both must be under GasGiantSimConfig::LayerCount. A slice past the
- *  end reads clamped rather than failing, so the shear quietly vanishes. */
+ *  The deep layer is clamped to the sim's last layer, so a single-layer sim
+ *  reads its one layer for both. */
 #ifndef GG_FLOW_LAYER
 #define GG_FLOW_LAYER 0
 #endif
@@ -251,7 +251,7 @@ GGFieldParams GG_BuildField(
     F.FlowRead.BandBias = BandBias;
     F.BandRelief = BandRelief;
     F.PressureRelief = PressureRelief;
-    F.VortexThreshold = VortexThreshold;
+    F.VortexThreshold = min(VortexThreshold, 0.999f);
     F.StormTowerRelief = StormTowerRelief;
     F.ReliefThinning = ReliefThinning;
 
@@ -819,7 +819,7 @@ GGFieldSample GG_Field(
     {
         const float3 PShear = normalize(N + FlowWarp * F.DetailFlowInherit);
 
-        const float4 DeepFlow = Flow_Sample(FlowField, FlowSampler, PShear, GG_DEEP_FLOW_LAYER);
+        const float4 DeepFlow = Flow_Sample(FlowField, FlowSampler, PShear, min((float) GG_DEEP_FLOW_LAYER, Flow_LayerCount(FlowField) - 1.0f));
 
         DeepShear = Flow_TangentVelocity(PShear, DeepFlow.xy) * (F.DeepShearTime * Turbulence);
     }
