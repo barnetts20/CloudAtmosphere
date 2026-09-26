@@ -25,7 +25,7 @@ class UFlowSnapshot;
  *  dimensions are latched; changing those reallocates and re-seeds.
  *
  *  PITFALL: BlueprintType is load-bearing. K2Node_GetSubsystem only offers
- *  classes marked with it, so without it the "Get Gas Giant Sim Subsystem" node
+ *  classes marked with it, so without it the "Get Flow Sim Subsystem" node
  *  never appears in the palette and every BlueprintCallable member below is
  *  unreachable -- present in the class, impossible to call. */
 UCLASS(BlueprintType)
@@ -68,8 +68,8 @@ public:
 
 	// -- Control ------------------------------------------------------------
 
-	/** Begin stepping against this config. Safe to call again with a different
-	 *  config; only a grid change forces a reseed. */
+	/** Begin stepping against this config. Always reseeds, or restores the
+	 *  config's InitialState when it has one. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	void StartSimulation(UFlowSimConfig* InConfig);
 
@@ -93,6 +93,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	bool IsSpinningUp() const { return StepsCompleted < SpinUpTarget; }
 
+	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
+	bool IsRunning() const { return bRunning; }
+
+	/** The config the sim steps against, whichever caller started it; null
+	 *  before the first start. */
+	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
+	UFlowSimConfig* GetConfig() const { return Config; }
+
 	/** Simulated time elapsed. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	float GetSimulatedTime() const { return SimulatedTime; }
@@ -114,6 +122,20 @@ public:
 	 *  real dissipation term, so it is worth watching when tuning DragRate. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	float GetCourant() const;
+
+	/** The params the next frame builds at the last frame's step, derived
+	 *  values included: output scales, stack, implicit weight. False with no
+	 *  config. For inspection; the render thread gets its own copy. */
+	bool GetRunningParams(FFlowSimParams& OutParams) const
+	{
+		if (!Config)
+		{
+			return false;
+		}
+
+		BuildParams(OutParams, CurrentStep);
+		return true;
+	}
 
 private:
 	/** The sim's half of Tick. Every early-out here is a reason the field should
