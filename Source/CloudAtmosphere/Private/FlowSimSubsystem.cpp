@@ -682,16 +682,14 @@ void UFlowSimSubsystem::ReportCourant() const
 
 	// THE BUDGET, as fractions of the speed root. The top layer's jet and shear
 	// are summed though they peak at different latitudes, an upper bound; eddies
-	// and the storm cells' vortex are their nominal equilibrium speeds against
-	// the drag. Past the ceiling's knee the clip acts as a drag on the zonal
-	// mean and clips eddy peaks.
+	// are their nominal equilibrium speed against the drag, and the storm cells
+	// their target eyewall wind. Past the ceiling's knee the clip acts as a drag
+	// on the zonal mean and clips eddy peaks.
 	const FFlowLayerProfile Top = LayerOf(*Config, 0);
-	const FFlowLayerProfile Bottom = LayerOf(*Config, LayerCountOf(*Config) - 1);
 
 	const float TopWind = FMath::Abs(Config->JetSpeed * Top.JetScale) + (LayerCountOf(*Config) > 1 ? FMath::Abs(Config->ShearSpeed) : 0.0f);
 	const float TopEddies = Config->EddySpeed * Top.EddyScale;
-	const float Cells = Config->StormCellForcing * Config->StormCellSpeed
-		/ FMath::Max(Config->DragRate * Bottom.DragScale, 1e-3f);
+	const float Cells = Config->StormCellSpeed;
 
 	UE_LOG(LogFlowSim, Log,
 		TEXT("Speed root %.3f, turnover %.3f. Of the root: top layer's jets and shear %.2f, ")

@@ -554,27 +554,29 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.1"))
 	float StormCellFalloff = 1.5f;
 
-	/** Scale of the vortex push, as a fraction of the speed root: at the
-	 *  eyewall the flow gains this times StormCellForcing per unit time. The
-	 *  push is open-loop, so the vortex does not settle at this speed; drag,
-	 *  the flow around it and the speed ceiling bound it. */
+	/** Eyewall wind a cell at full intensity holds on the bottom layer, as a
+	 *  fraction of the speed root. The push is closed-loop: each step it closes
+	 *  part of the gap between the flow's measured cyclonic wind and this, so a
+	 *  cell settles here against drag and the flow around it. Keep it under the
+	 *  ceiling's knee, 0.7, less the background wind the cell rides on. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
 	float StormCellSpeed = 0.6f;
 
-	/** Rate of the push, per unit time. Only its product with StormCellSpeed
-	 *  acts. */
+	/** Rate the flow relaxes toward the cell's vortex, per unit time: higher
+	 *  spins a cell up faster and holds it tighter against the flow around it.
+	 *  Also the rate of the inflow push. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
 	float StormCellForcing = 1.5f;
 
-	/** The top layer's share of the push; the bottom layer's is 1, and those
-	 *  between are linear. Negative spins the top the other way, as a storm's
-	 *  outflow does. PITFALL: the top layer's drag is a tenth of the bottom's
-	 *  by default, so a share there settles ten times stronger. */
+	/** The top layer's share of the target wind; the bottom layer's is 1, and
+	 *  those between are linear. Negative spins the top the other way, as a
+	 *  storm's outflow does. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
 	float StormCellTopShare = 0.0f;
 
-	/** Inflow on the bottom layer and outflow on the top, as a fraction of the
-	 *  vortex's speed, pushed at the same rate. The storm's secondary
+	/** Inflow on the bottom layer and outflow on the top, pushed open-loop at
+	 *  StormCellForcing times this fraction of StormCellSpeed per unit time, so
+	 *  it scales with both. The storm's secondary
 	 *  circulation: it turns what the vortex alone winds into rings into
 	 *  trailing spiral bands, and lifts the core. Zero turns it off. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
