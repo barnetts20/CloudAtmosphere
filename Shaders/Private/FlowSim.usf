@@ -1238,12 +1238,18 @@ struct SimStamp
     float Strength;
 };
 
-/** max(A, B) with its crease rounded over a width K. */
+/** max(A, B) with its crease rounded over a width K, the rounding fading out
+ *  as the smaller input falls to zero.
+ *
+ *  PITFALL: THE PLAIN POLYNOMIAL ROUNDING ADDS K/4 WHERE THE INPUTS ARE EQUAL,
+ *  zero and zero included, which puts a storm floor of K/4 under every texel of
+ *  the planet. */
 float SimSmoothMax(float A, float B, float K)
 {
-    const float H = max(K - abs(A - B), 0.0f) / max(K, 1e-4f);
+    const float Width = max(K, 1e-4f);
+    const float H = max(K - abs(A - B), 0.0f) / Width;
 
-    return max(A, B) + 0.25f * K * H * H;
+    return max(A, B) + 0.25f * K * H * H * saturate(min(A, B) / Width);
 }
 
 SimStamp SimCellStamp(float3 N)
