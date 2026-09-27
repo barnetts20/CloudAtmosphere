@@ -130,6 +130,15 @@
 #define TR_SLAB_ENTRY_PROBES 24
 #endif
 
+/** How a step integrates the slab profile: 0 Simpson's rule on three samples,
+ *  which a slab thinner than the step falls between, so thin columns flicker
+ *  as their surfaces drift across the samples; 1 exactly, from the profile's
+ *  closed-form integral (TR_SlabCumulative), with the ceiling fade by
+ *  Simpson's rule. */
+#ifndef TR_SLAB_EXACT
+#define TR_SLAB_EXACT 0
+#endif
+
 /** The sim layer every column read comes from: CloudLayer, negative for the
  *  bottom of the stack, clamped to the stack. */
 float TR_FlowLayer(Texture2DArray FlowField, float CloudLayer)
@@ -468,13 +477,13 @@ float TR_CeilingFade(float Height, TRFieldParams F)
 
 /** The height profile inside a column: a ramp down from the top times a ramp up
  *  from the base, each peaking at exactly 1 with zero derivative at both ends.
- *  Zero outside the slab.
+ *  Zero outside the slab. TR_SlabRamps gives the ramps' lengths, top then base.
  *
  *  A SHALLOW COLUMN SCALES BOTH RAMPS DOWN until they meet, so it still peaks
  *  at 1 and is thin rather than faint. PITFALL: cutting each ramp against the
  *  depth instead leaves a shallow column peaking near 0.15, which coverage and
  *  erosion then remove entirely while deep columns barely change. */
-float TR_SlabDensity(float Height, float Top, float Base, TRFieldParams F)
+float2 TR_SlabRamps(float Top, float Base, TRFieldParams F)
 {
     const float Depth = max(Top - Base, 1e-4f);
     const float Ratio = Depth / max(F.SpanTop + F.SpanBase, 1e-4f);
@@ -485,11 +494,44 @@ float TR_SlabDensity(float Height, float Top, float Base, TRFieldParams F)
 	// draws a lighting ring, as on an eye wall.
     const float Fit = Ratio * rsqrt(sqrt(1.0f + Ratio * Ratio * Ratio * Ratio));
 
-    const float FromTop = saturate((Top - Height) / max(F.SpanTop * Fit, 1e-5f));
-    const float FromBase = saturate((Height - Base) / max(F.SpanBase * Fit, 1e-5f));
+    return float2(max(F.SpanTop * Fit, 1e-5f), max(F.SpanBase * Fit, 1e-5f));
+}
+
+float TR_SlabDensity(float Height, float Top, float Base, TRFieldParams F)
+{
+    const float2 Ramps = TR_SlabRamps(Top, Base, F);
+
+    const float FromTop = saturate((Top - Height) / Ramps.x);
+    const float FromBase = saturate((Height - Base) / Ramps.y);
 
     return smoothstep(0.0f, 1.0f, pow(FromTop, max(F.TopCurve, 1e-4f)))
 		* smoothstep(0.0f, 1.0f, pow(FromBase, max(F.BottomCurve, 1e-4f)));
+}
+
+/** smoothstep(0, 1, U^C) integrated from 0 to U in [0, 1]:
+ *  3 U^(2C+1) / (2C+1) - 2 U^(3C+1) / (3C+1). */
+float TR_RampIntegral(float U, float C)
+{
+    const float P = pow(U, C);
+
+    return U * P * P * (3.0f / (2.0f * C + 1.0f) - 2.0f * P / (3.0f * C + 1.0f));
+}
+
+/** TR_SlabDensity integrated from below the base up to Height, Ramps being
+ *  TR_SlabRamps. The ramps fit inside the depth, so they never overlap and the
+ *  profile is the base ramp, a plateau at 1 and the top ramp in turn. */
+float TR_SlabCumulative(float Height, float Top, float Base, float2 Ramps, TRFieldParams F)
+{
+    const float Ct = max(F.TopCurve, 1e-4f);
+    const float Cb = max(F.BottomCurve, 1e-4f);
+
+    const float FromBase = saturate((Height - Base) / Ramps.y);
+    const float FromTop = saturate((Top - Height) / Ramps.x);
+
+    const float Plateau = max(min(Height, Top - Ramps.x) - (Base + Ramps.y), 0.0f);
+
+    return Ramps.y * TR_RampIntegral(FromBase, Cb) + Plateau
+		+ Ramps.x * (TR_RampIntegral(1.0f, Ct) - TR_RampIntegral(FromTop, Ct));
 }
 
 /** Extinction per atmosphere thickness, solved so a ray down a full-depth
@@ -992,11 +1034,27 @@ float4 TR_DensityInColumn(
 {
 	// -- Height profile, integrated across the step ----------------------------
 
+#if TR_SLAB_EXACT
+    const float Fade = (TR_CeilingFade(Height - HalfStep, F) + 4.0f * TR_CeilingFade(Height, F)
+		+ TR_CeilingFade(Height + HalfStep, F)) / 6.0f;
+
+	// The mean over the step from the integral's difference, point-sampled
+	// where the step is too short for the difference to hold its precision.
+    const float2 Ramps = TR_SlabRamps(Col.Top, Col.Base, F);
+
+    const float Slab = (HalfStep > 1e-5f)
+		? (TR_SlabCumulative(Height + HalfStep, Col.Top, Col.Base, Ramps, F)
+			- TR_SlabCumulative(Height - HalfStep, Col.Top, Col.Base, Ramps, F)) / (2.0f * HalfStep)
+		: TR_SlabDensity(Height, Col.Top, Col.Base, F);
+
+    const float Profile = Slab * Fade;
+#else
     const float Profile =
 		(TR_SlabDensity(Height - HalfStep, Col.Top, Col.Base, F) * TR_CeilingFade(Height - HalfStep, F)
 		+ 4.0f * TR_SlabDensity(Height, Col.Top, Col.Base, F) * TR_CeilingFade(Height, F)
 		+ TR_SlabDensity(Height + HalfStep, Col.Top, Col.Base, F) * TR_CeilingFade(Height + HalfStep, F))
 		/ 6.0f;
+#endif
 
     const float HeightFraction = saturate((Height - Col.Base) / max(Col.Top - Col.Base, 1e-4f));
 
