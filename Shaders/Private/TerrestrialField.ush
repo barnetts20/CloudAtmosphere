@@ -157,7 +157,9 @@ bool Field_SegmentIsCloud(float3 Origin, float3 Dir, float4 Segment, PlanetParam
  *  climbs into the band, since the segment structure changes there.
  *
  *  Turning it back on costs that; leaving it off costs resolution, recoverable
- *  with CloudSteps. Resolution is the cheaper of the two to buy back. */
+ *  with CloudSteps. Resolution is the cheaper of the two to buy back.
+ *  TR_PLAN_SLAB concentrates the samples without the trace's blind spots, and
+ *  takes precedence. */
 #ifndef TR_SPLIT_AT_ENTRY
 #define TR_SPLIT_AT_ENTRY 0
 #endif
@@ -173,6 +175,15 @@ void Field_PlanSegments(
 	inout float4 Segments[ATMO_MAX_SEGMENTS],
 	inout int SegmentCount)
 {
+#if TR_PLAN_SLAB
+    if (SegmentCount > 0)
+    {
+        TR_PlanSlabSegments(FlowField, FlowSampler, LocalOrigin, LocalDir, CoarseStep, F, Segments, SegmentCount);
+    }
+
+    return;
+#endif
+
     if (SegmentCount <= 0 || SegmentCount >= ATMO_MAX_SEGMENTS)
     {
         return;
