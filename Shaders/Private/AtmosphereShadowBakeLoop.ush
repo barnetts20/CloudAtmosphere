@@ -32,6 +32,17 @@
 // plus a Thickness member on BakeFieldParams, the one field the loop reads
 // directly, since every stored depth is expressed in it.
 
+/** 1 grows the step a power of two at a time wherever the steps left could not
+ *  otherwise reach the chord's exit, so every ray ends there or at its last
+ *  threshold. 0 lets a long grazing chord stop where ATMO_BAKE_MAX_STEPS falls
+ *  and extrapolates its unreached thresholds from there, inside the chord. */
+#ifndef ATMO_BAKE_STEP_BUDGET
+#define ATMO_BAKE_STEP_BUDGET 1
+#endif
+
+/** Most a budgeted step grows past the cell: 2^8 cells. */
+#define ATMO_BAKE_MAX_DOUBLINGS 8
+
 /** Bakes one texel of one cascade: the four crossing depths and, where the
  *  target carries them, the occluder term on the same ray.
  *
@@ -257,11 +268,32 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 		// moves the silhouette even when the deck has barely moved.
         float Step = CellSize;
 
+#if ATMO_BAKE_STEP_BUDGET
+		// The mean step the rest of the chord needs from the steps left. It
+		// outranks the demand: a coarse step through the deck costs accuracy, a
+		// ray stopped short costs the shadow behind it.
+        const float Budget = (RayLength - T) / float(max(ATMO_BAKE_MAX_STEPS - Iter, 1));
+
+        UNROLL
+
+        for (int Grow = 0; Grow < ATMO_BAKE_MAX_DOUBLINGS; Grow++)
+        {
+            if (Step >= Budget)
+            {
+                break;
+            }
+
+            Step *= 2.0f;
+        }
+#else
+        const float Budget = 0.0f;
+#endif
+
         UNROLL
 
         for (int Halve = 0; Halve < ATMO_BAKE_MAX_HALVINGS; Halve++)
         {
-            if (Step <= Demand)
+            if (Step <= Demand || 0.5f * Step < Budget)
             {
                 break;
             }
@@ -344,9 +376,11 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
     }
 
 	// Thresholds the ray never reached, extrapolated at the last extinction seen
-	// rather than flagged. The result lands past the shell exit and no view sample
-	// lives there, being outside the cull radius where the march does not run the
-	// deck path. A zero LastSigma sends it to the sentinel.
+	// rather than flagged. From the chord's exit the result lands past the shell,
+	// where no view sample lives, being outside the cull radius where the march
+	// does not run the deck path. A zero LastSigma sends it to the sentinel.
+	// PITFALL: A RAY STOPPED BY ATMO_BAKE_MAX_STEPS extrapolates from inside the
+	// chord, where view samples do live; ATMO_BAKE_STEP_BUDGET prevents that.
     const float TailRate = 1.0f / max(LastSigma, 1e-6f);
 
     if (NodeEntry < 0.0f)

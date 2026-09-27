@@ -718,6 +718,20 @@ float SimInterfaceFlux(int2 C, uint Interface)
  *  this of each other blend rather than meeting at a crease. */
 #define SIM_CELL_STORM_BLEND 0.25f
 
+/** Intensity below which a cell's slot frees. */
+#define SIM_CELL_FREE 0.05f
+
+/** 1 weighs the atlas's eye by the live cells' presence, SimStamp.Presence, so
+ *  a cell's eye leaves with it. 0 applies the eye tracer wherever it lingers,
+ *  which after a cell frees is the tracer decaying at SIM_CELL_EYE_DECAY with
+ *  nothing in the sim working it. */
+#ifndef SIM_EYE_PRESENCE
+#define SIM_EYE_PRESENCE 1
+#endif
+
+/** Share of a cell's radius over which its presence fades at the rim. */
+#define SIM_EYE_PRESENCE_RIM 0.2f
+
 /** Candidate points a spawn attempt draws in the genesis band. */
 #define SIM_CELL_SPAWN_DRAWS 8
 
@@ -1342,6 +1356,11 @@ struct SimStamp
     float Storm;
     float Low;
     float Strength;
+
+	/** The strongest live cell's claim on its eye, [0, 1]: 1 until its
+	 *  intensity falls within twice SIM_CELL_FREE, fading to 0 as it frees and
+	 *  over the rim of its radius. */
+    float Presence;
 };
 
 /** max(A, B) with its crease rounded over a width K, the rounding fading out
@@ -1365,6 +1384,7 @@ SimStamp SimCellStamp(float3 N)
     S.Storm = 0.0f;
     S.Low = 0.0f;
     S.Strength = 0.0f;
+    S.Presence = 0.0f;
 
 	[loop]
     for (int Slot = 0; Slot < SimCellCount; Slot++)
@@ -1389,6 +1409,8 @@ SimStamp SimCellStamp(float3 N)
         S.Storm = max(S.Storm, Intensity * max(SimCellCloud.w * Whole, SimCellDraft.z * Band));
         S.Low = max(S.Low, Intensity * Whole);
         S.Strength = max(S.Strength, Intensity * Profile);
+        S.Presence = max(S.Presence, saturate(Intensity / SIM_CELL_FREE - 1.0f)
+			* (1.0f - smoothstep(1.0f - SIM_EYE_PRESENCE_RIM, 1.0f, R)));
     }
 
     return S;
@@ -1995,7 +2017,7 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
  *  storm at the centre, on that ring or on the eyewall, where the cell's own
  *  inflow converges -- toward 0 once any fails or its lifetime is past, and
  *  toward 0 inside the radius of a stronger cell, so two that meet merge.
- *  Below 0.05 the slot frees.
+ *  Below SIM_CELL_FREE the slot frees.
  *
  *  THE GAINS (SIM_CELL_CONTROL_BASE): a live cell reads each layer's cyclonic
  *  wind on a ring at the eyewall, or as close in as the grid resolves, and on
@@ -2252,7 +2274,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 
     float Intensity = Cell.w + Dt * (SimCellLife.y * Favour * (1.0f - Cell.w) - SimCellLife.z * (1.0f - Favour) * Cell.w);
 
-    Intensity = (Intensity < 0.05f) ? 0.0f : saturate(Intensity);
+    Intensity = (Intensity < SIM_CELL_FREE) ? 0.0f : saturate(Intensity);
 
     SimCellUAV[2 * Slot] = float4(P, Intensity);
     SimCellUAV[2 * Slot + 1] = float4(Age + Dt, P - Cell.xyz);
@@ -3432,7 +3454,11 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
         // -- Storm cells --------------------------------------------------------------
 
 		// The eye tracer, from the latest state.
-        const float Eye = saturate(SimSampleMeridianTaps(SimNoiseSRV, Taps, Layer + L).w);
+        float Eye = saturate(SimSampleMeridianTaps(SimNoiseSRV, Taps, Layer + L).w);
+
+#if SIM_EYE_PRESENCE
+        Eye *= Stamp.Presence;
+#endif
 
 		// THE BAND INTENSIFIES, IT DOES NOT ADD. Storm deepens and darkens cloud
 		// the column already has; the cloud itself is the sim's, which carries the
