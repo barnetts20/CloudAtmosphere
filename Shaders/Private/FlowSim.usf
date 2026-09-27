@@ -336,6 +336,17 @@ SamplerState SimForcingNoiseSampler;
 StructuredBuffer<float4> SimCellSRV;
 RWStructuredBuffer<float4> SimCellUAV;
 
+/** The cells' fields, written by MainCellFieldCS each substep for
+ *  MainPredictCS. SimCellFlow is (column, face row, layer): x the
+ *  streamfunction at the corner west of the column, y the velocity potential
+ *  at the centre, zero on the last face row. SimCellColumn is (column, row):
+ *  the storm floor, the eye source, the cloud feed before the eye's share,
+ *  and 1 where a cell is near. */
+Texture2DArray<float2> SimCellFlowSRV;
+RWTexture2DArray<float2> SimCellFlowUAV;
+Texture2D<float4> SimCellColumnSRV;
+RWTexture2D<float4> SimCellColumnUAV;
+
 /** Snapshot transfer, one plane per float; see MainCaptureCS. A restore reads
  *  SimRestoreFloatsPerCell planes: SIM_SNAPSHOT_PLANES, or the 13 of the layout
  *  without the noise phases' w, which then restore as zero. */
@@ -1181,7 +1192,8 @@ float SimCellEyeSource(float3 P, float Pressure)
  *  tangent. */
 float SimCellStream(float3 P, uint Layer)
 {
-    const float Whole = SimCellWindIntegral(1.0f);
+    const float Hold = SimCellWindHold();
+    const float Whole = SimCellIntegralHeld(1.0f, Hold);
 
     float Psi = 0.0f;
 
@@ -1193,7 +1205,7 @@ float SimCellStream(float3 P, uint Layer)
 
         if (SimCellReach((uint) Slot, P, false, Axis, Sense, Intensity, R))
         {
-            Psi += Sense * SimCellGain((uint) Slot, Layer) * (SimCellWindIntegral(R) - Whole);
+            Psi += Sense * SimCellGain((uint) Slot, Layer) * (SimCellIntegralHeld(R, Hold) - Whole);
         }
     }
 
@@ -1232,6 +1244,12 @@ bool SimCellNear(float3 P, float Reach)
     return false;
 }
 
+/** SimCellFlow at column I, wrapped, and face row J. */
+float2 SimCellFlow(int I, int J, uint Layer)
+{
+    return SimCellFlowSRV.Load(int4(SimWrapColumn(I), J, Layer, 0));
+}
+
 /** Every live cell's velocity potential at P on a layer: its gradient runs
  *  the layer's inflow gain times the target wind toward the centre, on the
  *  stamp's profile. Inward below and outward above, it is the storm's
@@ -1258,7 +1276,8 @@ float SimCellPotential(float3 P, uint Layer)
     return SimCellVortex.w * SimCellShape.x * Chi;
 }
 
-/** How far the cells lift each layer's cloud toward full cover.
+/** How far the cells lift each layer's cloud toward full cover, before the
+ *  eye's share: MainPredictCS scales it by one less the eye tracer.
  *
  *  THE STAMP CARRIES ITS OWN CLOUD, on the same ramp as its vectors: none at
  *  the centre, the most at the eyewall, none at the radius, and less where
@@ -1274,7 +1293,7 @@ float SimCellPotential(float3 P, uint Layer)
  *  THE EYE IS NOT CLEARED HERE: the deck thins it by depth. PITFALL: a
  *  clearing that takes cloud to zero draws an edge along the contour where it
  *  does, in any deck that saturates the cloud amount. */
-float SimCellCloudFeed(float3 P, float Eye)
+float SimCellCloudFeed(float3 P)
 {
     float Target = 0.0f;
 
@@ -1289,7 +1308,7 @@ float SimCellCloudFeed(float3 P, float Eye)
             continue;
         }
 
-        Target = max(Target, Intensity * SimCellCloud.x * SimCellProfile(R) * (1.0f - Eye));
+        Target = max(Target, Intensity * SimCellCloud.x * SimCellProfile(R));
     }
 
     return Target;
@@ -2364,6 +2383,61 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 }
 
 // ---------------------------------------------------------------------------
+// Cell fields
+// ---------------------------------------------------------------------------
+
+/** The cells' fields MainPredictCS reads: the streamfunction at each corner
+ *  and the potential at each centre per layer, each shared by up to four
+ *  faces, and the layer-independent column terms. Dispatch (N_lon, N_lat + 1,
+ *  LayerCount + 1): slices [0, L) write SimCellFlow, slice L SimCellColumn.
+ *  Runs after MainCellsCS, reading this step's cells and the output
+ *  Reconstruct just wrote. */
+[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
+void MainCellFieldCS(uint3 Id : SV_DispatchThreadID)
+{
+    const int2 C = int2(Id.xy);
+    const uint L = (uint) SimGridSize.z;
+
+    if (C.x >= SimGridSize.x || C.y > SimGridSize.y || Id.z > L)
+    {
+        return;
+    }
+
+    const bool bRow = C.y < SimGridSize.y;
+
+    if (Id.z == L)
+    {
+        if (bRow)
+        {
+            const float3 P = SimDirection(SimColumnToLon((float) C.x), SimRowToMu((float) C.y));
+
+            float4 Column = float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+            if (SimCellNear(P, SimCellShape.x))
+            {
+                Column.x = (SimCellSustain > 0.0f) ? SimCellStormFloor(P) : 0.0f;
+                Column.y = SimCellEyeSource(P, SimLatLonSRV.Load(int4(C, L - 1u, 0)).z);
+                Column.z = SimCellCloudFeed(P);
+                Column.w = 1.0f;
+            }
+
+            SimCellColumnUAV[C] = Column;
+        }
+
+        return;
+    }
+
+    const uint Layer = Id.z;
+
+    const float Psi = SimCellCornerPsi(C.x, C.y, Layer);
+    const float Chi = bRow
+		? SimCellPotential(SimDirection(SimColumnToLon((float) C.x), SimRowToMu((float) C.y)), Layer)
+		: 0.0f;
+
+    SimCellFlowUAV[int3(C, Layer)] = float2(Psi, Chi);
+}
+
+// ---------------------------------------------------------------------------
 // Predict
 // ---------------------------------------------------------------------------
 
@@ -2394,7 +2468,8 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
  *  potentials by its inflow gain, inflow below and outflow above. Each cell
  *  also lifts every layer's cloud toward full along its vector ramp
  *  (SimCellCloudFeed), which the flow winds like any other, and holds the
- *  storm tracer along its eyewall at SimCellStormFloor at least.
+ *  storm tracer along its eyewall at SimCellStormFloor at least. All of it
+ *  is read from MainCellFieldCS's fields, gated on its near flag.
  *
  *  Every face then passes through the speed ceiling (SimSpeedCeiling).
  *
@@ -2434,9 +2509,9 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 	// the relaxation, so a fast rate on a long step does not overshoot.
     const float CellShare = 1.0f - exp(-SimCellVortex.y * Dt);
 
-    const float3 CellP = SimDirection(SimColumnToLon((float) C.x), SimRowToMu((float) C.y));
-
-    const bool bCellNear = SimCellCount > 0 && SimCellNear(CellP, SimCellShape.x);
+    const float4 CellColumn = (SimCellCount > 0) ? SimCellColumnSRV.Load(int3(C, 0)) : float4(0.0f, 0.0f, 0.0f, 0.0f);
+    const bool bCellNear = CellColumn.w > 0.0f;
+    const float2 CellHere = bCellNear ? SimCellFlow(C.x, C.y, Layer) : float2(0.0f, 0.0f);
 
 	// -- u on the west face -------------------------------------------------
 
@@ -2461,11 +2536,9 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
         if (bCellNear)
         {
-            U -= CellShare * SimRowCos(C.y) * (SimCellCornerPsi(C.x, C.y + 1, Layer) - SimCellCornerPsi(C.x, C.y, Layer)) / SimDMu();
+            U -= CellShare * SimRowCos(C.y) * (SimCellFlow(C.x, C.y + 1, Layer).x - CellHere.x) / SimDMu();
 
-            U += CellShare * (SimCellPotential(SimDirection(SimColumnToLon((float) C.x), Mu), Layer)
-				- SimCellPotential(SimDirection(SimColumnToLon((float) C.x - 1.0f), Mu), Layer))
-				/ (SimRowCos(C.y) * SimDLon());
+            U += CellShare * (CellHere.y - SimCellFlow(C.x - 1, C.y, Layer).y) / (SimRowCos(C.y) * SimDLon());
         }
 
         const float Across = dot(Arrival, SimNorth(P));
@@ -2494,14 +2567,9 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
         if (bCellNear)
         {
-            V += CellShare * (SimCellCornerPsi(C.x + 1, C.y, Layer) - SimCellCornerPsi(C.x, C.y, Layer))
-				/ (SimFaceCos(C.y) * SimDLon());
+            V += CellShare * (SimCellFlow(C.x + 1, C.y, Layer).x - CellHere.x) / (SimFaceCos(C.y) * SimDLon());
 
-            const float Lon = SimColumnToLon((float) C.x);
-
-            V += CellShare * SimFaceCos(C.y)
-				* (SimCellPotential(SimDirection(Lon, SimRowToMu((float) C.y)), Layer)
-					- SimCellPotential(SimDirection(Lon, SimRowToMu((float) C.y - 1.0f)), Layer)) / SimDMu();
+            V += CellShare * SimFaceCos(C.y) * (CellHere.y - SimCellFlow(C.x, C.y - 1, Layer).y) / SimDMu();
         }
 
         const float Across = dot(Arrival, SimEast(P));
@@ -2576,7 +2644,7 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 	// The storm cells' own cloud: lifted toward full, less where the eye is calm.
     if (bCellNear)
     {
-        const float Feed = SimCellCloudFeed(P, Eye);
+        const float Feed = CellColumn.z * (1.0f - Eye);
 
         Cloud = saturate(Cloud + SimCellCloud.y * Dt * Feed * (1.0f - Cloud));
     }
@@ -2617,7 +2685,7 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 	// The cells hold their storm up toward the floor at the formation rate.
     if (bCellNear && SimCellSustain > 0.0f)
     {
-        Storm += (1.0f - exp(-SimStormParams.x * Dt)) * max(SimCellStormFloor(P) - Storm, 0.0f);
+        Storm += (1.0f - exp(-SimStormParams.x * Dt)) * max(CellColumn.x - Storm, 0.0f);
     }
 
     SimTracerUAV[int3(C, Layer)] = float4(Cloud, CloudAscent, Vapour, Storm);
@@ -2657,7 +2725,7 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
         {
             Carried = saturate(SimSampleCubic4(SimNoiseSRV, DepartureGrid, Slice).w);
 
-            const float Source = bCellNear ? SimCellEyeSource(P, SimLatLonSRV.Load(int4(C, L - 1u, 0)).z) : 0.0f;
+            const float Source = CellColumn.y;
 
             const float Rate = (Source > Carried) ? SIM_CELL_EYE_RATE : SIM_CELL_EYE_DECAY;
 

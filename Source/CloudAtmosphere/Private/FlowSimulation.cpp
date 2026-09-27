@@ -57,6 +57,8 @@ struct FFlowSimResources
 	FRDGTextureRef Output = nullptr;
 	FRDGTextureRef Debug = nullptr;
 	FRDGBufferRef Cells = nullptr;
+	FRDGTextureRef CellFlow = nullptr;
+	FRDGTextureRef CellColumn = nullptr;
 
 	int32 Current = 0;
 	int32 TracerCurrent = 0;
@@ -270,6 +272,8 @@ void FFlowSimulation::Release_RenderThread()
 	PooledMontgomeryEq.SafeRelease();
 	PooledGlobalMean.SafeRelease();
 	PooledCells.SafeRelease();
+	PooledCellFlow.SafeRelease();
+	PooledCellColumn.SafeRelease();
 
 	// PendingRestore is DELIBERATELY NOT cleared. A queued restore sets the reset
 	// flag, and EnsureResources answers that flag by calling this function --
@@ -367,6 +371,16 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 	PooledCells = AllocatePooledBuffer(
 		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), 8 * FlowSimShader::MaxStormCells),
 		TEXT("FlowSim.Cells"));
+
+	// Streamfunction at the corners and potential at the centres, one row past
+	// the last centre row for the north polar faces.
+	PooledCellFlow = AllocatePooledTexture(
+		FRDGTextureDesc::Create2DArray(FIntPoint(Size.X, Size.Y + 1), PF_G32R32F, FClearValueBinding::Black, Flags, Slices),
+		TEXT("FlowSim.CellFlow"));
+
+	PooledCellColumn = AllocatePooledTexture(
+		FRDGTextureDesc::Create2D(Size, PF_A32B32G32R32F, FClearValueBinding::Black, Flags),
+		TEXT("FlowSim.CellColumn"));
 
 	AllocatedGrid = Params.GridSize;
 	CurrentFace = 0;
@@ -521,6 +535,21 @@ void FFlowSimulation::AddCellsPass(FRDGBuilder& GraphBuilder, const FFlowSimPara
 	AddSimPass<FFlowSimCellsCS>(GraphBuilder, TEXT("FlowSim.Cells"), P, FIntVector(1, 1, 1));
 }
 
+void FFlowSimulation::AddCellFieldPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
+{
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+	P->SimLatLonSRV = GraphBuilder.CreateSRV(R.LatLon);
+	P->SimCellSRV = GraphBuilder.CreateSRV(R.Cells);
+	P->SimCellFlowUAV = GraphBuilder.CreateUAV(R.CellFlow);
+	P->SimCellColumnUAV = GraphBuilder.CreateUAV(R.CellColumn);
+
+	// One row past the centres for the polar faces, one slice past the layers
+	// for the column terms.
+	const FIntVector Groups = GroupCount2D(FIntVector(Params.GridSize.X, Params.GridSize.Y + 1, Params.GridSize.Z + 1));
+
+	AddSimPass<FFlowSimCellFieldCS>(GraphBuilder, TEXT("FlowSim.CellField"), P, Groups);
+}
+
 void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, FFlowSimResources& R)
 {
 	const FIntVector Groups2D = GroupCount2D(Params.GridSize);
@@ -530,6 +559,12 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 	AddReducePasses(GraphBuilder, Params, R);
 	AddReconstructPass(GraphBuilder, Params, R, false);
 	AddCellsPass(GraphBuilder, Params, R);
+
+	// Without cells Predict reads none of the fields, so they are left stale.
+	if (Params.CellCount > 0)
+	{
+		AddCellFieldPass(GraphBuilder, Params, R);
+	}
 
 	// -- 2. Predict: advection and every explicit term --------------------
 
@@ -546,6 +581,8 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 		P->SimTracerSRV = GraphBuilder.CreateSRV(R.TracerSource());
 		P->SimNoiseSRV = GraphBuilder.CreateSRV(R.NoiseSource());
 		P->SimCellSRV = GraphBuilder.CreateSRV(R.Cells);
+		P->SimCellFlowSRV = GraphBuilder.CreateSRV(R.CellFlow);
+		P->SimCellColumnSRV = GraphBuilder.CreateSRV(R.CellColumn);
 		P->SimFaceUAV = GraphBuilder.CreateUAV(R.Dest());
 		P->SimPhiStarUAV = GraphBuilder.CreateUAV(R.PhiStar);
 		P->SimTracerUAV = GraphBuilder.CreateUAV(R.TracerDest());
@@ -712,6 +749,8 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	R.CentreLatest = GraphBuilder.RegisterExternalTexture(PooledCentreLatest);
 	R.LatLonLatest = GraphBuilder.RegisterExternalTexture(PooledLatLonLatest);
 	R.Cells = GraphBuilder.RegisterExternalBuffer(PooledCells);
+	R.CellFlow = GraphBuilder.RegisterExternalTexture(PooledCellFlow);
+	R.CellColumn = GraphBuilder.RegisterExternalTexture(PooledCellColumn);
 	R.Current = CurrentFace;
 	R.TracerCurrent = CurrentTracer;
 

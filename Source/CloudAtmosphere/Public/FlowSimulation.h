@@ -94,6 +94,8 @@ private:
 	 *  the output pair the resample blends toward, rather than the working pair. */
 	void AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R, bool bLatest);
 	void AddCellsPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
+	/** The cells' streamfunction, potential and column terms for Predict. */
+	void AddCellFieldPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	void AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, struct FFlowSimResources& R);
 	void AddDebugPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	void AddResamplePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
@@ -115,6 +117,11 @@ private:
 	 *  float4 of vortex gains, two of inflow gains, one of health and one of the
 	 *  pressure low per slot, rewritten every substep. */
 	TRefCountPtr<FRDGPooledBuffer> PooledCells;
+
+	/** The cells' fields Predict reads, rebuilt every substep: per layer on the
+	 *  face rows, and one layer-independent column slice. */
+	TRefCountPtr<IPooledRenderTarget> PooledCellFlow;
+	TRefCountPtr<IPooledRenderTarget> PooledCellColumn;
 
 	/** Noise displacements, phase A slices then phase B. Flips with the
 	 *  tracers. */
