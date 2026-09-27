@@ -558,17 +558,42 @@ struct TRColumnInputs
     float Depth;
 };
 
-TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, TRFieldParams F)
+TRColumnInputs TR_InputsFromSample(FlowColumnSample S)
 {
     TRColumnInputs In;
 
-    const float Layer = TR_FlowLayer(FlowField, F.CloudLayer);
-
-    In.Pressure = Flow_SampleSlice(FlowField, FlowSampler, N, Layer).z;
-    In.Weather = Flow_SampleWeather(FlowField, FlowSampler, N, Layer);
-    In.Depth = Flow_SampleDepth(FlowField, FlowSampler, N, Layer);
+    In.Pressure = S.Flow.z;
+    In.Weather = S.Weather;
+    In.Depth = saturate(S.NoiseB.w);
 
     return In;
+}
+
+TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, TRFieldParams F)
+{
+    return TR_InputsFromSample(Flow_SampleColumn(
+		FlowField, FlowSampler, N, TR_FlowLayer(FlowField, F.CloudLayer), false));
+}
+
+/** The column's material, from its weather alone: fair-weather 0 to storm 1.
+ *
+ *  A STORM INDEX: the raw column cloud, which grades from a system's edge to
+ *  its core, or the storm where larger, which puts storm cells at the top.
+ *  StormBalance sweeps a threshold down through it, from none at 0 to all
+ *  cloud at 1, and StormBlend is the ramp's half-width. Nothing that shapes
+ *  the density reads it.
+ *
+ *  PITFALL: an index built from the cloud amount saturates wherever the deck is
+ *  dense, so the threshold stops moving anything and only the density
+ *  settings change the balance. Taken from Type, the tropics term paints
+ *  every tropical cloud storm-coloured, fading uniformly with latitude. */
+float TR_MaterialFromWeather(float4 Weather, TRFieldParams F)
+{
+    const float StormIndex = max(saturate(Weather.y), saturate(Weather.w));
+    const float Blend = F.StormBlend;
+    const float StormThreshold = lerp(1.0f + Blend, -Blend, F.StormBalance);
+
+    return smoothstep(StormThreshold - Blend, StormThreshold + Blend, StormIndex);
 }
 
 /** The column at a spun direction N from its inputs.
@@ -650,21 +675,7 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
     Col.Type = saturate(F.TypeBias + F.TypeTropical * Tropical
 		+ F.TypeStorm * pow(Storm, F.TypeCurve));
 
-	// MATERIAL FROM A STORM INDEX: the raw column cloud, which grades from a
-	// system's edge to its core, or the storm where larger, which puts storm
-	// cells at the top. StormBalance sweeps a threshold down through it, from
-	// none at 0 to all cloud at 1, and StormBlend is the ramp's half-width.
-	// Nothing that shapes the density reads it.
-	//
-	// PITFALL: an index built from the cloud amount saturates wherever the deck is
-	// dense, so the threshold stops moving anything and only the density
-	// settings change the balance. Taken from Type, the tropics term paints
-	// every tropical cloud storm-coloured, fading uniformly with latitude.
-    const float StormIndex = max(saturate(Weather.y), Storm);
-    const float Blend = F.StormBlend;
-    const float StormThreshold = lerp(1.0f + Blend, -Blend, F.StormBalance);
-
-    Col.Material = smoothstep(StormThreshold - Blend, StormThreshold + Blend, StormIndex);
+    Col.Material = TR_MaterialFromWeather(Weather, F);
 
 	// Layered cloud is stratus, cellular where the air sinks, and cirrus as it
 	// rises; towering cloud is cumulus at any height.
@@ -702,14 +713,15 @@ TRColumn TR_Column(Texture2DArray FlowField, SamplerState FlowSampler, float3 N,
     return TR_ColumnFromInputs(TR_ReadColumn(FlowField, FlowSampler, N, F), N, F);
 }
 
-/** The column's material coordinate at a planet-local position, spun. For what
- *  varies over a system's width rather than a feature's: the tint of
- *  extinction a light ray crossed. */
+/** The column's material coordinate at a planet-local position, spun, from
+ *  the weather slice alone. For what varies over a system's width rather than
+ *  a feature's: the tint of extinction a light ray crossed. */
 float TR_TypeCoarse(Texture2DArray FlowField, SamplerState FlowSampler, float3 LocalPos, TRFieldParams F)
 {
     const float3 N = normalize(Atmo_RotateZ(normalize(LocalPos), F.SpinAngle));
 
-    return TR_Column(FlowField, FlowSampler, N, F).Material;
+    return TR_MaterialFromWeather(
+		Flow_SampleWeather(FlowField, FlowSampler, N, TR_FlowLayer(FlowField, F.CloudLayer)), F);
 }
 
 /** The field-wide reach, in atmosphere fractions: how far the BASE can move
@@ -1119,7 +1131,13 @@ float4 TR_Density(
 
     const float3 N = normalize(Atmo_RotateZ(LocalPos / max(Radius, 1e-4f), F.SpinAngle));
 
-    const TRColumn Col = TR_ColumnFromInputs(TR_ReadColumn(FlowField, FlowSampler, N, F), N, F);
+    const float Layer = TR_FlowLayer(FlowField, F.CloudLayer);
+
+	// Phase B comes with the column, for its depth factor; phase A only inside
+	// the slab.
+    const FlowColumnSample S = Flow_SampleColumn(FlowField, FlowSampler, N, Layer, false);
+
+    const TRColumn Col = TR_ColumnFromInputs(TR_InputsFromSample(S), N, F);
 
     BRANCH
 
@@ -1128,12 +1146,12 @@ float4 TR_Density(
         return float4(0.0f, Col.Material, Col.Pressure, Col.Top);
     }
 
-    float3 DisplacementA, DisplacementB;
-    Flow_SampleNoise(FlowField, FlowSampler, N, TR_FlowLayer(FlowField, F.CloudLayer), DisplacementA, DisplacementB);
+    const float3 DisplacementA = Flow_SampleSlice(
+		FlowField, FlowSampler, N, Layer + 2.0f * Flow_LayerCount(FlowField)).xyz;
 
     return TR_DensityInColumn(
 		DetailVolume, DetailSampler, StructureVolume, StructureSampler,
-		N, Height, HalfStep, Col, DisplacementA, DisplacementB, F);
+		N, Height, HalfStep, Col, DisplacementA, S.NoiseB.xyz, F);
 }
 
 // ---------------------------------------------------------------------------
@@ -1215,11 +1233,14 @@ TRColumnKey TR_ReadKey(
 
     const float3 N = normalize(Atmo_RotateZ(C.Perigee * CosA + C.Dir * SinA, F.SpinAngle));
 
+    const FlowColumnSample S = Flow_SampleColumn(
+		FlowField, FlowSampler, N, TR_FlowLayer(FlowField, F.CloudLayer), true);
+
     TRColumnKey Key;
 
-    Key.Inputs = TR_ReadColumn(FlowField, FlowSampler, N, F);
-    Flow_SampleNoise(FlowField, FlowSampler, N, TR_FlowLayer(FlowField, F.CloudLayer),
-		Key.DisplacementA, Key.DisplacementB);
+    Key.Inputs = TR_InputsFromSample(S);
+    Key.DisplacementA = S.NoiseA.xyz;
+    Key.DisplacementB = S.NoiseB.xyz;
 
     return Key;
 }

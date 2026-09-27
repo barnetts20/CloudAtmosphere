@@ -264,22 +264,29 @@ void Flow_AtlasMetrics(Texture2DArray FlowField, out float FaceSize, out float2 
     InvSize = 1.0f / float2(Width, Height);
 }
 
-/** Samples one slice of one face's tile, raw. Any sampler state works: every
- *  tap stays inside the tile for coordinates within the blend band. */
-float4 Flow_SampleTile(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	uint Face,
-	float2 Coord,
-	float Slice,
-	float FaceSize,
-	float2 InvSize)
+/** Where one face tile's reconstruction taps land at a coordinate and how
+ *  they weigh: shared by every slice read there. Under FLOW_FIELD_FILTER 0
+ *  only UV0 is used. */
+struct FlowTileTaps
 {
+    float2 UV0;
+    float2 UV1;
+    float2 S0;
+    float2 S1;
+};
+
+FlowTileTaps Flow_TileTaps(uint Face, float2 Coord, float FaceSize, float2 InvSize)
+{
+    FlowTileTaps Taps;
+
     const float2 Pixel = Flow_AtlasTexel(Face, Coord, FaceSize);
 
 #if FLOW_FIELD_FILTER == 0
 
-    return FlowField.SampleLevel(FlowSampler, float3(Pixel * InvSize, Slice), 0.0f);
+    Taps.UV0 = Pixel * InvSize;
+    Taps.UV1 = Taps.UV0;
+    Taps.S0 = float2(1.0f, 1.0f);
+    Taps.S1 = float2(0.0f, 0.0f);
 
 #else
 
@@ -302,19 +309,47 @@ float4 Flow_SampleTile(
     const float2 W2 = (-3.0f * F3 + 3.0f * F2 + 3.0f * Frac + 1.0f) / 6.0f;
     const float2 W3 = F3 / 6.0f;
 
-    const float2 S0 = W0 + W1;
-    const float2 S1 = W2 + W3;
+    Taps.S0 = W0 + W1;
+    Taps.S1 = W2 + W3;
 
-    const float2 UV0 = (Corner + 0.5f + (W1 / S0 - 1.0f)) * InvSize;
-    const float2 UV1 = (Corner + 0.5f + (W3 / S1 + 1.0f)) * InvSize;
-
-    return
-		  S0.x * S0.y * FlowField.SampleLevel(FlowSampler, float3(UV0.x, UV0.y, Slice), 0.0f)
-		+ S1.x * S0.y * FlowField.SampleLevel(FlowSampler, float3(UV1.x, UV0.y, Slice), 0.0f)
-		+ S0.x * S1.y * FlowField.SampleLevel(FlowSampler, float3(UV0.x, UV1.y, Slice), 0.0f)
-		+ S1.x * S1.y * FlowField.SampleLevel(FlowSampler, float3(UV1.x, UV1.y, Slice), 0.0f);
+    Taps.UV0 = (Corner + 0.5f + (W1 / Taps.S0 - 1.0f)) * InvSize;
+    Taps.UV1 = (Corner + 0.5f + (W3 / Taps.S1 + 1.0f)) * InvSize;
 
 #endif
+
+    return Taps;
+}
+
+/** One slice read through a tile's taps, raw. Any sampler state works: every
+ *  tap stays inside the tile for coordinates within the blend band. */
+float4 Flow_TapSlice(Texture2DArray FlowField, SamplerState FlowSampler, FlowTileTaps Taps, float Slice)
+{
+#if FLOW_FIELD_FILTER == 0
+
+    return FlowField.SampleLevel(FlowSampler, float3(Taps.UV0, Slice), 0.0f);
+
+#else
+
+    return
+		  Taps.S0.x * Taps.S0.y * FlowField.SampleLevel(FlowSampler, float3(Taps.UV0.x, Taps.UV0.y, Slice), 0.0f)
+		+ Taps.S1.x * Taps.S0.y * FlowField.SampleLevel(FlowSampler, float3(Taps.UV1.x, Taps.UV0.y, Slice), 0.0f)
+		+ Taps.S0.x * Taps.S1.y * FlowField.SampleLevel(FlowSampler, float3(Taps.UV0.x, Taps.UV1.y, Slice), 0.0f)
+		+ Taps.S1.x * Taps.S1.y * FlowField.SampleLevel(FlowSampler, float3(Taps.UV1.x, Taps.UV1.y, Slice), 0.0f);
+
+#endif
+}
+
+/** Samples one slice of one face's tile, raw. */
+float4 Flow_SampleTile(
+	Texture2DArray FlowField,
+	SamplerState FlowSampler,
+	uint Face,
+	float2 Coord,
+	float Slice,
+	float FaceSize,
+	float2 InvSize)
+{
+    return Flow_TapSlice(FlowField, FlowSampler, Flow_TileTaps(Face, Coord, FaceSize, InvSize), Slice);
 }
 
 /** Samples one slice of the atlas by direction, raw, blended across face
@@ -437,12 +472,60 @@ void Flow_SampleNoise(
         [branch]
         if (Set.Weight[Slot] > 0.0f)
         {
-            OutA += Set.Weight[Slot] * Flow_SampleTile(
-				FlowField, FlowSampler, Set.Face[Slot], Set.Coord[Slot], Layer + 2.0f * L, FaceSize, InvSize).xyz;
-            OutB += Set.Weight[Slot] * Flow_SampleTile(
-				FlowField, FlowSampler, Set.Face[Slot], Set.Coord[Slot], Layer + 3.0f * L, FaceSize, InvSize).xyz;
+            const FlowTileTaps Taps = Flow_TileTaps(Set.Face[Slot], Set.Coord[Slot], FaceSize, InvSize);
+
+            OutA += Set.Weight[Slot] * Flow_TapSlice(FlowField, FlowSampler, Taps, Layer + 2.0f * L).xyz;
+            OutB += Set.Weight[Slot] * Flow_TapSlice(FlowField, FlowSampler, Taps, Layer + 3.0f * L).xyz;
         }
     }
+}
+
+/** A layer's flow slice raw, weather slice and both noise slices at one
+ *  direction, in one pass over the faces: what a cloud column reads, equal to
+ *  the separate readers' results. Flow is in the face basis, so only its
+ *  scalars mean anything; phase B's w is the depth factor before its saturate.
+ *  NoiseA is read only with bNoiseA, and zero otherwise. */
+struct FlowColumnSample
+{
+    float4 Flow;
+    float4 Weather;
+    float4 NoiseA;
+    float4 NoiseB;
+};
+
+FlowColumnSample Flow_SampleColumn(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer, bool bNoiseA)
+{
+    const float L = Flow_LayerCount(FlowField);
+
+    float FaceSize;
+    float2 InvSize;
+    Flow_AtlasMetrics(FlowField, FaceSize, InvSize);
+
+    const FlowFaceSet Set = Flow_FaceSet(N, FaceSize);
+
+    FlowColumnSample S = (FlowColumnSample) 0;
+
+	[unroll]
+    for (uint Slot = 0; Slot < 3u; ++Slot)
+    {
+        [branch]
+        if (Set.Weight[Slot] > 0.0f)
+        {
+            const FlowTileTaps Taps = Flow_TileTaps(Set.Face[Slot], Set.Coord[Slot], FaceSize, InvSize);
+            const float W = Set.Weight[Slot];
+
+            S.Flow += W * Flow_TapSlice(FlowField, FlowSampler, Taps, Layer);
+            S.Weather += W * Flow_TapSlice(FlowField, FlowSampler, Taps, Layer + L);
+            S.NoiseB += W * Flow_TapSlice(FlowField, FlowSampler, Taps, Layer + 3.0f * L);
+
+            if (bNoiseA)
+            {
+                S.NoiseA += W * Flow_TapSlice(FlowField, FlowSampler, Taps, Layer + 2.0f * L);
+            }
+        }
+    }
+
+    return S;
 }
 
 /** Samples a layer's top height from phase A's w: the layer's top surface,
@@ -455,8 +538,8 @@ float Flow_SampleLayerHeight(Texture2DArray FlowField, SamplerState FlowSampler,
 }
 
 /** Samples the deck depth factor from phase B's w, [0, 1]: 1, falling across
- *  a storm cell's eye on an S curve toward 1 - StormCellEyeDepth times its
- *  intensity. A deck scales its column depth by it. */
+ *  a storm cell's eye toward 1 - its intensity. A deck scales its column
+ *  depth by it, so an eye is a bowl sloping to its floor. */
 float Flow_SampleDepth(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
 {
     return saturate(Flow_SampleSlice(FlowField, FlowSampler, N, Layer + 3.0f * Flow_LayerCount(FlowField)).w);
