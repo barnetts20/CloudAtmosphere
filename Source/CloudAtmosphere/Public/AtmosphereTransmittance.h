@@ -6,6 +6,7 @@
 #include "RenderGraphResources.h"
 
 class FRDGBuilder;
+class FTextureRenderTargetResource;
 
 /** Everything the transmittance bake reads.
  *
@@ -21,13 +22,14 @@ struct CLOUDATMOSPHERE_API FAtmosphereTransmittanceParams
 	/** (RayleighBeta.A, MieBeta.A, AbsorptionBeta.A, AbsorptionFalloff). */
 	FVector4f ProfilePins = FVector4f::Zero();
 
-	/** The bake's destination. Its identity is part of what a bake is keyed
-	 *  on: a recreated resource comes back cleared. */
-	FTextureRHIRef Table;
+	/** The bake's destination, resolved to its RHI handle on the render
+	 *  thread. NOT PART OF Matches: whoever recreates the resource, which
+	 *  comes back cleared, forgets what was baked into it. */
+	FTextureRenderTargetResource* TableResource = nullptr;
 
 	bool IsUsable() const
 	{
-		return Table.IsValid()
+		return TableResource
 			&& PlanetRadius > 0.0f
 			&& AtmosphereRadius > PlanetRadius;
 	}
@@ -35,8 +37,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereTransmittanceParams
 	/** Whether a table baked from Other is valid for these inputs. */
 	bool Matches(const FAtmosphereTransmittanceParams& Other) const
 	{
-		return Table == Other.Table
-			&& PlanetRadius == Other.PlanetRadius
+		return PlanetRadius == Other.PlanetRadius
 			&& AtmosphereRadius == Other.AtmosphereRadius
 			&& ProfilePins == Other.ProfilePins;
 	}

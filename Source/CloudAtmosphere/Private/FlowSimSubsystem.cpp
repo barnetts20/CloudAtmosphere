@@ -985,8 +985,10 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 	bool bSucceeded = false;
 
 	ENQUEUE_RENDER_COMMAND(FlowSimCapture)(
-		[Sim, Params, &Result, &Grid, &bSucceeded](FRHICommandListImmediate& RHICmdList)
+		[Sim, Params, &Result, &Grid, &bSucceeded](FRHICommandListImmediate& RHICmdList) mutable
 		{
+			Params.ResolveTextures_RenderThread();
+
 			FRHIGPUBufferReadback Readback(TEXT("FlowSim.SnapshotReadback"));
 			bool bCaptured = false;
 
@@ -1403,17 +1405,14 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 
 	// -- Resource handles ---------------------------------------------------
 
-	if (Config->ForcingVolume && Config->ForcingVolume->GetResource())
+	if (Config->ForcingVolume)
 	{
-		Out.ForcingTexture = Config->ForcingVolume->GetResource()->TextureRHI;
+		Out.ForcingResource = Config->ForcingVolume->GetResource();
 	}
 
 	if (Config->FlowTarget)
 	{
-		if (FTextureRenderTargetResource* Res = Config->FlowTarget->GameThread_GetRenderTargetResource())
-		{
-			Out.FlowTexture = Res->GetRenderTargetTexture();
-		}
+		Out.FlowResource = Config->FlowTarget->GameThread_GetRenderTargetResource();
 	}
 
 	// Only with UAV support, which the debug pass writes through;
@@ -1422,12 +1421,12 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	{
 		if (FTextureRenderTargetResource* Res = Config->DebugTarget->GameThread_GetRenderTargetResource())
 		{
-			Out.DebugTexture = Res->GetRenderTargetTexture();
+			Out.DebugResource = Res;
 			Out.DebugSize = FIntPoint(Config->DebugTarget->SizeX, Config->DebugTarget->SizeY);
 		}
 	}
 
-	return Out.FlowTexture.IsValid();
+	return Out.FlowResource != nullptr;
 }
 
 void UFlowSimSubsystem::TryAutoStart()
@@ -1618,8 +1617,10 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 	// Zero substeps still enqueues, so the output and debug views keep updating
 	// on a paused sim.
 	ENQUEUE_RENDER_COMMAND(FlowSimAdvance)(
-		[Sim, Params, Substeps](FRHICommandListImmediate& RHICmdList)
+		[Sim, Params, Substeps](FRHICommandListImmediate& RHICmdList) mutable
 		{
+			Params.ResolveTextures_RenderThread();
+
 			FRDGBuilder GraphBuilder(RHICmdList);
 
 			Sim->Enqueue_RenderThread(GraphBuilder, Params, Substeps);
@@ -1628,14 +1629,26 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 		});
 }
 
-void UFlowSimSubsystem::RequestShadowBake(const FGasGiantShadowParams& InParams)
+bool UFlowSimSubsystem::RequestShadowBake(const FGasGiantShadowParams& InParams)
 {
+	if (!InParams.IsUsable())
+	{
+		return false;
+	}
+
 	ShadowRequests.Add(InParams);
+	return true;
 }
 
-void UFlowSimSubsystem::RequestShadowBake(const FTerrestrialShadowParams& InParams)
+bool UFlowSimSubsystem::RequestShadowBake(const FTerrestrialShadowParams& InParams)
 {
+	if (!InParams.IsUsable())
+	{
+		return false;
+	}
+
 	TerrestrialShadowRequests.Add(InParams);
+	return true;
 }
 
 void UFlowSimSubsystem::BakeShadowMap()
@@ -1645,7 +1658,8 @@ void UFlowSimSubsystem::BakeShadowMap()
 	TArray<FGasGiantShadowParams> Requests = MoveTemp(ShadowRequests);
 	ShadowRequests.Reset();
 
-	for (const FGasGiantShadowParams& Params : Requests)
+	// Non-const, so the render command's copy can resolve its handles.
+	for (FGasGiantShadowParams& Params : Requests)
 	{
 		if (!Params.IsUsable())
 		{
@@ -1653,8 +1667,10 @@ void UFlowSimSubsystem::BakeShadowMap()
 		}
 
 		ENQUEUE_RENDER_COMMAND(GasGiantShadowBake)(
-			[Params](FRHICommandListImmediate& RHICmdList)
+			[Params](FRHICommandListImmediate& RHICmdList) mutable
 			{
+				Params.ResolveTextures_RenderThread();
+
 				FRDGBuilder GraphBuilder(RHICmdList);
 
 				GasGiantShadow::AddBakePass_RenderThread(GraphBuilder, Params);
@@ -1666,7 +1682,7 @@ void UFlowSimSubsystem::BakeShadowMap()
 	TArray<FTerrestrialShadowParams> TerrestrialRequests = MoveTemp(TerrestrialShadowRequests);
 	TerrestrialShadowRequests.Reset();
 
-	for (const FTerrestrialShadowParams& Params : TerrestrialRequests)
+	for (FTerrestrialShadowParams& Params : TerrestrialRequests)
 	{
 		if (!Params.IsUsable())
 		{
@@ -1674,8 +1690,10 @@ void UFlowSimSubsystem::BakeShadowMap()
 		}
 
 		ENQUEUE_RENDER_COMMAND(TerrestrialShadowBake)(
-			[Params](FRHICommandListImmediate& RHICmdList)
+			[Params](FRHICommandListImmediate& RHICmdList) mutable
 			{
+				Params.ResolveTextures_RenderThread();
+
 				FRDGBuilder GraphBuilder(RHICmdList);
 
 				TerrestrialShadow::AddBakePass_RenderThread(GraphBuilder, Params);

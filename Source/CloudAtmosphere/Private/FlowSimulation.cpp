@@ -14,10 +14,21 @@
 
 // TStaticSamplerState, for the wrapped trilinear forcing sampler.
 #include "RHIStaticStates.h"
+#include "TextureResource.h"
 
 DEFINE_LOG_CATEGORY(LogFlowSim);
 
-static_assert(UFlowSnapshot::FloatsPerCell == FFlowSimulation::StateFloatsPerCell,
+void FFlowSimParams::ResolveTextures_RenderThread()
+{
+	check(IsInRenderingThread());
+
+	ForcingTexture = ForcingResource ? ForcingResource->TextureRHI : FTextureRHIRef();
+	FlowTexture = FlowResource ? FTextureRHIRef(FlowResource->GetRenderTargetTexture()) : FTextureRHIRef();
+	DebugTexture = DebugResource ? FTextureRHIRef(DebugResource->GetRenderTargetTexture()) : FTextureRHIRef();
+}
+
+static_assert(UFlowSnapshot::FloatsPerCell == FFlowSimulation::StateFloatsPerCell
+	&& UFlowSnapshot::LegacyFloatsPerCell == FFlowSimulation::LegacyStateFloatsPerCell,
 	"Snapshot layout and solver state disagree about floats per cell.");
 
 static_assert(UFlowSnapshot::TrailingFloats == FFlowSimulation::StateTrailingFloats
@@ -118,8 +129,14 @@ namespace
 
 		// Wrapped in double: the forcing's pattern seeds repeat after 4096
 		// lifetimes, and the reset test needs only the phase.
-		P.SimForcingClock = (float)FMath::Fmod(Params.Time / FMath::Max((double)Params.ForcingLifetime, 1e-3), 4096.0);
-		P.SimNoiseClock = (float)FMath::Fmod(Params.Time / FMath::Max((double)Params.NoiseResetTime, 1e-6), 2.0);
+		// The forcing clock as a whole cycle and a fraction, so the fraction keeps
+		// full precision however many cycles have run.
+		const double ForcingCycles = Params.Time / FMath::Max((double)Params.ForcingLifetime, 1e-3);
+		const double ForcingWhole = FMath::FloorToDouble(ForcingCycles);
+
+		P.SimForcingCycle = (uint32)FMath::Fmod(ForcingWhole, 4294967296.0);
+		P.SimForcingFraction = (float)(ForcingCycles - ForcingWhole);
+		P.SimNoiseClock = (float)FMath::Fmod(Params.Time / (double)Params.NoiseResetTime, 2.0);
 		P.SimPlanetaryVorticity = Params.PlanetaryVorticity;
 		P.SimWaveSpeedSq = Params.Stack.DesignSpeedSq;
 		P.SimImplicitWeight = Params.ImplicitWeight;
@@ -167,7 +184,7 @@ namespace
 		P.SimStepIndex = Params.StepIndex;
 
 		P.SimNoiseDriftRate = Params.NoiseDriftRate;
-		P.SimNoiseResetTime = FMath::Max(Params.NoiseResetTime, 1e-3f);
+		P.SimNoiseResetTime = Params.NoiseResetTime;
 
 		P.SimFilterLatitude = Params.FilterLatitude;
 		P.SimFilterMaxHalfWidth = Params.FilterMaxHalfWidth;
@@ -384,18 +401,19 @@ void FFlowSimulation::AddInitPass(FRDGBuilder& GraphBuilder, const FFlowSimParam
 	AddSimPass<FFlowSimInitStateCS>(GraphBuilder, TEXT("FlowSim.InitState"), P, GroupCount2D(Params.GridSize));
 }
 
-void FFlowSimulation::AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
+void FFlowSimulation::AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R, int32 FloatsPerCell)
 {
 	FRDGBufferRef Upload = CreateStructuredBuffer(
 		GraphBuilder,
 		TEXT("FlowSim.RestoreUpload"),
 		sizeof(float),
-		StateFloats(Params.GridSize),
+		PendingRestore.Num(),
 		PendingRestore.GetData(),
 		PendingRestore.Num() * sizeof(float));
 
 	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
 	P->SimRestoreBuffer = GraphBuilder.CreateSRV(Upload);
+	P->SimRestoreFloatsPerCell = (uint32)FloatsPerCell;
 	P->SimFaceUAV = GraphBuilder.CreateUAV(R.Source());
 	P->SimPhiUAV = GraphBuilder.CreateUAV(R.Phi);
 	P->SimTracerUAV = GraphBuilder.CreateUAV(R.TracerSource());
@@ -713,10 +731,11 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	if (bNeedsSeeding || !bInitialised)
 	{
 		const int32 Expected = StateFloats(Params.GridSize);
+		const int32 FloatsPerCell = FloatsPerCellOf(Params.GridSize, PendingRestore.Num());
 
-		if (PendingRestore.Num() == Expected)
+		if (FloatsPerCell > 0)
 		{
-			AddRestorePass(GraphBuilder, Params, R);
+			AddRestorePass(GraphBuilder, Params, R, FloatsPerCell);
 
 			UE_LOG(LogFlowSim, Log, TEXT("Restored state from snapshot."));
 		}

@@ -50,8 +50,9 @@ public:
 
 	// -- Shadow bake --------------------------------------------------------
 
-	/** Queue one deck shadow map for this frame. Called by each gas giant every
-	 *  tick; the request is consumed by the next Tick and not retained.
+	/** Queue one deck shadow map for this frame. Called by each planet every
+	 *  tick; the request is consumed by the next Tick and not retained. False
+	 *  when it is unusable and dropped.
 	 *
 	 *  HOSTED HERE FOR ORDERING, NOT BECAUSE IT IS SIM STATE. The bake reads the
 	 *  flow texture this subsystem writes, and sharing a tick is what puts the
@@ -61,12 +62,12 @@ public:
 	 *  ONE MAP PER PLANET, NOT PER VIEW: the map reaches the march as a material
 	 *  parameter, which has no view dimension, so a second viewport shares the
 	 *  first's camera-derived layer fades. */
-	void RequestShadowBake(const FGasGiantShadowParams& InParams);
+	bool RequestShadowBake(const FGasGiantShadowParams& InParams);
 
 	/** The terrestrial field's bake. A SEPARATE QUEUE, not an overload sharing
 	 *  one: the two params structs are separate types bound to separate shaders,
 	 *  and they diverge as the fields do. */
-	void RequestShadowBake(const FTerrestrialShadowParams& InParams);
+	bool RequestShadowBake(const FTerrestrialShadowParams& InParams);
 
 	// -- Control ------------------------------------------------------------
 
@@ -113,9 +114,11 @@ public:
 	 *  renders.
 	 *  PITFALL: READ BEFORE THE STEP, IT LAGS THE RENDERED FIELD BY A FRAME. At a
 	 *  high SimSpeed the noise phases the renderer weights then no longer reach
-	 *  zero where the sim resets them, and the whole field snaps. */
+	 *  zero where the sim resets them, and the whole field snaps.
+	 *  Double: a float stops resolving a frame's advance within days of sim
+	 *  time, so reduce any phase from it before narrowing. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
-	float GetDisplayTime() const { return (float)(SimulatedTime - (1.0 - StateBlend) * CurrentStep); }
+	double GetDisplayTime() const { return SimulatedTime - (1.0 - StateBlend) * CurrentStep; }
 
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	int32 GetStepsCompleted() const { return StepsCompleted; }

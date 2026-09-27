@@ -35,7 +35,8 @@ SHADER_PARAMETER_ARRAY(FVector4f, SimMatModeToMontgomery, [16])
 
 // -- Time, rotation and gravity waves -----------------------------------
 SHADER_PARAMETER(float, SimDeltaTime)
-SHADER_PARAMETER(float, SimForcingClock)
+SHADER_PARAMETER(uint32, SimForcingCycle)
+SHADER_PARAMETER(float, SimForcingFraction)
 SHADER_PARAMETER(float, SimNoiseClock)
 SHADER_PARAMETER(float, SimPlanetaryVorticity)
 SHADER_PARAMETER(float, SimWaveSpeedSq)
@@ -142,6 +143,7 @@ SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SimDebugUAV)
 SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FVector4f>, SimCellSRV)
 SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FVector4f>, SimCellUAV)
 SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, SimRestoreBuffer)
+SHADER_PARAMETER(uint32, SimRestoreFloatsPerCell)
 SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, SimCaptureBuffer)
 
 SHADER_PARAMETER_TEXTURE(Texture3D, SimForcingNoise)

@@ -61,9 +61,11 @@ struct FFlowSnapshotProvenance
  *
  *  THE LAYOUT IS THE SOLVER'S STATE, one plane per float: u faces, v faces,
  *  the layer thickness, cloud fraction, cloud times formation ascent, vapour,
- *  storm, then noise phase A's displacement xyz and phase B's, each plane
- *  layer-major, then row, then column; then the storm cells, eight floats a
- *  slot. See FFlowSimulation::StateFloatsPerCell.
+ *  storm, noise phase A's displacement xyz and phase B's, then the low-passed
+ *  ascent and the eye tracer, each plane layer-major, then row, then column;
+ *  then the storm cells, eight floats a slot. The layout is told by its size:
+ *  one without the last two planes restores them as zero. See
+ *  FFlowSimulation::StateFloatsPerCell.
  *
  *  PITFALL: THE TRACERS ARE STATE TOO. The clouds, moisture and noise the deck
  *  draws are carried by the sim, not derived from the flow; a snapshot without
@@ -79,7 +81,8 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Snapshot")
 	FIntVector Grid = FIntVector::ZeroValue;
 
-	/** Length Grid.X * Grid.Y * Grid.Z * FloatsPerCell + TrailingFloats. */
+	/** Length Grid.X * Grid.Y * Grid.Z * FloatsPerCell + TrailingFloats, or the
+	 *  same with LegacyFloatsPerCell. */
 	UPROPERTY()
 	TArray<float> State;
 
@@ -94,10 +97,11 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Snapshot")
 	int32 StepsCompleted = 0;
 
-	/** Floats per cell the current solver stores. Matches
-	 *  FFlowSimulation::StateFloatsPerCell; duplicated so this header stays free
-	 *  of the render-side one. */
-	static constexpr int32 FloatsPerCell = 13;
+	/** Floats per cell the current solver stores, and the layout without the
+	 *  noise phases' w that still restores. Match FFlowSimulation's; duplicated
+	 *  so this header stays free of the render-side one. */
+	static constexpr int32 FloatsPerCell = 15;
+	static constexpr int32 LegacyFloatsPerCell = 13;
 
 	/** The storm cells after the planes. Matches
 	 *  FFlowSimulation::StateTrailingFloats. */
@@ -107,6 +111,8 @@ public:
 	{
 		const int32 N = InGrid.X * InGrid.Y * InGrid.Z;
 
-		return Grid == InGrid && N > 0 && State.Num() == N * FloatsPerCell + TrailingFloats;
+		return Grid == InGrid && N > 0
+			&& (State.Num() == N * FloatsPerCell + TrailingFloats
+				|| State.Num() == N * LegacyFloatsPerCell + TrailingFloats);
 	}
 };

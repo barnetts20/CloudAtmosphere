@@ -4,6 +4,8 @@
 #include "Engine/DataAsset.h"
 #include "FlowSimTypes.generated.h"
 
+class FTextureResource;
+class FTextureRenderTargetResource;
 class UVolumeTexture;
 class UFlowSnapshot;
 class UTextureRenderTarget2D;
@@ -1040,8 +1042,18 @@ struct FFlowSimParams
 	float DebugScale = 1.0f;
 	FIntPoint DebugSize = FIntPoint::ZeroValue;
 
-	/** A null forcing texture is legal and evaluates as zero. */
+	/** Resources on the game thread, resolved to RHI handles by
+	 *  ResolveTextures_RenderThread: a handle read on the game thread can be one
+	 *  the render thread is replacing. A null forcing volume is legal and
+	 *  evaluates as zero. */
+	FTextureResource* ForcingResource = nullptr;
+	FTextureRenderTargetResource* FlowResource = nullptr;
+	FTextureRenderTargetResource* DebugResource = nullptr;
+
+	/** Render thread only. */
 	FTextureRHIRef ForcingTexture;
 	FTextureRHIRef FlowTexture;
 	FTextureRHIRef DebugTexture;
+
+	void ResolveTextures_RenderThread();
 };

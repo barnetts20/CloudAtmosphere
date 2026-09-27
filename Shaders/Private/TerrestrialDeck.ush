@@ -224,7 +224,6 @@ struct TRFieldParams
 	 *  the entry search's cone angle. */
     float CloudSlope;
 
-    float RotationWeight;
 
 	/** The noise's solid-body drift about the spin axis, radians, wrapped, and
 	 *  noise phase A's position in its reset cycle, [0, 1). */
@@ -311,7 +310,7 @@ struct TRFieldParams
  *    CloudType         TypeBias, TypeCloud, TypeTropical, ErosionAscent
  *    CloudLid          PressureScale, CeilingDepth, CeilingPressure, StratusDepth
  *    CloudLift         BaseTropical, BasePressure, AltitudeGain, AltitudeLift
- *    CloudMotion       DriftAngle, NoisePhase, WarpShift, RotationWeight
+ *    CloudMotion       DriftAngle, NoisePhase, WarpShift, SpinAngle
  *    NoiseLevels       StructureMipBias, StructureAmount, DetailMipBias, DetailAmount
  *    <Layer>Sampling   Scale, Aspect, Erosion, FadeMean (detail) or
  *                      TypeStorm (structure)
@@ -322,9 +321,9 @@ struct TRFieldParams
  *    CloudGenus<Name>  structure channel weights for that genus
  *    CloudResponse     CloudFull, TypeCurve, StormBalance, StormBlend
  *
- *  RotationWeight is the planet's own rotation; the sim runs in the rotating
- *  frame, so it applies to the sampling position, negated because rotating the
- *  sample point backwards carries the field forwards. */
+ *  SpinAngle is the planet's own rotation, -RotationWeight * Time wrapped in
+ *  double on the CPU; the sim runs in the rotating frame, so it turns the
+ *  sampling position. Time is unread here: every clock arrives wrapped. */
 TRFieldParams TR_BuildField(
 	float PlanetRadius,
 	float HeightScale,
@@ -385,7 +384,7 @@ TRFieldParams TR_BuildField(
     F.DriftAngle = CloudMotion.x;
     F.NoisePhase = CloudMotion.y;
     F.WarpShift = CloudMotion.z;
-    F.RotationWeight = CloudMotion.w;
+    F.SpinAngle = CloudMotion.w;
 
     F.StructureMipBias = NoiseLevels.x;
     F.StructureAmount = saturate(NoiseLevels.y);
@@ -414,8 +413,6 @@ TRFieldParams TR_BuildField(
 	// most in the middle. The curves carry any asymmetry.
     F.SpanTop = clamp(F.SurfaceSoftness, 1e-4f, 0.5f) * F.CloudThickness;
     F.SpanBase = F.SpanTop;
-
-    F.SpinAngle = -F.RotationWeight * Time;
 
     F.StructureVertical = StructureSampling.x * StructureSampling.y * HeightScale;
     F.DetailVertical = DetailSampling.x * DetailSampling.y * HeightScale;

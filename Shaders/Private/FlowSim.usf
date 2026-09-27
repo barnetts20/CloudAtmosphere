@@ -96,12 +96,13 @@ float4 SimMatModeToMontgomery[16];
 
 float SimDeltaTime;
 
-/** The step's start in forcing lifetimes and in noise reset periods, wrapped
- *  in double precision on the CPU.
+/** The step's start in forcing lifetimes, as a whole cycle and a fraction,
+ *  and in noise reset periods, wrapped in double precision on the CPU.
  *  PITFALL: AN ABSOLUTE TIME IN FLOAT32 STOPS RESOLVING THE STEP after a few
  *  hundred time units at small steps: resets stop firing and the forcing's
  *  phases quantise. */
-float SimForcingClock;
+uint SimForcingCycle;
+float SimForcingFraction;
 float SimNoiseClock;
 
 /** 2 * Omega; f = SimPlanetaryVorticity * mu. */
@@ -330,14 +331,19 @@ Texture3D<float4> SimForcingNoise;
 SamplerState SimForcingNoiseSampler;
 
 /** Storm cells: two float4 of state per slot (position and intensity, 0 is a
- *  free slot; age and the last move), then the vortex and inflow gains
- *  (SIM_CELL_CONTROL_BASE). */
+ *  free slot; age and the last move), then the control block from
+ *  SIM_CELL_CONTROL_BASE: vortex and inflow gains, health and the low. */
 StructuredBuffer<float4> SimCellSRV;
 RWStructuredBuffer<float4> SimCellUAV;
 
-/** Snapshot transfer, one plane per float; see MainCaptureCS. */
+/** Snapshot transfer, one plane per float; see MainCaptureCS. A restore reads
+ *  SimRestoreFloatsPerCell planes: SIM_SNAPSHOT_PLANES, or the 13 of the layout
+ *  without the noise phases' w, which then restore as zero. */
 StructuredBuffer<float> SimRestoreBuffer;
 RWStructuredBuffer<float> SimCaptureBuffer;
+uint SimRestoreFloatsPerCell;
+
+#define SIM_SNAPSHOT_PLANES 15
 
 // -- Stack ------------------------------------------------------------------
 
@@ -504,12 +510,11 @@ float3 SimHash3(uint X)
  *  this cycle, carried east at the local zonal-mean angular rate for the
  *  cycle's age. Divided by the forcing scale so the amplitude reads as a
  *  velocity whatever the noise frequency. */
-float SimForcingPhase(float3 P, float3 Dir, uint Layer, float Rate, float Clock, uint Phase)
+float SimForcingPhase(float3 P, float3 Dir, uint Layer, float Rate, uint Cycle, float Fraction, uint Phase)
 {
-    const float Cycle = floor(Clock);
-    const float Age = (Clock - Cycle) * SimForcingLifetime;
+    const float Age = Fraction * SimForcingLifetime;
 
-    const float3 Offset = SimHash3(((uint) Cycle * 2u + Phase) * 8u + Layer);
+    const float3 Offset = SimHash3((Cycle * 2u + Phase) * 8u + Layer);
 
     float SinA, CosA;
     sincos(-Rate * Age, SinA, CosA);
@@ -549,13 +554,17 @@ float SimForcingSlope(float3 P, float3 Dir, uint Layer, float Rate)
         return 0.0f;
     }
 
-    const float Clock = SimForcingClock;
+    // Phase B runs half a cycle behind, entering its next cycle at A's middle.
+    const float FractionA = SimForcingFraction;
+    const bool bWrapB = FractionA >= 0.5f;
+    const float FractionB = bWrapB ? FractionA - 0.5f : FractionA + 0.5f;
+    const uint CycleB = SimForcingCycle + (bWrapB ? 1u : 0u);
 
-    const float WeightA = 1.0f - abs(2.0f * frac(Clock) - 1.0f);
+    const float WeightA = 1.0f - abs(2.0f * FractionA - 1.0f);
     const float WeightB = 1.0f - WeightA;
 
-    return (WeightA * SimForcingPhase(P, Dir, Layer, Rate, Clock, 0u)
-		+ WeightB * SimForcingPhase(P, Dir, Layer, Rate, Clock + 0.5f, 1u))
+    return (WeightA * SimForcingPhase(P, Dir, Layer, Rate, SimForcingCycle, FractionA, 0u)
+		+ WeightB * SimForcingPhase(P, Dir, Layer, Rate, CycleB, FractionB, 1u))
 		* rsqrt(WeightA * WeightA + WeightB * WeightB);
 }
 
@@ -3034,8 +3043,8 @@ void MainCaptureCS(uint3 Id : SV_DispatchThreadID)
 
     const float2 F = SimFaceSRV.Load(int4(Id, 0));
     const float4 Tracer = SimTracerSRV.Load(int4(Id, 0));
-    const float3 NoiseA = SimNoiseSRV.Load(int4(Id, 0)).xyz;
-    const float3 NoiseB = SimNoiseSRV.Load(int4(Id.xy, Id.z + (uint) SimGridSize.z, 0)).xyz;
+    const float4 NoiseA = SimNoiseSRV.Load(int4(Id, 0));
+    const float4 NoiseB = SimNoiseSRV.Load(int4(Id.xy, Id.z + (uint) SimGridSize.z, 0));
 
     SimCaptureBuffer[Index] = F.x;
     SimCaptureBuffer[Total + Index] = F.y;
@@ -3054,6 +3063,10 @@ void MainCaptureCS(uint3 Id : SV_DispatchThreadID)
         SimCaptureBuffer[(10 + C) * Total + Index] = NoiseB[C];
     }
 
+	// The low-passed ascent and the eye tracer.
+    SimCaptureBuffer[13 * Total + Index] = NoiseA.w;
+    SimCaptureBuffer[14 * Total + Index] = NoiseB.w;
+
     if (all(Id == 0u))
     {
 		[loop]
@@ -3064,7 +3077,7 @@ void MainCaptureCS(uint3 Id : SV_DispatchThreadID)
             [unroll]
             for (int K = 0; K < 4; K++)
             {
-                SimCaptureBuffer[13 * Total + 4 * Slot + K] = Cell[K];
+                SimCaptureBuffer[SIM_SNAPSHOT_PLANES * Total + 4 * Slot + K] = Cell[K];
             }
         }
     }
@@ -3102,16 +3115,20 @@ void MainRestoreCS(uint3 Id : SV_DispatchThreadID)
         NoiseB[C] = SimRestoreBuffer[(10 + C) * Total + Index];
     }
 
+    const bool bCarries = SimRestoreFloatsPerCell >= SIM_SNAPSHOT_PLANES;
+    const float CarryA = bCarries ? SimRestoreBuffer[13 * Total + Index] : 0.0f;
+    const float CarryB = bCarries ? SimRestoreBuffer[14 * Total + Index] : 0.0f;
+
     SimTracerUAV[int3(Id)] = Tracer;
-    SimNoiseUAV[int3(Id)] = float4(NoiseA, 0.0f);
-    SimNoiseUAV[int3(Id.xy, Id.z + (uint) SimGridSize.z)] = float4(NoiseB, 0.0f);
+    SimNoiseUAV[int3(Id)] = float4(NoiseA, CarryA);
+    SimNoiseUAV[int3(Id.xy, Id.z + (uint) SimGridSize.z)] = float4(NoiseB, CarryB);
 
     if (all(Id == 0u))
     {
 		[loop]
         for (int Slot = 0; Slot < 2 * GG_SIM_MAX_CELLS; Slot++)
         {
-            const int Base = 13 * Total + 4 * Slot;
+            const int Base = (int) SimRestoreFloatsPerCell * Total + 4 * Slot;
 
             SimCellUAV[Slot] = float4(
 				SimRestoreBuffer[Base], SimRestoreBuffer[Base + 1],

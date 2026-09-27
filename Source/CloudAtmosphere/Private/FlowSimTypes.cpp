@@ -145,9 +145,11 @@ float UFlowSimConfig::GetNoiseDriftRate() const
 	return NoiseDriftSpeed * GetSpeedRoot();
 }
 
+// The one floor: the sim's clock, its per-step reset test and the renderer's
+// crossfade all read this value, so they reset together.
 float UFlowSimConfig::GetNoiseResetTime() const
 {
-	return FMath::Max(NoiseResetTurnovers, 0.05f) * FMath::Max(DeformationRadius, 0.01f) / GetSpeedRoot();
+	return FMath::Max(FMath::Max(NoiseResetTurnovers, 0.05f) * FMath::Max(DeformationRadius, 0.01f) / GetSpeedRoot(), 1e-3f);
 }
 
 // ---------------------------------------------------------------------------

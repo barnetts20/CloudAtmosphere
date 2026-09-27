@@ -7,6 +7,7 @@
 #include "ShaderCompilerCore.h"
 
 #include "RenderUtils.h"
+#include "TextureResource.h"
 
 bool FAtmosphereTransmittanceCS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 {
@@ -36,10 +37,19 @@ namespace AtmosphereTransmittance
 {
 	static void AddBakePass_RenderThread(FRDGBuilder& GraphBuilder, const FAtmosphereTransmittanceParams& Params)
 	{
+		// Runs after the resource's own init, so a missing handle means the
+		// target failed to create.
+		FTextureRHIRef TableRHI = Params.TableResource->GetRenderTargetTexture();
+
+		if (!TableRHI.IsValid())
+		{
+			return;
+		}
+
 		RDG_EVENT_SCOPE(GraphBuilder, "AtmosphereTransmittance");
 
 		FRDGTextureRef Table = GraphBuilder.RegisterExternalTexture(
-			CreateRenderTarget(Params.Table, TEXT("Atmosphere.Transmittance")));
+			CreateRenderTarget(TableRHI, TEXT("Atmosphere.Transmittance")));
 
 		FAtmosphereTransmittanceParameters* P =
 			GraphBuilder.AllocParameters<FAtmosphereTransmittanceParameters>();

@@ -32,17 +32,29 @@ class CLOUDATMOSPHERE_API FFlowSimulation
 {
 public:
 	/** Floats per cell in a snapshot: u, v, phi, the four tracer channels
-	 *  (cloud, cloud ascent, vapour, storm), and both noise phases'
-	 *  displacements (xyz each). */
-	static constexpr int32 StateFloatsPerCell = 13;
+	 *  (cloud, cloud ascent, vapour, storm), both noise phases' displacements
+	 *  (xyz each), then the low-passed ascent and the eye tracer. */
+	static constexpr int32 StateFloatsPerCell = 15;
+
+	/** The layout without the last two planes, which a restore still reads;
+	 *  those two come back as zero. */
+	static constexpr int32 LegacyStateFloatsPerCell = 13;
 
 	/** Floats after the per-cell planes: every storm cell slot's two float4s. */
 	static constexpr int32 StateTrailingFloats = 8 * 32;
 
 	/** Floats a snapshot of this grid holds. */
-	static int32 StateFloats(const FIntVector& Grid)
+	static int32 StateFloats(const FIntVector& Grid, int32 FloatsPerCell = StateFloatsPerCell)
 	{
-		return Grid.X * Grid.Y * Grid.Z * StateFloatsPerCell + StateTrailingFloats;
+		return Grid.X * Grid.Y * Grid.Z * FloatsPerCell + StateTrailingFloats;
+	}
+
+	/** Which layout Num floats are for this grid, or 0 for neither. */
+	static int32 FloatsPerCellOf(const FIntVector& Grid, int32 Num)
+	{
+		return Num == StateFloats(Grid) ? StateFloatsPerCell
+			: Num == StateFloats(Grid, LegacyStateFloatsPerCell) ? LegacyStateFloatsPerCell
+			: 0;
 	}
 
 	/** Discard all state. The next Enqueue rebuilds and re-seeds. */
@@ -76,7 +88,7 @@ private:
 
 	void AddBalancePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	void AddInitPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
-	void AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
+	void AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R, int32 FloatsPerCell);
 	void AddReducePasses(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	/** Centre, explicit and output fields of the current faces. bLatest writes
 	 *  the output pair the resample blends toward, rather than the working pair. */
@@ -100,8 +112,8 @@ private:
 	TRefCountPtr<IPooledRenderTarget> PooledTracer[2];
 
 	/** Storm cells: two float4 of state per slot, advanced in place, then two
-	 *  float4 of vortex gains, two of inflow gains and one of health per slot,
-	 *  rewritten every substep. */
+	 *  float4 of vortex gains, two of inflow gains, one of health and one of the
+	 *  pressure low per slot, rewritten every substep. */
 	TRefCountPtr<FRDGPooledBuffer> PooledCells;
 
 	/** Noise displacements, phase A slices then phase B. Flips with the

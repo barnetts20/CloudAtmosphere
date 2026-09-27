@@ -7,6 +7,7 @@
 
 // IsFeatureLevelSupported, GBlackVolumeTexture.
 #include "RenderUtils.h"
+#include "TextureResource.h"
 
 bool FGasGiantShadowBakeCS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 {
@@ -28,13 +29,24 @@ IMPLEMENT_GLOBAL_SHADER(
 	"MainShadowBakeCS",
 	SF_Compute);
 
+void FGasGiantShadowParams::ResolveTextures_RenderThread()
+{
+	check(IsInRenderingThread());
+
+	FlowTexture = FlowResource ? FTextureRHIRef(FlowResource->GetRenderTargetTexture()) : FTextureRHIRef();
+	MapTexture = MapResource ? FTextureRHIRef(MapResource->GetRenderTargetTexture()) : FTextureRHIRef();
+	DetailTexture = DetailResource ? DetailResource->TextureRHI : FTextureRHIRef();
+	StructureTexture = StructureResource ? StructureResource->TextureRHI : FTextureRHIRef();
+}
+
 namespace GasGiantShadow
 {
 	void AddBakePass_RenderThread(FRDGBuilder& GraphBuilder, const FGasGiantShadowParams& Params)
 	{
 		check(IsInRenderingThread());
 
-		if (!Params.IsUsable())
+		// Resolved by the caller; a resource still initialising has no handle.
+		if (!Params.IsUsable() || !Params.FlowTexture.IsValid() || !Params.MapTexture.IsValid())
 		{
 			return;
 		}
@@ -113,10 +125,7 @@ namespace GasGiantShadow
 
 		P->FlowTarget = Params.FlowTexture;
 
-		// WRAP U, CLAMP V, matching the sampler the material reads the same
-		// texture with. The sim grid is a cylinder; wrapping V joins the north
-		// pole to the south, which reads as a simulation bug rather than a
-		// sampler one.
+		// Any address mode works: every face of the atlas carries its own gutter.
 		P->FlowTargetSampler = TStaticSamplerState<SF_Bilinear, AM_Wrap, AM_Clamp, AM_Clamp>::GetRHI();
 
 		// A missing volume binds black rather than refusing the bake. Black is a

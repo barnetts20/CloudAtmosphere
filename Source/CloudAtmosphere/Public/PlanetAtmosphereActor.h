@@ -1,8 +1,4 @@
-﻿// Manages a post-process volume with two blendable material instances and a
-// directional light, rendering a volumetric atmosphere and cloud layer around a
-// planet.
-//
-// THE TRANSFORM IS THE INTERFACE.
+﻿// THE TRANSFORM IS THE INTERFACE.
 //
 //   Actor Location  -> planet centre / atmosphere centre
 //   Actor Scale max -> planet radius
@@ -17,10 +13,10 @@
 // groups, with only the composite and the sim shared between them; see
 // AtmosphereParams.h.
 //
-// PITFALL: THE MARCH READS SCENE DEPTH ITSELF. There is no pass ahead of it
-// producing depth or a target size; both were traps -- a depth routed through
-// a user scene texture is quantised by distance, and a size taken from the
-// pass reports the internal resolution, not the pixel's viewport fraction.
+// PITFALL: THE MARCH READS SCENE DEPTH ITSELF, with no pass ahead of it. A
+// depth routed through a user scene texture is quantised by distance, and a
+// target size taken from a pass reports the internal resolution rather than
+// the pixel's viewport fraction.
 
 #pragma once
 
@@ -29,6 +25,7 @@
 #include "Engine/PostProcessVolume.h"
 #include "Engine/DirectionalLight.h"
 #include "Components/DirectionalLightComponent.h"
+#include "Components/PostProcessComponent.h"
 #include "Engine/VolumeTexture.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "AtmosphereParams.h"
@@ -41,12 +38,12 @@ class UTextureRenderTarget2D;
 class UTextureRenderTarget2DArray;
 
 /** Renders a volumetric atmosphere and cloud layer via post-process materials.
- *  Spawns two child actors (APostProcessVolume and ADirectionalLight) and
- *  creates two dynamic material instances assigned as blendables on the
- *  volume. Every parameter is pushed each tick by UpdateMaterialParameters, and
- *  the light's rotation and colour are synced from the actor's rotation and
- *  LightColor. When planet-owned, location and scale are locked and rotation
- *  stays editable.
+ *  Owns an unbound post-process component and a directional light component,
+ *  and creates two transient dynamic material instances assigned as
+ *  blendables on the post-process component. Every parameter is pushed each
+ *  tick by UpdateMaterialParameters, and the light's rotation and colour are
+ *  synced from the actor's rotation and LightColor. When planet-owned,
+ *  location and scale are locked and rotation stays editable.
  *
  *  ONE FUNCTION PICKS THE MATERIAL AND ONE PICKS THE PARAMETERS, BOTH FROM
  *  PlanetType. PITFALL: setting a parameter a material does not declare does
@@ -112,9 +109,9 @@ public:
     /** Destination for the deck shadow bake, in the light's frame: a cascade of
      *  slices, all one resolution, each covering a smaller radius. ASSIGNED, NOT
      *  CREATED, matching FlowTarget, so an asset can be opened beside the planet
-     *  and watched while the light moves. Size, format and UAV support are forced
-     *  on assignment; a target without bCanCreateUAV accepts every dispatch and
-     *  stays black. */
+     *  and watched while the light moves. ONE PER ATMOSPHERE: a target another
+     *  atmosphere already bakes into is refused with a warning. Size, format,
+     *  clear colour and UAV support are forced on assignment. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
     TObjectPtr<UTextureRenderTarget2DArray> ShadowTarget;
 
@@ -188,11 +185,12 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Atmosphere")
     FLinearColor LightColor = FLinearColor(30.0f, 28.5f, 27.0f, 10.0f);
 
-    /** Enable or disable the atmosphere's unbound post-process volume. THE ONLY
-     *  RELIABLE OFF-SWITCH for the ray march: the volume is not a primitive
-     *  component, so hiding the actor or disabling its tick does not stop it.
-     *  Parked planets must call this with false, or every pooled atmosphere keeps
-     *  tinting the whole screen. */
+    /** Parks or wakes the atmosphere: both passes, the light and the per-tick
+     *  push, bake and transmittance update. THE ONLY RELIABLE OFF-SWITCH for the
+     *  march: an unbound post-process component is not a primitive, so hiding
+     *  the actor or stopping its tick does not stop it. Parked planets must call
+     *  this with false, or every pooled atmosphere keeps tinting the screen and
+     *  lighting the scene. Waking rebakes every shadow level. */
     void SetAtmosphereActive(bool bActive);
 
     /** Aim the light and the march at the star: sets the actor's relative
@@ -213,7 +211,7 @@ public:
     // are visible at once, distinguished only by their parent category.
 
     // Terrestrial. The lighting groups are twinned with the gas giant's --
-    // shared STRUCTS, separate INSTANCES, since the terrestrial shell is a tenth
+    // shared STRUCTS, separate INSTANCES, since the terrestrial shell is a fifth
     // the gas giant's and every scale authored against it means something else.
     // The cloud groups are the terrestrial field's own: it reads the sim as a
     // weather map rather than as bands.
@@ -376,8 +374,8 @@ public:
 
     virtual void OnConstruction(const FTransform& Transform) override;
     virtual void BeginPlay() override;
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
     virtual void Destroyed() override;
-    virtual void BeginDestroy() override;
     virtual bool ShouldTickIfViewportsOnly() const override { return true; }
     virtual void Tick(float DeltaTime) override;
 
@@ -385,6 +383,7 @@ public:
 
 #if WITH_EDITOR
     virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+    virtual void PostEditUndo() override;
     virtual void PostEditMove(bool bFinished) override;
     virtual void EditorApplyTranslation(const FVector& DeltaTranslation, bool bAltDown, bool bShiftDown, bool bCtrlDown) override;
     virtual void EditorApplyScale(const FVector& DeltaScale, const FVector* PivotLocation, bool bAltDown, bool bShiftDown, bool bCtrlDown) override;
@@ -397,27 +396,39 @@ public:
         FVector InScale = FVector::ZeroVector);
 
 private:
-    /** Root component -- child actors (PPV, light) attach here. */
+    /** Root component; carries the planet radius as scale. */
     UPROPERTY()
     TObjectPtr<USceneComponent> AtmosphereRoot;
 
-    /** Unbound post-process volume carrying the 3 blendable material instances. */
-    UPROPERTY()
-    TObjectPtr<APostProcessVolume> PostProcessVolume = nullptr;
+    /** Unbound, carrying both blendables. COMPONENTS, NOT CHILD ACTORS: a
+     *  duplicate or a deletion takes its own and never another's. */
+    UPROPERTY(VisibleAnywhere, Category = "CloudAtmosphere|Pipeline")
+    TObjectPtr<UPostProcessComponent> PostProcessComponent;
 
-    /** Directional light whose rotation and color are synced from actor rotation
-     *  and the LightColor property. */
+    /** Synced from the actor's rotation and LightColor; absolute rotation and
+     *  scale, so the planet's frame and the root's radius never reach it. */
+    UPROPERTY(VisibleAnywhere, Category = "CloudAtmosphere|Pipeline")
+    TObjectPtr<UDirectionalLightComponent> SunLightComponent;
+
+    /** Legacy child actors a saved level can still hold, destroyed on
+     *  Initialize. */
     UPROPERTY()
-    TObjectPtr<ADirectionalLight> SunLight = nullptr;
+    TObjectPtr<APostProcessVolume> PostProcessVolume_DEPRECATED = nullptr;
+
+    UPROPERTY()
+    TObjectPtr<ADirectionalLight> SunLight_DEPRECATED = nullptr;
 
     // --- Dynamic Material Instances (created from plugin base materials) ---
+    //
+    // TRANSIENT, object and pointer: the post-process component's saved
+    // blendables would otherwise write them into the level.
 
     /** Pass 0: atmosphere + cloud ray marching. Parent depends on PlanetType. */
-    UPROPERTY()
+    UPROPERTY(Transient, DuplicateTransient)
     TObjectPtr<UMaterialInstanceDynamic> MID_Atmosphere = nullptr;
 
     /** Pass 1: distance-based blur compositing. */
-    UPROPERTY()
+    UPROPERTY(Transient, DuplicateTransient)
     TObjectPtr<UMaterialInstanceDynamic> MID_Postprocess = nullptr;
 
     /** Air transmittance table, created on first use. Visible for inspection,
@@ -426,7 +437,7 @@ private:
     UPROPERTY(Transient, VisibleInstanceOnly, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
     TObjectPtr<UTextureRenderTarget2D> TransmittanceTable = nullptr;
 
-    /** Inputs and destination of the last enqueued bake. */
+    /** Inputs of the last enqueued bake; reset when the table is recreated. */
     FAtmosphereTransmittanceParams TransmittanceBaked;
 
     /** Which model MID_Atmosphere was created for. Guards a PlanetType change
@@ -440,13 +451,20 @@ private:
 
     bool bInitialized = false;
 
-    /** When true, Initialize runs on the next Tick. Set by OnConstruction to
-     *  defer initialization until the world is ready. */
+    /** Initialize runs on the next Tick outside a preview world. True from
+     *  construction, so a loaded actor initialises without OnConstruction. */
     bool bPendingInitialize = true;
+
+    /** False while parked by SetAtmosphereActive. */
+    bool bAtmosphereActive = true;
 
     /** True once this actor has asked the subsystem to start. Cleared on
      *  teardown so a pooled planet does not leave the sim running. */
     bool bStartedSimulation = false;
+
+    /** The frame the last shadow bake was requested on: one request per frame
+     *  however many paths push parameters. */
+    uint64 ShadowBakeFrame = MAX_uint64;
 
     /** Cached scale set by the planet actor, used by the transform guard. */
     FVector PlanetDrivenScale = FVector::OneVector;
@@ -455,16 +473,15 @@ private:
      *  and scale back to planet-driven values, leaving rotation alone. */
     void OnTransformUpdated(USceneComponent* Component, EUpdateTransformFlags Flags, ETeleportType Teleport);
 
-    /** Spawns child actors, creates the material instances, pushes every
-     *  parameter and syncs the light. */
+    /** Destroys legacy child actors, creates the material instances, pushes
+     *  every parameter and syncs the light. */
     void Initialize();
 
-    /** Spawns the APostProcessVolume and ADirectionalLight as child actors,
-     *  attaching them to AtmosphereRoot. */
-    void SpawnChildActors();
+    /** Destroys the legacy child actors a saved level can still hold. */
+    void DestroyLegacyChildActors();
 
-    /** Destroys the post-process volume and directional light, nulls the MID pointers. */
-    void DestroyChildActors();
+    /** Stops the sim if this actor started it. */
+    void StopFlowSimulation();
 
     /** Creates the two dynamic material instances and assigns them as
      *  blendables. Slot 0's parent is chosen from PlanetType here and recorded
@@ -502,24 +519,32 @@ private:
 
     /** Fills the half of a bake request that does not depend on which field is
      *  baked: the map, the frame, the light, the camera and the shared groups.
-     *  Returns false when the request could not be made usable.
+     *  Returns false when the request could not be made usable. Records
+     *  nothing; CommitShadowBake does once the subsystem takes the request.
      *
      *  A TEMPLATE BECAUSE THE TWO PARAMS STRUCTS ARE SEPARATE TYPES, deliberately
      *  -- they diverge as the fields do. Both instantiations live in the one
      *  translation unit that uses them. */
     template<typename TShadowParams>
     bool FillSharedShadowParams(TShadowParams& Params, float PlanetRadius,
-        const FVector& PlanetCenter, const FVector& LightDir,
-        class FTextureRenderTargetResource*& OutFlowRes);
+        const FVector& PlanetCenter, const FVector& LightDir);
 
-    /** Forces the assigned shadow target to RGBA16F with UAV support, resizing
-     *  only when the format is wrong. Returns false when nothing is usable,
+    /** Records an accepted bake and pushes the cameras the march reads the
+     *  fine levels against. */
+    void CommitShadowBake(uint32 LevelMask, const FVector3f& LightDir, const FVector3f& CameraLocal);
+
+    /** Forces the assigned shadow target to RGBA16F with UAV support, cleared
+     *  to the no-deck sentinel, reinitialising only on a mismatch. Returns false
+     *  when nothing is usable or another atmosphere is baking into the target,
      *  having logged the reason at most once per state. */
     bool PrepareShadowTarget();
 
     /** Suppresses the per-tick repeat of the shadow target complaint. Cleared
      *  when a usable target appears, so a fixed asset logs its recovery. */
     bool bWarnedShadowTarget = false;
+
+    /** The same, for a target another atmosphere is baking into. */
+    bool bWarnedSharedShadowTarget = false;
 
     /** The next cascade in the bake rotation, and the camera each level was
      *  last baked around -- what the material reads that level against. */
@@ -603,8 +628,9 @@ private:
      *  WORLD TIME: the field is coherent against the sim's own clock, and the two
      *  diverge the moment the sim pauses, is stepped by hand or is restored from
      *  a snapshot -- after which the warp would advect a field that has not
-     *  moved. */
-    float GetGasGiantTime() const;
+     *  moved. Double; the terrestrial clocks reduce from it before narrowing,
+     *  while the gas giant's Time pin is still a raw float (GG-04). */
+    double GetFieldTime() const;
 
     /** Syncs the directional light's rotation, colour and intensity from the
      *  actor's rotation and the LightColor property. */

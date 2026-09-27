@@ -1,4 +1,5 @@
 ﻿#include "PlanetAtmosphereActor.h"
+#include "CoreGlobals.h"
 #include "Engine/PostProcessVolume.h"
 #include "Engine/DirectionalLight.h"
 #include "Components/DirectionalLightComponent.h"
@@ -7,7 +8,6 @@
 #include "Math/OrthoMatrix.h"
 #include "Engine/VolumeTexture.h"
 #include "Engine/TextureRenderTarget2D.h"
-#include "Engine/TextureRenderTarget2DArray.h"
 #include "Engine/TextureRenderTarget2DArray.h"
 #include "AtmosphereTransmittance.h"
 #include "GasGiantShadowMap.h"
@@ -97,10 +97,21 @@ static bool MaterialHasParameter(UMaterialInstanceDynamic* MID, EAtmoParamKind K
     return Known->Contains(Name);
 }
 
+/** Drops a MID's cached parameter set. Called on every MID created, since a
+ *  new instance can reuse a dead one's address or be rebuilt in place. */
+static void ForgetMaterialParameters(const UMaterialInstanceDynamic* MID)
+{
+    GKnownScalarNames.Remove(MID);
+    GKnownVectorNames.Remove(MID);
+    GKnownTextureNames.Remove(MID);
+}
+
+// Keyed and reported by path, which names the actor: every actor's instances
+// share their object names.
 static void WarnMissingParameter(const UMaterialInstanceDynamic* MID, const TCHAR* Kind, FName Name)
 {
     const FString Key = FString::Printf(TEXT("%s.%s"),
-        MID ? *MID->GetName() : TEXT("null"), *Name.ToString());
+        MID ? *MID->GetPathName() : TEXT("null"), *Name.ToString());
 
     if (GWarnedMaterialParameters.Contains(Key))
     {
@@ -111,7 +122,7 @@ static void WarnMissingParameter(const UMaterialInstanceDynamic* MID, const TCHA
 
     UE_LOG(LogTemp, Warning,
         TEXT("PlanetAtmosphereActor: material '%s' has no %s parameter '%s' -- push ignored"),
-        MID ? *MID->GetName() : TEXT("null"), Kind, *Name.ToString());
+        MID ? *MID->GetPathName() : TEXT("null"), Kind, *Name.ToString());
 }
 #endif
 
@@ -168,6 +179,17 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
 
     AtmosphereRoot = CreateDefaultSubobject<USceneComponent>(TEXT("AtmosphereRoot"));
     SetRootComponent(AtmosphereRoot);
+
+    PostProcessComponent = CreateDefaultSubobject<UPostProcessComponent>(TEXT("PostProcess"));
+    PostProcessComponent->SetupAttachment(AtmosphereRoot);
+    PostProcessComponent->bUnbound = true;
+    PostProcessComponent->BlendWeight = 1.0f;
+
+    SunLightComponent = CreateDefaultSubobject<UDirectionalLightComponent>(TEXT("SunLight"));
+    SunLightComponent->SetupAttachment(AtmosphereRoot);
+    SunLightComponent->SetMobility(EComponentMobility::Movable);
+    SunLightComponent->SetUsingAbsoluteRotation(true);
+    SunLightComponent->SetUsingAbsoluteScale(true);
 
     // Past any authored interval, so every level captures on its first tick
     // rather than shadowing nothing until its cadence comes round.
@@ -308,22 +330,22 @@ void APlanetAtmosphereActor::BeginPlay()
     }
 }
 
-void APlanetAtmosphereActor::Destroyed()
+void APlanetAtmosphereActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-    DestroyChildActors();
-    Super::Destroyed();
+    StopFlowSimulation();
+    Super::EndPlay(EndPlayReason);
 }
 
-void APlanetAtmosphereActor::BeginDestroy()
+// An editor deletion routes no EndPlay. The components go with the actor.
+void APlanetAtmosphereActor::Destroyed()
 {
-    DestroyChildActors();
-    Super::BeginDestroy();
+    StopFlowSimulation();
+    Super::Destroyed();
 }
 
 void APlanetAtmosphereActor::OnConstruction(const FTransform& Transform)
 {
     Super::OnConstruction(Transform);
-    if (!GetWorld() || GetWorld()->IsPreviewWorld()) return;
 
     if (!bInitialized)
     {
@@ -335,13 +357,15 @@ void APlanetAtmosphereActor::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
-    if (bPendingInitialize)
+    const UWorld* World = GetWorld();
+
+    if (bPendingInitialize && World && !World->IsPreviewWorld())
     {
         bPendingInitialize = false;
         Initialize();
     }
 
-    if (bInitialized)
+    if (bInitialized && bAtmosphereActive)
     {
         UpdateMaterialParameters();
         UpdateLightFromRotation();
@@ -360,7 +384,8 @@ void APlanetAtmosphereActor::PostEditChangeProperty(FPropertyChangedEvent& Prope
     const bool bTypeChanged =
         Changed == GET_MEMBER_NAME_CHECKED(APlanetAtmosphereActor, PlanetType) ||
         Changed == GET_MEMBER_NAME_CHECKED(APlanetAtmosphereActor, TerrestrialMarchMaterial) ||
-        Changed == GET_MEMBER_NAME_CHECKED(APlanetAtmosphereActor, GasGiantMarchMaterial);
+        Changed == GET_MEMBER_NAME_CHECKED(APlanetAtmosphereActor, GasGiantMarchMaterial) ||
+        Changed == GET_MEMBER_NAME_CHECKED(APlanetAtmosphereActor, PostprocessMaterial);
 
     if (bInitialized && bTypeChanged)
     {
@@ -368,12 +393,34 @@ void APlanetAtmosphereActor::PostEditChangeProperty(FPropertyChangedEvent& Prope
         return;
     }
 
-    // Everything else reaches the materials on the next Tick. PITFALL: pushing
-    // here too requests a second shadow bake that frame, and the subsystem runs
-    // both.
+    // Everything else reaches the materials on the next Tick.
     if (bInitialized)
     {
         UpdateLightFromRotation();
+    }
+}
+
+// An undo restores PlanetType or a material without a property event, so the
+// instances are checked against what the properties now name.
+void APlanetAtmosphereActor::PostEditUndo()
+{
+    Super::PostEditUndo();
+
+    if (!bInitialized)
+    {
+        return;
+    }
+
+    const TSoftObjectPtr<UMaterialInterface>& March =
+        (PlanetType == EPlanetAtmosphereType::GasGiant) ? GasGiantMarchMaterial : TerrestrialMarchMaterial;
+
+    const bool bStale = BuiltType != PlanetType
+        || !MID_Atmosphere || MID_Atmosphere->Parent != March.Get()
+        || !MID_Postprocess || MID_Postprocess->Parent != PostprocessMaterial.Get();
+
+    if (bStale)
+    {
+        RebuildMaterialInstances();
     }
 }
 
@@ -458,10 +505,19 @@ void APlanetAtmosphereActor::InitializeFromPlanet(USceneComponent* InAttachParen
 
 void APlanetAtmosphereActor::Initialize()
 {
-    SpawnChildActors();
+    DestroyLegacyChildActors();
+
+    // The components' switches are saved with them; parking is runtime state.
+    SetAtmosphereActive(bAtmosphereActive);
+
     CreateMaterialInstances();
-    UpdateMaterialParameters();
-    UpdateLightFromRotation();
+
+    if (bAtmosphereActive)
+    {
+        UpdateMaterialParameters();
+        UpdateLightFromRotation();
+    }
+
     bInitialized = true;
 }
 
@@ -471,9 +527,6 @@ void APlanetAtmosphereActor::RebuildMaterialInstances()
     // The parameter-check retrigger. Cleared before the push, so every missing
     // name reports again rather than staying silent from the first run.
     GWarnedMaterialParameters.Reset();
-    GKnownScalarNames.Reset();
-    GKnownVectorNames.Reset();
-    GKnownTextureNames.Reset();
 #endif
 
     CreateMaterialInstances();
@@ -481,90 +534,42 @@ void APlanetAtmosphereActor::RebuildMaterialInstances()
 }
 
 // --------------------------------------------------------------------------
-// Child actor management
+// Teardown and legacy child actors
 // --------------------------------------------------------------------------
 
-void APlanetAtmosphereActor::SpawnChildActors()
+void APlanetAtmosphereActor::DestroyLegacyChildActors()
 {
-    UWorld* World = GetWorld();
-    if (!World) return;
-
-    FActorSpawnParameters SpawnParams;
-    SpawnParams.Owner = this;
-    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-    // --- Post-Process Volume ---
-    if (!PostProcessVolume)
+    if (PostProcessVolume_DEPRECATED)
     {
-        PostProcessVolume = World->SpawnActor<APostProcessVolume>(
-            APostProcessVolume::StaticClass(),
-            GetActorTransform(),
-            SpawnParams);
-
-        if (PostProcessVolume)
-        {
-            PostProcessVolume->bUnbound = true;
-            PostProcessVolume->BlendWeight = 1.0f;
-
-            if (USceneComponent* PPRoot = PostProcessVolume->GetRootComponent())
-            {
-                PPRoot->AttachToComponent(AtmosphereRoot,
-                    FAttachmentTransformRules::KeepWorldTransform);
-            }
-        }
+        PostProcessVolume_DEPRECATED->Destroy();
+        PostProcessVolume_DEPRECATED = nullptr;
     }
 
-    // --- Directional Light ---
-    if (!SunLight)
+    if (SunLight_DEPRECATED)
     {
-        SunLight = World->SpawnActor<ADirectionalLight>(
-            ADirectionalLight::StaticClass(),
-            GetActorTransform(),
-            SpawnParams);
-
-        if (SunLight)
-        {
-            SunLight->GetComponent()->SetMobility(EComponentMobility::Movable);
-
-            if (USceneComponent* LightRoot = SunLight->GetRootComponent())
-            {
-                LightRoot->AttachToComponent(AtmosphereRoot,
-                    FAttachmentTransformRules::KeepWorldTransform);
-            }
-        }
+        SunLight_DEPRECATED->Destroy();
+        SunLight_DEPRECATED = nullptr;
     }
 }
 
-void APlanetAtmosphereActor::DestroyChildActors()
+void APlanetAtmosphereActor::StopFlowSimulation()
 {
     // Released before the actor goes, or a pooled planet leaves the sim
     // stepping with nothing sampling it.
-    if (bStartedSimulation)
+    if (!bStartedSimulation)
     {
-        if (UWorld* World = GetWorld())
+        return;
+    }
+
+    bStartedSimulation = false;
+
+    if (UWorld* World = GetWorld())
+    {
+        if (UFlowSimSubsystem* Sim = World->GetSubsystem<UFlowSimSubsystem>())
         {
-            if (UFlowSimSubsystem* Sim = World->GetSubsystem<UFlowSimSubsystem>())
-            {
-                Sim->StopSimulation();
-            }
+            Sim->StopSimulation();
         }
-        bStartedSimulation = false;
     }
-
-    if (PostProcessVolume)
-    {
-        PostProcessVolume->Destroy();
-        PostProcessVolume = nullptr;
-    }
-    if (SunLight)
-    {
-        SunLight->Destroy();
-        SunLight = nullptr;
-    }
-    MID_Atmosphere = nullptr;
-    MID_Postprocess = nullptr;
-
-    DestroyGasGiantOccluderCaptures();
 }
 
 // --------------------------------------------------------------------------
@@ -590,7 +595,7 @@ UMaterialInterface* APlanetAtmosphereActor::LoadMaterialAsset(const TSoftObjectP
 
 void APlanetAtmosphereActor::CreateMaterialInstances()
 {
-    if (!PostProcessVolume) return;
+    if (!PostProcessComponent) return;
 
     // THE MODEL IS CHOSEN ONCE, HERE, and recorded in BuiltType. The parameter
     // sweep dispatches on BuiltType rather than PlanetType so a type change
@@ -611,6 +616,14 @@ void APlanetAtmosphereActor::CreateMaterialInstances()
     MID_Atmosphere = UMaterialInstanceDynamic::Create(BaseAtmo, this, TEXT("MID_Atmosphere"));
     MID_Postprocess = UMaterialInstanceDynamic::Create(BasePost, this, TEXT("MID_Postprocess"));
 
+    MID_Atmosphere->SetFlags(RF_Transient);
+    MID_Postprocess->SetFlags(RF_Transient);
+
+#if WITH_EDITOR
+    ForgetMaterialParameters(MID_Atmosphere);
+    ForgetMaterialParameters(MID_Postprocess);
+#endif
+
     BuiltType = PlanetType;
 
     // The map holds the previous model's deck until every level is rebaked.
@@ -619,7 +632,7 @@ void APlanetAtmosphereActor::CreateMaterialInstances()
     // Order is the pipeline order: march, composite. Rebuilt rather
     // than assigned by index, so a stale instance cannot survive a swap and
     // write the same UserSceneTexture as its replacement.
-    FPostProcessSettings& Settings = PostProcessVolume->Settings;
+    FPostProcessSettings& Settings = PostProcessComponent->Settings;
     Settings.WeightedBlendables.Array.Empty();
     Settings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, MID_Atmosphere));
     Settings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, MID_Postprocess));
@@ -739,11 +752,11 @@ struct FTerrestrialFieldPins
 };
 
 /** The sim's noise drift angle and phase A's position in its reset cycle, at
- *  sim time Time. Reduced in double precision, so the shader's trig and its
+ *  sim time T. Reduced in double precision, so the shader's trig and its
  *  crossfade weight stay exact however long the sim has run. THE PHASE MUST BE
  *  THE SIM'S OWN: it resets each displacement where this puts its weight at
  *  zero. */
-static void NoiseClock(const UFlowSimConfig* Config, float Time, float& OutDriftAngle, float& OutPhase)
+static void NoiseClock(const UFlowSimConfig* Config, double T, float& OutDriftAngle, float& OutPhase)
 {
     OutDriftAngle = 0.0f;
     OutPhase = 0.0f;
@@ -752,8 +765,6 @@ static void NoiseClock(const UFlowSimConfig* Config, float Time, float& OutDrift
     {
         return;
     }
-
-    const double T = (double)Time;
 
     OutDriftAngle = (float)FMath::Fmod((double)Config->GetNoiseDriftRate() * T, 2.0 * UE_DOUBLE_PI);
 
@@ -765,12 +776,16 @@ static FTerrestrialFieldPins PackTerrestrialField(
     const FTerrestrialProfileParams& P, const FTerrestrialMotionParams& M,
     const FTerrestrialGenusParams& G,
     const FAtmosphereNoiseLayerParams& Structure, const FAtmosphereNoiseLayerParams& Detail,
-    const FVector2D& ShadowCascadeRadii, const UFlowSimConfig* SimConfig, float Time)
+    const FVector2D& ShadowCascadeRadii, const UFlowSimConfig* SimConfig, double Time)
 {
     FTerrestrialFieldPins Out;
 
     float DriftAngle, NoisePhase;
     NoiseClock(SimConfig, Time, DriftAngle, NoisePhase);
+
+    // The planet's own spin, wrapped in double like the drift. Negated: turning
+    // the sample point back carries the field forward.
+    const float SpinAngle = (float)FMath::Fmod(-(double)M.RotationWeight * Time, 2.0 * UE_DOUBLE_PI);
 
     Out.CloudProfile = FLinearColor(P.CloudBase, P.CloudThickness, P.SurfaceSoftness, P.CeilingFalloff);
     Out.CloudCurves = FLinearColor(P.TopCurve, P.BottomCurve, P.CloudSlope, P.WarpStretch);
@@ -778,7 +793,7 @@ static FTerrestrialFieldPins PackTerrestrialField(
     Out.CloudType = FLinearColor(P.TypeBias, P.TypeCloud, P.TypeTropical, P.ErosionAscent);
     Out.CloudLid = FLinearColor(P.PressureScale, P.CeilingDepth, P.CeilingPressure, P.StratusDepth);
     Out.CloudLift = FLinearColor(P.BaseTropical, P.BasePressure, P.AltitudeGain, P.AltitudeLift);
-    Out.CloudMotion = FLinearColor(DriftAngle, NoisePhase, P.WarpShift, M.RotationWeight);
+    Out.CloudMotion = FLinearColor(DriftAngle, NoisePhase, P.WarpShift, SpinAngle);
 
     const auto Sampling = [](const FAtmosphereNoiseLayerParams& L)
         {
@@ -847,7 +862,7 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
     // to feed the Custom node directly -- wired through a multiply against an
     // engine Time node, this value is ignored and the field advects against
     // world time, which diverges the moment the sim pauses or restores.
-    SetScalarChecked(MID_Atmosphere, TEXT("Time"), GetGasGiantTime());
+    SetScalarChecked(MID_Atmosphere, TEXT("Time"), static_cast<float>(GetFieldTime()));
 
     // The field's frame as a quaternion, which the material rebuilds the
     // rotation from. The field is defined with the spin axis on Z; the march
@@ -860,8 +875,8 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
     // -- Textures ---------------------------------------------------------------
     //
     // FlowTarget is created at runtime, so it arrives through the config rather
-    // than as a migrated asset. Its sampler must be WRAP U, CLAMP V: the sim grid
-    // is a cylinder, and wrapping V joins the north pole to the south.
+    // than as a migrated asset. Any sampler works: every face of the atlas
+    // carries its own gutter.
     //
     // ShadowTarget's sampler must be CLAMP on both axes: the map is a disc
     // inside a square, and wrapping puts the far limb against the near one. The
@@ -879,9 +894,10 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
 
     // -- The shell ----------------------------------------------------------------
     //
-    // FROM THE BUILT MODEL'S OWN GROUP, as everything below is. The pin names are
-    // shared because both materials expand the same build macro; the values
-    // behind them are not.
+    // FROM THE BUILT MODEL'S OWN GROUP, as are the field, lighting and surface
+    // shadow groups below; only Raymarch is shared. The pin names are shared
+    // because both materials expand the same build macro; the values behind them
+    // are not.
 
     SetScalarChecked(MID_Atmosphere, TEXT("HeightScale"), ActiveGeometry().HeightScale);
 
@@ -957,19 +973,17 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
 
     // -- Surface Shadows ----------------------------------------------------------
     //
-    // PACKED, unlike everything above: four related scalars on one Custom node
-    // pin, the way the band tints and the cloud phase already travel. Pack()
-    // owns the layout and GG_BuildAtmo unpacks it.
+    // PACKED: four related scalars on one Custom node pin. Pack() owns the
+    // layout and both models' atmosphere builders unpack it.
     SetVectorChecked(MID_Atmosphere, TEXT("SurfaceShadow"), ActiveSurfaceShadow().Pack());
 }
 
 // --------------------------------------------------------------------------
 // The field's own parameters
 //
-// SAME NAMES ON BOTH PATHS. The two materials carry the same pins, so what
-// differs is only which authored group a value is read from. When a field stops
-// wanting one of these it stops pushing it and its material drops the pin; the
-// checked setters catch the half-done case.
+// The gas giant pushes each member under its own name; the terrestrial field
+// packs its groups into the float4 pins TR_BuildField unpacks. A pin one side
+// pushes and its material lacks is caught by the checked setters.
 // --------------------------------------------------------------------------
 
 void APlanetAtmosphereActor::ApplyGasGiantModelParams()
@@ -986,12 +1000,9 @@ void APlanetAtmosphereActor::ApplyGasGiantModelParams()
     SetScalarChecked(MID_Atmosphere, TEXT("DeckOpticalDepth"), GasGiantProfile.DeckOpticalDepth);
     SetScalarChecked(MID_Atmosphere, TEXT("DensityCurve"), Extinction.DensityCurve);
 
-    // Read by the deck's relief and not by the terrestrial band, which routes the
-    // same channels through its own weight vectors instead.
+    // The band shape and the deck's relief.
     SetScalarChecked(MID_Atmosphere, TEXT("BandSharpness"), GasGiantBandShape.BandSharpness);
     SetScalarChecked(MID_Atmosphere, TEXT("BandBias"), GasGiantBandShape.BandBias);
-    // These four are the deck's relief. The terrestrial band routes the same
-    // channels through its own weight vectors and carries no such pins.
     SetScalarChecked(MID_Atmosphere, TEXT("BandRelief"), GasGiantBandShape.BandRelief);
     SetScalarChecked(MID_Atmosphere, TEXT("PressureRelief"), Flow.PressureRelief);
     SetScalarChecked(MID_Atmosphere, TEXT("VortexThreshold"), Flow.VortexThreshold);
@@ -1030,7 +1041,7 @@ void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
     const FTerrestrialFieldPins Pins = PackTerrestrialField(
         TerrestrialProfile, TerrestrialMotion, TerrestrialGenus,
         TerrestrialStructureLayer, TerrestrialDetailLayer,
-        ShadowCascadeRadii, Simulation.Config, GetGasGiantTime());
+        ShadowCascadeRadii, Simulation.Config, GetFieldTime());
 
     SetVectorChecked(MID_Atmosphere, TEXT("CloudProfile"), Pins.CloudProfile);
     SetVectorChecked(MID_Atmosphere, TEXT("CloudCurves"), Pins.CloudCurves);
@@ -1076,6 +1087,19 @@ void APlanetAtmosphereActor::ApplyNoiseLayer(const TCHAR* Prefix, const FAtmosph
     SetScalarChecked(MID_Atmosphere, Name(TEXT("Crossfade")), Layer.bCrossfade ? 1.0f : 0.0f);
 }
 
+/** ATMO_SHADOW_NO_DECK in AtmosphereShadowMap.ush: every crossing past any
+ *  chord, so an unbaked texel reads as fully lit. */
+static constexpr float ShadowNoDeck = 1000.0f;
+
+/** Which actor bakes into each shadow target, and on which frame it last did. */
+struct FShadowTargetClaim
+{
+    TWeakObjectPtr<const APlanetAtmosphereActor> Actor;
+    uint64 Frame = 0;
+};
+
+static TMap<TWeakObjectPtr<const UTextureRenderTarget2DArray>, FShadowTargetClaim> GShadowTargetClaims;
+
 bool APlanetAtmosphereActor::PrepareShadowTarget()
 {
     UTextureRenderTarget2DArray* Target = ShadowTarget;
@@ -1087,13 +1111,43 @@ bool APlanetAtmosphereActor::PrepareShadowTarget()
             bWarnedShadowTarget = true;
 
             UE_LOG(LogTemp, Warning,
-                TEXT("%s: no Gas Giant Shadow Target set. Create a Texture Render Target 2D ")
+                TEXT("%s: no Shadow Target set. Create a Texture Render Target 2D ")
                 TEXT("Array asset and assign it; the deck shadow bake has nowhere to write."),
                 *GetName());
         }
 
         return false;
     }
+
+    // ONE ACTOR PER TARGET. Two baking into one asset re-init it against each
+    // other's settings and overwrite each other's slices. The first to claim it
+    // keeps it while it keeps baking; a play world's actor takes it from an
+    // editor world's, so a PIE session shadows even while the editor ticks.
+    FShadowTargetClaim& Claim = GShadowTargetClaims.FindOrAdd(Target);
+    const APlanetAtmosphereActor* Holder = Claim.Actor.Get();
+
+    const bool bHeld = Holder && Holder != this && Claim.Frame + 1 >= GFrameCounter;
+    const bool bOutranks = GetWorld() && GetWorld()->IsGameWorld()
+        && !(Holder && Holder->GetWorld() && Holder->GetWorld()->IsGameWorld());
+
+    if (bHeld && !bOutranks)
+    {
+        if (!bWarnedSharedShadowTarget)
+        {
+            bWarnedSharedShadowTarget = true;
+
+            UE_LOG(LogTemp, Warning,
+                TEXT("%s: Shadow Target '%s' is already baked by '%s'. Assign each ")
+                TEXT("atmosphere its own target; this one bakes no shadows until then."),
+                *GetName(), *Target->GetName(), *Holder->GetName());
+        }
+
+        return false;
+    }
+
+    Claim.Actor = this;
+    Claim.Frame = GFrameCounter;
+    bWarnedSharedShadowTarget = false;
 
     const int32 Edge = FMath::Clamp(ShadowResolution, 64, 4096);
 
@@ -1108,18 +1162,25 @@ bool APlanetAtmosphereActor::PrepareShadowTarget()
     const int32 DesiredSlices =
         AtmoShadowBake::SlicesFor(GasGiantOccluderShadows.IsEnabled());
 
+    // CLEARED TO THE NO-DECK SENTINEL, so a texel no bake has reached reads lit
+    // rather than shadowed. PITFALL: the occluder band's neutral value is zero,
+    // which this clear does not give it; the band exists only while that feature
+    // is unparked.
+    const FLinearColor Clear(ShadowNoDeck, ShadowNoDeck, ShadowNoDeck, ShadowNoDeck);
+
     const bool bMismatch =
         Target->SizeX != Edge ||
         Target->SizeY != Edge ||
         Target->Slices != DesiredSlices ||
         Target->OverrideFormat != PF_FloatRGBA ||
+        Target->ClearColor != Clear ||
         !Target->bCanCreateUAV;
 
     if (bMismatch)
     {
         Target->bCanCreateUAV = true;
         Target->OverrideFormat = PF_FloatRGBA;
-        Target->ClearColor = FLinearColor::Black;
+        Target->ClearColor = Clear;
 
         // The map stores depths in atmosphere thicknesses, which run well past 1
         // and reach the no-deck sentinel at 1000. A float format has no sRGB
@@ -1130,7 +1191,7 @@ bool APlanetAtmosphereActor::PrepareShadowTarget()
 
         bShadowPrimed = false;
 
-        UE_LOG(LogTemp, Log, TEXT("%s: Gas Giant Shadow Target set to %dx%d x %d RGBA16F."),
+        UE_LOG(LogTemp, Log, TEXT("%s: Shadow Target set to %dx%d x %d RGBA16F."),
             *GetName(), Edge, Edge, DesiredSlices);
     }
 
@@ -1472,19 +1533,9 @@ void APlanetAtmosphereActor::UpdateOccluderCaptures(
             }
         }
 
-        // The atmosphere's own actors. None of them render opaque depth, so
-        // this is insurance rather than a fix.
+        // The atmosphere itself. Nothing on it renders opaque depth, so this
+        // is insurance rather than a fix.
         Capture->HiddenActors.Add(this);
-
-        if (PostProcessVolume)
-        {
-            Capture->HiddenActors.Add(PostProcessVolume);
-        }
-
-        if (SunLight)
-        {
-            Capture->HiddenActors.Add(SunLight);
-        }
 
         FAtmoOccluderFrame& Frame = OccluderFrames[Level];
 
@@ -1591,6 +1642,9 @@ void APlanetAtmosphereActor::PrepareTransmittanceTable()
         Table->InitCustomFormat(AtmosphereTransmittance::Width, AtmosphereTransmittance::Height,
             AtmosphereTransmittance::Format, true);
         Table->UpdateResourceImmediate(true);
+
+        // A recreated table comes back cleared.
+        TransmittanceBaked = FAtmosphereTransmittanceParams();
     }
 }
 
@@ -1614,10 +1668,8 @@ void APlanetAtmosphereActor::UpdateTransmittanceTable(float PlanetRadius)
     Params.AtmosphereRadius = ActiveGeometry().GetAtmosphereRadius(PlanetRadius);
     Params.ProfilePins = FVector4f(
         Air.RayleighScaleHeight, Air.MieScaleHeight, Air.AbsorptionAltitude, Air.AbsorptionFalloff);
-    Params.Table = TableRes->GetRenderTargetTexture();
+    Params.TableResource = TableRes;
 
-    // A null texture means the resource is still initialising. Not recorded as
-    // baked, so the next tick tries again.
     if (Params.IsUsable() && !Params.Matches(TransmittanceBaked))
     {
         AtmosphereTransmittance::RequestBake(Params);
@@ -1630,7 +1682,7 @@ void APlanetAtmosphereActor::UpdateTransmittanceTable(float PlanetRadius)
 template<typename TShadowParams>
 bool APlanetAtmosphereActor::FillSharedShadowParams(
     TShadowParams& Params, float PlanetRadius, const FVector& PlanetCenter,
-    const FVector& LightDir, FTextureRenderTargetResource*& OutFlowRes)
+    const FVector& LightDir)
 {
     UWorld* World = GetWorld();
 
@@ -1644,17 +1696,13 @@ bool APlanetAtmosphereActor::FillSharedShadowParams(
         return false;
     }
 
-    OutFlowRes = Simulation.Config->FlowTarget->GameThread_GetRenderTargetResource();
+    Params.FlowResource = Simulation.Config->FlowTarget->GameThread_GetRenderTargetResource();
+    Params.MapResource = ShadowTarget->GameThread_GetRenderTargetResource();
 
-    FTextureRenderTargetResource* MapRes =
-        ShadowTarget->GameThread_GetRenderTargetResource();
-
-    if (!OutFlowRes || !MapRes)
+    if (!Params.FlowResource || !Params.MapResource)
     {
         return false;
     }
-
-    FTextureRenderTargetResource* FlowRes = OutFlowRes;
 
     // -- Frame --------------------------------------------------------------
     //
@@ -1695,7 +1743,8 @@ bool APlanetAtmosphereActor::FillSharedShadowParams(
     // -- Rotation -----------------------------------------------------------
     //
     // ShadowLevelsPerFrame levels this request, taken in turn; every level on
-    // the first request into a fresh target, which holds nothing yet.
+    // the first request into a fresh target, which holds nothing yet. NOTHING
+    // IS RECORDED HERE: CommitShadowBake does that once the request is taken.
     const int32 LevelCount = AtmoShadowBake::CascadeCount;
 
     // A fresh target holds nothing to blend from.
@@ -1704,8 +1753,6 @@ bool APlanetAtmosphereActor::FillSharedShadowParams(
     if (!bShadowPrimed)
     {
         Params.LevelMask = (1u << LevelCount) - 1u;
-        ShadowLevelCursor = 0;
-        bShadowPrimed = true;
     }
     else
     {
@@ -1713,8 +1760,7 @@ bool APlanetAtmosphereActor::FillSharedShadowParams(
 
         for (int32 i = 0; i < FMath::Clamp(ShadowLevelsPerFrame, 1, LevelCount); ++i)
         {
-            Params.LevelMask |= 1u << ShadowLevelCursor;
-            ShadowLevelCursor = (ShadowLevelCursor + 1) % LevelCount;
+            Params.LevelMask |= 1u << ((ShadowLevelCursor + i) % LevelCount);
         }
     }
 
@@ -1750,25 +1796,7 @@ bool APlanetAtmosphereActor::FillSharedShadowParams(
             History.Weight = FMath::Min(
                 FMath::Exp(-Age / ShadowTemporalSmoothing), AtmoShadowBake::MaxHistoryWeight);
         }
-
-        ShadowBakedCamera[Level] = Params.CameraLocal;
-        ShadowBakedLight[Level] = Params.LightDir;
-        ShadowBakeTime[Level] = Now;
     }
-
-    // PUSHED, NOT RE-DERIVED, AND PER LEVEL. A fine cascade's centre is snapped
-    // to its own texel grid from the camera it was baked around, so the reader
-    // has to snap from that same camera. Any other -- the material's own, or a
-    // level baked frames ago read against this frame's -- can land a whole texel
-    // out, which is a jump in where the map sits, not a smooth disagreement.
-    // Level 0 is planet-centred and needs none.
-    const auto PushCamera = [this](const TCHAR* Name, const FVector3f& Camera)
-        {
-            SetVectorChecked(MID_Atmosphere, Name, FLinearColor(Camera.X, Camera.Y, Camera.Z, 0.0f));
-        };
-
-    PushCamera(TEXT("ShadowCamera1"), ShadowBakedCamera[1]);
-    PushCamera(TEXT("ShadowCamera2"), ShadowBakedCamera[2]);
 
     // NO EXTENT AND NO CENTRE PUSHED. Every cascade derives its half-width from
     // the fade radii and its centre from the camera, on both sides, so the level
@@ -1790,7 +1818,7 @@ bool APlanetAtmosphereActor::FillSharedShadowParams(
 
     Params.PlanetRadius = PlanetRadius;
     Params.HeightScale = ActiveGeometry().HeightScale;
-    Params.Time = GetGasGiantTime();
+    Params.Time = static_cast<float>(GetFieldTime());
 
     // -- Extinction ---------------------------------------------------------
 
@@ -1798,23 +1826,11 @@ bool APlanetAtmosphereActor::FillSharedShadowParams(
 
     // -- Volumes ------------------------------------------------------------
     //
-    // RHI handles taken from the properties ApplyMarchParams already pushes,
-    // not a second reference to the assets. A compute pass runs on the render
-    // thread and cannot reach a UObject, so this is the only crossing available.
+    // Resources of the properties ApplyMarchParams already pushes, not a second
+    // reference to the assets: a compute pass cannot reach a UObject.
 
-    if (Detail.Volume && Detail.Volume->GetResource())
-    {
-        Params.DetailTexture = Detail.Volume->GetResource()->TextureRHI;
-    }
-
-    if (Structure.Volume && Structure.Volume->GetResource())
-    {
-        Params.StructureTexture = Structure.Volume->GetResource()->TextureRHI;
-    }
-
-    Params.FlowTexture = FlowRes->GetRenderTargetTexture();
-
-    Params.MapTexture = MapRes->GetRenderTargetTexture();
+    Params.DetailResource = Detail.Volume ? Detail.Volume->GetResource() : nullptr;
+    Params.StructureResource = Structure.Volume ? Structure.Volume->GetResource() : nullptr;
 
     // -- Occluders ----------------------------------------------------------
     //
@@ -1844,23 +1860,25 @@ void APlanetAtmosphereActor::RequestShadowBake(
 
     UFlowSimSubsystem* Sim = World ? World->GetSubsystem<UFlowSimSubsystem>() : nullptr;
 
-    if (!Sim)
+    // ONE REQUEST PER FRAME. Initialize, a rebuild and Tick can all push in one
+    // frame, and the subsystem would run every request it is handed.
+    if (!Sim || ShadowBakeFrame == GFrameCounter)
     {
         return;
     }
+
+    ShadowBakeFrame = GFrameCounter;
 
     // ONE REQUEST PER FIELD TYPE, because the two parameter structs are separate
     // types bound to separate shaders. What they hold is the same today and is
     // expected not to stay that way.
     const auto ToVector4 = [](const FLinearColor& C) { return FVector4f(C.R, C.G, C.B, C.A); };
 
-    FTextureRenderTargetResource* FlowRes = nullptr;
-
     if (BuiltType == EPlanetAtmosphereType::GasGiant)
     {
         FGasGiantShadowParams Params;
 
-        if (!FillSharedShadowParams(Params, PlanetRadius, PlanetCenter, LightDir, FlowRes))
+        if (!FillSharedShadowParams(Params, PlanetRadius, PlanetCenter, LightDir))
         {
             return;
         }
@@ -1922,13 +1940,16 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.DetailBandMix = DetailLayer.BandMix;
         Params.DetailCrossfade = DetailLayer.bCrossfade ? 1.0f : 0.0f;
 
-        Sim->RequestShadowBake(Params);
+        if (Sim->RequestShadowBake(Params))
+        {
+            CommitShadowBake(Params.LevelMask, Params.LightDir, Params.CameraLocal);
+        }
     }
     else
     {
         FTerrestrialShadowParams Params;
 
-        if (!FillSharedShadowParams(Params, PlanetRadius, PlanetCenter, LightDir, FlowRes))
+        if (!FillSharedShadowParams(Params, PlanetRadius, PlanetCenter, LightDir))
         {
             return;
         }
@@ -1936,7 +1957,7 @@ void APlanetAtmosphereActor::RequestShadowBake(
         const FTerrestrialFieldPins Pins = PackTerrestrialField(
             TerrestrialProfile, TerrestrialMotion, TerrestrialGenus,
             TerrestrialStructureLayer, TerrestrialDetailLayer,
-            ShadowCascadeRadii, Simulation.Config, Params.Time);
+            ShadowCascadeRadii, Simulation.Config, GetFieldTime());
 
         Params.CloudProfile = ToVector4(Pins.CloudProfile);
         Params.CloudCurves = ToVector4(Pins.CloudCurves);
@@ -1961,8 +1982,48 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.CloudExtinction = ToVector4(TerrestrialCloudMaterial.CloudExtinction);
         Params.StormExtinction = ToVector4(TerrestrialCloudMaterial.StormExtinction);
 
-        Sim->RequestShadowBake(Params);
+        if (Sim->RequestShadowBake(Params))
+        {
+            CommitShadowBake(Params.LevelMask, Params.LightDir, Params.CameraLocal);
+        }
     }
+}
+
+void APlanetAtmosphereActor::CommitShadowBake(
+    uint32 LevelMask, const FVector3f& LightDir, const FVector3f& CameraLocal)
+{
+    const int32 LevelCount = AtmoShadowBake::CascadeCount;
+    const double Now = FPlatformTime::Seconds();
+
+    for (int32 Level = 0; Level < LevelCount; ++Level)
+    {
+        if (LevelMask & (1u << Level))
+        {
+            ShadowBakedCamera[Level] = CameraLocal;
+            ShadowBakedLight[Level] = LightDir;
+            ShadowBakeTime[Level] = Now;
+        }
+    }
+
+    ShadowLevelCursor = bShadowPrimed
+        ? (ShadowLevelCursor + FMath::CountBits(LevelMask)) % LevelCount
+        : 0;
+
+    bShadowPrimed = true;
+
+    // PUSHED, NOT RE-DERIVED, AND PER LEVEL. A fine cascade's centre is snapped
+    // to its own texel grid from the camera it was baked around, so the reader
+    // has to snap from that same camera. Any other -- the material's own, or a
+    // level baked frames ago read against this frame's -- can land a whole texel
+    // out, which is a jump in where the map sits, not a smooth disagreement.
+    // Level 0 is planet-centred and needs none.
+    const auto PushCamera = [this](const TCHAR* Name, const FVector3f& Camera)
+        {
+            SetVectorChecked(MID_Atmosphere, Name, FLinearColor(Camera.X, Camera.Y, Camera.Z, 0.0f));
+        };
+
+    PushCamera(TEXT("ShadowCamera1"), ShadowBakedCamera[1]);
+    PushCamera(TEXT("ShadowCamera2"), ShadowBakedCamera[2]);
 }
 
 // --------------------------------------------------------------------------
@@ -1989,7 +2050,7 @@ void APlanetAtmosphereActor::StartFlowSimulation()
     bStartedSimulation = true;
 }
 
-float APlanetAtmosphereActor::GetGasGiantTime() const
+double APlanetAtmosphereActor::GetFieldTime() const
 {
     if (const UWorld* World = GetWorld())
     {
@@ -1998,7 +2059,7 @@ float APlanetAtmosphereActor::GetGasGiantTime() const
             return Sim->GetDisplayTime();
         }
     }
-    return 0.0f;
+    return 0.0;
 }
 
 // --------------------------------------------------------------------------
@@ -2030,15 +2091,12 @@ FQuat APlanetAtmosphereActor::GetFieldFrame() const
 
 void APlanetAtmosphereActor::UpdateLightFromRotation()
 {
-    if (!SunLight) return;
-
-    UDirectionalLightComponent* LightComp = SunLight->GetComponent();
+    UDirectionalLightComponent* LightComp = SunLightComponent;
     if (!LightComp) return;
 
     // Directional light faces opposite the light direction vector
     const FVector LightDir = GetRootComponent()->GetRelativeRotation().Vector();
-    const FRotator SunRotation = (-LightDir).Rotation();
-    SunLight->SetActorRotation(SunRotation);
+    LightComp->SetWorldRotation((-LightDir).Rotation());
 
     // Extract color and intensity from LightColor.
     // RGB = normalized color, magnitude of RGB = intensity multiplier.
@@ -2063,8 +2121,23 @@ void APlanetAtmosphereActor::UpdateLightFromRotation()
 
 void APlanetAtmosphereActor::SetAtmosphereActive(bool bActive)
 {
-    // bEnabled drops the volume out of the post-process chain entirely -- the ray march
-    // stops. Unbound volumes affect the whole camera regardless of actor visibility, so
-    // this is what makes a pooled/dormant planet cost zero atmosphere GPU.
-    if (PostProcessVolume) PostProcessVolume->bEnabled = bActive;
+    // The map stopped following the clouds while parked.
+    if (bActive && !bAtmosphereActive)
+    {
+        bShadowPrimed = false;
+    }
+
+    bAtmosphereActive = bActive;
+
+    // bEnabled drops both passes out of the post-process chain; Tick stops the
+    // parameter push, the bake and the transmittance update.
+    if (PostProcessComponent)
+    {
+        PostProcessComponent->bEnabled = bActive;
+    }
+
+    if (SunLightComponent)
+    {
+        SunLightComponent->SetVisibility(bActive);
+    }
 }

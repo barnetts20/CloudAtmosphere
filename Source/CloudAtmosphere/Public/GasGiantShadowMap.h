@@ -8,6 +8,8 @@
 #include "AtmosphereShadowBake.h"
 
 class FRDGBuilder;
+class FTextureResource;
+class FTextureRenderTargetResource;
 
 /** Everything the shadow bake reads, flattened for the render thread.
  *
@@ -118,21 +120,32 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 	float LightExtinctionFraction = 0.0f;
 
 	// -- Resources ----------------------------------------------------------
+	//
+	// RESOURCES ON THE GAME THREAD, RHI HANDLES ON THE RENDER THREAD. A handle
+	// read on the game thread can be one the render thread is replacing; the
+	// resource object is stable until a release enqueued after this request.
+	// ResolveTextures_RenderThread fills the handles from the resources.
 
 	/** The sim's flow output. Read, never written. */
-	FTextureRHIRef FlowTexture;
+	FTextureRenderTargetResource* FlowResource = nullptr;
 
-	/** The deck's noise volumes, from the actor's own properties -- these are
-	 *  RHI handles rather than a second asset reference, since a compute pass
-	 *  cannot reach a UObject. Either may be null; the pass binds black, which
-	 *  is a defined value through the noise and gives an uncarved deck. */
-	FTextureRHIRef DetailTexture;
-	FTextureRHIRef StructureTexture;
+	/** The deck's noise volumes, from the actor's own properties. Either may be
+	 *  null; the pass then binds black. */
+	FTextureResource* DetailResource = nullptr;
+	FTextureResource* StructureResource = nullptr;
 
 	/** The bake's destination: AtmoShadowBake::CascadeCount slices, pushed to the
 	 *  march as a single array parameter. Fewer slices leaves the inner cascades
 	 *  unwritten and the march reads whatever the target held. */
+	FTextureRenderTargetResource* MapResource = nullptr;
+
+	/** Render thread only, filled by ResolveTextures_RenderThread. */
+	FTextureRHIRef FlowTexture;
+	FTextureRHIRef DetailTexture;
+	FTextureRHIRef StructureTexture;
 	FTextureRHIRef MapTexture;
+
+	void ResolveTextures_RenderThread();
 
 	// -- Occluders ----------------------------------------------------------
 
@@ -165,8 +178,8 @@ struct CLOUDATMOSPHERE_API FGasGiantShadowParams
 	 *  game thread than a dispatch is to unwind on the render thread. */
 	bool IsUsable() const
 	{
-		return FlowTexture.IsValid()
-			&& MapTexture.IsValid()
+		return FlowResource
+			&& MapResource
 			&& MapSize.X > 0
 			&& MapSize.X == MapSize.Y
 			&& PlanetRadius > 0.0f;
@@ -294,7 +307,7 @@ public:
 namespace GasGiantShadow
 {
 	/** Adds the bake to the graph, or does nothing when Params is unusable.
-	 *  Render thread. */
+	 *  Render thread; Params must already be resolved. */
 	CLOUDATMOSPHERE_API void AddBakePass_RenderThread(
 		FRDGBuilder& GraphBuilder, const FGasGiantShadowParams& Params);
 }

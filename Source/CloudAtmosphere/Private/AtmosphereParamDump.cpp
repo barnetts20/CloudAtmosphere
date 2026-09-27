@@ -13,6 +13,7 @@
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "PlanetAtmosphereActor.h"
+#include "Serialization/CustomVersion.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "UObject/UnrealType.h"
@@ -28,7 +29,7 @@
 // with both values, so the tuned assets can be told apart from the class
 // defaults and read back as the source of new defaults and presets.
 //
-// CloudAtmosphere.LoadParams FileName [Sim|Atmospheres]
+// CloudAtmosphere.LoadParams FileName [Sim|Atmospheres] [Pipeline]
 //
 // Reads a file in the same layout back into the running sim config and the
 // world's atmosphere actors. See AtmosphereLoad.
@@ -38,6 +39,21 @@ DEFINE_LOG_CATEGORY_STATIC(LogAtmosphereDump, Log, All);
 namespace AtmosphereDump
 {
 	using FFilter = TFunctionRef<bool(const FProperty*)>;
+
+	/** The sim config's saved-data version, the one its PostLoad converts
+	 *  from; -1 if unregistered. */
+	int32 ConfigVersion()
+	{
+		for (const FCustomVersion& Version : FCurrentCustomVersions::GetAll().GetAllVersions())
+		{
+			if (Version.GetFriendlyName() == FName(TEXT("FlowSimConfig")))
+			{
+				return Version.Version;
+			}
+		}
+
+		return -1;
+	}
 
 	/** Every property but those kept only to load old data. */
 	bool Current(const FProperty* Property)
@@ -145,6 +161,7 @@ namespace AtmosphereDump
 
 		Out->SetBoolField(TEXT("Running"), Sub.IsRunning());
 		Out->SetStringField(TEXT("Config"), PathOf(Config));
+		Out->SetNumberField(TEXT("ConfigVersion"), ConfigVersion());
 		Out->SetNumberField(TEXT("SimulatedTime"), Sub.GetSimulatedTime());
 		Out->SetNumberField(TEXT("DisplayTime"), Sub.GetDisplayTime());
 		Out->SetNumberField(TEXT("StepsCompleted"), Sub.GetStepsCompleted());
@@ -420,7 +437,84 @@ namespace AtmosphereLoad
 		int32 Applied = 0;
 		int32 Unchanged = 0;
 		TArray<FString> Skipped;
+		TArray<FString> Clamped;
+
+		/** Top-level members left alone unless the Pipeline argument is given. */
+		const TSet<FName>* Excluded = nullptr;
 	};
+
+	/** Assets, targets, debug views and start state: what a machine or a
+	 *  session owns rather than what a tune is, so a preset does not repoint
+	 *  them. */
+	const TSet<FName>& SimPipeline()
+	{
+		static const TSet<FName> Names = {
+			TEXT("InitialState"), TEXT("FlowTarget"), TEXT("DebugTarget"), TEXT("bAutoResizeTargets"),
+			TEXT("DebugMode"), TEXT("DebugLayer"), TEXT("DebugScale"), TEXT("bPaused") };
+		return Names;
+	}
+
+	const TSet<FName>& ActorPipeline()
+	{
+		static const TSet<FName> Names = {
+			TEXT("TerrestrialMarchMaterial"), TEXT("GasGiantMarchMaterial"), TEXT("PostprocessMaterial"),
+			TEXT("Simulation"), TEXT("ShadowTarget") };
+		return Names;
+	}
+
+#if WITH_EDITOR
+	/** Holds a number to its ClampMin and ClampMax, which the panel enforces and
+	 *  a file does not. True when it moved. */
+	bool ClampToMeta(const FProperty* Property, void* Value)
+	{
+		const FNumericProperty* Numeric = CastField<FNumericProperty>(Property);
+
+		if (!Numeric || Property->ArrayDim != 1 || Numeric->IsEnum())
+		{
+			return false;
+		}
+
+		const FString& MinText = Property->GetMetaData(TEXT("ClampMin"));
+		const FString& MaxText = Property->GetMetaData(TEXT("ClampMax"));
+
+		if (MinText.IsEmpty() && MaxText.IsEmpty())
+		{
+			return false;
+		}
+
+		const double Was = Numeric->IsFloatingPoint()
+			? Numeric->GetFloatingPointPropertyValue(Value)
+			: (double)Numeric->GetSignedIntPropertyValue(Value);
+
+		double Held = Was;
+
+		if (!MinText.IsEmpty())
+		{
+			Held = FMath::Max(Held, FCString::Atod(*MinText));
+		}
+
+		if (!MaxText.IsEmpty())
+		{
+			Held = FMath::Min(Held, FCString::Atod(*MaxText));
+		}
+
+		if (Held == Was)
+		{
+			return false;
+		}
+
+		if (Numeric->IsFloatingPoint())
+		{
+			Numeric->SetFloatingPointPropertyValue(Value, Held);
+		}
+		else
+		{
+			Numeric->SetIntPropertyValue(Value, (int64)Held);
+		}
+
+		return true;
+	}
+#endif
 
 	/** Members the panel edits, less those kept only to load old data. */
 	bool Loadable(const FProperty* Property)
@@ -487,6 +581,13 @@ namespace AtmosphereLoad
 			}
 		}
 
+#if WITH_EDITOR
+		if (bParsed && ClampToMeta(Property, Scratch))
+		{
+			Report.Clamped.Add(Name);
+		}
+#endif
+
 		if (bParsed && !Property->Identical(Value, Scratch))
 		{
 			Property->CopyCompleteValue(Value, Scratch);
@@ -509,6 +610,12 @@ namespace AtmosphereLoad
 		if (!Property || (bTop ? !Loadable(Property) : Property->HasAnyPropertyFlags(CPF_Deprecated)))
 		{
 			Report.Skipped.Add(Name + (Property ? TEXT(" (not editable)") : TEXT(" (unknown)")));
+			return nullptr;
+		}
+
+		if (bTop && Report.Excluded && Report.Excluded->Contains(Property->GetFName()))
+		{
+			Report.Skipped.Add(Name + TEXT(" (pipeline; pass Pipeline to apply)"));
 			return nullptr;
 		}
 
@@ -592,7 +699,8 @@ namespace AtmosphereLoad
 	/** One section onto one object: its Values when the section has them, the
 	 *  full state, otherwise its Overrides of the C++ defaults over what the
 	 *  object already holds. */
-	void ApplySection(UObject& Target, const UStruct* Type, const FJsonObject& Section, const FString& Label)
+	void ApplySection(UObject& Target, const UStruct* Type, const FJsonObject& Section, const FString& Label,
+		const TSet<FName>* Excluded)
 	{
 		const TSharedPtr<FJsonObject>* Values = nullptr;
 		const TSharedPtr<FJsonObject>* Overrides = nullptr;
@@ -608,6 +716,7 @@ namespace AtmosphereLoad
 #endif
 
 		FReport Report;
+		Report.Excluded = Excluded;
 
 		if (Values)
 		{
@@ -630,6 +739,11 @@ namespace AtmosphereLoad
 		{
 			UE_LOG(LogAtmosphereDump, Warning, TEXT("  skipped %s"), *Skipped);
 		}
+
+		for (const FString& Clamped : Report.Clamped)
+		{
+			UE_LOG(LogAtmosphereDump, Warning, TEXT("  clamped %s to its range"), *Clamped);
+		}
 	}
 
 	/** The file as given, or under Saved/CloudAtmosphere, with or without its
@@ -651,7 +765,7 @@ namespace AtmosphereLoad
 
 	/** Each atmosphere in the file onto the world's actor of the same name, or
 	 *  onto the only actor when both hold exactly one. */
-	void ApplyAtmospheres(const TArray<TSharedPtr<FJsonValue>>& Entries, UWorld& World)
+	void ApplyAtmospheres(const TArray<TSharedPtr<FJsonValue>>& Entries, UWorld& World, const TSet<FName>* Excluded)
 	{
 		TArray<APlanetAtmosphereActor*> Actors;
 
@@ -684,7 +798,7 @@ namespace AtmosphereLoad
 			}
 
 			ApplySection(*Target, APlanetAtmosphereActor::StaticClass(), **Section,
-				FString::Printf(TEXT("Atmosphere '%s'"), *Target->GetActorNameOrLabel()));
+				FString::Printf(TEXT("Atmosphere '%s'"), *Target->GetActorNameOrLabel()), Excluded);
 		}
 	}
 
@@ -692,12 +806,27 @@ namespace AtmosphereLoad
 	{
 		if (Args.Num() == 0 || !World)
 		{
-			UE_LOG(LogAtmosphereDump, Error, TEXT("Usage: CloudAtmosphere.LoadParams FileName [Sim|Atmospheres]"));
+			UE_LOG(LogAtmosphereDump, Error, TEXT("Usage: CloudAtmosphere.LoadParams FileName [Sim|Atmospheres] [Pipeline]"));
 			return;
 		}
 
 		const FString Path = Locate(Args[0]);
-		const FString Scope = Args.Num() > 1 ? Args[1] : FString();
+
+		FString Scope;
+		bool bPipeline = false;
+
+		for (int32 i = 1; i < Args.Num(); ++i)
+		{
+			if (Args[i].Equals(TEXT("Pipeline"), ESearchCase::IgnoreCase))
+			{
+				bPipeline = true;
+			}
+			else
+			{
+				Scope = Args[i];
+			}
+		}
+
 		const bool bSim = Scope.IsEmpty() || Scope.Equals(TEXT("Sim"), ESearchCase::IgnoreCase);
 		const bool bAtmospheres = Scope.IsEmpty() || Scope.Equals(TEXT("Atmospheres"), ESearchCase::IgnoreCase);
 
@@ -718,9 +847,27 @@ namespace AtmosphereLoad
 			const UFlowSimSubsystem* Sub = World->GetSubsystem<UFlowSimSubsystem>();
 			UFlowSimConfig* Config = Sub ? Sub->GetConfig() : nullptr;
 
+			// NO CONVERSION ON LOAD. A file from an older config version applies its
+			// values under today's meanings; renamed members are skipped as unknown.
+			double FileVersion = -1.0;
+			const int32 Current = AtmosphereDump::ConfigVersion();
+
+			if (!(*Sim)->TryGetNumberField(TEXT("ConfigVersion"), FileVersion))
+			{
+				UE_LOG(LogAtmosphereDump, Warning,
+					TEXT("The Sim section records no ConfigVersion; values written before a conversion apply under the current meanings."));
+			}
+			else if ((int32)FileVersion < Current)
+			{
+				UE_LOG(LogAtmosphereDump, Warning,
+					TEXT("The Sim section is config version %d, the config is %d; values written before a conversion apply under the current meanings."),
+					(int32)FileVersion, Current);
+			}
+
 			if (Config)
 			{
-				ApplySection(*Config, UFlowSimConfig::StaticClass(), **Sim, FString::Printf(TEXT("Sim config '%s'"), *Config->GetName()));
+				ApplySection(*Config, UFlowSimConfig::StaticClass(), **Sim, FString::Printf(TEXT("Sim config '%s'"), *Config->GetName()),
+					bPipeline ? nullptr : &SimPipeline());
 			}
 			else
 			{
@@ -732,7 +879,7 @@ namespace AtmosphereLoad
 
 		if (bAtmospheres && Root->TryGetArrayField(TEXT("Atmospheres"), Atmospheres))
 		{
-			ApplyAtmospheres(*Atmospheres, *World);
+			ApplyAtmospheres(*Atmospheres, *World, bPipeline ? nullptr : &ActorPipeline());
 		}
 
 		UE_LOG(LogAtmosphereDump, Display, TEXT("Loaded %s. Save the changed assets to keep the values."), *Path);
@@ -749,5 +896,6 @@ static FAutoConsoleCommandWithWorldAndArgs GAtmosphereLoadParamsCmd(
 	TEXT("CloudAtmosphere.LoadParams"),
 	TEXT("Apply a parameter file in DumpParams' layout to the running sim config and the world's atmosphere actors: ")
 	TEXT("each section's Values, or its Overrides when it has no Values. Any subset of members may be given. ")
-	TEXT("File from Saved/CloudAtmosphere or a full path; optional second argument Sim or Atmospheres limits it."),
+	TEXT("File from Saved/CloudAtmosphere or a full path; optional Sim or Atmospheres limits it. Assets, targets, ")
+	TEXT("debug views and start state are left alone unless Pipeline is given; numbers are held to their ranges."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AtmosphereLoad::Load));
