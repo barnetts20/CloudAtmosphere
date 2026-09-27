@@ -36,14 +36,20 @@
 // both reverse across a pole, so a folded face value arrives with its sign
 // flipped. Face operators wrap longitude only and treat out-of-range rows as the
 // zero-flux polar face; only scalars and Cartesian vectors cross the fold.
+//
+// THE SIM'S SCALARS ARE ONE UNIFORM BUFFER, FlowSimUB (FFlowSimUniformParameters
+// in FlowSimShaders.h), built once per substep and shared by its passes. Each
+// SimName defined as FlowSimUB.Name here and in FlowSim.usf is an alias for
+// its member. PITFALL: the aliases are macros, so no local, parameter or struct
+// member may reuse one of those names.
 
 /** Grid dimensions. x = longitude columns, y = latitude rows, z = layer count.
  *  Longitude must be even: the polar fold offsets by N_lon/2 columns, and an odd
  *  width lands the reflection half a texel off. */
-int3 SimGridSize;
+#define SimGridSize FlowSimUB.GridSize
 
 /** float3(1/N_lon, 1/N_lat, 1/N_layers). */
-float3 SimInvGridSize;
+#define SimInvGridSize FlowSimUB.InvGridSize
 
 // -- Coordinates ------------------------------------------------------------
 

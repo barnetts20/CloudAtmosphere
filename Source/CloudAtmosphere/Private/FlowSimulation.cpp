@@ -58,6 +58,11 @@ struct FFlowSimResources
 	FRDGTextureRef Debug = nullptr;
 	FRDGBufferRef Cells = nullptr;
 	FRDGTextureRef CellFlow = nullptr;
+
+	/** The scalars the passes being added read: this substep's, or the
+	 *  frame's outside the substeps. */
+	TRDGUniformBufferRef<FFlowSimUniformParameters> Uniforms;
+
 	FRDGTextureRef CellColumn = nullptr;
 
 	int32 Current = 0;
@@ -98,36 +103,36 @@ namespace
 		return FIntVector(FMath::DivideAndRoundUp(GridSize.Z, ThreadGroupSizeLayers), 1, 1);
 	}
 
-	/** Fills every scalar parameter. Resources are attached per pass afterwards.
-	 *  The one place a config value becomes a shader value. */
-	void FillCommonParameters(FFlowSimParameters& P, const FFlowSimParams& Params)
+	/** Fills every scalar parameter. The one place a config value becomes a
+	 *  shader value. */
+	void FillCommonParameters(FFlowSimUniformParameters& P, const FFlowSimParams& Params)
 	{
-		P.SimGridSize = Params.GridSize;
-		P.SimInvGridSize = FVector3f(
+		P.GridSize = Params.GridSize;
+		P.InvGridSize = FVector3f(
 			1.0f / FMath::Max(Params.GridSize.X, 1),
 			1.0f / FMath::Max(Params.GridSize.Y, 1),
 			1.0f / FMath::Max(Params.GridSize.Z, 1));
 
-		P.SimJetParams = Params.JetParams;
-		P.SimWidthBias = Params.WidthBias;
-		P.SimZonalProfile = Params.ZonalProfile;
+		P.JetParams = Params.JetParams;
+		P.WidthBias = Params.WidthBias;
+		P.ZonalProfile = Params.ZonalProfile;
 
 		for (int32 i = 0; i < 8; ++i)
 		{
-			P.SimLayerProfile[i] = Params.LayerProfile[i];
-			P.SimLayerState[i] = Params.LayerState[i];
+			P.LayerProfile[i] = Params.LayerProfile[i];
+			P.LayerState[i] = Params.LayerState[i];
 		}
 
 		for (int32 i = 0; i < 16; ++i)
 		{
-			P.SimMatMontgomery[i] = Params.Stack.Montgomery[i];
-			P.SimMatMontgomeryInverse[i] = Params.Stack.MontgomeryInverse[i];
-			P.SimMatModeToLayer[i] = Params.Stack.ModeToLayer[i];
-			P.SimMatLayerToMode[i] = Params.Stack.LayerToMode[i];
-			P.SimMatModeToMontgomery[i] = Params.Stack.ModeToMontgomery[i];
+			P.MatMontgomery[i] = Params.Stack.Montgomery[i];
+			P.MatMontgomeryInverse[i] = Params.Stack.MontgomeryInverse[i];
+			P.MatModeToLayer[i] = Params.Stack.ModeToLayer[i];
+			P.MatLayerToMode[i] = Params.Stack.LayerToMode[i];
+			P.MatModeToMontgomery[i] = Params.Stack.ModeToMontgomery[i];
 		}
 
-		P.SimDeltaTime = Params.DeltaTime;
+		P.DeltaTime = Params.DeltaTime;
 
 		// Wrapped in double: the forcing's pattern seeds repeat after 4096
 		// lifetimes, and the reset test needs only the phase.
@@ -136,78 +141,76 @@ namespace
 		const double ForcingCycles = Params.Time / FMath::Max((double)Params.ForcingLifetime, 1e-3);
 		const double ForcingWhole = FMath::FloorToDouble(ForcingCycles);
 
-		P.SimForcingCycle = (uint32)FMath::Fmod(ForcingWhole, 4294967296.0);
-		P.SimForcingFraction = (float)(ForcingCycles - ForcingWhole);
-		P.SimNoiseClock = (float)FMath::Fmod(Params.Time / (double)Params.NoiseResetTime, 2.0);
-		P.SimPlanetaryVorticity = Params.PlanetaryVorticity;
-		P.SimWaveSpeedSq = Params.Stack.DesignSpeedSq;
-		P.SimImplicitWeight = Params.ImplicitWeight;
+		P.ForcingCycle = (uint32)FMath::Fmod(ForcingWhole, 4294967296.0);
+		P.ForcingFraction = (float)(ForcingCycles - ForcingWhole);
+		P.NoiseClock = (float)FMath::Fmod(Params.Time / (double)Params.NoiseResetTime, 2.0);
+		P.PlanetaryVorticity = Params.PlanetaryVorticity;
+		P.WaveSpeedSq = Params.Stack.DesignSpeedSq;
+		P.ImplicitWeight = Params.ImplicitWeight;
 
-		P.SimForcingChannel = Params.ForcingChannel;
-		P.SimForcingBipolar = Params.bForcingBipolar ? 1 : 0;
-		P.SimHasForcing = Params.ForcingTexture.IsValid() ? 1 : 0;
+		P.ForcingChannel = Params.ForcingChannel;
+		P.ForcingBipolar = Params.bForcingBipolar ? 1 : 0;
+		P.HasForcing = Params.ForcingTexture.IsValid() ? 1 : 0;
 
-		P.SimNudgeRate = Params.NudgeRate;
-		P.SimForcingAmplitude = Params.ForcingAmplitude;
-		P.SimForcingScale = Params.ForcingScale;
-		P.SimForcingLifetime = Params.ForcingLifetime;
-		P.SimDragRate = Params.DragRate;
-		P.SimLayerCoupling = Params.LayerCoupling;
-		P.SimDivergenceDamping = Params.DivergenceDamping;
-		P.SimFroudeCeiling = Params.FroudeCeiling;
-		P.SimShockDamping = Params.ShockDamping;
-		P.SimSharpCentre = Params.bSharpCentreVelocity ? 1 : 0;
-		P.SimThermalRelaxation = Params.ThermalRelaxation;
-		P.SimThermalParams = Params.ThermalParams;
+		P.NudgeRate = Params.NudgeRate;
+		P.ForcingAmplitude = Params.ForcingAmplitude;
+		P.ForcingScale = Params.ForcingScale;
+		P.ForcingLifetime = Params.ForcingLifetime;
+		P.DragRate = Params.DragRate;
+		P.LayerCoupling = Params.LayerCoupling;
+		P.DivergenceDamping = Params.DivergenceDamping;
+		P.FroudeCeiling = Params.FroudeCeiling;
+		P.ShockDamping = Params.ShockDamping;
+		P.SharpCentre = Params.bSharpCentreVelocity ? 1 : 0;
+		P.ThermalRelaxation = Params.ThermalRelaxation;
+		P.ThermalParams = Params.ThermalParams;
 
-		P.SimCondensationRate = Params.CondensationRate;
-		P.SimEvaporationRate = Params.EvaporationRate;
-		P.SimCloudDecay = 1.0f / FMath::Max(Params.CloudLifetime, 1e-3f);
-		P.SimMoistureParams = Params.MoistureParams;
-		P.SimLatentHeating = Params.LatentHeating;
-		P.SimAscentSmoothing = Params.AscentSmoothing;
-		P.SimStormParams = Params.StormParams;
-		P.SimWindEvaporation = Params.WindEvaporation;
+		P.CondensationRate = Params.CondensationRate;
+		P.EvaporationRate = Params.EvaporationRate;
+		P.CloudDecay = 1.0f / FMath::Max(Params.CloudLifetime, 1e-3f);
+		P.MoistureParams = Params.MoistureParams;
+		P.LatentHeating = Params.LatentHeating;
+		P.AscentSmoothing = Params.AscentSmoothing;
+		P.StormParams = Params.StormParams;
+		P.WindEvaporation = Params.WindEvaporation;
 
-		P.SimCellShape = Params.CellShape;
-		P.SimCellVortex = Params.CellVortex;
-		P.SimCellDraft = Params.CellDraft;
-		P.SimCellLife = Params.CellLife;
-		P.SimCellMotion = Params.CellMotion;
-		P.SimCellGenesis = Params.CellGenesis;
-		P.SimCellCloud = Params.CellCloud;
-		P.SimCellWindBreadth = Params.CellWindBreadth;
-		P.SimCellSustain = Params.CellSustain;
-		P.SimCellEyeDepth = Params.CellEyeDepth;
-		P.SimCellCoreFollow = Params.CellCoreFollow;
-		P.SimCellEyeLow = Params.CellEyeLow;
-		P.SimCellEyeSoftness = Params.CellEyeSoftness;
-		P.SimCellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
-		P.SimStepIndex = Params.StepIndex;
+		P.CellShape = Params.CellShape;
+		P.CellVortex = Params.CellVortex;
+		P.CellDraft = Params.CellDraft;
+		P.CellLife = Params.CellLife;
+		P.CellMotion = Params.CellMotion;
+		P.CellGenesis = Params.CellGenesis;
+		P.CellCloud = Params.CellCloud;
+		P.CellWindBreadth = Params.CellWindBreadth;
+		P.CellSustain = Params.CellSustain;
+		P.CellEyeDepth = Params.CellEyeDepth;
+		P.CellCoreFollow = Params.CellCoreFollow;
+		P.CellEyeLow = Params.CellEyeLow;
+		P.CellEyeSoftness = Params.CellEyeSoftness;
+		P.CellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
+		P.StepIndex = Params.StepIndex;
 
-		P.SimNoiseDriftRate = Params.NoiseDriftRate;
-		P.SimNoiseResetTime = Params.NoiseResetTime;
+		P.NoiseDriftRate = Params.NoiseDriftRate;
+		P.NoiseResetTime = Params.NoiseResetTime;
 
-		P.SimFilterLatitude = Params.FilterLatitude;
-		P.SimFilterMaxHalfWidth = Params.FilterMaxHalfWidth;
+		P.FilterLatitude = Params.FilterLatitude;
+		P.FilterMaxHalfWidth = Params.FilterMaxHalfWidth;
 
-		P.SimOutputScales = Params.OutputScales;
-		P.SimAtlasFaceSize = Params.AtlasFaceSize;
-		P.SimStateBlend = FMath::Clamp(Params.StateBlend, 0.0f, 1.0f);
+		P.OutputScales = Params.OutputScales;
+		P.AtlasFaceSize = Params.AtlasFaceSize;
+		P.StateBlend = FMath::Clamp(Params.StateBlend, 0.0f, 1.0f);
 
-		P.SimDebugMode = Params.DebugMode;
-		P.SimDebugLayer = Params.DebugLayer;
-		P.SimDebugScale = Params.DebugScale;
-		P.SimDebugSize = Params.DebugSize;
+		P.DebugMode = Params.DebugMode;
+		P.DebugLayer = Params.DebugLayer;
+		P.DebugScale = Params.DebugScale;
+		P.DebugSize = Params.DebugSize;
+	}
 
-		// A null forcing texture binds black and SimHasForcing gates it to zero.
-		P.SimForcingNoise = Params.ForcingTexture.IsValid()
-			? Params.ForcingTexture
-			: GBlackVolumeTexture->TextureRHI;
-
-		// Wrap on all three axes: the forcing volume is a tiling bake, and a
-		// clamped read puts a band of constant value along each face.
-		P.SimForcingNoiseSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
+	TRDGUniformBufferRef<FFlowSimUniformParameters> CreateUniforms(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params)
+	{
+		FFlowSimUniformParameters* U = GraphBuilder.AllocParameters<FFlowSimUniformParameters>();
+		FillCommonParameters(*U, Params);
+		return GraphBuilder.CreateUniformBuffer(U);
 	}
 
 	template <typename TShader>
@@ -227,10 +230,23 @@ namespace
 			Groups);
 	}
 
-	FFlowSimParameters* NewParameters(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params)
+	/** A pass's parameters over shared scalars. Resources are attached per pass
+	 *  afterwards. */
+	FFlowSimParameters* NewParameters(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params,
+		TRDGUniformBufferRef<FFlowSimUniformParameters> Uniforms)
 	{
 		FFlowSimParameters* P = GraphBuilder.AllocParameters<FFlowSimParameters>();
-		FillCommonParameters(*P, Params);
+		P->FlowSimUB = Uniforms;
+
+		// A null forcing texture binds black and SimHasForcing gates it to zero.
+		P->SimForcingNoise = Params.ForcingTexture.IsValid()
+			? Params.ForcingTexture
+			: GBlackVolumeTexture->TextureRHI;
+
+		// Wrap on all three axes: the forcing volume is a tiling bake, and a
+		// clamped read puts a band of constant value along each face.
+		P->SimForcingNoiseSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
+
 		return P;
 	}
 
@@ -259,14 +275,14 @@ namespace
 	 *  and more. */
 	TArray<uint8> LatestKeyOf(const FFlowSimParams& Params)
 	{
-		FFlowSimParameters P;
+		FFlowSimUniformParameters P;
 		FMemory::Memzero(&P, sizeof(P));
 		FillCommonParameters(P, Params);
-		P.SimStateBlend = 0.0f;
-		P.SimForcingCycle = 0;
-		P.SimForcingFraction = 0.0f;
-		P.SimNoiseClock = 0.0f;
-		P.SimStepIndex = 0;
+		P.StateBlend = 0.0f;
+		P.ForcingCycle = 0;
+		P.ForcingFraction = 0.0f;
+		P.NoiseClock = 0.0f;
+		P.StepIndex = 0;
 
 		TArray<uint8> Key;
 		Key.Append(reinterpret_cast<const uint8*>(&P), sizeof(P));
@@ -438,7 +454,7 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 
 void FFlowSimulation::AddBalancePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
 {
-	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 	P->SimMontgomeryEqUAV = GraphBuilder.CreateUAV(R.MontgomeryEq);
 
 	AddSimPass<FFlowSimInitBalanceCS>(GraphBuilder, TEXT("FlowSim.Balance"), P, GroupCountLayers(Params.GridSize));
@@ -446,7 +462,7 @@ void FFlowSimulation::AddBalancePass(FRDGBuilder& GraphBuilder, const FFlowSimPa
 
 void FFlowSimulation::AddInitPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
 {
-	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 	P->SimMontgomeryEqSRV = GraphBuilder.CreateSRV(R.MontgomeryEq);
 	P->SimFaceUAV = GraphBuilder.CreateUAV(R.Source());
 	P->SimPhiUAV = GraphBuilder.CreateUAV(R.Phi);
@@ -467,7 +483,7 @@ void FFlowSimulation::AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimPa
 		PendingRestore.GetData(),
 		PendingRestore.Num() * sizeof(float));
 
-	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 	P->SimRestoreBuffer = GraphBuilder.CreateSRV(Upload);
 	P->SimRestoreFloatsPerCell = (uint32)FloatsPerCell;
 	P->SimFaceUAV = GraphBuilder.CreateUAV(R.Source());
@@ -509,12 +525,12 @@ bool FFlowSimulation::AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, con
 		FRDGBufferDesc::CreateStructuredDesc(sizeof(float), Floats),
 		TEXT("FlowSim.Capture"));
 
-	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
-
 	// THE ALLOCATED GRID, NOT THE CONFIG'S: a grid edit is not reallocated
 	// until the next step, and the capture indexes the state as it is.
-	P->SimGridSize = AllocatedGrid;
-	P->SimInvGridSize = FVector3f(1.0f / AllocatedGrid.X, 1.0f / AllocatedGrid.Y, 1.0f / AllocatedGrid.Z);
+	FFlowSimParams Allocated = Params;
+	Allocated.GridSize = AllocatedGrid;
+
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Allocated, CreateUniforms(GraphBuilder, Allocated));
 
 	P->SimFaceSRV = GraphBuilder.CreateSRV(Face);
 	P->SimPhiSRV = GraphBuilder.CreateSRV(Phi);
@@ -533,7 +549,7 @@ bool FFlowSimulation::AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, con
 void FFlowSimulation::AddReducePasses(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
 {
 	{
-		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 		P->SimFaceSRV = GraphBuilder.CreateSRV(R.Source());
 		P->SimPhiSRV = GraphBuilder.CreateSRV(R.Phi);
 		P->SimRowMeanUAV = GraphBuilder.CreateUAV(R.RowMean);
@@ -542,7 +558,7 @@ void FFlowSimulation::AddReducePasses(FRDGBuilder& GraphBuilder, const FFlowSimP
 	}
 
 	{
-		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 		P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
 		P->SimGlobalMeanUAV = GraphBuilder.CreateUAV(R.GlobalMean);
 
@@ -554,7 +570,7 @@ void FFlowSimulation::AddReducePasses(FRDGBuilder& GraphBuilder, const FFlowSimP
 
 void FFlowSimulation::AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R, bool bLatest)
 {
-	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 	P->SimFaceSRV = GraphBuilder.CreateSRV(R.Source());
 	P->SimPhiSRV = GraphBuilder.CreateSRV(R.Phi);
 	P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
@@ -572,7 +588,7 @@ void FFlowSimulation::AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowS
 
 void FFlowSimulation::AddCellsPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
 {
-	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 	P->SimCentreSRV = GraphBuilder.CreateSRV(R.Centre);
 	P->SimLatLonSRV = GraphBuilder.CreateSRV(R.LatLon);
 	P->SimCellUAV = GraphBuilder.CreateUAV(R.Cells);
@@ -582,7 +598,7 @@ void FFlowSimulation::AddCellsPass(FRDGBuilder& GraphBuilder, const FFlowSimPara
 
 void FFlowSimulation::AddCellFieldPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
 {
-	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 	P->SimLatLonSRV = GraphBuilder.CreateSRV(R.LatLon);
 	P->SimCellSRV = GraphBuilder.CreateSRV(R.Cells);
 	P->SimCellFlowUAV = GraphBuilder.CreateUAV(R.CellFlow);
@@ -597,6 +613,9 @@ void FFlowSimulation::AddCellFieldPass(FRDGBuilder& GraphBuilder, const FFlowSim
 
 void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, FFlowSimResources& R)
 {
+	// This substep's clocks, for every pass in it.
+	R.Uniforms = CreateUniforms(GraphBuilder, Params);
+
 	const FIntVector Groups2D = GroupCount2D(Params.GridSize);
 
 	// -- 1. Means and centre fields of the current state ------------------
@@ -614,7 +633,7 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 	// -- 2. Predict: advection and every explicit term --------------------
 
 	{
-		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 		P->SimFaceSRV = GraphBuilder.CreateSRV(R.Source());
 		P->SimCentreSRV = GraphBuilder.CreateSRV(R.Centre);
 		P->SimExplicitSRV = GraphBuilder.CreateSRV(R.Explicit);
@@ -641,7 +660,7 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 	// -- 3. Polar filter; filtered phi* lands in Rhs -----------------------
 
 	{
-		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 		P->SimFaceSRV = GraphBuilder.CreateSRV(R.Source());
 		P->SimPhiStarSRV = GraphBuilder.CreateSRV(R.PhiStar);
 		P->SimFaceUAV = GraphBuilder.CreateUAV(R.Dest());
@@ -654,7 +673,7 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 	// -- 4. Right-hand side, projected onto the vertical modes -------------
 
 	{
-		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 		P->SimFaceSRV = GraphBuilder.CreateSRV(R.Source());
 		P->SimRhsUAV = GraphBuilder.CreateUAV(R.Rhs);
 
@@ -669,7 +688,7 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 	const FIntVector GroupsWavenumbers(Params.GridSize.X, Params.GridSize.Z, 1);
 
 	{
-		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 		P->SimRhsSRV = GraphBuilder.CreateSRV(R.Rhs);
 		P->SimSpectrumUAV = GraphBuilder.CreateUAV(R.Spectrum[0]);
 
@@ -677,7 +696,7 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 	}
 
 	{
-		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 		P->SimSpectrumSRV = GraphBuilder.CreateSRV(R.Spectrum[0]);
 		P->SimSpectrumUAV = GraphBuilder.CreateUAV(R.Spectrum[1]);
 
@@ -685,7 +704,7 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 	}
 
 	{
-		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 		P->SimSpectrumSRV = GraphBuilder.CreateSRV(R.Spectrum[1]);
 		P->SimPhiStarUAV = GraphBuilder.CreateUAV(R.PhiStar);
 
@@ -695,7 +714,7 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 	// -- 6. Correct: the implicit pressure gradient, and the layers -----------
 
 	{
-		FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+		FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 		P->SimFaceSRV = GraphBuilder.CreateSRV(R.Source());
 		P->SimPhiStarSRV = GraphBuilder.CreateSRV(R.PhiStar);
 		P->SimFaceUAV = GraphBuilder.CreateUAV(R.Dest());
@@ -716,7 +735,7 @@ void FFlowSimulation::AddResamplePass(FRDGBuilder& GraphBuilder, const FFlowSimP
 		FMath::DivideAndRoundUp(Atlas.Y, ThreadGroupSize2D),
 		1);
 
-	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 	P->SimCentreSRV = GraphBuilder.CreateSRV(R.Centre);
 	P->SimLatLonSRV = GraphBuilder.CreateSRV(R.LatLon);
 	P->SimCentreLatestSRV = GraphBuilder.CreateSRV(R.CentreLatest);
@@ -742,7 +761,7 @@ void FFlowSimulation::AddDebugPass(FRDGBuilder& GraphBuilder, const FFlowSimPara
 		FMath::DivideAndRoundUp(Params.DebugSize.Y, ThreadGroupSize2D),
 		1);
 
-	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 	P->SimFaceSRV = GraphBuilder.CreateSRV(R.Source());
 	P->SimPhiSRV = GraphBuilder.CreateSRV(R.Phi);
 	P->SimPhiStarSRV = GraphBuilder.CreateSRV(R.PhiStar);
@@ -797,6 +816,9 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	R.Cells = GraphBuilder.RegisterExternalBuffer(PooledCells);
 	R.CellFlow = GraphBuilder.RegisterExternalTexture(PooledCellFlow);
 	R.CellColumn = GraphBuilder.RegisterExternalTexture(PooledCellColumn);
+	const TRDGUniformBufferRef<FFlowSimUniformParameters> FrameUniforms = CreateUniforms(GraphBuilder, Params);
+
+	R.Uniforms = FrameUniforms;
 	R.Current = CurrentFace;
 	R.TracerCurrent = CurrentTracer;
 
@@ -866,6 +888,9 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 
 		AddSubstep(GraphBuilder, StepParams, R);
 	}
+
+	// Back to the frame's scalars, which the passes below have always read.
+	R.Uniforms = FrameUniforms;
 
 	// THE OUTPUT BLENDS THE LAST TWO STATES. Each substep's reconstruct leaves
 	// the state it started from in Centre and LatLon, so after the loop they

@@ -30,6 +30,10 @@ namespace FlowSimShader
 	}
 }
 
+/** The name the shader reads the scalars under; FlowSimCommon.ush aliases each
+ *  member from it. */
+IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FFlowSimUniformParameters, "FlowSimUB");
+
 // Entry point names must match FlowSim.usf. A mismatch fails at cook time as a
 // missing entry point.
 

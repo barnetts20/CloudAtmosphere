@@ -66,102 +66,102 @@
 // -- Parameters -------------------------------------------------------------
 
 /** x BandCount, y JetStrength, z EquatorialBoost, w Asymmetry. */
-float4 SimJetParams;
+#define SimJetParams FlowSimUB.JetParams
 
 /** Offsets the jet profile so zones and belts need not be the same width. */
-float SimWidthBias;
+#define SimWidthBias FlowSimUB.WidthBias
 
 /** SIM_PROFILE_BANDED or SIM_PROFILE_THREE_CELL. */
-int SimZonalProfile;
+#define SimZonalProfile FlowSimUB.ZonalProfile
 
 #define SIM_PROFILE_BANDED     0
 #define SIM_PROFILE_THREE_CELL 1
 
 /** Per layer: x JetScale, y BoostScale, z ForcingScale, w DragScale. */
-float4 SimLayerProfile[8];
+#define SimLayerProfile FlowSimUB.LayerProfile
 
 /** Per layer: x mean geopotential (the layer's depth), y Helmholtz scale
  *  (alpha dt)^2 c^2 of the vertical mode in this slice, z saturation factor,
  *  w output scale of the height of the layer's top. */
-float4 SimLayerState[8];
+#define SimLayerState FlowSimUB.LayerState
 
 /** The stack's vertical coupling, each an 8 x 8 row-major matrix in 16 float4s:
  *  layers to Montgomery potential and back, modes to layers and back, and modes
  *  straight to Montgomery potential. */
-float4 SimMatMontgomery[16];
-float4 SimMatMontgomeryInverse[16];
-float4 SimMatModeToLayer[16];
-float4 SimMatLayerToMode[16];
-float4 SimMatModeToMontgomery[16];
+#define SimMatMontgomery FlowSimUB.MatMontgomery
+#define SimMatMontgomeryInverse FlowSimUB.MatMontgomeryInverse
+#define SimMatModeToLayer FlowSimUB.MatModeToLayer
+#define SimMatLayerToMode FlowSimUB.MatLayerToMode
+#define SimMatModeToMontgomery FlowSimUB.MatModeToMontgomery
 
-float SimDeltaTime;
+#define SimDeltaTime FlowSimUB.DeltaTime
 
 /** The step's start in forcing lifetimes, as a whole cycle and a fraction,
  *  and in noise reset periods, wrapped in double precision on the CPU.
  *  PITFALL: AN ABSOLUTE TIME IN FLOAT32 STOPS RESOLVING THE STEP after a few
  *  hundred time units at small steps: resets stop firing and the forcing's
  *  phases quantise. */
-uint SimForcingCycle;
-float SimForcingFraction;
-float SimNoiseClock;
+#define SimForcingCycle FlowSimUB.ForcingCycle
+#define SimForcingFraction FlowSimUB.ForcingFraction
+#define SimNoiseClock FlowSimUB.NoiseClock
 
 /** 2 * Omega; f = SimPlanetaryVorticity * mu. */
-float SimPlanetaryVorticity;
+#define SimPlanetaryVorticity FlowSimUB.PlanetaryVorticity
 
 /** Square of the wave speed the deformation radius sets: the stack's first
  *  internal mode, or the one layer's. */
-float SimWaveSpeedSq;
+#define SimWaveSpeedSq FlowSimUB.WaveSpeedSq
 
 /** Off-centring of the implicit terms. 0.5 is Crank-Nicolson; above it the
  *  scheme damps gravity waves, and below it is unstable. */
-float SimImplicitWeight;
+#define SimImplicitWeight FlowSimUB.ImplicitWeight
 
-float SimNudgeRate;
-float SimForcingAmplitude;
-float SimForcingScale;
+#define SimNudgeRate FlowSimUB.NudgeRate
+#define SimForcingAmplitude FlowSimUB.ForcingAmplitude
+#define SimForcingScale FlowSimUB.ForcingScale
 /** How long one forcing pattern lives, in sim time. */
-float SimForcingLifetime;
-float SimDragRate;
-float SimLayerCoupling;
+#define SimForcingLifetime FlowSimUB.ForcingLifetime
+#define SimDragRate FlowSimUB.DragRate
+#define SimLayerCoupling FlowSimUB.LayerCoupling
 /** Fraction of grid-scale divergence removed per substep, in [0, 0.5]. */
-float SimDivergenceDamping;
+#define SimDivergenceDamping FlowSimUB.DivergenceDamping
 
 /** Bore suppression: the speed ceiling in Froude number, and the gain of the
  *  compression-activated damping. See SimSpeedCeiling and SimFaceDamping. */
-float SimFroudeCeiling;
-float SimShockDamping;
+#define SimFroudeCeiling FlowSimUB.FroudeCeiling
+#define SimShockDamping FlowSimUB.ShockDamping
 
 /** Rate interfaces relax toward the profile's balanced heights. */
-float SimThermalRelaxation;
+#define SimThermalRelaxation FlowSimUB.ThermalRelaxation
 
 /** x vertical shear between top and bottom layer, angular rate; y shape, 0
  *  midlatitude zone, 1 the jets; z zone latitude, w zone half-width, radians. */
-float4 SimThermalParams;
+#define SimThermalParams FlowSimUB.ThermalParams
 
 /** Cloud rates, per unit time, against normalised vertical motion W in (-1, 1):
  *  condensation in rising saturated air, evaporation in sinking air, and the
  *  inverse lifetime every cloud rains out at. */
-float SimCondensationRate;
-float SimEvaporationRate;
-float SimCloudDecay;
+#define SimCondensationRate FlowSimUB.CondensationRate
+#define SimEvaporationRate FlowSimUB.EvaporationRate
+#define SimCloudDecay FlowSimUB.CloudDecay
 
 /** x saturation at the equator, y at the poles, z relative humidity where
  *  rising air starts to condense, w surface evaporation rate. */
-float4 SimMoistureParams;
+#define SimMoistureParams FlowSimUB.MoistureParams
 
 /** Share of a layer's depth moved up across the interface above it per unit
  *  of vapour condensed. */
-float SimLatentHeating;
+#define SimLatentHeating FlowSimUB.LatentHeating
 
 /** Time constant of the vertical motion's low-pass along the flow; zero reads
  *  it raw. See MainReconstructCS. */
-float SimAscentSmoothing;
+#define SimAscentSmoothing FlowSimUB.AscentSmoothing
 
 /** x formation rate, y intensity threshold, z vorticity gain, w decay rate. */
-float4 SimStormParams;
+#define SimStormParams FlowSimUB.StormParams
 
 /** Rate surface evaporation grows with the bottom layer's wind speed. */
-float SimWindEvaporation;
+#define SimWindEvaporation FlowSimUB.WindEvaporation
 
 /** Storm cells; see MainCellsCS and SimCellStamp.
  *    Shape    x radius (radians), y eye and z eyewall radius as fractions of
@@ -184,43 +184,43 @@ float SimWindEvaporation;
  *             at the eyewall, y rate of the lift, z inflow below and outflow
  *             above at the eyewall as a fraction of the target wind, w storm
  *             raised across the whole storm. */
-float4 SimCellShape;
-float4 SimCellVortex;
-float4 SimCellDraft;
-float4 SimCellLife;
-float4 SimCellMotion;
-float4 SimCellGenesis;
-float4 SimCellCloud;
+#define SimCellShape FlowSimUB.CellShape
+#define SimCellVortex FlowSimUB.CellVortex
+#define SimCellDraft FlowSimUB.CellDraft
+#define SimCellLife FlowSimUB.CellLife
+#define SimCellMotion FlowSimUB.CellMotion
+#define SimCellGenesis FlowSimUB.CellGenesis
+#define SimCellCloud FlowSimUB.CellCloud
 
 /** Share of the span from the eyewall to the radius over which the vortex's
  *  wind holds its peak before falling off. The stamp's profile is unaffected. */
-float SimCellWindBreadth;
+#define SimCellWindBreadth FlowSimUB.CellWindBreadth
 
 /** Storm tracer a mature cell tops up toward, on the stamp's profile. */
-float SimCellSustain;
+#define SimCellSustain FlowSimUB.CellSustain
 
 /** Share of the deck's depth a full-intensity eye removes at its centre. */
-float SimCellEyeDepth;
+#define SimCellEyeDepth FlowSimUB.CellEyeDepth
 
 /** Rate a cell is pulled onto its vortex's core, per unit time. */
-float SimCellCoreFollow;
+#define SimCellCoreFollow FlowSimUB.CellCoreFollow
 
 /** How far the eye tracer's source follows the storm's pressure low rather
  *  than the eye radius, and the share of the eye's radius its rim ramps over;
  *  see SimCellEyeSource. */
-float SimCellEyeLow;
-float SimCellEyeSoftness;
+#define SimCellEyeLow FlowSimUB.CellEyeLow
+#define SimCellEyeSoftness FlowSimUB.CellEyeSoftness
 
 /** Live cell slots, up to GG_SIM_MAX_CELLS. */
-int SimCellCount;
+#define SimCellCount FlowSimUB.CellCount
 
 /** Steps completed before this one: seeds the cells' spawn draws. */
-int SimStepIndex;
+#define SimStepIndex FlowSimUB.StepIndex
 
 /** Noise coordinates: the solid-body drift, radians per unit time, and the sim
  *  time a displacement accumulates before it resets. */
-float SimNoiseDriftRate;
-float SimNoiseResetTime;
+#define SimNoiseDriftRate FlowSimUB.NoiseDriftRate
+#define SimNoiseResetTime FlowSimUB.NoiseResetTime
 
 /** Cloud fraction below which the formation altitude fades to zero instead of
  *  being divided out, so the ratio stays smooth where cloud is thin. */
@@ -233,19 +233,19 @@ float SimNoiseResetTime;
 #define SIM_STORM_HEMISPHERE 20.0f
 #endif
 
-int SimForcingChannel;
-int SimForcingBipolar;
-int SimHasForcing;
+#define SimForcingChannel FlowSimUB.ForcingChannel
+#define SimForcingBipolar FlowSimUB.ForcingBipolar
+#define SimHasForcing FlowSimUB.HasForcing
 
-float SimFilterLatitude;
-int SimFilterMaxHalfWidth;
+#define SimFilterLatitude FlowSimUB.FilterLatitude
+#define SimFilterMaxHalfWidth FlowSimUB.FilterMaxHalfWidth
 
 /** 1 to rebuild centre velocities to fourth order, 0 for the two-face average;
  *  see SimCentreComponents. */
-int SimSharpCentre;
+#define SimSharpCentre FlowSimUB.SharpCentre
 
 /** Normalisation for the output channels: x pressure, y vorticity, z divergence. */
-float3 SimOutputScales;
+#define SimOutputScales FlowSimUB.OutputScales
 
 // -- Resources --------------------------------------------------------------
 
@@ -317,7 +317,7 @@ RWTexture2DArray<float4> SimLatLonUAV;
  *  the previous state to this one. */
 Texture2DArray<float4> SimCentreLatestSRV;
 Texture2DArray<float4> SimLatLonLatestSRV;
-float SimStateBlend;
+#define SimStateBlend FlowSimUB.StateBlend
 
 /** Nonzero when Reconstruct writes the latest pair for the resample, which
  *  reads no explicit field, so it skips that one. */
@@ -328,7 +328,7 @@ int SimReconstructLatest;
 RWTexture2DArray<float4> SimOutputUAV;
 
 /** Atlas face edge in texels. */
-int SimAtlasFaceSize;
+#define SimAtlasFaceSize FlowSimUB.AtlasFaceSize
 
 /** Band-limited tiling noise, read as a forcing streamfunction. */
 Texture3D<float4> SimForcingNoise;
@@ -3466,10 +3466,10 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 
 RWTexture2D<float4> SimDebugUAV;
 
-int SimDebugMode;
-int SimDebugLayer;
-float SimDebugScale;
-int2 SimDebugSize;
+#define SimDebugMode FlowSimUB.DebugMode
+#define SimDebugLayer FlowSimUB.DebugLayer
+#define SimDebugScale FlowSimUB.DebugScale
+#define SimDebugSize FlowSimUB.DebugSize
 
 #define SIM_DEBUG_VORTICITY    0
 #define SIM_DEBUG_PRESSURE     1
