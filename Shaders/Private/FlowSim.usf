@@ -233,6 +233,7 @@
 #define SIM_STORM_HEMISPHERE 20.0f
 #endif
 
+
 #define SimForcingChannel FlowSimUB.ForcingChannel
 #define SimForcingBipolar FlowSimUB.ForcingBipolar
 #define SimHasForcing FlowSimUB.HasForcing
@@ -490,6 +491,14 @@ float SimSoftSat(float X)
     return X * rsqrt(1.0f + X * X);
 }
 
+/** The hemisphere's rotation sense at sin(latitude) Z, easing through zero at
+ *  the equator over 1 / Sharpness: SIM_CELL_HEMISPHERE_SHARPNESS for the cells,
+ *  SIM_STORM_HEMISPHERE for the storm tracer and the seeds. */
+float SimSense(float Z, float Sharpness)
+{
+    return SimSoftSat(Z * Sharpness);
+}
+
 /** PITFALL: a missing volume binds black, and a unipolar decode of black is a
  *  constant -1 -- a uniform source rather than an absent one. Hence the flag. */
 float SimSampleForcing(float3 UVW)
@@ -721,12 +730,12 @@ float SimInterfaceFlux(int2 C, uint Interface)
 /** Intensity below which a cell's slot frees. */
 #define SIM_CELL_FREE 0.05f
 
-/** 1 weighs the atlas's eye by the live cells' presence, SimStamp.Presence, so
- *  a cell's eye leaves with it. 0 applies the eye tracer wherever it lingers,
- *  which after a cell frees is the tracer decaying at SIM_CELL_EYE_DECAY with
- *  nothing in the sim working it. */
-#ifndef SIM_EYE_PRESENCE
-#define SIM_EYE_PRESENCE 1
+/** STORM-16. 1 steers a cell by the layers' flow weighted by each layer's
+ *  share of the vortex (SimCellLayerShare), as magnitude, so it moves with the
+ *  vortex it drives. 0 takes the plain layer mean, and under shear the cell
+ *  and its vortex, which lives mostly in the bottom layer, drift apart. */
+#ifndef SIM_CELL_STEER_BY_SHARE
+#define SIM_CELL_STEER_BY_SHARE 0
 #endif
 
 /** Share of a cell's radius over which its presence fades at the rim. */
@@ -824,7 +833,7 @@ float2 SimCellParent(float3 P)
     const float Storm = SimSampleBilinear4(SimLatLonSRV, Grid, (L - 1u) + L).w;
     const float Vorticity = SimSampleBilinear4(SimLatLonSRV, Grid, L - 1u).w;
 
-    return float2(Storm, max(Vorticity * SimSoftSat(P.z * SIM_STORM_HEMISPHERE), 0.0f));
+    return float2(Storm, max(Vorticity * SimSense(P.z, SIM_STORM_HEMISPHERE), 0.0f));
 }
 
 /** The bottom layer's pressure at P, normalised as the output carries it:
@@ -1061,10 +1070,17 @@ bool SimCellReach(uint Slot, float3 N, bool bDisplay,
         return false;
     }
 
-    Sense = SimSoftSat(Axis.z * SIM_CELL_HEMISPHERE_SHARPNESS);
+    Sense = SimSense(Axis.z, SIM_CELL_HEMISPHERE_SHARPNESS);
     R = acos(clamp(CosD, -1.0f, 1.0f)) / max(SimCellShape.x, 1e-4f);
 
     return R < 1.0f;
+}
+
+/** A layer's share of a cell's vortex target: all of it on the bottom layer,
+ *  SimCellVortex.z of it on top, linear between. */
+float SimCellLayerShare(uint Layer, uint L)
+{
+    return (L > 1u) ? lerp(SimCellVortex.z, 1.0f, (float) Layer / (float) (L - 1u)) : 1.0f;
 }
 
 /** A cell's control entry K, written by MainCellsCS this step. */
@@ -2010,8 +2026,8 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
  *  a shrinking ring search. The spawn holds where the window and humidity pass
  *  and no live cell is within two radii.
  *
- *  A LIVE CELL moves with the mean of the layers' flow, a drift poleward and
- *  west, and a pull toward the storm-weighted centre of a ring half its radius
+ *  A LIVE CELL moves with the layers' flow (SIM_CELL_STEER_BY_SHARE), a drift
+ *  poleward and west, and a pull toward the storm-weighted centre of a ring half its radius
  *  out, which keeps it on its parent storm. Its intensity relaxes toward 1
  *  while the window, the humidity and the parent storm hold -- the strongest
  *  storm at the centre, on that ring or on the eyewall, where the cell's own
@@ -2207,9 +2223,11 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 
     // -- Move ------------------------------------------------------------------
 
-	// The layers' mean flow over the half-radius ring: the environment's
-	// steering, with the cell's own vortex and inflow cancelled.
+	// The layers' flow over the half-radius ring: the environment's steering,
+	// with the cell's own vortex and inflow cancelled. Each layer weighs its
+	// share of the vortex under SIM_CELL_STEER_BY_SHARE, equally otherwise.
     float3 Steering = 0.0f;
+    float SteerWeight = 0.0f;
 
 	[loop]
     for (int K = 0; K < 6; K++)
@@ -2219,11 +2237,18 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 		[loop]
         for (int Layer = 0; Layer < SimGridSize.z; Layer++)
         {
-            Steering += SimSampleBilinear4(SimCentreSRV, Grid, (uint) Layer).xyz;
+#if SIM_CELL_STEER_BY_SHARE
+            const float LayerWeight = abs(SimCellLayerShare((uint) Layer, (uint) SimGridSize.z));
+#else
+            const float LayerWeight = 1.0f;
+#endif
+
+            Steering += LayerWeight * SimSampleBilinear4(SimCentreSRV, Grid, (uint) Layer).xyz;
+            SteerWeight += LayerWeight;
         }
     }
 
-    Steering /= 6.0f * (float) SimGridSize.z;
+    Steering /= max(SteerWeight, 1e-4f);
 
     const float Hemisphere = (Cell.z >= 0.0f) ? 1.0f : -1.0f;
 
@@ -2319,6 +2344,13 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
     const uint L = (uint) SimGridSize.z;
     const float Sense = (P.z >= 0.0f) ? 1.0f : -1.0f;
 
+	// How much of the push the rotation sense leaves near the equator
+	// (SimCellReach), which scales the vortex's targets and units, so the loop
+	// asks only for what the push delivers. PITFALL: MEASURED AGAINST THE FULL
+	// TARGET, a cell near the equator raises its gain to cancel the easing
+	// until it pins at SIM_CELL_GAIN_LIMIT.
+    const float SenseShare = abs(SimSense(P.z, SIM_CELL_HEMISPHERE_SHARPNESS));
+
 	// Measured at the eyewall and out in the band, each against its own target:
 	// the gain is whichever asks for more, so the outer band is held against
 	// the environment it mixes with as well as the eyewall.
@@ -2326,6 +2358,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
     const float Strength = SimCellStrength(Intensity);
 
     const float RingAt[2] = { Ring, Outer };
+    float WindUnit[2];
     float Unit[2];
     float2 RingGrid[2][6];
     float3 RingTangent[2][6];
@@ -2334,7 +2367,8 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 	[unroll]
     for (int Band = 0; Band < 2; Band++)
     {
-        Unit[Band] = max(SimCellVortex.w * SimCellWindProfile(RingAt[Band]), 1e-4f);
+        WindUnit[Band] = max(SimCellVortex.w * SimCellWindProfile(RingAt[Band]), 1e-4f);
+        Unit[Band] = max(WindUnit[Band] * SenseShare, 1e-4f);
 
 		[unroll]
         for (int K = 0; K < 6; K++)
@@ -2354,13 +2388,13 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 	// The bottom layer's inflow target at the eyewall, cut back so it and the
 	// vortex's target stay under the ceiling.
     const float InflowUnit = max(SimCellVortex.w * SimCellProfile(Ring), 1e-4f);
-    float InflowTarget = SimCellCloud.z * Strength * Unit[0];
+    float InflowTarget = SimCellCloud.z * Strength * WindUnit[0];
 
     if (SimFroudeCeiling > 0.0f)
     {
         const float Room = SIM_CELL_TARGET_CEILING * SimFroudeCeiling * sqrt(max(SimWaveSpeedSq, 1e-8f));
 
-        InflowTarget = min(InflowTarget, sqrt(max(Room * Room - Strength * Strength * Unit[0] * Unit[0], 0.0f)));
+        InflowTarget = min(InflowTarget, sqrt(max(Room * Room - Strength * Strength * WindUnit[0] * WindUnit[0], 0.0f)));
     }
 
     float4 Spin[2] = { float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f) };
@@ -2371,7 +2405,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
     {
         if (Layer < L)
         {
-            const float Share = (L > 1u) ? lerp(SimCellVortex.z, 1.0f, (float) Layer / (float) (L - 1u)) : 1.0f;
+            const float Share = SimCellLayerShare(Layer, L);
 
             float Gain = 0.0f;
             float Inward = 0.0f;
@@ -2706,7 +2740,7 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
 	// Intensity is the condensing ascent, W near saturation, raised by
 	// cyclonic vorticity; a storm forms above the threshold.
-    const float Cyclonic = max(Vorticity * SimSoftSat(Mu * SIM_STORM_HEMISPHERE), 0.0f);
+    const float Cyclonic = max(Vorticity * SimSense(Mu, SIM_STORM_HEMISPHERE), 0.0f);
     const float Intensity = Condensing / max(SimCondensationRate, 1e-6f) * (1.0f + SimStormParams.z * Cyclonic);
     const float Drive = saturate((Intensity - SimStormParams.y) / max(1.0f - SimStormParams.y, 1e-3f));
 
@@ -3453,12 +3487,11 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 
         // -- Storm cells --------------------------------------------------------------
 
-		// The eye tracer, from the latest state.
-        float Eye = saturate(SimSampleMeridianTaps(SimNoiseSRV, Taps, Layer + L).w);
-
-#if SIM_EYE_PRESENCE
-        Eye *= Stamp.Presence;
-#endif
+		// The eye tracer, from the latest state, as far as a live cell claims it.
+		// PITFALL: UNWEIGHTED, A FREED CELL'S EYE LINGERS in the atlas while the
+		// tracer decays at SIM_CELL_EYE_DECAY with nothing in the sim working it.
+        const float Eye = saturate(SimSampleMeridianTaps(SimNoiseSRV, Taps, Layer + L).w)
+			* Stamp.Presence;
 
 		// THE BAND INTENSIFIES, IT DOES NOT ADD. Storm deepens and darkens cloud
 		// the column already has; the cloud itself is the sim's, which carries the

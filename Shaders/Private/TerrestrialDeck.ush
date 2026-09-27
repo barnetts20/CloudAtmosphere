@@ -130,14 +130,19 @@
 #define TR_SLAB_ENTRY_PROBES 24
 #endif
 
-/** How a step integrates the slab profile: 0 Simpson's rule on three samples,
- *  which a slab thinner than the step falls between, so thin columns flicker
- *  as their surfaces drift across the samples; 1 exactly, from the profile's
- *  closed-form integral (TR_SlabCumulative), with the ceiling fade by
- *  Simpson's rule. */
+/** How a step integrates the slab profile: 0 Simpson's rule on three samples;
+ *  1 exactly, from the profile's closed form (TR_SlabCumulative).
+ *
+ *  PITFALL: THE TWO DISAGREE ABOUT THIN SLABS, and the eyes depend on it. A
+ *  slab keeps its peak density however thin it gets, so at a high
+ *  CloudOpticalDepth even a thin one is opaque. Sampled, it falls between the
+ *  samples and a storm eye's thinning floor opens into a hole, at the price of
+ *  thin columns flickering as their surfaces drift across the samples;
+ *  integrated exactly, the floor holds as a thin opaque sheet. */
 #ifndef TR_SLAB_EXACT
 #define TR_SLAB_EXACT 0
 #endif
+
 
 /** The sim layer every column read comes from: CloudLayer, negative for the
  *  bottom of the stack, clamped to the stack. */
@@ -1033,6 +1038,9 @@ float4 TR_DensityInColumn(
 	TRFieldParams F)
 {
 	// -- Height profile, integrated across the step ----------------------------
+	//
+	// See TR_SLAB_EXACT. The ceiling fade, which varies slowly, by Simpson's
+	// rule either way.
 
 #if TR_SLAB_EXACT
     const float Fade = (TR_CeilingFade(Height - HalfStep, F) + 4.0f * TR_CeilingFade(Height, F)
