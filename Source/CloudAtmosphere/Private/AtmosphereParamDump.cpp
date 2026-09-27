@@ -696,6 +696,45 @@ namespace AtmosphereLoad
 		}
 	}
 
+	/** A Values or Overrides group written with GridLongitude and GridLatitude,
+	 *  as GridResolution: a quarter of the columns, which every 2:1 grid
+	 *  reproduces. A group that has GridResolution keeps it. */
+	void AliasGrid(FJsonObject& Group)
+	{
+		const TSharedPtr<FJsonValue> Columns = Group.TryGetField(TEXT("GridLongitude"));
+
+		if (Columns.IsValid() && !Group.HasField(TEXT("GridResolution")))
+		{
+			double Value = 0.0;
+
+			if (Columns->TryGetNumber(Value))
+			{
+				Group.SetNumberField(TEXT("GridResolution"), Value / 4.0);
+			}
+			else if (Columns->Type == EJson::Object)
+			{
+				const TSharedPtr<FJsonObject> Pair = Columns->AsObject();
+				TSharedPtr<FJsonObject> Converted = MakeShared<FJsonObject>();
+				double Default = 0.0;
+
+				if (Pair->TryGetNumberField(TEXT("Value"), Value))
+				{
+					Converted->SetNumberField(TEXT("Value"), Value / 4.0);
+
+					if (Pair->TryGetNumberField(TEXT("Default"), Default))
+					{
+						Converted->SetNumberField(TEXT("Default"), Default / 4.0);
+					}
+
+					Group.SetObjectField(TEXT("GridResolution"), Converted);
+				}
+			}
+		}
+
+		Group.RemoveField(TEXT("GridLongitude"));
+		Group.RemoveField(TEXT("GridLatitude"));
+	}
+
 	/** One section onto one object: its Values when the section has them, the
 	 *  full state, otherwise its Overrides of the C++ defaults over what the
 	 *  object already holds. */
@@ -848,7 +887,8 @@ namespace AtmosphereLoad
 			UFlowSimConfig* Config = Sub ? Sub->GetConfig() : nullptr;
 
 			// NO CONVERSION ON LOAD. A file from an older config version applies its
-			// values under today's meanings; renamed members are skipped as unknown.
+			// values under today's meanings; renamed members are skipped as unknown,
+			// except the grid, which is read as GridResolution.
 			double FileVersion = -1.0;
 			const int32 Current = AtmosphereDump::ConfigVersion();
 
@@ -862,6 +902,16 @@ namespace AtmosphereLoad
 				UE_LOG(LogAtmosphereDump, Warning,
 					TEXT("The Sim section is config version %d, the config is %d; values written before a conversion apply under the current meanings."),
 					(int32)FileVersion, Current);
+			}
+
+			for (const TCHAR* Group : { TEXT("Values"), TEXT("Overrides") })
+			{
+				const TSharedPtr<FJsonObject>* Fields = nullptr;
+
+				if ((*Sim)->TryGetObjectField(Group, Fields))
+				{
+					AliasGrid(**Fields);
+				}
 			}
 
 			if (Config)

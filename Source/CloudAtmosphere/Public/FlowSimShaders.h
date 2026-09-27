@@ -193,13 +193,6 @@ namespace FlowSimShader
 	 *  this define, or every face reads its neighbour's tile. */
 	static constexpr int32 AtlasGutter = 4;
 
-	/** Atlas face edge for a grid width: four faces span the equator, matching
-	 *  the grid's resolution there. */
-	inline int32 AtlasFaceSize(int32 GridLongitude)
-	{
-		return FMath::Max(GridLongitude / 4, 8);
-	}
-
 	/** The atlas: six faces with their gutters, packed 3 x 2. */
 	inline FIntPoint AtlasSize(int32 FaceSize)
 	{
@@ -207,17 +200,34 @@ namespace FlowSimShader
 		return FIntPoint(3 * Tile, 2 * Tile);
 	}
 
-	/** Longitude columns for a requested width: the power of two at or below it,
-	 *  within [32, MaxGridLongitude]. The transform is radix-2. */
-	inline int32 GridLongitude(int32 Requested)
+	/** Range of UFlowSimConfig::GridResolution: 64 x 32 up to the transform's
+	 *  and the column solve's limits. */
+	static constexpr int32 MinGridResolution = 16;
+	static constexpr int32 MaxGridResolution = 512;
+
+	static_assert(4 * MaxGridResolution <= MaxGridLongitude && 2 * MaxGridResolution <= MaxGridLatitude,
+		"The largest grid resolution exceeds the Helmholtz solve's limits.");
+
+	/** The atlas face edge for a requested resolution: the power of two at or
+	 *  below it, in range. Powers of two keep the columns radix-2 for the
+	 *  transform and even for the polar fold. */
+	inline int32 GridResolution(int32 Requested)
 	{
-		const uint32 Clamped = (uint32)FMath::Clamp(Requested, 32, MaxGridLongitude);
+		const uint32 Clamped = (uint32)FMath::Clamp(Requested, MinGridResolution, MaxGridResolution);
 		return (int32)(1u << FMath::FloorLog2(Clamped));
 	}
 
-	inline int32 GridLatitude(int32 Requested)
+	/** Longitude columns: four atlas faces span the equator, so the output
+	 *  matches the grid there. */
+	inline int32 GridLongitude(int32 Resolution)
 	{
-		return FMath::Clamp(Requested, 16, MaxGridLatitude);
+		return 4 * GridResolution(Resolution);
+	}
+
+	/** Latitude rows, pole to pole. */
+	inline int32 GridLatitude(int32 Resolution)
+	{
+		return 2 * GridResolution(Resolution);
 	}
 }
 

@@ -25,7 +25,11 @@ namespace
 			/** Storm cell inflow authored as a fraction of the target wind. */
 			InflowRatio = 4,
 
-			Latest = InflowRatio
+			/** One grid resolution, the atlas face edge, in place of the columns
+			 *  and rows. */
+			GridResolution = 5,
+
+			Latest = GridResolution
 		};
 
 		static const FGuid Guid;
@@ -70,8 +74,8 @@ namespace
 	 *  refers to. */
 	float EquatorStiffness(const UFlowSimConfig& Config)
 	{
-		const float DLon = 2.0f * UE_PI / FlowSimShader::GridLongitude(Config.GridLongitude);
-		const float DMu = 2.0f / FlowSimShader::GridLatitude(Config.GridLatitude);
+		const float DLon = 2.0f * UE_PI / FlowSimShader::GridLongitude(Config.GridResolution);
+		const float DMu = 2.0f / FlowSimShader::GridLatitude(Config.GridResolution);
 
 		return 2.0f / (DLon * DLon) + 2.0f / (DMu * DMu);
 	}
@@ -283,6 +287,17 @@ void UFlowSimConfig::PostLoad()
 	}
 
 	const int32 Version = GetLinkerCustomVersion(FFlowSimConfigVersion::Guid);
+
+	// First: the conversions below read the grid. Every saved grid is 2:1, so
+	// a quarter of the columns reproduces it.
+	if (Version < FFlowSimConfigVersion::GridResolution)
+	{
+		GridResolution = FlowSimShader::GridResolution(GridLongitude_DEPRECATED / 4);
+
+		UE_LOG(LogFlowSim, Display,
+			TEXT("Converted '%s' to GridResolution %d (%dx%d). Save the asset to keep the conversion."),
+			*GetName(), GridResolution, FlowSimShader::GridLongitude(GridResolution), FlowSimShader::GridLatitude(GridResolution));
+	}
 
 	if (Version < FFlowSimConfigVersion::SpeedRoot)
 	{

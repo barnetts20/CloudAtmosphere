@@ -211,15 +211,12 @@ class CLOUDATMOSPHERE_API UFlowSimConfig : public UDataAsset
 public:
 	// -- Grid ---------------------------------------------------------------
 
-	/** Longitude columns. Rounded down to a power of two, which the Helmholtz
-	 *  transform needs and which also keeps the width even for the polar fold. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (ClampMin = "32", ClampMax = "2048"))
-	int32 GridLongitude = 512;
-
-	/** Latitude rows, in sin(latitude). At most 1024, the tallest column the
-	 *  Helmholtz solve holds. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (ClampMin = "16", ClampMax = "1024"))
-	int32 GridLatitude = 256;
+	/** Edge of one face of the cube atlas the output is resampled onto, in
+	 *  texels, rounded down to a power of two. The solver's grid follows: four
+	 *  times it in longitude columns, twice it in latitude rows, so 64 runs at
+	 *  256 x 128. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (ClampMin = "16", ClampMax = "512"))
+	int32 GridResolution = 64;
 
 	/** Layers in the stack, 0 on top, coupled through their pressure. Two is
 	 *  the smallest with baroclinic storms; one is a single shallow layer. */
@@ -557,8 +554,8 @@ public:
 	// pushed along them; the eyewall band is drawn on the output.
 	//
 	// PITFALL: the sim grid resolves the push and the atlas the band. Nothing
-	// under about two grid cells survives: at 512 columns the eyewall wants to
-	// sit at least 1.4 degrees out, at AtlasFaceSize 256 at least 0.7.
+	// under about two grid cells survives: at GridResolution 128 the eyewall
+	// wants to sit at least 1.4 degrees out, at 256 at least 0.7.
 
 	/** Outer radius, degrees of arc, where every effect reaches zero. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.5", ClampMax = "45.0"))
@@ -851,14 +848,18 @@ public:
 
 	virtual void Serialize(FArchive& Ar) override;
 
-	/** Converts a config saved before the speed root or before GridDamping, at
-	 *  the regime and step it was saved with, so it runs as it did. */
+	/** Converts a config saved before GridResolution, the speed root or
+	 *  GridDamping, at the grid, regime and step it was saved with, so it runs
+	 *  as it did. */
 	virtual void PostLoad() override;
 
-	// -- Values of configs saved before the speed root and GridDamping ----------
+	// -- Values of configs saved before a conversion ----------------------------
 	//
 	// PostLoad converts them. Each defaults to its old default, since a value
 	// equal to that was never saved.
+
+	UPROPERTY()
+	int32 GridLongitude_DEPRECATED = 512;
 
 	UPROPERTY()
 	float JetStrength_DEPRECATED = 1.0f;

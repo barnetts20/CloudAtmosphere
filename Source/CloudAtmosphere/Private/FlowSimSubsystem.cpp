@@ -225,8 +225,8 @@ namespace
 	FIntVector GridOf(const UFlowSimConfig& Config)
 	{
 		return FIntVector(
-			FlowSimShader::GridLongitude(Config.GridLongitude),
-			FlowSimShader::GridLatitude(Config.GridLatitude),
+			FlowSimShader::GridLongitude(Config.GridResolution),
+			FlowSimShader::GridLatitude(Config.GridResolution),
 			LayerCountOf(Config));
 	}
 
@@ -565,7 +565,7 @@ float UFlowSimSubsystem::GetCourant() const
 		return 0.0f;
 	}
 
-	const int32 W = FlowSimShader::GridLongitude(Config->GridLongitude);
+	const int32 W = FlowSimShader::GridLongitude(Config->GridResolution);
 	return PeakRate(*Config, Config->ResolveSpeeds()) * CurrentStep * W / (2.0f * UE_PI);
 }
 
@@ -645,7 +645,7 @@ void UFlowSimSubsystem::ReportCourant() const
 
 	// CONSEQUENCES, NOT CONTROLS. These fall out of the step with the profile,
 	// the rotation and the grid; the step rate falls out of the speed.
-	const int32 W = FlowSimShader::GridLongitude(Config->GridLongitude);
+	const int32 W = FlowSimShader::GridLongitude(Config->GridResolution);
 	const float Step = Config->GetStepSize();
 	const float Steps = FMath::Max(Config->SimSpeed, 0.0f) / 60.0f / Step;
 	const float C = WaveSpeed(*Config);
@@ -793,7 +793,7 @@ void UFlowSimSubsystem::ReportStack() const
 	// The balanced interfaces, from the same profile the balance pass
 	// integrates: where a layer thins toward nothing, it has run into the top
 	// or bottom of the stack.
-	const int32 Rows = FlowSimShader::GridLatitude(Config->GridLatitude);
+	const int32 Rows = FlowSimShader::GridLatitude(Config->GridResolution);
 	const float DMu = 2.0f / Rows;
 
 	TArray<float> M;
@@ -1091,11 +1091,11 @@ bool UFlowSimSubsystem::PrepareTargets() const
 		return false;
 	}
 
-	const int32 GridW = FlowSimShader::GridLongitude(Config->GridLongitude);
-	const int32 GridH = FlowSimShader::GridLatitude(Config->GridLatitude);
+	const int32 GridW = FlowSimShader::GridLongitude(Config->GridResolution);
+	const int32 GridH = FlowSimShader::GridLatitude(Config->GridResolution);
 
 	// The cube atlas the sim resamples its output onto; see FlowField.ush.
-	const FIntPoint Atlas = FlowSimShader::AtlasSize(FlowSimShader::AtlasFaceSize(GridW));
+	const FIntPoint Atlas = FlowSimShader::AtlasSize(FlowSimShader::GridResolution(Config->GridResolution));
 
 	const int32 W = Atlas.X;
 	const int32 H = Atlas.Y;
@@ -1179,7 +1179,6 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	// Rounded to what the solver supports rather than refused.
 	Out.GridSize = GridOf(*Config);
 
-	const int32 W = Out.GridSize.X;
 	const int32 Layers = Out.GridSize.Z;
 
 	// Every wind from the speed root.
@@ -1341,7 +1340,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	const float DivScale = FMath::Max(FlowSimOutput::Divergence * (Speeds.Root / Speeds.WaveSpeed) * Speeds.Root / Radius, 1e-4f);
 
 	Out.OutputScales = FVector3f(PressureScale, ZetaScale, DivScale);
-	Out.AtlasFaceSize = FlowSimShader::AtlasFaceSize(W);
+	Out.AtlasFaceSize = FlowSimShader::GridResolution(Config->GridResolution);
 
 	// -- The stack ------------------------------------------------------------
 
