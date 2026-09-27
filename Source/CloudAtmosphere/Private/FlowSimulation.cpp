@@ -161,6 +161,7 @@ namespace
 		P.SimCellSustain = Params.CellSustain;
 		P.SimCellEyeDepth = Params.CellEyeDepth;
 		P.SimCellCoreFollow = Params.CellCoreFollow;
+		P.SimCellEyeLow = Params.CellEyeLow;
 		P.SimCellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
 		P.SimStepIndex = Params.StepIndex;
 
@@ -343,10 +344,10 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 		TEXT("FlowSim.GlobalMean"));
 
 	// Two float4 of state per slot (captured in snapshots), then two of vortex
-	// gains, two of inflow gains and one of health per slot (rewritten each
-	// step). Must match SIM_CELL_BUFFER_SIZE.
+	// gains, two of inflow gains, one of health and one of the low per
+	// slot (rewritten each step). Must match SIM_CELL_BUFFER_SIZE.
 	PooledCells = AllocatePooledBuffer(
-		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), 7 * FlowSimShader::MaxStormCells),
+		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), 8 * FlowSimShader::MaxStormCells),
 		TEXT("FlowSim.Cells"));
 
 	AllocatedGrid = Params.GridSize;

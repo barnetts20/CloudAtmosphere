@@ -204,6 +204,10 @@ float SimCellEyeDepth;
 /** Rate a cell is pulled onto its vortex's core, per unit time. */
 float SimCellCoreFollow;
 
+/** How far the eye tracer's source follows the storm's pressure low rather
+ *  than the eye radius; see SimCellEyeSource. */
+float SimCellEyeLow;
+
 /** Live cell slots, up to GG_SIM_MAX_CELLS. */
 int SimCellCount;
 
@@ -783,6 +787,13 @@ float2 SimCellParent(float3 P)
     return float2(Storm, max(Vorticity * SimSoftSat(P.z * SIM_STORM_HEMISPHERE), 0.0f));
 }
 
+/** The bottom layer's pressure at P, normalised as the output carries it:
+ *  lowest at a storm's centre of rotation. */
+float SimCellPressure(float3 P)
+{
+    return SimSampleBilinear4(SimLatLonSRV, SimDirectionToGrid(P), (uint) SimGridSize.z - 1u).z;
+}
+
 /** How good a seed P is: its storm weighted by cyclonic spin, zero below the
  *  storm a seed needs. */
 float SimCellSeedScore(float3 P)
@@ -823,12 +834,14 @@ float SimCellSeedScore(float3 P)
 // converges only in a thin eyewall band, with the mass vented by a separate
 // flux, leaves the core's storm to decay and the cell with it.
 
-/** The control block follows the cells' 2 GG_SIM_MAX_CELLS state entries, five
+/** The control block follows the cells' 2 GG_SIM_MAX_CELLS state entries, six
  *  float4 per slot: two of vortex gains and two of inflow gains, one component
- *  per layer each, then the cell's health (SIM_CELL_HEALTH). */
+ *  per layer each, the cell's health (SIM_CELL_HEALTH), then its low's pressure
+ *  at the eyewall and least (SIM_CELL_CORE). */
 #define SIM_CELL_CONTROL_BASE (2 * GG_SIM_MAX_CELLS)
-#define SIM_CELL_CONTROL_STRIDE 5
+#define SIM_CELL_CONTROL_STRIDE 6
 #define SIM_CELL_HEALTH 4u
+#define SIM_CELL_CORE 5u
 #define SIM_CELL_BUFFER_SIZE (SIM_CELL_CONTROL_BASE + SIM_CELL_CONTROL_STRIDE * GG_SIM_MAX_CELLS)
 
 /** Largest gain, in target winds: bounds the push while the flow is far from
@@ -1061,21 +1074,38 @@ float SimCellStormFloor(float3 P)
 #define SIM_CELL_EYE_RATE 16.0f
 #define SIM_CELL_EYE_DECAY 4.0f
 
-/** Where the cells' cores feed the eye tracer at P, [0, 1]: each cell's
- *  intensity on an S curve from its centre to the eye radius. The tracer
- *  settles on this profile, so it is the eye's cross-section: a rounded
- *  shoulder at the rim and a rounded floor at the core.
+/** Rings of six points MainCellsCS reads the low's pressure on, out to the
+ *  eyewall ring. */
+#define SIM_CELL_LOW_RINGS 4
+
+/** Where the cells' cores feed the eye tracer at P, [0, 1], given the bottom
+ *  layer's pressure there: each cell's intensity times an S curve from its
+ *  centre to the eye radius, or, as far as SimCellEyeLow, its low's core. The
+ *  tracer settles on this profile, so it is the eye's cross-section: a rounded
+ *  shoulder at the rim and a rounded floor.
+ *
+ *  THE LOW'S CORE IS THE FLOW'S EYE. A balanced vortex turns about its
+ *  pressure minimum, whatever the shape of its vorticity. MainCellsCS reads the
+ *  low's pressure on the eyewall ring and its least inside (SIM_CELL_CORE),
+ *  and the eye is what the eyewall's isobar encloses, on an S curve from none
+ *  at it to full at the minimum, at the cell's strength. It follows the
+ *  isobars wherever the low's centre is, so it sits on the centre of rotation
+ *  the cloud spirals into, and deepens toward it.
+ *
+ *  PITFALL: AN EYE FROM THE VORTICITY LEANS OFF THE CENTRE. A storm's
+ *  vorticity peaks in a ring or hook that is often open on one side, and what
+ *  it encloses runs out through the gap.
  *
  *  THE EYE IS A TRACER THE FLOW CARRIES, fed at each core and fading back
  *  (MainPredictCS, noise phase B's w). The flow deforms it, drags it with the
  *  storm's motion and winds it into streaks at its edge, so its shape is the
  *  flow's, and having memory it cannot blink out between steps.
  *
- *  PITFALL: AN EYE MEASURED FROM THE FLOW EACH STEP IS NOT A STABLE THING. The
- *  eye's calm core is a grid cell or two across: judged against any estimate
- *  of the storm's motion it slides into a crescent, and a centre found from
- *  it wanders and loses it. */
-float SimCellEyeSource(float3 P)
+ *  PITFALL: AN EYE MEASURED FROM THE CALM AIR EACH STEP IS NOT A STABLE THING.
+ *  The eye's calm core is a grid cell or two across: judged against any
+ *  estimate of the storm's motion it slides into a crescent, and a centre
+ *  found from it wanders and loses it. */
+float SimCellEyeSource(float3 P, float Pressure)
 {
     float Source = 0.0f;
 
@@ -1087,7 +1117,20 @@ float SimCellEyeSource(float3 P)
 
         if (SimCellReach((uint) Slot, P, false, Axis, Sense, Intensity, R))
         {
-            Source = max(Source, Intensity * (1.0f - smoothstep(0.0f, max(SimCellShape.y, 1e-4f), R)));
+            float Eye = Intensity * (1.0f - smoothstep(0.0f, max(SimCellShape.y, 1e-4f), R));
+
+            if (SimCellEyeLow > 0.0f)
+            {
+                const float4 Low = SimCellControl((uint) Slot, SIM_CELL_CORE);
+                const float Depth = Low.x - Low.y;
+
+                const float Near = 1.0f - smoothstep(SimCellShape.z, 2.0f * SimCellShape.z, R);
+                const float Core = (Depth > 1e-5f) ? smoothstep(0.0f, 1.0f, (Low.x - Pressure) / Depth) : 0.0f;
+
+                Eye = lerp(Eye, SimCellStrength(Intensity) * Near * Core, SimCellEyeLow);
+            }
+
+            Source = max(Source, Eye);
         }
     }
 
@@ -2136,6 +2179,32 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 
     SimCellUAV[Block + SIM_CELL_HEALTH] = (Intensity > 0.0f) ? float4(Health, Favour) : float4(0.0f, 0.0f, 0.0f, 0.0f);
 
+	// The low about the new centre: the bottom layer's mean pressure on the
+	// eyewall ring, and the least of it at the centre and on every ring out to
+	// it (SimCellEyeSource).
+    if (SimCellEyeLow > 0.0f && Intensity > 0.0f)
+    {
+        float Least = SimCellPressure(P);
+        float Wall = 0.0f;
+
+		[loop]
+        for (int LowK = 1; LowK <= SIM_CELL_LOW_RINGS; LowK++)
+        {
+            const float At = Ring * Radius * (float) LowK / (float) SIM_CELL_LOW_RINGS;
+
+			[unroll]
+            for (int K = 0; K < 6; K++)
+            {
+                const float Pressure = SimCellPressure(SimCellRingPoint(P, At, K));
+
+                Least = min(Least, Pressure);
+                Wall += (LowK == SIM_CELL_LOW_RINGS) ? Pressure / 6.0f : 0.0f;
+            }
+        }
+
+        SimCellUAV[Block + SIM_CELL_CORE] = float4(Wall, Least, 0.0f, 0.0f);
+    }
+
     // -- Push gains ------------------------------------------------------------
 
     if (Intensity <= 0.0f)
@@ -2534,7 +2603,7 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
         {
             Carried = saturate(SimSampleCubic4(SimNoiseSRV, DepartureGrid, Slice).w);
 
-            const float Source = bCellNear ? SimCellEyeSource(P) : 0.0f;
+            const float Source = bCellNear ? SimCellEyeSource(P, SimLatLonSRV.Load(int4(C, L - 1u, 0)).z) : 0.0f;
 
             const float Rate = (Source > Carried) ? SIM_CELL_EYE_RATE : SIM_CELL_EYE_DECAY;
 

@@ -82,6 +82,7 @@ SHADER_PARAMETER(float, SimCellWindBreadth)
 SHADER_PARAMETER(float, SimCellSustain)
 SHADER_PARAMETER(float, SimCellEyeDepth)
 SHADER_PARAMETER(float, SimCellCoreFollow)
+SHADER_PARAMETER(float, SimCellEyeLow)
 SHADER_PARAMETER(int32, SimCellCount)
 SHADER_PARAMETER(int32, SimStepIndex)
 

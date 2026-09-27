@@ -576,6 +576,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellEyeDepth = 0.8f;
 
+	/** How far the eye follows the storm's pressure low rather than
+	 *  StormCellEye's circle. At 1 the eye is what the isobar through the
+	 *  eyewall encloses, deepening to full at the low's minimum: it sits on the
+	 *  centre of rotation the cloud spirals into, whatever the vorticity's
+	 *  shape. StormCellEyeDepth sets how far it thins the deck and
+	 *  StormCellEyeDraft how hard it sinks the sim's cloud. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellEyeLow = 0.0f;
+
 	/** How fast the vectors fall from the eyewall to the radius, as the power
 	 *  of the remaining distance: 1 is linear, higher tightens the storm onto
 	 *  its core. */
@@ -991,6 +1000,9 @@ struct FFlowSimParams
 
 	/** Rate a cell is pulled onto its vortex's core. */
 	float CellCoreFollow = 8.0f;
+
+	/** How far the eye follows the storm's pressure low. */
+	float CellEyeLow = 0.0f;
 	int32 CellCount = 0;
 
 	/** Steps completed before the frame's first; seeds the cells' spawns. */
