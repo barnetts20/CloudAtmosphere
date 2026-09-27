@@ -585,6 +585,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellEyeLow = 0.0f;
 
+	/** Share of the low's eye, in radius from the eyewall inward, that its rim
+	 *  ramps over on a curve with no crease at either end. Higher starts the
+	 *  descent gently from the eyewall and shrinks the fully clear floor; 1
+	 *  ramps all the way to the centre. Lower gives a broad clear floor inside
+	 *  a steeper wall. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float StormCellEyeSoftness = 0.75f;
+
 	/** How fast the vectors fall from the eyewall to the radius, as the power
 	 *  of the remaining distance: 1 is linear, higher tightens the storm onto
 	 *  its core. */
@@ -1001,8 +1009,9 @@ struct FFlowSimParams
 	/** Rate a cell is pulled onto its vortex's core. */
 	float CellCoreFollow = 8.0f;
 
-	/** How far the eye follows the storm's pressure low. */
+	/** How far the eye follows the storm's pressure low, and its rim's ramp. */
 	float CellEyeLow = 0.0f;
+	float CellEyeSoftness = 0.75f;
 	int32 CellCount = 0;
 
 	/** Steps completed before the frame's first; seeds the cells' spawns. */

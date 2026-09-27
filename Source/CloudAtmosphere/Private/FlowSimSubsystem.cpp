@@ -1288,6 +1288,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.CellEyeDepth = FMath::Clamp(Config->StormCellEyeDepth, 0.0f, 1.0f);
 	Out.CellCoreFollow = FMath::Max(Config->StormCellCoreFollow, 0.0f);
 	Out.CellEyeLow = FMath::Clamp(Config->StormCellEyeLow, 0.0f, 1.0f);
+	Out.CellEyeSoftness = FMath::Clamp(Config->StormCellEyeSoftness, 0.05f, 1.0f);
 
 	Out.CellCount = FMath::Clamp(Config->MaxStormCells, 0, FlowSimShader::MaxStormCells);
 

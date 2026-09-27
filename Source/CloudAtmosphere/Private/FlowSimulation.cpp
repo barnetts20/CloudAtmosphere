@@ -162,6 +162,7 @@ namespace
 		P.SimCellEyeDepth = Params.CellEyeDepth;
 		P.SimCellCoreFollow = Params.CellCoreFollow;
 		P.SimCellEyeLow = Params.CellEyeLow;
+		P.SimCellEyeSoftness = Params.CellEyeSoftness;
 		P.SimCellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
 		P.SimStepIndex = Params.StepIndex;
 

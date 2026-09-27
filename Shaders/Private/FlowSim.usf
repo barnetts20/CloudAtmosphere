@@ -205,8 +205,10 @@ float SimCellEyeDepth;
 float SimCellCoreFollow;
 
 /** How far the eye tracer's source follows the storm's pressure low rather
- *  than the eye radius; see SimCellEyeSource. */
+ *  than the eye radius, and the share of the eye's radius its rim ramps over;
+ *  see SimCellEyeSource. */
 float SimCellEyeLow;
+float SimCellEyeSoftness;
 
 /** Live cell slots, up to GG_SIM_MAX_CELLS. */
 int SimCellCount;
@@ -1074,6 +1076,14 @@ float SimCellStormFloor(float3 P)
 #define SIM_CELL_EYE_RATE 16.0f
 #define SIM_CELL_EYE_DECAY 4.0f
 
+/** A quintic S curve from A to B: zero slope and curvature at both ends. */
+float SimSmootherstep(float A, float B, float X)
+{
+    const float T = saturate((X - A) / max(B - A, 1e-5f));
+
+    return T * T * T * (T * (6.0f * T - 15.0f) + 10.0f);
+}
+
 /** Rings of six points MainCellsCS reads the low's pressure on, out to the
  *  eyewall ring. */
 #define SIM_CELL_LOW_RINGS 4
@@ -1087,10 +1097,17 @@ float SimCellStormFloor(float3 P)
  *  THE LOW'S CORE IS THE FLOW'S EYE. A balanced vortex turns about its
  *  pressure minimum, whatever the shape of its vorticity. MainCellsCS reads the
  *  low's pressure on the eyewall ring and its least inside (SIM_CELL_CORE),
- *  and the eye is what the eyewall's isobar encloses, on an S curve from none
- *  at it to full at the minimum, at the cell's strength. It follows the
- *  isobars wherever the low's centre is, so it sits on the centre of rotation
- *  the cloud spirals into, and deepens toward it.
+ *  and the eye is what the eyewall's isobar encloses, at the cell's strength.
+ *  It follows the isobars wherever the low's centre is, so it sits on the
+ *  centre of rotation the cloud spirals into, and deepens toward it.
+ *
+ *  THE RIM RAMPS IN RADIUS, NOT PRESSURE. A low deepens about as the square
+ *  of the distance in, so the depth below the eyewall's isobar, as a share of
+ *  the low's, is read back as an equivalent radius, 1 on the isobar and 0 at
+ *  the minimum. The eye ramps in over the outer SimCellEyeSoftness of it on a
+ *  quintic S curve, full inside. PITFALL: A RAMP IN PRESSURE, or a cubic one,
+ *  starts at the rim with a jump in curvature that the deck's lighting draws
+ *  as a ridge around the eye.
  *
  *  PITFALL: AN EYE FROM THE VORTICITY LEANS OFF THE CENTRE. A storm's
  *  vorticity peaks in a ring or hook that is often open on one side, and what
@@ -1125,7 +1142,8 @@ float SimCellEyeSource(float3 P, float Pressure)
                 const float Depth = Low.x - Low.y;
 
                 const float Near = 1.0f - smoothstep(SimCellShape.z, 2.0f * SimCellShape.z, R);
-                const float Core = (Depth > 1e-5f) ? smoothstep(0.0f, 1.0f, (Low.x - Pressure) / Depth) : 0.0f;
+                const float Rim = sqrt(max(1.0f - (Low.x - Pressure) / max(Depth, 1e-5f), 0.0f));
+                const float Core = (Depth > 1e-5f) ? 1.0f - SimSmootherstep(1.0f - SimCellEyeSoftness, 1.0f, Rim) : 0.0f;
 
                 Eye = lerp(Eye, SimCellStrength(Intensity) * Near * Core, SimCellEyeLow);
             }
