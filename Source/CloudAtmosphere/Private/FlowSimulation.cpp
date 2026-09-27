@@ -233,6 +233,45 @@ namespace
 		FillCommonParameters(*P, Params);
 		return P;
 	}
+
+	/** What MainInitBalanceCS reads: the grid, the jets, the thermal shear and
+	 *  the rotation. */
+	TArray<float> BalanceKeyOf(const FFlowSimParams& Params)
+	{
+		TArray<float> Key;
+		Key.Reserve(48);
+
+		Key.Append({ (float)Params.GridSize.X, (float)Params.GridSize.Y, (float)Params.GridSize.Z });
+		Key.Append({ Params.JetParams.X, Params.JetParams.Y, Params.JetParams.Z, Params.JetParams.W });
+		Key.Append({ Params.WidthBias, (float)Params.ZonalProfile, Params.PlanetaryVorticity });
+		Key.Append({ Params.ThermalParams.X, Params.ThermalParams.Y, Params.ThermalParams.Z, Params.ThermalParams.W });
+
+		for (int32 i = 0; i < 8; ++i)
+		{
+			Key.Append({ Params.LayerProfile[i].X, Params.LayerProfile[i].Y, Params.LayerProfile[i].Z, Params.LayerProfile[i].W });
+		}
+
+		return Key;
+	}
+
+	/** Every scalar parameter a pass sees as bytes, less the output blend and
+	 *  the clocks, which Reduce and Reconstruct do not read: what they read,
+	 *  and more. */
+	TArray<uint8> LatestKeyOf(const FFlowSimParams& Params)
+	{
+		FFlowSimParameters P;
+		FMemory::Memzero(&P, sizeof(P));
+		FillCommonParameters(P, Params);
+		P.SimStateBlend = 0.0f;
+		P.SimForcingCycle = 0;
+		P.SimForcingFraction = 0.0f;
+		P.SimNoiseClock = 0.0f;
+		P.SimStepIndex = 0;
+
+		TArray<uint8> Key;
+		Key.Append(reinterpret_cast<const uint8*>(&P), sizeof(P));
+		return Key;
+	}
 }
 
 void FFlowSimulation::RequestReset()
@@ -274,6 +313,9 @@ void FFlowSimulation::Release_RenderThread()
 	PooledCells.SafeRelease();
 	PooledCellFlow.SafeRelease();
 	PooledCellColumn.SafeRelease();
+
+	BalanceKey.Reset();
+	LatestKey.Reset();
 
 	// PendingRestore is DELIBERATELY NOT cleared. A queued restore sets the reset
 	// flag, and EnsureResources answers that flag by calling this function --
@@ -519,6 +561,9 @@ void FFlowSimulation::AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowS
 	P->SimTracerSRV = GraphBuilder.CreateSRV(R.TracerSource());
 	P->SimNoiseSRV = GraphBuilder.CreateSRV(R.NoiseSource());
 	P->SimCentreUAV = GraphBuilder.CreateUAV(bLatest ? R.CentreLatest : R.Centre);
+	P->SimReconstructLatest = bLatest ? 1 : 0;
+
+	// Bound either way, since the kernel declares it; unwritten when latest.
 	P->SimExplicitUAV = GraphBuilder.CreateUAV(R.Explicit);
 	P->SimLatLonUAV = GraphBuilder.CreateUAV(bLatest ? R.LatLonLatest : R.LatLon);
 
@@ -665,10 +710,11 @@ void FFlowSimulation::AddResamplePass(FRDGBuilder& GraphBuilder, const FFlowSimP
 {
 	const FIntPoint Atlas = AtlasSize(Params.AtlasFaceSize);
 
+	// Every layer in each thread, which shares the taps and the cells' stamp.
 	const FIntVector Groups(
 		FMath::DivideAndRoundUp(Atlas.X, ThreadGroupSize2D),
 		FMath::DivideAndRoundUp(Atlas.Y, ThreadGroupSize2D),
-		Params.GridSize.Z);
+		1);
 
 	FFlowSimParameters* P = NewParameters(GraphBuilder, Params);
 	P->SimCentreSRV = GraphBuilder.CreateSRV(R.Centre);
@@ -763,9 +809,15 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 			CreateRenderTarget(Params.DebugTexture, TEXT("FlowSim.Debug")));
 	}
 
-	// Every frame: the thermal relaxation target and the initial state both
-	// read it, and a live profile edit should reach both.
-	AddBalancePass(GraphBuilder, Params, R);
+	// Whenever its inputs change: the thermal relaxation target and the initial
+	// state both read it, and a live profile edit should reach both.
+	TArray<float> Balance = BalanceKeyOf(Params);
+
+	if (Balance != BalanceKey)
+	{
+		AddBalancePass(GraphBuilder, Params, R);
+		BalanceKey = MoveTemp(Balance);
+	}
 
 	if (bNeedsSeeding || !bInitialised)
 	{
@@ -793,10 +845,15 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 
 		PendingRestore.Empty();
 		bInitialised = true;
+		LatestKey.Reset();
 
-		// The start state is also the previous state, until a step replaces it.
-		AddReducePasses(GraphBuilder, Params, R);
-		AddReconstructPass(GraphBuilder, Params, R, false);
+		// The start state is also the previous state, until a step replaces it;
+		// a first substep writes the same pair itself.
+		if (NumSubsteps <= 0)
+		{
+			AddReducePasses(GraphBuilder, Params, R);
+			AddReconstructPass(GraphBuilder, Params, R, false);
+		}
 	}
 
 	// Each substep at its own time: the forcing's phases and the noise resets
@@ -813,9 +870,18 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	// THE OUTPUT BLENDS THE LAST TWO STATES. Each substep's reconstruct leaves
 	// the state it started from in Centre and LatLon, so after the loop they
 	// hold the previous state; this one writes the latest beside them. A frame
-	// without substeps leaves the previous state as it was.
-	AddReducePasses(GraphBuilder, Params, R);
-	AddReconstructPass(GraphBuilder, Params, R, true);
+	// without substeps leaves the previous state as it was, and the latest too
+	// unless a parameter changed: most frames at a low SimSpeed, and every
+	// paused one.
+	TArray<uint8> Latest = LatestKeyOf(Params);
+
+	if (NumSubsteps > 0 || Latest != LatestKey)
+	{
+		AddReducePasses(GraphBuilder, Params, R);
+		AddReconstructPass(GraphBuilder, Params, R, true);
+		LatestKey = MoveTemp(Latest);
+	}
+
 	AddResamplePass(GraphBuilder, Params, R);
 
 	AddDebugPass(GraphBuilder, Params, R);

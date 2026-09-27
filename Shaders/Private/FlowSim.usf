@@ -319,6 +319,10 @@ Texture2DArray<float4> SimCentreLatestSRV;
 Texture2DArray<float4> SimLatLonLatestSRV;
 float SimStateBlend;
 
+/** Nonzero when Reconstruct writes the latest pair for the resample, which
+ *  reads no explicit field, so it skips that one. */
+int SimReconstructLatest;
+
 /** The texture the material samples: SimLatLon's slices resampled onto the
  *  cube atlas; see FlowField.ush. */
 RWTexture2DArray<float4> SimOutputUAV;
@@ -1826,7 +1830,7 @@ void MainReduceGlobalCS(uint3 Group : SV_GroupID, uint Thread : SV_GroupIndex)
  *
  *  EXPLICIT FIELD: the centre average of each face's V - (1-alpha) dt grad M,
  *  so the pressure gradient is the C-grid's own, and the mass term with its
- *  nonlinear part.
+ *  nonlinear part. Not written under SimReconstructLatest.
  *
  *  FLOW SLICE: (u_east, u_north, pressure, vorticity). Pressure is M less its
  *  zonal mean, soft-saturated: positive in highs in both hemispheres.
@@ -1870,26 +1874,31 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
 
     // -- Explicit field ----------------------------------------------------
 
-    const float Explicit = (1.0f - SimImplicitWeight) * SimDeltaTime;
-
     const float MHere = SimMontgomery(C, Layer);
 
-    const float GradEast = (SimMontgomery(C + int2(1, 0), Layer) - SimMontgomery(C + int2(-1, 0), Layer))
-		/ (2.0f * SimRowCos(C.y) * SimDLon());
+    BRANCH
 
-    const float GradSouth = (C.y > 0)
-		? SimFaceCos(C.y) * (MHere - SimMontgomery(C + int2(0, -1), Layer)) / SimDMu()
-		: 0.0f;
+    if (SimReconstructLatest == 0)
+    {
+        const float Explicit = (1.0f - SimImplicitWeight) * SimDeltaTime;
 
-    const float GradNorth = (C.y + 1 < SimGridSize.y)
-		? SimFaceCos(C.y + 1) * (SimMontgomery(C + int2(0, 1), Layer) - MHere) / SimDMu()
-		: 0.0f;
+        const float GradEast = (SimMontgomery(C + int2(1, 0), Layer) - SimMontgomery(C + int2(-1, 0), Layer))
+			/ (2.0f * SimRowCos(C.y) * SimDLon());
 
-    const float3 Gradient = SimEast(N) * GradEast + SimNorth(N) * (0.5f * (GradSouth + GradNorth));
+        const float GradSouth = (C.y > 0)
+			? SimFaceCos(C.y) * (MHere - SimMontgomery(C + int2(0, -1), Layer)) / SimDMu()
+			: 0.0f;
 
-    SimExplicitUAV[int3(C, Layer)] = float4(
-		Velocity - Explicit * Gradient,
-		Phi - Explicit * SimLayerDepth(Layer) * Divergence - SimDeltaTime * Phi * Divergence);
+        const float GradNorth = (C.y + 1 < SimGridSize.y)
+			? SimFaceCos(C.y + 1) * (SimMontgomery(C + int2(0, 1), Layer) - MHere) / SimDMu()
+			: 0.0f;
+
+        const float3 Gradient = SimEast(N) * GradEast + SimNorth(N) * (0.5f * (GradSouth + GradNorth));
+
+        SimExplicitUAV[int3(C, Layer)] = float4(
+			Velocity - Explicit * Gradient,
+			Phi - Explicit * SimLayerDepth(Layer) * Divergence - SimDeltaTime * Phi * Divergence);
+    }
 
     // -- Flow --------------------------------------------------------------
 
@@ -3263,13 +3272,23 @@ float SimRowLatitude(int Row)
     return asin(SimRowToMu((float) Row));
 }
 
-/** SimSampleCubic4 with the latitude weights taken in latitude, not in mu.
+/** Where the resample reads the lat-lon fields at a direction and how it
+ *  weighs each texel, folded over the poles: the same for every field and
+ *  slice there. */
+struct SimMeridianTaps
+{
+    int2 Coord[16];
+    float Weight[16];
+};
+
+/** SimSampleCubic4's taps with the latitude weights taken in latitude, not in
+ *  mu.
  *
  *  PITFALL: A CUBIC IN MU IS WRONG AT THE POLES. Mu is quadratic in angle
  *  there, so a field varying linearly across a pole is a square root in mu, and
  *  the uniform cubic leaves a dent at the pole the width of the polar rows.
  *  Lagrange weights on the rows' true latitudes, folded, reproduce it. */
-float4 SimSampleMeridian4(Texture2DArray<float4> Field, float3 N, uint Layer)
+SimMeridianTaps SimMeridianTapsAt(float3 N)
 {
     const float2 Grid = SimDirectionToGrid(N);
 
@@ -3310,7 +3329,7 @@ float4 SimSampleMeridian4(Texture2DArray<float4> Field, float3 N, uint Layer)
 
     const int2 C0 = int2((int) BaseI - 1, BaseJ - 1);
 
-    float4 Sum = 0.0f;
+    SimMeridianTaps Taps;
 
 	[unroll]
     for (int J = 0; J < 4; J++)
@@ -3318,8 +3337,23 @@ float4 SimSampleMeridian4(Texture2DArray<float4> Field, float3 N, uint Layer)
 		[unroll]
         for (int I = 0; I < 4; I++)
         {
-            Sum += WX[I] * WY[J] * SimLoad4(Field, C0 + int2(I, J), Layer);
+            Taps.Coord[4 * J + I] = SimWrapCoord(C0 + int2(I, J));
+            Taps.Weight[4 * J + I] = WX[I] * WY[J];
         }
+    }
+
+    return Taps;
+}
+
+/** A slice of a lat-lon field through taps from SimMeridianTapsAt. */
+float4 SimSampleMeridianTaps(Texture2DArray<float4> Field, SimMeridianTaps Taps, uint Slice)
+{
+    float4 Sum = 0.0f;
+
+	[unroll]
+    for (int K = 0; K < 16; K++)
+    {
+        Sum += Taps.Weight[K] * Field.Load(int4(Taps.Coord[K], Slice, 0));
     }
 
     return Sum;
@@ -3327,23 +3361,25 @@ float4 SimSampleMeridian4(Texture2DArray<float4> Field, float3 N, uint Layer)
 
 /** A centre field or output slice at the output's place between the last two
  *  states. */
-float4 SimResampleCentre(float3 N, uint Slice)
+float4 SimResampleCentre(SimMeridianTaps Taps, uint Slice)
 {
-    return lerp(SimSampleMeridian4(SimCentreSRV, N, Slice),
-		SimSampleMeridian4(SimCentreLatestSRV, N, Slice), SimStateBlend);
+    return lerp(SimSampleMeridianTaps(SimCentreSRV, Taps, Slice),
+		SimSampleMeridianTaps(SimCentreLatestSRV, Taps, Slice), SimStateBlend);
 }
 
-float4 SimResampleOutput(float3 N, uint Slice)
+float4 SimResampleOutput(SimMeridianTaps Taps, uint Slice)
 {
-    return lerp(SimSampleMeridian4(SimLatLonSRV, N, Slice),
-		SimSampleMeridian4(SimLatLonLatestSRV, N, Slice), SimStateBlend);
+    return lerp(SimSampleMeridianTaps(SimLatLonSRV, Taps, Slice),
+		SimSampleMeridianTaps(SimLatLonLatestSRV, Taps, Slice), SimStateBlend);
 }
 
-/** One atlas texel of every slice for a layer. Dispatch (AtlasW, AtlasH,
- *  LayerCount), after the frame's last Reconstruct.
+/** One atlas texel of every slice of every layer. Dispatch (AtlasW, AtlasH,
+ *  1), after the frame's last Reconstruct. The taps, the cells' stamp and the
+ *  face basis depend on the direction alone, so each is built once for all
+ *  layers.
  *
  *  BY DIRECTION, FOLDED OVER THE POLES. Each texel, gutter included, is
- *  SimSampleMeridian4 of the lat-lon output at its direction, so nothing
+ *  the lat-lon output at its direction, cubic in longitude and true latitude, so nothing
  *  converges on the poles. Velocity comes from the Cartesian centre field
  *  instead of the stored east/north pair, which flips sign across the fold, and
  *  is written in the face's basis. The cubic can overshoot, so the weather's
@@ -3364,12 +3400,11 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
     const float FaceSize = (float) SimAtlasFaceSize;
     const float Tile = FaceSize + 2.0f * FLOW_ATLAS_GUTTER;
 
-    if ((float) Id.x >= 3.0f * Tile || (float) Id.y >= 2.0f * Tile || (int) Id.z >= SimGridSize.z)
+    if ((float) Id.x >= 3.0f * Tile || (float) Id.y >= 2.0f * Tile)
     {
         return;
     }
 
-    const uint Layer = Id.z;
     const uint L = (uint) SimGridSize.z;
 
     const uint2 TileIndex = uint2((float2) Id.xy / Tile);
@@ -3378,42 +3413,47 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
     const float2 Local = (float2) Id.xy + 0.5f - (float2) TileIndex * Tile - FLOW_ATLAS_GUTTER;
     const float3 N = Flow_FaceDirection(Face, Local / FaceSize * 2.0f - 1.0f);
 
-    float3 Velocity = SimResampleCentre(N, Layer).xyz;
-    Velocity -= N * dot(N, Velocity);
-
-    float4 Flow = SimResampleOutput(N, Layer);
-    float4 Weather = SimResampleOutput(N, Layer + L);
-    float4 NoiseB = SimResampleOutput(N, Layer + 3u * L);
-
-    // -- Storm cells --------------------------------------------------------------
-
+    const SimMeridianTaps Taps = SimMeridianTapsAt(N);
     const SimStamp Stamp = SimCellStamp(N);
-
-	// The eye tracer, from the latest state.
-    const float Eye = saturate(SimSampleMeridian4(SimNoiseSRV, N, Layer + L).w);
-
-	// THE BAND INTENSIFIES, IT DOES NOT ADD. Storm deepens and darkens cloud
-	// the column already has; the cloud itself is the sim's, which carries the
-	// cell's own. PITFALL: raising cover here stamps a solid disc over the
-	// eyewall region that ignores the cloud the vortex actually winds.
-    Weather.x = clamp(Weather.x + Stamp.Draft + SimCellDraft.y * Eye, -1.0f, 1.0f);
-
-	// The eye as depth alone; see SimCellEyeSource.
-    NoiseB.w = 1.0f - SimCellEyeDepth * Eye;
-    Weather.w = SimSmoothMax(Weather.w, Stamp.Storm, SIM_CELL_STORM_BLEND);
-    Weather.yzw = saturate(Weather.yzw);
-
-    Flow.z = clamp(Flow.z - SimCellDraft.w * Stamp.Low, -1.0f, 1.0f);
-
-    // -- Write ---------------------------------------------------------------------
 
     float3 T1, T2;
     Flow_FaceBasis(N, Face, T1, T2);
 
-    SimOutputUAV[int3(Id.xy, Layer)] = float4(dot(Velocity, T1), dot(Velocity, T2), Flow.zw);
-    SimOutputUAV[int3(Id.xy, Layer + L)] = Weather;
-    SimOutputUAV[int3(Id.xy, Layer + 2u * L)] = SimResampleOutput(N, Layer + 2u * L);
-    SimOutputUAV[int3(Id.xy, Layer + 3u * L)] = NoiseB;
+	[loop]
+    for (uint Layer = 0; Layer < L; Layer++)
+    {
+        float3 Velocity = SimResampleCentre(Taps, Layer).xyz;
+        Velocity -= N * dot(N, Velocity);
+
+        float4 Flow = SimResampleOutput(Taps, Layer);
+        float4 Weather = SimResampleOutput(Taps, Layer + L);
+        float4 NoiseB = SimResampleOutput(Taps, Layer + 3u * L);
+
+        // -- Storm cells --------------------------------------------------------------
+
+		// The eye tracer, from the latest state.
+        const float Eye = saturate(SimSampleMeridianTaps(SimNoiseSRV, Taps, Layer + L).w);
+
+		// THE BAND INTENSIFIES, IT DOES NOT ADD. Storm deepens and darkens cloud
+		// the column already has; the cloud itself is the sim's, which carries the
+		// cell's own. PITFALL: raising cover here stamps a solid disc over the
+		// eyewall region that ignores the cloud the vortex actually winds.
+        Weather.x = clamp(Weather.x + Stamp.Draft + SimCellDraft.y * Eye, -1.0f, 1.0f);
+
+		// The eye as depth alone; see SimCellEyeSource.
+        NoiseB.w = 1.0f - SimCellEyeDepth * Eye;
+        Weather.w = SimSmoothMax(Weather.w, Stamp.Storm, SIM_CELL_STORM_BLEND);
+        Weather.yzw = saturate(Weather.yzw);
+
+        Flow.z = clamp(Flow.z - SimCellDraft.w * Stamp.Low, -1.0f, 1.0f);
+
+        // -- Write ---------------------------------------------------------------------
+
+        SimOutputUAV[int3(Id.xy, Layer)] = float4(dot(Velocity, T1), dot(Velocity, T2), Flow.zw);
+        SimOutputUAV[int3(Id.xy, Layer + L)] = Weather;
+        SimOutputUAV[int3(Id.xy, Layer + 2u * L)] = SimResampleOutput(Taps, Layer + 2u * L);
+        SimOutputUAV[int3(Id.xy, Layer + 3u * L)] = NoiseB;
+    }
 }
 
 // ---------------------------------------------------------------------------

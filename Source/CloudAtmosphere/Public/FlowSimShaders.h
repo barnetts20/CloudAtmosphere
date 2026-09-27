@@ -100,6 +100,7 @@ SHADER_PARAMETER(int32, SimFilterMaxHalfWidth)
 SHADER_PARAMETER(FVector3f, SimOutputScales)
 SHADER_PARAMETER(int32, SimAtlasFaceSize)
 SHADER_PARAMETER(float, SimStateBlend)
+SHADER_PARAMETER(int32, SimReconstructLatest)
 
 // -- Debug --------------------------------------------------------------
 SHADER_PARAMETER(int32, SimDebugMode)

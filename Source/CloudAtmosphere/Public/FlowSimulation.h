@@ -91,7 +91,8 @@ private:
 	void AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R, int32 FloatsPerCell);
 	void AddReducePasses(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	/** Centre, explicit and output fields of the current faces. bLatest writes
-	 *  the output pair the resample blends toward, rather than the working pair. */
+	 *  the output pair the resample blends toward, rather than the working pair,
+	 *  and no explicit field. */
 	void AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R, bool bLatest);
 	void AddCellsPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	/** The cells' streamfunction, potential and column terms for Predict. */
@@ -153,6 +154,15 @@ private:
 
 	/** Consumed by the next initialisation, then emptied. */
 	TArray<float> PendingRestore;
+
+	/** The balance pass's inputs when it last ran. It reruns only when they
+	 *  change; empty after a release. */
+	TArray<float> BalanceKey;
+
+	/** Every scalar parameter but the blend when the latest pair was last
+	 *  written. A frame without steps rewrites it only when they change; empty
+	 *  after a release or a seed. */
+	TArray<uint8> LatestKey;
 
 	bool bInitialised = false;
 	bool bResetRequested = false;
