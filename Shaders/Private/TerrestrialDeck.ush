@@ -1,7 +1,6 @@
 #pragma once
 
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
-#include "/Plugin/CloudAtmosphere/Private/AtmosphereNoise.ush"
 #include "/Plugin/CloudAtmosphere/Private/FlowField.ush"
 
 // Terrestrial clouds: the field the march samples.
@@ -79,19 +78,7 @@
 /** Share of the noise's range full structure erosion cuts away at full
  *  coverage: the hole fraction a thick system breaks up into. Half leaves
  *  about half of it clear, the survivors ramping from their edges to full. */
-#ifndef TR_EROSION_CUT
 #define TR_EROSION_CUT 0.5f
-#endif
-
-/** How far the noise stretches vertically with column depth, 0 to 1. At 1 a
- *  column of any depth spans as many noise features as a stratiform one, so
- *  erosion cuts through a tower as it does through a deck. PITFALL: at 0 a
- *  tower stacks several independent features, a view ray down it almost
- *  always meets one, and it reads solid at any erosion while thin cloud
- *  breaks up. */
-#ifndef TR_COLUMN_COHERENCE
-#define TR_COLUMN_COHERENCE 1.0f
-#endif
 
 /** The least StratusDepth the stretch measures depth against. */
 #ifndef TR_STRETCH_MIN_STRATUS
@@ -1078,9 +1065,12 @@ float4 TR_DensityInColumn(
 	// -- Vertical warp: rising air stretches and lifts the noise ---------------
 	//
 	// STRETCH divides the vertical frequency, so rising air draws a feature out
-	// taller, and so does depth past a stratiform column's (TR_COLUMN_COHERENCE);
-	// SHIFT reads the volume from a different altitude. Both touch only the
-	// noise, so they cost the bounds nothing.
+	// taller, and so does depth past a stratiform column's, so a column of any
+	// depth spans as many noise features as a stratiform one; SHIFT reads the
+	// volume from a different altitude. Both touch only the noise, so they cost
+	// the bounds nothing. PITFALL: without the depth stretch a tower stacks
+	// several independent features, a view ray down it almost always meets one,
+	// and it reads solid at any erosion while thin cloud breaks up.
 
 	// Against a stratiform depth floored at a tenth of the thickness, so a
 	// StratusDepth near zero cannot stretch a tower's noise flat.
@@ -1091,8 +1081,7 @@ float4 TR_DensityInColumn(
 	// break re-scales the noise abruptly where depth crosses StratusDepth.
     const float DepthFit = sqrt(sqrt(1.0f + StretchRatio * StretchRatio * StretchRatio * StretchRatio));
 
-    const float Stretch = max(1.0f + F.WarpStretch * Col.Ascent, 0.1f)
-		* lerp(1.0f, DepthFit, TR_COLUMN_COHERENCE);
+    const float Stretch = max(1.0f + F.WarpStretch * Col.Ascent, 0.1f) * DepthFit;
     const float Shift = F.WarpShift * F.CloudThickness * Col.Ascent;
 
 	// ANCHORED AT THE COLUMN'S BASE: the stretch scales height from there, so a
@@ -1189,52 +1178,6 @@ float4 TR_DensityInColumn(
     Density *= pow(saturate(Col.Thinning), TR_EYE_OPEN_POWER);
 
     return float4(Density, Col.Material, Col.Pressure, Col.Top);
-}
-
-/** Density at a planet-local point, the column read where it stands. LocalPos
- *  carries its true radius; StepHalfLength is half the march step in
- *  atmosphere fractions along the radius. Returns as TR_DensityInColumn.
- *
- *  ONE COLUMN READ OUTSIDE THE SLAB RATHER THAN THE NOISE AS WELL: density
- *  there is exactly zero. */
-float4 TR_Density(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	Texture3D DetailVolume,
-	SamplerState DetailSampler,
-	Texture3D StructureVolume,
-	SamplerState StructureSampler,
-	float3 LocalPos,
-	float StepHalfLength,
-	TRFieldParams F)
-{
-    const float Radius = length(LocalPos);
-    const float Height = (Radius - F.PlanetRadius) / F.Thickness;
-    const float HalfStep = max(StepHalfLength, 0.0f);
-
-    const float3 N = normalize(Atmo_RotateZ(LocalPos / max(Radius, 1e-4f), F.SpinAngle));
-
-    const float Layer = TR_FlowLayer(FlowField, F.CloudLayer);
-
-	// Phase B comes with the column, for its depth factor; phase A only inside
-	// the slab.
-    const FlowColumnSample S = Flow_SampleColumn(FlowField, FlowSampler, N, Layer, false);
-
-    const TRColumn Col = TR_ColumnFromInputs(TR_InputsFromSample(S), N, F);
-
-    BRANCH
-
-    if (TR_SlabMissed(Col, Height, HalfStep))
-    {
-        return float4(0.0f, Col.Material, Col.Pressure, Col.Top);
-    }
-
-    const float3 DisplacementA = Flow_SampleSlice(
-		FlowField, FlowSampler, N, Layer + 2.0f * Flow_LayerCount(FlowField)).xyz;
-
-    return TR_DensityInColumn(
-		DetailVolume, DetailSampler, StructureVolume, StructureSampler,
-		N, Height, HalfStep, Col, DisplacementA, S.NoiseB.xyz, F);
 }
 
 // ---------------------------------------------------------------------------

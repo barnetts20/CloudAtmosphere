@@ -5,8 +5,8 @@
 
 // Terrestrial cloud shadow map: this field's side of the bake.
 //
-// THE MARCH IS NOT HERE. The ray setup, the step lattice, the crossing
-// accumulation and the occluder band live in AtmosphereShadowBake.ush and
+// THE MARCH IS NOT HERE. The ray setup, the step lattice and the crossing
+// accumulation live in AtmosphereShadowBake.ush and
 // AtmosphereShadowBakeLoop.ush, which any bake writing this format shares. What
 // remains below is the field's own -- its uniforms, its extinction, where a ray
 // enters it -- exposed to that loop through the BakeField_ hooks at the bottom

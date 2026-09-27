@@ -108,10 +108,9 @@ namespace
 	void FillCommonParameters(FFlowSimUniformParameters& P, const FFlowSimParams& Params)
 	{
 		P.GridSize = Params.GridSize;
-		P.InvGridSize = FVector3f(
+		P.InvGridSize = FVector2f(
 			1.0f / FMath::Max(Params.GridSize.X, 1),
-			1.0f / FMath::Max(Params.GridSize.Y, 1),
-			1.0f / FMath::Max(Params.GridSize.Z, 1));
+			1.0f / FMath::Max(Params.GridSize.Y, 1));
 
 		P.JetParams = Params.JetParams;
 		P.WidthBias = Params.WidthBias;
@@ -154,7 +153,7 @@ namespace
 
 		P.NudgeRate = Params.NudgeRate;
 		P.ForcingAmplitude = Params.ForcingAmplitude;
-		P.ForcingScale = Params.ForcingScale;
+		P.ForcingFrequency = Params.ForcingFrequency;
 		P.ForcingLifetime = Params.ForcingLifetime;
 		P.DragRate = Params.DragRate;
 		P.LayerCoupling = Params.LayerCoupling;

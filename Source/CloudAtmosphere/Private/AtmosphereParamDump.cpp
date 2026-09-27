@@ -61,8 +61,8 @@ namespace AtmosphereDump
 		return !Property->HasAnyPropertyFlags(CPF_Deprecated);
 	}
 
-	/** The actor's panel: edited members only, which leaves out the parked
-	 *  occluder group and the transient readouts. */
+	/** The actor's panel: edited members only, which leaves out internal state
+	 *  and the transient readouts. */
 	bool Authored(const FProperty* Property)
 	{
 		return Property->HasAnyPropertyFlags(CPF_Edit) && !Property->HasAnyPropertyFlags(CPF_Transient);
@@ -735,6 +735,20 @@ namespace AtmosphereLoad
 		Group.RemoveField(TEXT("GridLatitude"));
 	}
 
+	/** A field written under a member's former name, moved to its current one.
+	 *  A group that has the current name keeps it. */
+	void AliasRenamed(FJsonObject& Group, const TCHAR* Old, const TCHAR* New)
+	{
+		const TSharedPtr<FJsonValue> Value = Group.TryGetField(Old);
+
+		if (Value.IsValid() && !Group.HasField(New))
+		{
+			Group.SetField(New, Value);
+		}
+
+		Group.RemoveField(Old);
+	}
+
 	/** One section onto one object: its Values when the section has them, the
 	 *  full state, otherwise its Overrides of the C++ defaults over what the
 	 *  object already holds. */
@@ -911,6 +925,7 @@ namespace AtmosphereLoad
 				if ((*Sim)->TryGetObjectField(Group, Fields))
 				{
 					AliasGrid(**Fields);
+					AliasRenamed(**Fields, TEXT("ForcingScale"), TEXT("ForcingFrequency"));
 				}
 			}
 

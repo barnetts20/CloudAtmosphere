@@ -315,7 +315,7 @@ public:
 
 	/** Forcing noise frequency, in volume UVW per unit sphere. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
-	float ForcingScale = 0.25f;
+	float ForcingFrequency = 0.25f;
 
 	/** How long one forcing pattern lives, in sim time. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing", meta = (ClampMin = "0.01"))
@@ -339,7 +339,7 @@ public:
 	 *  so the deck's coverage tuning does not carry over, and the faster flow
 	 *  pulls the two noise phases apart until their crossfade reads as density
 	 *  sliding under the clouds. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver")
 	bool bSharpCentreVelocity = false;
 
 	// -- Thermal forcing ----------------------------------------------------
@@ -890,6 +890,9 @@ public:
 
 	UPROPERTY()
 	float DivergenceDamping_DEPRECATED = 0.05f;
+
+	UPROPERTY()
+	float ForcingScale_DEPRECATED = 0.25f;
 };
 
 /** The zonal profiles on the CPU, mirroring FlowSim.usf, for the speed root and
@@ -946,7 +949,7 @@ struct FFlowSimParams
 		FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero() };
 
 	/** Per layer: x depth, y the Helmholtz scale of the mode in its slice,
-	 *  z saturation factor, w height output scale. */
+	 *  z saturation factor; w unused. */
 	FVector4f LayerState[8] = {
 		FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(),
 		FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero() };
@@ -966,7 +969,7 @@ struct FFlowSimParams
 
 	float NudgeRate = 1.0f;
 	float ForcingAmplitude = 0.3f;
-	float ForcingScale = 0.25f;
+	float ForcingFrequency = 0.25f;
 	float ForcingLifetime = 0.5f;
 	float DragRate = 1.5f;
 	float LayerCoupling = 0.1f;

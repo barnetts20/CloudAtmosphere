@@ -5,25 +5,13 @@
 #include "FlowSimTypes.h"
 #include "FlowSimSettings.generated.h"
 
-/** Project Settings -> Plugins -> Gas Giant Sim.
+/** Project Settings -> Plugins -> Flow Sim.
  *
- *  WHY THE EDITOR ENTRY POINT IS A SETTING AND NOT A BLUEPRINT.
- *
- *  A Level Blueprint's BeginPlay does not fire outside PIE, so a
- *  blueprint-driven start means entering play every time you want to look at
- *  the field. That is the wrong loop for this stage of the work: the whole
- *  point of the debug view is a fast change-look-change cycle, and PIE round
- *  trips are the slowest part of it.
- *
- *  A setting plus console commands means the sim is running in the editor
- *  viewport from the moment the project opens, with nothing authored and
- *  nothing to remember to trigger.
- *
- *  Blueprint control still exists -- UFlowSimSubsystem's StartSimulation
- *  and friends are BlueprintCallable -- and is the right path for shipping,
- *  where a planet actor should own its own sim rather than the project having
- *  one global one. This is a bring-up affordance, and the auto-start defaults
- *  reflect that: on in the editor, off in game. */
+ *  An editor entry point, so the sim runs in the viewport from the moment the
+ *  project opens, with nothing authored and no PIE round trip before the debug
+ *  view shows anything. UFlowSimSubsystem's StartSimulation and friends are
+ *  BlueprintCallable for shipping, where each planet owns its own sim; hence
+ *  the auto-start defaults: on in the editor, off in game. */
 UCLASS(config = Game, defaultconfig, meta = (DisplayName = "Flow Sim"))
 class CLOUDATMOSPHERE_API UFlowSimSettings : public UDeveloperSettings
 {

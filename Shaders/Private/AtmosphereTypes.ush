@@ -20,22 +20,10 @@
 #define ATMO_MS_MAX_OCTAVES 4
 #endif
 
-/** Cloud state. The gas giant path reads only cloudScatBeta, cloudAbsBeta and
- *  cloudAmb; the rest serve the terrestrial density. */
+/** The cloud extinction and ambient the shared march reads. Shape, material
+ *  and phase are the field's own. */
 struct CloudParams
 {
-    float cloudScale;
-    float2 cloudHeightCurve;
-    float cloudCoverage;
-    float cloudDensityMult;
-    float4 cloudNoiseWeights;
-    float4 cloudNoiseInvert;
-    float4 detailNoiseWeights;
-    float4 detailNoiseInvert;
-    float detailNoiseScale;
-    float detailNoiseErode;
-    float4 animationWeights;
-    float4 cloudPhaseParams; // (gForward, gBack, forwardWeight, multi-scatter weight)
     float3 cloudScatBeta; // per world unit
     float3 cloudAbsBeta; // per world unit
     float4 cloudAmb; // rgb colour, a night-side floor for Atmo_AmbientFactor
@@ -72,7 +60,6 @@ struct ScatterParams
 struct MainRayParams
 {
     float2 svxy; // pixel position, jitter seed
-    float3 originalCameraPos; // absolute camera position, for world-anchored noise
     float3 cameraPos; // ray origin, always zero
     float3 cameraDir;
     float3 lightCol;
@@ -97,7 +84,6 @@ struct SurfaceShadowParams
 {
     float enabled;
     float directFraction; // the sun's share of a surface's brightness
-    float receiverBias; // lift along the light, in atmosphere thicknesses
     float strength; // multiplier on optical depth, for art control
 };
 

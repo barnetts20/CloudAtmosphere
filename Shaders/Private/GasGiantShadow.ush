@@ -6,9 +6,8 @@
 // The gas giant's side of the shadow map: what the deck contributes to a frame,
 // and nothing else.
 //
-// THE FORMAT IS NOT HERE. Encoding, reconstruction, the cascade walk and the
-// occluder composite live in AtmosphereShadowMap.ush and know nothing about this
-// model. What remains below is the three numbers the deck supplies -- a cull
+// THE FORMAT IS NOT HERE. Encoding, reconstruction and the cascade walk live
+// in AtmosphereShadowMap.ush and know nothing about this model. What remains below is the three numbers the deck supplies -- a cull
 // radius, a depth unit and the cascade half-widths -- plus the names the bake and
 // the march already call.
 //
@@ -27,10 +26,7 @@
 #define GG_SHADOW_LOOKUP_JITTER ATMO_SHADOW_LOOKUP_JITTER
 #define GG_SHADOW_CASCADES ATMO_SHADOW_CASCADES
 #define GG_SHADOW_NEAR_BLEND ATMO_SHADOW_NEAR_BLEND
-#define GG_SHADOW_OCCLUDER_BLUR ATMO_SHADOW_OCCLUDER_BLUR
-#define GG_SHADOW_OCCLUDER_TAPS ATMO_SHADOW_OCCLUDER_TAPS
 
-#define GG_ShadowOccluderSlice(Level) AtmoShadow_OccluderSlice(Level)
 #define GG_ShadowBasis(L, OutU, OutV) AtmoShadow_Basis(L, OutU, OutV)
 #define GG_ShadowTauFromNodes(Node, Depth, Ceiling) AtmoShadow_TauFromNodes(Node, Depth, Ceiling)
 #define GG_ExtinctionTintRange(Neg, Pos, Base) AtmoShadow_ExtinctionTintRange(Neg, Pos, Base)
@@ -131,10 +127,9 @@ float GG_ShadowSurfaceOptDepth(
 	float2 JitterTexels,
 	float Ceiling,
 	float FoldConstant,
-	float ReceiverBias,
 	GGFieldParams F)
 {
     return AtmoShadow_SurfaceOptDepth(
 		ShadowMap, ShadowSampler, LocalPos, LightLocal, Cameras,
-		JitterTexels, Ceiling, GG_ShadowFrame(F), FoldConstant, ReceiverBias);
+		JitterTexels, Ceiling, GG_ShadowFrame(F), FoldConstant);
 }

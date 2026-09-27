@@ -1,4 +1,4 @@
-﻿// THE TRANSFORM IS THE INTERFACE.
+// THE TRANSFORM IS THE INTERFACE.
 //
 //   Actor Location  -> planet centre / atmosphere centre
 //   Actor Scale max -> planet radius
@@ -30,10 +30,9 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "AtmosphereParams.h"
 #include "AtmosphereTransmittance.h"
-#include "GasGiantShadowMap.h"
+#include "AtmosphereShadowBake.h"
 #include "PlanetAtmosphereActor.generated.h"
 
-class USceneCaptureComponent2D;
 class UTextureRenderTarget2D;
 class UTextureRenderTarget2DArray;
 
@@ -149,14 +148,6 @@ public:
      *  cascades from its noise layers' fade distances. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "0.0"))
     FVector2D ShadowCascadeRadii = FVector2D(0.9, 0.3);
-
-    /** Opaque geometry casting into the deck shadow map. PARKED, so it carries
-     *  no edit specifier and reaches neither the details panel nor Blueprint;
-     *  FGasGiantOccluderShadowParams::IsEnabled answers false whatever a saved
-     *  instance holds. Kept as a plain UPROPERTY so existing levels deserialize
-     *  their authored values rather than losing them. */
-    UPROPERTY()
-    FGasGiantOccluderShadowParams GasGiantOccluderShadows;
 
     // --- Atmosphere ---
     //
@@ -561,57 +552,6 @@ private:
      *  when the target is reinitialised or the model changes, so the first
      *  request after either bakes all of them. */
     bool bShadowPrimed = false;
-
-
-    // --- Occluder captures ---
-    //
-    // One orthographic depth capture per cascade, created on demand and torn
-    // down when the feature is off or the planet is not a gas giant. Transient
-    // and unassignable: unlike the shadow target there is nothing to watch in
-    // them that the shadow target does not already show.
-
-    // TArray rather than a fixed array on the reflected members: the header
-    // tool wants a literal bound, and a second spelling of CascadeCount is a
-    // number that can drift from the one the dispatch uses. Sized to
-    // AtmoShadowBake::CascadeCount wherever they are touched.
-
-    UPROPERTY(Transient)
-    TArray<TObjectPtr<USceneCaptureComponent2D>> OccluderCaptures;
-
-    /** Visible so a capture can be opened and looked at. There is nothing to
-     *  read in a depth target by eye -- its values run to 1e8 and display flat
-     *  white -- but with bDebugColorCapture on it shows the scene from the
-     *  light, which is what tells a missing shadow from a missing capture. */
-    UPROPERTY(Transient, VisibleInstanceOnly, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
-    TArray<TObjectPtr<UTextureRenderTarget2D>> OccluderDepthTargets;
-
-    /** The frame each capture ACTUALLY RENDERED WITH, not the one computed this
-     *  tick. A level on a slow cadence is then placed correctly and only late,
-     *  where reusing this tick's frame would drag its last image across the
-     *  deck as the light moves. */
-    FAtmoOccluderFrame OccluderFrames[AtmoShadowBake::CascadeCount];
-
-    int32 FramesSinceCapture[AtmoShadowBake::CascadeCount];
-
-    /** Creates or destroys the capture components and their R32F targets to
-     *  match the current settings and resolution. Returns whether any level is
-     *  live. */
-    bool PrepareGasGiantOccluderCaptures();
-
-    /** Places each capture in the light's frame, captures the levels due this
-     *  frame, and fills Params.Occluders from what each level last rendered.
-     *
-     *  A TEMPLATE for the same reason FillSharedShadowParams is: the occluder
-     *  band belongs to the map rather than to the field, so both params structs
-     *  carry it and neither type is the right one to name here. */
-    template<typename TShadowParams>
-    void UpdateOccluderCaptures(
-        float PlanetRadius, const FVector& PlanetCenter,
-        const FVector3f& LightLocal, const FVector3f& CameraLocal,
-        TShadowParams& Params);
-
-    /** Frees the capture components and targets. */
-    void DestroyGasGiantOccluderCaptures();
 
     /** Creates the transmittance table if needed, rebakes it when its inputs or
      *  its resource change, and pushes it to the march material. */

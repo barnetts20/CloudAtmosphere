@@ -35,8 +35,7 @@
 /** Most a budgeted step grows past the cell: 2^8 cells. */
 #define ATMO_BAKE_MAX_DOUBLINGS 8
 
-/** Bakes one texel of one cascade: the four crossing depths and, where the
- *  target carries them, the occluder term on the same ray.
+/** Bakes one texel of one cascade: the four crossing depths.
  *
  *  EVERY FIELD QUESTION GOES THROUGH A BakeField_ CALL. What is left is the ray
  *  setup, the step lattice and the crossing accumulation, none of which depend
@@ -80,7 +79,6 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
     if (ShadowExtent <= 0.0f)
     {
         ShadowMapUAV[Texel] = ATMO_SHADOW_NO_DECK;
-        AtmoBake_WriteOccluder(Texel, (float4) 0.0f);
         return;
     }
 
@@ -119,7 +117,6 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
     if (HalfChordSq <= 0.0f)
     {
         ShadowMapUAV[Texel] = ATMO_SHADOW_NO_DECK;
-        AtmoBake_WriteOccluder(Texel, (float4) 0.0f);
         return;
     }
 
@@ -131,20 +128,6 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
     const float3 Origin = Offset - Dir * HalfChord;
 
     const float RayLength = 2.0f * HalfChord;
-
-	// GEOMETRY IS A SEPARATE TERM AND THE DECK IS MARCHED WHOLE. The march used
-	// to stop at the blocker, which is correct only for an all-or-nothing shadow;
-	// a graded one is added to the deck behind it and needs that deck to exist.
-	// Stored in thicknesses, matching the depth the reader arrives with.
-    {
-        float Coverage;
-        const float TOcc = AtmoBake_Occlusion(
-			Offset, HalfChord, OccluderSoftness * F.Thickness, Coverage);
-
-        AtmoBake_WriteOccluder(Texel, AtmoOcc_Encode(
-			TOcc / F.Thickness, Coverage, OccluderInset,
-			OccluderStrength, OccluderFalloff));
-    }
 
     const float TexelScale = 2.0f * HalfWidth * Extent0 / float(max(ShadowMapSize.x, 1));
 

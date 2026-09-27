@@ -61,9 +61,9 @@ void Atmo_ChordSteps(float Length, float Count, float Spread, out float First, o
  *  coarser ones to compensate. Sized from the chord instead, a limb ray through
  *  a thin band gets steps longer by 2*sqrt(2*R*d)/d -- two orders of magnitude
  *  at planetary scale -- at exactly the angle where its path through cloud is
- *  longest and the integral hardest. The step size a segment carries is read
- *  only when ATMO_CHORD_STEPS is off; with it on the march divides each class's
- *  own chord and the sizes here are ignored.
+ *  longest and the integral hardest. The march does not read the step size a
+ *  segment carries, dividing each class's own chord instead; a field's planner
+ *  reads it to snap a split onto the band's step lattice.
  *
  *  The boundary list is built in ORDER and never sorted, which works only
  *  because the guards enforce the ordering as they go: each candidate is

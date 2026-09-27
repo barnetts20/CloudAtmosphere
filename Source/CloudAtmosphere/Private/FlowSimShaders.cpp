@@ -15,13 +15,13 @@ namespace FlowSimShader
 
 	void ModifyEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
 	{
-		OutEnvironment.SetDefine(TEXT("GG_SIM_THREADS_2D"), ThreadGroupSize2D);
-		OutEnvironment.SetDefine(TEXT("GG_SIM_THREADS_1D"), ThreadGroupSize1D);
-		OutEnvironment.SetDefine(TEXT("GG_SIM_THREADS_LAYERS"), ThreadGroupSizeLayers);
-		OutEnvironment.SetDefine(TEXT("GG_SIM_THREADS_LINE"), ThreadGroupSizeLine);
-		OutEnvironment.SetDefine(TEXT("GG_SIM_LINE_MAX"), MaxGridLongitude);
-		OutEnvironment.SetDefine(TEXT("GG_SIM_COLUMN_MAX"), MaxGridLatitude);
-		OutEnvironment.SetDefine(TEXT("GG_SIM_MAX_CELLS"), MaxStormCells);
+		OutEnvironment.SetDefine(TEXT("FLOWSIM_THREADS_2D"), ThreadGroupSize2D);
+		OutEnvironment.SetDefine(TEXT("FLOWSIM_THREADS_1D"), ThreadGroupSize1D);
+		OutEnvironment.SetDefine(TEXT("FLOWSIM_THREADS_LAYERS"), ThreadGroupSizeLayers);
+		OutEnvironment.SetDefine(TEXT("FLOWSIM_THREADS_LINE"), ThreadGroupSizeLine);
+		OutEnvironment.SetDefine(TEXT("FLOWSIM_LINE_MAX"), MaxGridLongitude);
+		OutEnvironment.SetDefine(TEXT("FLOWSIM_COLUMN_MAX"), MaxGridLatitude);
+		OutEnvironment.SetDefine(TEXT("FLOWSIM_MAX_CELLS"), MaxStormCells);
 
 		// The Rhs pass reads the R32F UAV it also writes. R32F is in the
 		// guaranteed typed-UAV-load set; every other UAV here is write-only, which
@@ -37,26 +37,26 @@ IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FFlowSimUniformParameters, "FlowSimUB")
 // Entry point names must match FlowSim.usf. A mismatch fails at cook time as a
 // missing entry point.
 
-#define GG_IMPLEMENT_SIM_SHADER(ClassName, EntryPoint) \
+#define FLOWSIM_IMPLEMENT_SHADER(ClassName, EntryPoint) \
 	IMPLEMENT_GLOBAL_SHADER(ClassName, "/Plugin/CloudAtmosphere/Private/FlowSim.usf", EntryPoint, SF_Compute)
 
-GG_IMPLEMENT_SIM_SHADER(FFlowSimInitBalanceCS, "MainInitBalanceCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimInitStateCS, "MainInitStateCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimReduceRowsCS, "MainReduceRowsCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimReduceGlobalCS, "MainReduceGlobalCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimReconstructCS, "MainReconstructCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimCellsCS, "MainCellsCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimCellFieldCS, "MainCellFieldCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimPredictCS, "MainPredictCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimFilterCS, "MainFilterCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimRhsCS, "MainRhsCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimHelmholtzForwardCS, "MainHelmholtzForwardCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimHelmholtzColumnCS, "MainHelmholtzColumnCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimHelmholtzInverseCS, "MainHelmholtzInverseCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimCorrectCS, "MainCorrectCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimCaptureCS, "MainCaptureCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimRestoreCS, "MainRestoreCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimDebugVisCS, "MainDebugVisCS")
-GG_IMPLEMENT_SIM_SHADER(FFlowSimResampleCS, "MainResampleCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimInitBalanceCS, "MainInitBalanceCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimInitStateCS, "MainInitStateCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimReduceRowsCS, "MainReduceRowsCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimReduceGlobalCS, "MainReduceGlobalCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimReconstructCS, "MainReconstructCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimCellsCS, "MainCellsCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimCellFieldCS, "MainCellFieldCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimPredictCS, "MainPredictCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimFilterCS, "MainFilterCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimRhsCS, "MainRhsCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimHelmholtzForwardCS, "MainHelmholtzForwardCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimHelmholtzColumnCS, "MainHelmholtzColumnCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimHelmholtzInverseCS, "MainHelmholtzInverseCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimCorrectCS, "MainCorrectCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimCaptureCS, "MainCaptureCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimRestoreCS, "MainRestoreCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimDebugVisCS, "MainDebugVisCS")
+FLOWSIM_IMPLEMENT_SHADER(FFlowSimResampleCS, "MainResampleCS")
 
-#undef GG_IMPLEMENT_SIM_SHADER
+#undef FLOWSIM_IMPLEMENT_SHADER

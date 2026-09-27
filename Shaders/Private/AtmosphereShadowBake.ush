@@ -1,10 +1,9 @@
 #pragma once
 
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereShadowMap.ush"
-#include "/Plugin/CloudAtmosphere/Private/AtmosphereOccluders.ush"
 
 // The parts of a shadow bake that no cloud field appears in: how finely a ray is
-// stepped, where a threshold is crossed inside a step, and the occluder band.
+// stepped, where a threshold is crossed inside a step, and the history blend.
 //
 // NOT THE MARCH ITSELF. A bake's loop is shaped by the field it walks -- where
 // it enters, what bounds a step, when it may stop -- so that stays with the
@@ -12,9 +11,8 @@
 // duplicating it would mean two copies of a quadratic root solve and of a
 // lattice the reader has to agree with exactly.
 //
-// THE OUTPUT AND THE CAPTURES ARE DECLARED HERE, not by the model, because the
-// map's format owns them: the same slices, the same second band, the same
-// per-cascade frames whatever field was baked into them. A model declares only
+// THE OUTPUT IS DECLARED HERE, not by the model, because the map's format owns
+// it: the same slices whatever field was baked into them. A model declares only
 // the uniforms describing its own field.
 
 #ifndef ATMO_BAKE_THREADS
@@ -139,33 +137,6 @@ float3 ShadowHistoryLightDir;
 float3 ShadowHistoryCameraLocal;
 float ShadowHistoryWeight;
 
-/** One depth capture per cascade, named rather than arrayed: each is a separate
- *  render target owned by a separate component, and a Texture2D array cannot be
- *  indexed dynamically here anyway. Adding a cascade means adding a texture, a
- *  frame and a branch in AtmoBake_Occlusion; a static_assert on the C++ side
- *  holds the count. */
-Texture2D OccluderDepth0;
-Texture2D OccluderDepth1;
-Texture2D OccluderDepth2;
-
-SamplerState OccluderDepthSampler;
-
-/** AtmoOccluderFrame per level, packed three float4s wide. AtmoOcc_MakeFrame
- *  owns the layout. */
-float4 OccluderU[ATMO_SHADOW_CASCADES];
-float4 OccluderV[ATMO_SHADOW_CASCADES];
-float4 OccluderPlane[ATMO_SHADOW_CASCADES];
-
-/** Footprint radius the capture is sampled over, in atmosphere thicknesses --
- *  a distance, not texels, so every cascade erodes the same amount of ground;
- *  optical depth a fully covered texel adds, on the same fastest-channel scale
- *  the deck's thresholds use; and the distance over which that decays behind the
- *  blocker, also in thicknesses. */
-float OccluderSoftness;
-float OccluderInset;
-float OccluderStrength;
-float OccluderFalloff;
-
 /** How far into a step optical depth reaches Target, in step lengths.
  *
  *  SIGMA IS LINEAR ACROSS THE STEP, so optical depth is quadratic and the
@@ -262,63 +233,4 @@ float4 AtmoBake_History(
     Out.w = max(Out.w, Out.z);
 
     return Out;
-}
-
-/** Depth of the nearest opaque occluder on a texel's ray, in the ray parameter,
- *  with the fraction of the footprint it covers. ONE LOOKUP PER RAY, NOT PER
- *  STEP: the captures are orthographic along the same light direction the ray
- *  runs down, so the whole ray is a single point in every capture.
- *
- *  FINEST FIRST, then stop. See AtmoOcc_QueryLevel for what that trades. */
-float AtmoBake_Occlusion(
-	float3 Offset, float HalfChord, float FootprintWorld, out float OutCoverage)
-{
-    float Depth;
-
-    if (AtmoOcc_QueryLevel(
-		OccluderDepth2, OccluderDepthSampler,
-		AtmoOcc_MakeFrame(OccluderU[2], OccluderV[2], OccluderPlane[2]),
-		Offset, HalfChord, FootprintWorld, Depth, OutCoverage))
-    {
-        return Depth;
-    }
-
-    if (AtmoOcc_QueryLevel(
-		OccluderDepth1, OccluderDepthSampler,
-		AtmoOcc_MakeFrame(OccluderU[1], OccluderV[1], OccluderPlane[1]),
-		Offset, HalfChord, FootprintWorld, Depth, OutCoverage))
-    {
-        return Depth;
-    }
-
-    if (AtmoOcc_QueryLevel(
-		OccluderDepth0, OccluderDepthSampler,
-		AtmoOcc_MakeFrame(OccluderU[0], OccluderV[0], OccluderPlane[0]),
-		Offset, HalfChord, FootprintWorld, Depth, OutCoverage))
-    {
-        return Depth;
-    }
-
-    OutCoverage = 0.0f;
-
-    return ATMO_OCC_NO_HIT;
-}
-
-/** Writes a cascade's occluder term. A SECOND BAND OF SLICES, one per cascade,
- *  so the deck's four channels stay the deck's and the reader adds the two.
- *
- *  SILENT ON A TARGET WITHOUT THE BAND. The target is sized to one band when the
- *  feature is off, and the reader gates on the same count, so both sides agree
- *  without a define or a parameter to keep in step. */
-void AtmoBake_WriteOccluder(uint3 Texel, float4 Value)
-{
-    uint Width, Height, Slices;
-    ShadowMapUAV.GetDimensions(Width, Height, Slices);
-
-    if (Slices < uint(ATMO_SHADOW_SLICES_WITH_OCCLUDERS))
-    {
-        return;
-    }
-
-    ShadowMapUAV[uint3(Texel.xy, Texel.z + uint(ATMO_SHADOW_CASCADES))] = Value;
 }

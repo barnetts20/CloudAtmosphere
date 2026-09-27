@@ -338,9 +338,8 @@ GGScatterParams GG_BuildScatter(
 /** Fills CompositeParams for a gas giant, deriving the cloud shell from the
  *  field rather than taking it as two more pins. Air colours arrive as rgb with
  *  their profile terms as scalars and are packed here into the float4s
- *  Atmo_BuildParams takes; the terrestrial cloud SHAPE arguments go in as zero,
- *  none of them being sampled on this path, and the phase with them since the
- *  deck reads its own from GGScatterParams.
+ *  Atmo_BuildParams takes; the deck's shape, material and phase are its own,
+ *  in GGFieldParams and GGScatterParams.
  *
  *  THE CLOUD RADII ARE NOT AUTHORED. cloudOuterRadius comes from the highest the
  *  deck can reach; cloudInnerRadius from the depth at which it has certainly
@@ -437,20 +436,14 @@ CompositeParams GG_BuildAtmo(
 		float4(AtmosphereAmbient, AtmosphereAmbientFloor), MieG,
 		CloudScatterBeta, CloudScatterBeta * LightExtinctionFraction,
 		float4(CloudAmbient, CloudAmbientFloor),
-		float4(0.0f, 0.0f, 0.0f, 0.0f),
-		0.0f, float2(0.0f, 0.0f), 0.0f, 0.0f,
-		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
-		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
-		0.0f, 0.0f, float4(0.0f, 0.0f, 0.0f, 0.0f),
 		(int) AtmosphereSteps, (int) CloudSteps,
 		ChordSpread);
 
-	// ONE PIN FOR FOUR RELATED SCALARS, matching how the band tints and the
-	// cloud phase already travel. FAtmosphereSurfaceShadowParams::Pack writes
+	// ONE PIN FOR THE GROUP'S SCALARS, Z FREE, matching how the band tints and
+	// the cloud phase already travel. FAtmosphereSurfaceShadowParams::Pack writes
 	// this layout and nothing checks that the two still agree.
     Params.surfaceShadowParams.enabled = SurfaceShadow.x;
     Params.surfaceShadowParams.directFraction = saturate(SurfaceShadow.y);
-    Params.surfaceShadowParams.receiverBias = max(SurfaceShadow.z, 0.0f);
     Params.surfaceShadowParams.strength = max(SurfaceShadow.w, 0.0f);
 
     return Params;

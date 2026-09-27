@@ -33,8 +33,6 @@
 #include "UObject/ObjectMacros.h"
 #include "AtmosphereParams.generated.h"
 
-class AActor;
-
 class UFlowSimConfig;
 
 class UVolumeTexture;
@@ -132,191 +130,6 @@ struct CLOUDATMOSPHERE_API FAtmosphereSimulationParams
 	bool bStartOnBeginPlay = true;
 };
 
-/** Opaque geometry casting into the deck shadow map: moons, hanging objects,
- *  terrain, a mesh inner surface. One orthographic depth capture per cascade,
- *  each sized and centred on that cascade, feeding the bake one occluder depth
- *  per texel ray.
- *
- *  PARKED. IsEnabled answers false whatever is authored, and the group is no
- *  longer exposed on the actor. Restoring the feature means returning bEnabled
- *  from IsEnabled and putting the EditAnywhere specifier back on
- *  APlanetAtmosphereActor::GasGiantOccluderShadows; nothing else was removed.
- *
- *  COST IS THE SCENE, NOT THE BAKE. Each enabled level runs the scene's depth
- *  pass for its own view every time it captures, while the bake gets CHEAPER on
- *  occluded rays because the march stops at the occluder. The cadences and the
- *  disc switch are the levers; nothing here changes the map's format or what the
- *  march does with it. */
-USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FGasGiantOccluderShadowParams
-{
-	GENERATED_BODY()
-
-	/** Off destroys the capture components and their targets, and the bake runs
-	 *  exactly as it does without this feature. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	bool bEnabled = false;
-
-	// Which levels capture. A level that is off binds nothing and reports
-	// invalid, so a ray it would have covered falls through to the next coarser
-	// level that is on -- which is how one level is isolated during bring-up.
-	//
-	// The disc is the most expensive of the three, being a planet-sized depth
-	// pass, and only eclipse-scale occluders need it.
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled"))
-	bool bCaptureDisc = false;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled"))
-	bool bCaptureStructure = true;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled"))
-	bool bCaptureDetail = true;
-
-	/** Renders the captures as LDR COLOUR instead of depth, so the targets show
-	 *  what each capture actually frames. The depths are then meaningless and
-	 *  every level reports invalid, so the bake ignores them and the deck
-	 *  shadows alone remain.
-	 *
-	 *  This answers the first question any missing shadow raises -- whether the
-	 *  capture is rendering at all and whether it is pointed at the planet --
-	 *  which a depth target cannot, its values running to 1e8 and displaying as
-	 *  flat white. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled"))
-	bool bDebugColorCapture = false;
-
-	// Frames between captures per level, 1 being every frame. A level holds its
-	// last capture and the frame it rendered with between refreshes, so a stale
-	// capture is placed correctly and only late.
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled && bCaptureDisc", ClampMin = "1"))
-	int32 DiscIntervalFrames = 8;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled && bCaptureStructure", ClampMin = "1"))
-	int32 StructureIntervalFrames = 4;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled && bCaptureDetail", ClampMin = "1"))
-	int32 DetailIntervalFrames = 1;
-
-	/** How far the capture plane sits off the planet, as a multiple of the outer
-	 *  shell. THE NEAR PLANE IS AT THE CAPTURE, so this is the ceiling on what
-	 *  can cast: anything farther from the planet centre along the light is
-	 *  clipped and casts nothing, and an object STRADDLING the plane loses its
-	 *  near cap, which shrinks its shadow to whatever rim still sits below.
-	 *
-	 *  Raise it to cover moons and high orbits. The cost is depth range, not
-	 *  resolution -- the capture's width does not change with it, because the
-	 *  projection is orthographic. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "1.1"))
-	float CaptureDistanceScale = 4.0f;
-
-	/** Radius of the footprint each ray samples the capture over, in ATMOSPHERE
-	 *  THICKNESSES. This is what EdgeInset erodes against, and it must match
-	 *  GG_SHADOW_OCCLUDER_BLUR in GasGiantShadow.ush, which pushes the edge back
-	 *  out by the same distance on the read side. Eroding and blurring by one
-	 *  width leaves the edge where it was and only softens it.
-	 *
-	 *  A DISTANCE, NOT TEXELS. A texel spans an order of magnitude more ground
-	 *  on the disc slice than on the detail slice, so a width in texels gives
-	 *  each cascade a differently sized shadow and the walk between them steps
-	 *  outward at every boundary.
-	 *
-	 *  PITFALL: the lattice is still the floor. Asking for less than a cascade
-	 *  can resolve leaves that cascade at its own texel width, so the coarse
-	 *  slices stay slightly wider however this is set. Closing that gap means
-	 *  bringing the fade radii, which size the cascades, closer together. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0", ClampMax = "0.5"))
-	float EdgeWidth = 0.002f;
-
-	/** How much of the footprint must be covered before a texel shadows at all,
-	 *  which pulls the edge inward.
-	 *
-	 *  EVERY STAGE SPREADS OUTWARD: the footprint is centred on the texel, the
-	 *  texel is reconstructed across its neighbours, and the occluder term is
-	 *  filtered again on the way out. Left uncorrected they leave a rim of
-	 *  shadow outside the object, which reads as a halo when the view looks down
-	 *  the light and the rest of the shadow hides behind the object.
-	 *
-	 *  HALF IS NEUTRAL, NOT INWARD. The footprint is centred on the texel, so
-	 *  requiring half of it reproduces the true silhouette; below that the edge
-	 *  dilates. Inward bias starts above 0.5 and is total at 1, where only a
-	 *  fully covered texel shadows.
-	 *
-	 *  The trade is detachment where object meets surface -- the same bargain a
-	 *  depth bias makes against shadow acne. Raise it until the halo goes, not
-	 *  further. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0", ClampMax = "0.95"))
-	float EdgeInset = 0.85f;
-
-	/** Optical depth a fully covered texel adds, on the same scale the deck's
-	 *  own thresholds use: 1 is 63% extinction, 3 is 95%, 5 is what saturated
-	 *  cloud reads as. Higher goes darker than any cloud can, which is what
-	 *  makes a solid object read solid rather than merely thick. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0", ClampMax = "50.0"))
-	float Strength = 10.0f;
-
-	/** How far behind a blocker its shadow decays to nothing, in atmosphere
-	 *  thicknesses. Zero never decays.
-	 *
-	 *  The distance from blocker to receiver IS the light path between them, so
-	 *  this reads as scattered light filling the shadow back in: darkest
-	 *  directly under an object, gone once the deck is far enough below.
-	 *
-	 *  PITFALL: it grades along the LIGHT RAY, not from the object in space. At
-	 *  the terminator a shadow stretched toward the night side fades along its
-	 *  length while the object has not moved. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0"))
-	float FalloffDistance = 0.0f;
-
-	/** View distance cap per capture, as a fraction of its FAR PLANE rather than
-	 *  of its width: the plane sits well off the planet, so a cap measured
-	 *  against a narrow level's own extent would cull the deck itself. 1 culls
-	 *  exactly where the far plane does; 0 leaves the engine default. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0", ClampMax = "1.0"))
-	float MaxViewDistanceScale = 1.0f;
-
-	/** Excluded from every capture. For anything that renders opaque depth but
-	 *  should not shadow the deck -- a skybox shell, a visual proxy for the
-	 *  planet itself. The atmosphere actor hides its own children regardless. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled"))
-	TArray<TObjectPtr<AActor>> HiddenActors;
-
-	/** Whether the feature runs at all. THE ONLY GATE: the capture components and
-	 *  the shadow target's slice count both hang off it, so a false here leaves
-	 *  the bake and the reader exactly as they are without the feature. */
-	bool IsEnabled() const
-	{
-		return false;
-	}
-
-	/** Frames between captures for a cascade index, 0 being the disc. */
-	int32 GetIntervalFrames(int32 Level) const
-	{
-		if (Level <= 0)
-		{
-			return FMath::Max(DiscIntervalFrames, 1);
-		}
-
-		return FMath::Max(Level == 1 ? StructureIntervalFrames : DetailIntervalFrames, 1);
-	}
-
-	/** Whether a cascade index captures at all. */
-	bool IsLevelEnabled(int32 Level) const
-	{
-		if (!IsEnabled())
-		{
-			return false;
-		}
-
-		if (Level <= 0)
-		{
-			return bCaptureDisc;
-		}
-
-		return Level == 1 ? bCaptureStructure : bCaptureDetail;
-	}
-};
-
 /** Cloud and deck shadows falling on whatever opaque geometry the depth buffer
  *  holds: terrain, meshes, a mesh inner surface, other actors.
  *
@@ -351,32 +164,17 @@ struct CLOUDATMOSPHERE_API FAtmosphereSurfaceShadowParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0", ClampMax = "1.0"))
 	float DirectFraction = 0.7f;
 
-	/** Distance along the light the receiver is lifted before the map is
-	 *  sampled, in ATMOSPHERE THICKNESSES.
-	 *
-	 *  FOR THE OCCLUDER BAND ONLY. A captured surface holds its own depth in the
-	 *  occluder slices, so an unbiased receiver reads the occluder's full peak
-	 *  and shadows itself everywhere. The deck's crossings sit above the receiver
-	 *  and need none, so with captures off this can be zero.
-	 *
-	 *  PITFALL: it must clear the occluder lattice's depth quantisation across
-	 *  one texel -- texel width times slope, kilometres on the disc cascade, so
-	 *  not a small number. Too much detaches shadows from the ground at the
-	 *  terminator, where a lift along a grazing light travels far laterally.
-	 *  Tune there, not at noon. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0"))
-	float ReceiverBias = 0.0f;
-
 	/** Final multiplier on the optical depth read from the map, for art control
 	 *  independent of the physical terms. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0"))
 	float Strength = 1.0f;
 
-	/** The single vector parameter the march unpacks, four related scalars on
-	 *  one Custom node pin. GGAtmo_BuildAtmo mirrors this layout. */
+	/** The single vector parameter the march unpacks, the group's scalars on
+	 *  one Custom node pin, Z free. Both fields' atmosphere builders mirror this
+	 *  layout. */
 	FLinearColor Pack() const
 	{
-		return FLinearColor(bEnabled ? 1.0f : 0.0f, DirectFraction, ReceiverBias, Strength);
+		return FLinearColor(bEnabled ? 1.0f : 0.0f, DirectFraction, 0.0f, Strength);
 	}
 };
 

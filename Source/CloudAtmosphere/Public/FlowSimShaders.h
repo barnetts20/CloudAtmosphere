@@ -18,7 +18,7 @@ BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FFlowSimUniformParameters, )
 
 // -- Grid ---------------------------------------------------------------
 SHADER_PARAMETER(FIntVector, GridSize)
-SHADER_PARAMETER(FVector3f, InvGridSize)
+SHADER_PARAMETER(FVector2f, InvGridSize)
 
 // -- Profile ------------------------------------------------------------
 SHADER_PARAMETER(FVector4f, JetParams)
@@ -51,7 +51,7 @@ SHADER_PARAMETER(int32, HasForcing)
 // -- Forcing ------------------------------------------------------------
 SHADER_PARAMETER(float, NudgeRate)
 SHADER_PARAMETER(float, ForcingAmplitude)
-SHADER_PARAMETER(float, ForcingScale)
+SHADER_PARAMETER(float, ForcingFrequency)
 SHADER_PARAMETER(float, ForcingLifetime)
 SHADER_PARAMETER(float, DragRate)
 SHADER_PARAMETER(float, LayerCoupling)
@@ -117,62 +117,62 @@ END_GLOBAL_SHADER_PARAMETER_STRUCT()
  *  transitions nor lifetime-extends them.
  *
  *  Names must match the declarations in FlowSim.usf exactly. */
-	BEGIN_SHADER_PARAMETER_STRUCT(FFlowSimParameters, )
+BEGIN_SHADER_PARAMETER_STRUCT(FFlowSimParameters, )
 
-	SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FFlowSimUniformParameters, FlowSimUB)
+SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FFlowSimUniformParameters, FlowSimUB)
 
-	// -- Per pass -----------------------------------------------------------
-	SHADER_PARAMETER(int32, SimReconstructLatest)
-	SHADER_PARAMETER(uint32, SimRestoreFloatsPerCell)
+// -- Per pass -----------------------------------------------------------
+SHADER_PARAMETER(int32, SimReconstructLatest)
+SHADER_PARAMETER(uint32, SimRestoreFloatsPerCell)
 
-	// -- Resources ----------------------------------------------------------
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float2>, SimFaceSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimCentreSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimExplicitSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float>, SimPhiSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float>, SimPhiStarSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float>, SimRhsSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float2>, SimSpectrumSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimTracerSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimNoiseSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimLatLonSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimCentreLatestSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimLatLonLatestSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float2>, SimRowMeanSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, SimMontgomeryEqSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, SimGlobalMeanSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float2>, SimCellFlowSRV)
-	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float4>, SimCellColumnSRV)
+// -- Resources ----------------------------------------------------------
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float2>, SimFaceSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimCentreSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimExplicitSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float>, SimPhiSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float>, SimPhiStarSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float>, SimRhsSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float2>, SimSpectrumSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimTracerSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimNoiseSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimLatLonSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimCentreLatestSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float4>, SimLatLonLatestSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float2>, SimRowMeanSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, SimMontgomeryEqSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, SimGlobalMeanSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float2>, SimCellFlowSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float4>, SimCellColumnSRV)
 
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float2>, SimFaceUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimCentreUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimExplicitUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float>, SimPhiUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float>, SimPhiStarUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float>, SimRhsUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float2>, SimSpectrumUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimTracerUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimNoiseUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimLatLonUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, SimRowMeanUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, SimMontgomeryEqUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, SimGlobalMeanUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimOutputUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SimDebugUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float2>, SimCellFlowUAV)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SimCellColumnUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float2>, SimFaceUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimCentreUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimExplicitUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float>, SimPhiUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float>, SimPhiStarUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float>, SimRhsUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float2>, SimSpectrumUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimTracerUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimNoiseUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimLatLonUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, SimRowMeanUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, SimMontgomeryEqUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, SimGlobalMeanUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimOutputUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SimDebugUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float2>, SimCellFlowUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SimCellColumnUAV)
 
-	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FVector4f>, SimCellSRV)
-	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FVector4f>, SimCellUAV)
-	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, SimRestoreBuffer)
-	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, SimCaptureBuffer)
+SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FVector4f>, SimCellSRV)
+SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FVector4f>, SimCellUAV)
+SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, SimRestoreBuffer)
+SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, SimCaptureBuffer)
 
-	SHADER_PARAMETER_TEXTURE(Texture3D, SimForcingNoise)
-	SHADER_PARAMETER_SAMPLER(SamplerState, SimForcingNoiseSampler)
+SHADER_PARAMETER_TEXTURE(Texture3D, SimForcingNoise)
+SHADER_PARAMETER_SAMPLER(SamplerState, SimForcingNoiseSampler)
 
-	END_SHADER_PARAMETER_STRUCT()
+END_SHADER_PARAMETER_STRUCT()
 
-	namespace FlowSimShader
+namespace FlowSimShader
 {
 	CLOUDATMOSPHERE_API bool ShouldCompile(const FGlobalShaderPermutationParameters& Parameters);
 	CLOUDATMOSPHERE_API void ModifyEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
@@ -250,7 +250,7 @@ END_GLOBAL_SHADER_PARAMETER_STRUCT()
 
 /** One class per entry point, all sharing FFlowSimParameters. A macro because
  *  the bodies are identical and a hand-written set would drift apart. */
-#define GG_DECLARE_SIM_SHADER(ClassName)                                                    \
+#define FLOWSIM_DECLARE_SHADER(ClassName)                                                    \
 	class ClassName : public FGlobalShader                                                  \
 	{                                                                                       \
 		DECLARE_GLOBAL_SHADER(ClassName);                                                   \
@@ -268,23 +268,23 @@ END_GLOBAL_SHADER_PARAMETER_STRUCT()
 		}                                                                                   \
 	};
 
-GG_DECLARE_SIM_SHADER(FFlowSimInitBalanceCS)
-GG_DECLARE_SIM_SHADER(FFlowSimInitStateCS)
-GG_DECLARE_SIM_SHADER(FFlowSimReduceRowsCS)
-GG_DECLARE_SIM_SHADER(FFlowSimReduceGlobalCS)
-GG_DECLARE_SIM_SHADER(FFlowSimReconstructCS)
-GG_DECLARE_SIM_SHADER(FFlowSimCellsCS)
-GG_DECLARE_SIM_SHADER(FFlowSimCellFieldCS)
-GG_DECLARE_SIM_SHADER(FFlowSimPredictCS)
-GG_DECLARE_SIM_SHADER(FFlowSimFilterCS)
-GG_DECLARE_SIM_SHADER(FFlowSimRhsCS)
-GG_DECLARE_SIM_SHADER(FFlowSimHelmholtzForwardCS)
-GG_DECLARE_SIM_SHADER(FFlowSimHelmholtzColumnCS)
-GG_DECLARE_SIM_SHADER(FFlowSimHelmholtzInverseCS)
-GG_DECLARE_SIM_SHADER(FFlowSimCorrectCS)
-GG_DECLARE_SIM_SHADER(FFlowSimCaptureCS)
-GG_DECLARE_SIM_SHADER(FFlowSimRestoreCS)
-GG_DECLARE_SIM_SHADER(FFlowSimDebugVisCS)
-GG_DECLARE_SIM_SHADER(FFlowSimResampleCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimInitBalanceCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimInitStateCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimReduceRowsCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimReduceGlobalCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimReconstructCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimCellsCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimCellFieldCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimPredictCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimFilterCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimRhsCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimHelmholtzForwardCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimHelmholtzColumnCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimHelmholtzInverseCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimCorrectCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimCaptureCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimRestoreCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimDebugVisCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimResampleCS)
 
-#undef GG_DECLARE_SIM_SHADER
+#undef FLOWSIM_DECLARE_SHADER

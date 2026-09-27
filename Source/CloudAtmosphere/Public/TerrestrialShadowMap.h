@@ -121,32 +121,6 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 
 	void ResolveTextures_RenderThread();
 
-	// -- Occluders ----------------------------------------------------------
-
-	/** One depth capture per cascade, each optional. NOT PART OF IsUsable: a
-	 *  level with no capture disables itself and the deck still bakes, which is
-	 *  the difference between a planet with no geometry shadows and a planet
-	 *  with no shadows. */
-	TStaticArray<FAtmoOccluderFrame, AtmoShadowBake::CascadeCount> Occluders;
-
-	/** Footprint radius in capture texels. Under about 0.5 the taps stay inside
-	 *  one texel and the edge is as hard as the lattice allows; above that it is
-	 *  a penumbra width. */
-	float OccluderSoftness = 0.5f;
-
-	/** Coverage below this contributes nothing, pulling the shadow's edge inward
-	 *  against the outward spread of the footprint and the two filters after
-	 *  it. */
-	float OccluderInset = 0.5f;
-
-	/** Optical depth a fully covered texel adds, on the fastest-channel scale
-	 *  the map's thresholds already use. */
-	float OccluderStrength = 10.0f;
-
-	/** How far behind a blocker that decays to nothing, in atmosphere
-	 *  thicknesses. Zero never decays. */
-	float OccluderFalloff = 0.0f;
-
 	/** Whether the bake has everything it needs. Checked before the render
 	 *  command is enqueued, since a params struct is cheaper to reject on the
 	 *  game thread than a dispatch is to unwind on the render thread. */
@@ -215,28 +189,7 @@ SHADER_PARAMETER_SAMPLER(SamplerState, DetailVolumeSampler)
 SHADER_PARAMETER_TEXTURE(Texture3D, StructureVolume)
 SHADER_PARAMETER_SAMPLER(SamplerState, StructureVolumeSampler)
 
-SHADER_PARAMETER_ARRAY(FVector4f, OccluderU, [AtmoShadowBake::CascadeCount])
-SHADER_PARAMETER_ARRAY(FVector4f, OccluderV, [AtmoShadowBake::CascadeCount])
-SHADER_PARAMETER_ARRAY(FVector4f, OccluderPlane, [AtmoShadowBake::CascadeCount])
-
-SHADER_PARAMETER_TEXTURE(Texture2D, OccluderDepth0)
-SHADER_PARAMETER_TEXTURE(Texture2D, OccluderDepth1)
-SHADER_PARAMETER_TEXTURE(Texture2D, OccluderDepth2)
-
-SHADER_PARAMETER_SAMPLER(SamplerState, OccluderDepthSampler)
-
-SHADER_PARAMETER(float, OccluderSoftness)
-SHADER_PARAMETER(float, OccluderInset)
-SHADER_PARAMETER(float, OccluderStrength)
-SHADER_PARAMETER(float, OccluderFalloff)
-
 END_SHADER_PARAMETER_STRUCT()
-
-// The captures are bound one name per level, and the shader walks them finest
-// first through an unrolled chain, so a fourth cascade is not just a larger
-// array. Caught here rather than as an unbound-parameter warning.
-static_assert(AtmoShadowBake::CascadeCount == 3,
-	"OccluderDepth0..2 and TRShadow_Occlusion are written out per cascade.");
 
 class FTerrestrialShadowBakeCS : public FGlobalShader
 {

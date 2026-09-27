@@ -29,7 +29,10 @@ namespace
 			 *  and rows. */
 			GridResolution = 5,
 
-			Latest = GridResolution
+			/** The forcing noise frequency as ForcingFrequency. */
+			ForcingFrequency = 6,
+
+			Latest = ForcingFrequency
 		};
 
 		static const FGuid Guid;
@@ -302,6 +305,11 @@ void UFlowSimConfig::PostLoad()
 	if (Version < FFlowSimConfigVersion::SpeedRoot)
 	{
 		ConvertToSpeedRoot(*this);
+	}
+
+	if (Version < FFlowSimConfigVersion::ForcingFrequency)
+	{
+		ForcingFrequency = ForcingScale_DEPRECATED;
 	}
 
 	if (Version < FFlowSimConfigVersion::DampingRate)

@@ -62,8 +62,7 @@ float Atmo_PixelAngle()
     return 2.0f / max(View.ViewToClipNoAA[1][1] * View.ViewSizeAndInvSize.y, 1e-4f);
 }
 
-/** Fills CompositeParams from the material's pin values. The gas giant path
- *  passes zero for every terrestrial cloud-shape argument, which it never reads.
+/** Fills CompositeParams from the material's pin values.
  *
  *  PITFALL: sceneDepth is a TRUE RAY DISTANCE, from Atmo_SceneRayDistance. The
  *  march spends it as a bound on the ray parameter, so it has to be measured
@@ -81,9 +80,8 @@ float Atmo_PixelAngle()
  *
  *  CAMERA AT THE ORIGIN. The march runs camera-relative, which raises the
  *  precision floor enormously at planetary scale -- planet-relative positions
- *  are millions of units and float32 has about seven digits. The original camera
- *  position is carried separately for the one thing that needs world space,
- *  which is sampling the cloud noise. */
+ *  are millions of units and float32 has about seven digits. The fields sample
+ *  their noise in planet-local space, never world space. */
 CompositeParams Atmo_BuildParams(
 	float2 svPosition,
 	float3 rayDir,
@@ -105,18 +103,6 @@ CompositeParams Atmo_BuildParams(
 	float3 cloudScatterBeta,
 	float3 cloudAbsorptionBeta,
 	float4 cloudAmbient,
-	float4 cloudPhaseParams,
-	float cloudScale,
-	float2 cloudHeightCurve,
-	float cloudCoverage,
-	float cloudDensityMult,
-	float4 cloudNoiseWeights,
-	float4 cloudNoiseInvert,
-	float4 detailNoiseWeights,
-	float4 detailNoiseInvert,
-	float detailNoiseScale,
-	float detailNoiseErode,
-	float4 animationWeights,
 	int mainAtmoSteps,
 	int mainCloudSteps,
 	float chordSpread)
@@ -161,22 +147,9 @@ CompositeParams Atmo_BuildParams(
     params.cloudParams.cloudScatBeta = cloudScatterBeta / atmoThickness;
     params.cloudParams.cloudAbsBeta = cloudAbsorptionBeta / atmoThickness;
     params.cloudParams.cloudAmb = cloudAmbient;
-    params.cloudParams.cloudPhaseParams = cloudPhaseParams;
-    params.cloudParams.cloudScale = cloudScale;
-    params.cloudParams.cloudHeightCurve = cloudHeightCurve;
-    params.cloudParams.cloudCoverage = cloudCoverage;
-    params.cloudParams.cloudDensityMult = cloudDensityMult;
-    params.cloudParams.cloudNoiseWeights = cloudNoiseWeights;
-    params.cloudParams.cloudNoiseInvert = cloudNoiseInvert;
-    params.cloudParams.detailNoiseWeights = detailNoiseWeights;
-    params.cloudParams.detailNoiseInvert = detailNoiseInvert;
-    params.cloudParams.detailNoiseScale = detailNoiseScale;
-    params.cloudParams.detailNoiseErode = detailNoiseErode;
-    params.cloudParams.animationWeights = animationWeights;
 
     params.mainRayParams.svxy = svPosition;
     params.mainRayParams.cameraPos = float3(0, 0, 0);
-    params.mainRayParams.originalCameraPos = cameraPos;
     params.mainRayParams.cameraDir = rayDir;
     params.mainRayParams.lightCol = lightColor;
     params.mainRayParams.sceneDepth = sceneDepth;
@@ -197,7 +170,6 @@ CompositeParams Atmo_BuildParams(
 	// one a march without a map can honour.
     params.surfaceShadowParams.enabled = 0.0;
     params.surfaceShadowParams.directFraction = 0.0;
-    params.surfaceShadowParams.receiverBias = 0.0;
     params.surfaceShadowParams.strength = 0.0;
 
     return params;

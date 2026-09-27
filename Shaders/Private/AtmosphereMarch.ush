@@ -931,8 +931,7 @@ float4 Atmo_MainMarch(
         const float SurfaceOptDepth = AtmoShadow_SurfaceOptDepth(
 			ShadowMap, ShadowSampler, SurfaceLocal, LightLocal, ShadowCameras,
 			float2(0.0f, 0.0f), ATMO_SHADOW_SATURATION / TauScale,
-			Field_ShadowFrame(P.Field), Fold.x,
-			P.Atmo.surfaceShadowParams.receiverBias)
+			Field_ShadowFrame(P.Field), Fold.x)
 			* P.Atmo.surfaceShadowParams.strength;
 
 		// THE RECEIVER'S BAND COLOURS THE DECK IT WAS SHADOWED BY, the rule the

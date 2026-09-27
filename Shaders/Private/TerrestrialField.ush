@@ -320,9 +320,8 @@ TRScatterParams TR_BuildScatter(
 /** Fills CompositeParams for the terrestrial clouds, deriving the cloud shell from
  *  the field rather than taking it as two more pins. Air colours arrive as rgb
  *  with their profile terms as scalars and are packed here into the float4s
- *  Atmo_BuildParams takes; the shared builder's own cloud SHAPE arguments go in
- *  as zero, none of them being sampled on this path, and the phase with them
- *  since the field reads its own from TRScatterParams.
+ *  Atmo_BuildParams takes; the field's shape, material and phase are its own,
+ *  in TRFieldParams and TRScatterParams.
  *
  *  THE CLOUD RADII ARE NOT AUTHORED. Both come from the surfaces the field can
  *  actually produce: cloudOuterRadius from the highest a top can reach,
@@ -401,20 +400,14 @@ CompositeParams TR_BuildAtmo(
 		float4(AtmosphereAmbient, AtmosphereAmbientFloor), MieG,
 		CloudScatterBeta, CloudScatterBeta * LightExtinctionFraction,
 		float4(CloudAmbient, CloudAmbientFloor),
-		float4(0.0f, 0.0f, 0.0f, 0.0f),
-		0.0f, float2(0.0f, 0.0f), 0.0f, 0.0f,
-		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
-		float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f),
-		0.0f, 0.0f, float4(0.0f, 0.0f, 0.0f, 0.0f),
 		(int) AtmosphereSteps, (int) CloudSteps,
 		ChordSpread);
 
-	// ONE PIN FOR FOUR RELATED SCALARS, matching how the field's packed pins
-	// travel. FAtmosphereSurfaceShadowParams::Pack writes
-	// this layout and nothing checks that the two still agree.
+	// ONE PIN FOR THE GROUP'S SCALARS, Z FREE, matching how the field's packed
+	// pins travel. FAtmosphereSurfaceShadowParams::Pack writes this layout and
+	// nothing checks that the two still agree.
     Params.surfaceShadowParams.enabled = SurfaceShadow.x;
     Params.surfaceShadowParams.directFraction = saturate(SurfaceShadow.y);
-    Params.surfaceShadowParams.receiverBias = max(SurfaceShadow.z, 0.0f);
     Params.surfaceShadowParams.strength = max(SurfaceShadow.w, 0.0f);
 
     return Params;
@@ -474,27 +467,17 @@ void Field_Terminus(
     }
 }
 
-/** Density and material at a planet-local point, as (density, material,
- *  pressure, top). StepHalfHeight is the sample's own half-extent along the radius, which
- *  the field integrates its height profile across.
+/** Density and material along one view ray, as (density, material, pressure,
+ *  top), reading the sim at keyframes rather than per sample; see
+ *  TR_DensityOnRay. StepHalfHeight is the sample's own half-extent along the
+ *  radius, which the field integrates its height profile across. The march
+ *  begins a cache per ray and passes each sample's ray parameter T with it.
  *
  *  THE SECOND CHANNEL IS OPAQUE TO THE MARCH. It carries it from here to
  *  Field_Albedo and Field_Extinction without interpreting it; on this field it
- *  is fair-weather to storm. */
-float4 Field_Sample(
-	FIELD_TEXTURE_DECL,
-	float3 LocalPos,
-	float StepHalfHeight,
-	FieldParams F)
-{
-    return TR_Density(
-		FlowField, FlowSampler, DetailVolume, DetailSampler,
-		StructureVolume, StructureSampler, LocalPos, StepHalfHeight, F);
-}
-
-/** Field_Sample along one view ray, reading the sim at keyframes rather than
- *  per sample; see TR_DensityOnRay. The march begins a cache per ray and passes
- *  each sample's ray parameter T with it. */
+ *  is fair-weather to storm.
+ *
+ *  THE CACHE IS THE ONLY PATH: this field defines no Field_Sample. */
 #define FIELD_RAY_CACHE 1
 #define FieldRayCache TRRayCache
 

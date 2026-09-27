@@ -25,29 +25,29 @@
 // change one thing, look, change it back.
 // ---------------------------------------------------------------------------
 
-static TAutoConsoleVariable<int32> CVarGasGiantDebugMode(
-	TEXT("r.GasGiant.DebugMode"),
+static TAutoConsoleVariable<int32> CVarFlowSimDebugMode(
+	TEXT("r.FlowSim.DebugMode"),
 	-1,
 	TEXT("Override the config's debug view. -1 uses the config.\n")
 	TEXT("0 Vorticity, 1 Pressure, 2 Speed, 3 East, 4 North,\n")
 	TEXT("5 Helmholtz residual, 6 Zonal profile error, 7 Vertical motion, 8 Froude, 9 Cloud, 10 Cloud formation ascent, 11 Noise displacement,\n")
-	TEXT("12 Relative humidity, 13 Storm, 14 Layer top height, 15 Column cloud, 16 Storm eye, 17 Storm cell health, 18 Storm genesis."),
+	TEXT("12 Relative humidity, 13 Storm, 14 Layer top height, 15 Column cloud, 16 Storm eye, 17 Storm cell health, 18 Storm genesis, 19 Storm cell gains."),
 	ECVF_RenderThreadSafe);
 
-static TAutoConsoleVariable<int32> CVarGasGiantDebugLayer(
-	TEXT("r.GasGiant.DebugLayer"),
+static TAutoConsoleVariable<int32> CVarFlowSimDebugLayer(
+	TEXT("r.FlowSim.DebugLayer"),
 	-1,
 	TEXT("Override the debug layer. -1 uses the config."),
 	ECVF_RenderThreadSafe);
 
-static TAutoConsoleVariable<float> CVarGasGiantDebugScale(
-	TEXT("r.GasGiant.DebugScale"),
+static TAutoConsoleVariable<float> CVarFlowSimDebugScale(
+	TEXT("r.FlowSim.DebugScale"),
 	-1.0f,
 	TEXT("Override the debug value scale. Negative uses the config."),
 	ECVF_RenderThreadSafe);
 
-static TAutoConsoleVariable<int32> CVarGasGiantPaused(
-	TEXT("r.GasGiant.Paused"),
+static TAutoConsoleVariable<int32> CVarFlowSimPaused(
+	TEXT("r.FlowSim.Paused"),
 	-1,
 	TEXT("Override pause. -1 uses the config, 0 runs, 1 freezes."),
 	ECVF_RenderThreadSafe);
@@ -90,7 +90,7 @@ namespace
 		{
 			UE_LOG(LogFlowSim, Error,
 				TEXT("No config given and no DefaultConfig set in ")
-				TEXT("Project Settings -> Plugins -> Gas Giant Sim."));
+				TEXT("Project Settings -> Plugins -> Flow Sim."));
 			return nullptr;
 		}
 
@@ -474,11 +474,6 @@ static float PeakRate(const UFlowSimConfig& Config, const FFlowSimSpeeds& Speeds
 	return FMath::Max(Peak, 1e-6f);
 }
 
-/** Wave speed from the deformation radius at 45 degrees. */
-static float WaveSpeed(const UFlowSimConfig& Config)
-{
-	return FlowSimProfile::WaveSpeed(Config);
-}
 
 /** Output scales against the speed root's physical scales: the constants the
  *  terrestrial baseline (Design/Baseline.json) keeps its scales at. */
@@ -648,7 +643,7 @@ void UFlowSimSubsystem::ReportCourant() const
 	const int32 W = FlowSimShader::GridLongitude(Config->GridResolution);
 	const float Step = Config->GetStepSize();
 	const float Steps = FMath::Max(Config->SimSpeed, 0.0f) / 60.0f / Step;
-	const float C = WaveSpeed(*Config);
+	const float C = FlowSimProfile::WaveSpeed(*Config);
 	const FFlowSimSpeeds Speeds = Config->ResolveSpeeds();
 
 	const float Advective = PeakRate(*Config, Speeds) * Step * W / (2.0f * UE_PI);
@@ -759,7 +754,7 @@ void UFlowSimSubsystem::ReportStack() const
 	}
 
 	const int32 N = LayerCountOf(*Config);
-	const FFlowSimStack Stack = BuildStack(*Config, WaveSpeed(*Config));
+	const FFlowSimStack Stack = BuildStack(*Config, FlowSimProfile::WaveSpeed(*Config));
 	const FFlowSimSpeeds Resolved = Config->ResolveSpeeds();
 
 	FString Speeds;
@@ -781,7 +776,7 @@ void UFlowSimSubsystem::ReportStack() const
 	const float Lat = FMath::DegreesToRadians(FMath::Clamp(Config->BaroclinicLatitude, 10.0f, 80.0f));
 	const float F = Config->PlanetaryVorticity * FMath::Sin(Lat);
 	const float Beta = Config->PlanetaryVorticity * FMath::Cos(Lat);
-	const float LocalRadius = WaveSpeed(*Config) / FMath::Max(F, 1e-3f);
+	const float LocalRadius = FlowSimProfile::WaveSpeed(*Config) / FMath::Max(F, 1e-3f);
 	const float Critical = 2.0f * Beta * LocalRadius * LocalRadius;
 	const float Drive = FMath::Abs(Resolved.ThermalShear) * FMath::Cos(Lat) / FMath::Max(Critical, 1e-6f);
 
@@ -1215,7 +1210,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 
 	Out.NudgeRate = Config->NudgeRate;
 	Out.ForcingAmplitude = Speeds.EddySpeed;
-	Out.ForcingScale = Config->ForcingScale;
+	Out.ForcingFrequency = Config->ForcingFrequency;
 	Out.ForcingLifetime = FMath::Max(Config->ForcingLifetime, 0.01f);
 	Out.DragRate = Config->DragRate;
 	Out.LayerCoupling = Config->LayerCoupling;
@@ -1344,7 +1339,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 
 	// -- The stack ------------------------------------------------------------
 
-	Out.Stack = BuildStack(*Config, WaveSpeed(*Config));
+	Out.Stack = BuildStack(*Config, FlowSimProfile::WaveSpeed(*Config));
 
 	const float ImplicitStep = Out.ImplicitWeight * Out.DeltaTime;
 	const float Stratification = FMath::Clamp(Config->Stratification, 0.01f, 1.0f);
@@ -1365,14 +1360,14 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 			Out.Stack.Depth[k],
 			ImplicitStep * ImplicitStep * Out.Stack.ModeSpeedSq[k],
 			Saturation,
-			(k == 0) ? PressureScale : PressureScale / Stratification);
+			0.0f);
 	}
 
 	// -- Debug --------------------------------------------------------------
 
-	const int32 ModeOverride = CVarGasGiantDebugMode.GetValueOnGameThread();
-	const int32 LayerOverride = CVarGasGiantDebugLayer.GetValueOnGameThread();
-	const float ScaleOverride = CVarGasGiantDebugScale.GetValueOnGameThread();
+	const int32 ModeOverride = CVarFlowSimDebugMode.GetValueOnGameThread();
+	const int32 LayerOverride = CVarFlowSimDebugLayer.GetValueOnGameThread();
+	const float ScaleOverride = CVarFlowSimDebugScale.GetValueOnGameThread();
 
 	Out.DebugMode = (ModeOverride >= 0) ? ModeOverride : (int32)Config->DebugMode;
 	Out.DebugLayer = FMath::Clamp((LayerOverride >= 0) ? LayerOverride : Config->DebugLayer, 0, Layers - 1);
@@ -1542,7 +1537,7 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 		ResetSimulation();
 	}
 
-	const int32 PauseOverride = CVarGasGiantPaused.GetValueOnGameThread();
+	const int32 PauseOverride = CVarFlowSimPaused.GetValueOnGameThread();
 	const bool bPaused = (PauseOverride >= 0) ? (PauseOverride != 0) : Config->bPaused;
 
 	int32 Substeps = 0;

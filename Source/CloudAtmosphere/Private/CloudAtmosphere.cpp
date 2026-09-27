@@ -8,7 +8,7 @@
 
 #define LOCTEXT_NAMESPACE "FCloudAtmosphereModule"
 
-DEFINE_LOG_CATEGORY_STATIC(LogCloudAtmosphere, Log, All);
+DEFINE_LOG_CATEGORY(LogCloudAtmosphere);
 
 void FCloudAtmosphereModule::StartupModule()
 {

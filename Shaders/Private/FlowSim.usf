@@ -59,6 +59,9 @@
 #include "/Plugin/CloudAtmosphere/Private/GasGiantJets.ush"
 #include "/Plugin/CloudAtmosphere/Private/FlowSimCommon.ush"
 
+// The atlas layout, gutter and face basis the resample writes the output in.
+#include "/Plugin/CloudAtmosphere/Private/FlowField.ush"
+
 // Group sizes arrive as defines from FlowSimShaders.cpp, which FlowSimulation.cpp
 // also sizes every dispatch from. PITFALL: a literal here instead leaves the two
 // linked only by coincidence, and a mismatch under-covers the grid silently.
@@ -77,12 +80,12 @@
 #define SIM_PROFILE_BANDED     0
 #define SIM_PROFILE_THREE_CELL 1
 
-/** Per layer: x JetScale, y BoostScale, z ForcingScale, w DragScale. */
+/** Per layer: x JetScale, y BoostScale, z EddyScale * DragScale, w DragScale. */
 #define SimLayerProfile FlowSimUB.LayerProfile
 
 /** Per layer: x mean geopotential (the layer's depth), y Helmholtz scale
- *  (alpha dt)^2 c^2 of the vertical mode in this slice, z saturation factor,
- *  w output scale of the height of the layer's top. */
+ *  (alpha dt)^2 c^2 of the vertical mode in this slice, z saturation factor;
+ *  w unused. */
 #define SimLayerState FlowSimUB.LayerState
 
 /** The stack's vertical coupling, each an 8 x 8 row-major matrix in 16 float4s:
@@ -118,7 +121,7 @@
 
 #define SimNudgeRate FlowSimUB.NudgeRate
 #define SimForcingAmplitude FlowSimUB.ForcingAmplitude
-#define SimForcingScale FlowSimUB.ForcingScale
+#define SimForcingFrequency FlowSimUB.ForcingFrequency
 /** How long one forcing pattern lives, in sim time. */
 #define SimForcingLifetime FlowSimUB.ForcingLifetime
 #define SimDragRate FlowSimUB.DragRate
@@ -211,7 +214,7 @@
 #define SimCellEyeLow FlowSimUB.CellEyeLow
 #define SimCellEyeSoftness FlowSimUB.CellEyeSoftness
 
-/** Live cell slots, up to GG_SIM_MAX_CELLS. */
+/** Live cell slots, up to FLOWSIM_MAX_CELLS. */
 #define SimCellCount FlowSimUB.CellCount
 
 /** Steps completed before this one: seeds the cells' spawn draws. */
@@ -224,14 +227,10 @@
 
 /** Cloud fraction below which the formation altitude fades to zero instead of
  *  being divided out, so the ratio stays smooth where cloud is thin. */
-#ifndef SIM_CLOUD_ASCENT_FLOOR
 #define SIM_CLOUD_ASCENT_FLOOR 0.05f
-#endif
 
 /** sin(latitude) scale over which the storm's cyclonic sense changes sign. */
-#ifndef SIM_STORM_HEMISPHERE
 #define SIM_STORM_HEMISPHERE 20.0f
-#endif
 
 #define SimForcingChannel FlowSimUB.ForcingChannel
 #define SimForcingBipolar FlowSimUB.ForcingBipolar
@@ -552,7 +551,7 @@ float SimForcingPhase(float3 P, float3 Dir, uint Layer, float Rate, uint Cycle, 
     uint VolumeW, VolumeH, VolumeD;
     SimForcingNoise.GetDimensions(VolumeW, VolumeH, VolumeD);
 
-    const float Scale = max(SimForcingScale, 1e-4f);
+    const float Scale = max(SimForcingFrequency, 1e-4f);
     const float Eps = 1.0f / (float(max(VolumeW, 1u)) * Scale);
 
     const float A = SimSampleForcing((Q + D * Eps) * Scale + Offset);
@@ -803,6 +802,10 @@ float2 SimCellConditions(float3 P, float Ring)
         Humidity += SimSampleBilinear4(SimLatLonSRV, Grid, (L - 1u) + 3u * L).w / 6.0f;
     }
 
+	// Each ring point's wind is tangent at that point; the mean is not tangent at P.
+    Top -= dot(Top, P) * P;
+    Bottom -= dot(Bottom, P) * P;
+
     return float2(SimGenesisWindow(P, Top, Bottom), Humidity);
 }
 
@@ -874,15 +877,15 @@ float SimCellSeedScore(float3 P)
 // converges only in a thin eyewall band, with the mass vented by a separate
 // flux, leaves the core's storm to decay and the cell with it.
 
-/** The control block follows the cells' 2 GG_SIM_MAX_CELLS state entries, six
+/** The control block follows the cells' 2 FLOWSIM_MAX_CELLS state entries, six
  *  float4 per slot: two of vortex gains and two of inflow gains, one component
  *  per layer each, the cell's health (SIM_CELL_HEALTH), then its low's pressure
  *  at the eyewall, its least and the ring it was measured on (SIM_CELL_CORE). */
-#define SIM_CELL_CONTROL_BASE (2 * GG_SIM_MAX_CELLS)
+#define SIM_CELL_CONTROL_BASE (2 * FLOWSIM_MAX_CELLS)
 #define SIM_CELL_CONTROL_STRIDE 6
 #define SIM_CELL_HEALTH 4u
 #define SIM_CELL_CORE 5u
-#define SIM_CELL_BUFFER_SIZE (SIM_CELL_CONTROL_BASE + SIM_CELL_CONTROL_STRIDE * GG_SIM_MAX_CELLS)
+#define SIM_CELL_BUFFER_SIZE (SIM_CELL_CONTROL_BASE + SIM_CELL_CONTROL_STRIDE * FLOWSIM_MAX_CELLS)
 
 /** Largest gain, in target winds: bounds the push while the flow is far from
  *  the target. */
@@ -918,11 +921,18 @@ float SimCellTowardTarget(float Target, float Measured, float Unit)
  *  vortex it reads is resolved. */
 #define SIM_CELL_RING_CELLS 2.0f
 
+/** The eyewall's radius, in cell radii: StormCellEyewall, held just outside
+ *  the eye. Every read of the eyewall goes through this. */
+float SimCellWall()
+{
+    return max(SimCellShape.z, SimCellShape.y + 1e-3f);
+}
+
 /** Radius, in cell radii, where the vortex's wind starts to fall: the eyewall
  *  plus SimCellWindBreadth of the span beyond it. */
 float SimCellWindHold()
 {
-    const float Wall = max(SimCellShape.z, SimCellShape.y + 1e-3f);
+    const float Wall = SimCellWall();
 
 	// The fall-off keeps SIM_CELL_RING_CELLS grid cells at least, or the rim is
 	// a grid-scale shear sheet.
@@ -937,8 +947,10 @@ float SimCellWindHold()
 float SimCellProfileHeld(float R, float Hold)
 {
     const float Eye = SimCellShape.y;
-    const float Wall = max(SimCellShape.z, Eye + 1e-3f);
+    const float Wall = SimCellWall();
     const float EyeStrength = SimCellShape.w;
+
+    Hold = max(Hold, Wall);
 
     if (R >= 1.0f)
     {
@@ -968,7 +980,7 @@ float SimCellProfileHeld(float R, float Hold)
 /** The stamp's profile: cloud, storm and draft peak at the eyewall. */
 float SimCellProfile(float R)
 {
-    return SimCellProfileHeld(R, max(SimCellShape.z, SimCellShape.y + 1e-3f));
+    return SimCellProfileHeld(R, SimCellWall());
 }
 
 /** The vortex's wind profile, holding its peak across SimCellWindBreadth. */
@@ -983,7 +995,7 @@ float SimCellWindProfile(float R)
 float SimCellIntegralHeld(float R, float Hold)
 {
     const float Eye = SimCellShape.y;
-    const float Wall = max(SimCellShape.z, Eye + 1e-3f);
+    const float Wall = SimCellWall();
     Hold = max(Hold, Wall);
     const float EyeStrength = SimCellShape.w;
     const float Falloff = SimCellVortex.x;
@@ -1013,7 +1025,7 @@ float SimCellWindIntegral(float R)
 /** The stamp profile's integral: the inflow. */
 float SimCellIntegral(float R)
 {
-    return SimCellIntegralHeld(R, max(SimCellShape.z, SimCellShape.y + 1e-3f));
+    return SimCellIntegralHeld(R, SimCellWall());
 }
 
 /** A cell's centre at the output's time: its latest position backed off by
@@ -1062,7 +1074,8 @@ bool SimCellReach(uint Slot, float3 N, bool bDisplay,
     }
 
     Sense = SimSense(Axis.z, SIM_CELL_HEMISPHERE_SHARPNESS);
-    R = acos(clamp(CosD, -1.0f, 1.0f)) / max(SimCellShape.x, 1e-4f);
+	// PITFALL: acos loses the angle near CosD = 1, which is where small cells live.
+    R = atan2(length(cross(Axis, N)), CosD) / max(SimCellShape.x, 1e-4f);
 
     return R < 1.0f;
 }
@@ -1410,8 +1423,8 @@ SimStamp SimCellStamp(float3 N)
         // Held full inside the eyewall: the vector profile falls toward the
         // eye, and a band read from it leaves the eye and its lining at the
         // whole-storm level, a clean disc inside the eyewall.
-        const float Band = (R <= SimCellShape.z) ? 1.0f : smoothstep(SIM_CELL_BAND_FLOOR, 1.0f, Profile);
-        const float Whole = 1.0f - smoothstep(SimCellShape.z, 1.0f, R);
+        const float Band = (R <= SimCellWall()) ? 1.0f : smoothstep(SIM_CELL_BAND_FLOOR, 1.0f, Profile);
+        const float Whole = 1.0f - smoothstep(SimCellWall(), 1.0f, R);
 
         S.Storm = max(S.Storm, Intensity * max(SimCellCloud.w * Whole, SimCellDraft.z * Band));
         S.Low = max(S.Low, Intensity * Whole);
@@ -1701,7 +1714,7 @@ float3 SimAdvectVelocity(float3 P, float3 VArrival, uint Layer)
  *
  *  Run every frame, so the thermal relaxation target follows a live profile
  *  edit. Two passes over the rows: the mean, then the values less it. */
-[numthreads(GG_SIM_THREADS_LAYERS, 1, 1)]
+[numthreads(FLOWSIM_THREADS_LAYERS, 1, 1)]
 void MainInitBalanceCS(uint3 Id : SV_DispatchThreadID)
 {
     const uint Layer = Id.x;
@@ -1746,7 +1759,7 @@ void MainInitBalanceCS(uint3 Id : SV_DispatchThreadID)
 /** Zonal flow on the faces, balanced thickness at the centres, no eddies, and
  *  vapour at the humidity where condensation starts. Dispatch (N_lon, N_lat,
  *  LayerCount). */
-[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
+[numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
 void MainInitStateCS(uint3 Id : SV_DispatchThreadID)
 {
     if (SimOutOfBounds(Id))
@@ -1782,13 +1795,13 @@ void MainInitStateCS(uint3 Id : SV_DispatchThreadID)
 // ONE GROUP PER SUM, NOT ONE THREAD. A thread per row leaves a few hundred
 // threads looping serially over a whole row: the pass is all latency.
 
-groupshared float2 SimReduce[GG_SIM_THREADS_1D];
+groupshared float2 SimReduce[FLOWSIM_THREADS_1D];
 
 /** Folds SimReduce into element 0. Every thread of the group must call it. */
 void SimReduceGroup(uint Thread)
 {
 	[unroll]
-    for (uint Half = GG_SIM_THREADS_1D / 2; Half > 0; Half >>= 1)
+    for (uint Half = FLOWSIM_THREADS_1D / 2; Half > 0; Half >>= 1)
     {
         GroupMemoryBarrierWithGroupSync();
 
@@ -1800,7 +1813,7 @@ void SimReduceGroup(uint Thread)
 }
 
 /** Dispatch (N_lat, LayerCount, 1) groups: one per row. */
-[numthreads(GG_SIM_THREADS_1D, 1, 1)]
+[numthreads(FLOWSIM_THREADS_1D, 1, 1)]
 void MainReduceRowsCS(uint3 Group : SV_GroupID, uint Thread : SV_GroupIndex)
 {
     const int Row = (int) Group.x;
@@ -1809,7 +1822,7 @@ void MainReduceRowsCS(uint3 Group : SV_GroupID, uint Thread : SV_GroupIndex)
     float2 Sum = float2(0.0f, 0.0f);
 
 	[loop]
-    for (int I = (int) Thread; I < SimGridSize.x; I += GG_SIM_THREADS_1D)
+    for (int I = (int) Thread; I < SimGridSize.x; I += FLOWSIM_THREADS_1D)
     {
         Sum += float2(
 			SimFaceSRV.Load(int4(I, Row, Layer, 0)).x,
@@ -1827,7 +1840,7 @@ void MainReduceRowsCS(uint3 Group : SV_GroupID, uint Thread : SV_GroupIndex)
 }
 
 /** Dispatch (LayerCount, 1, 1) groups: one per layer. */
-[numthreads(GG_SIM_THREADS_1D, 1, 1)]
+[numthreads(FLOWSIM_THREADS_1D, 1, 1)]
 void MainReduceGlobalCS(uint3 Group : SV_GroupID, uint Thread : SV_GroupIndex)
 {
     const uint Layer = Group.x;
@@ -1835,7 +1848,7 @@ void MainReduceGlobalCS(uint3 Group : SV_GroupID, uint Thread : SV_GroupIndex)
     float Sum = 0.0f;
 
 	[loop]
-    for (int J = (int) Thread; J < SimGridSize.y; J += GG_SIM_THREADS_1D)
+    for (int J = (int) Thread; J < SimGridSize.y; J += FLOWSIM_THREADS_1D)
     {
         Sum += SimRowMeanSRV.Load(int3(J, Layer, 0)).y;
     }
@@ -1873,10 +1886,10 @@ void MainReduceGlobalCS(uint3 Group : SV_GroupID, uint Thread : SV_GroupIndex)
  *  layer's cloud sits in its own share of the stack, raised within it by the
  *  ascent it condensed at. One layer gives the formation ascent itself.
  *
- *  NOISE SLICES: phase A's displacement, then phase B's, xyz, in radians. Their
- *  w carry the height of the layer's top surface, soft-saturated, and the
- *  layer's relative humidity. */
-[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
+ *  NOISE SLICES: phase A's displacement, then phase B's, xyz, in radians.
+ *  Phase A's w is unused and zero; phase B's carries the layer's relative
+ *  humidity. */
+[numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
 void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
 {
     if (SimOutOfBounds(Id))
@@ -1973,7 +1986,7 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
     const float Ascent = SimLayerVerticalMotion(C, Layer);
     const float Carried = SimNoiseSRV.Load(int4(C, Layer, 0)).w;
 
-    const float Weight = (SimAscentSmoothing > 0.0f) ? saturate(SimDeltaTime / SimAscentSmoothing) : 1.0f;
+    const float Weight = (SimAscentSmoothing > 0.0f) ? 1.0f - exp(-SimDeltaTime / SimAscentSmoothing) : 1.0f;
 
     SimLatLonUAV[int3(C, Layer + L)] = float4(
 		lerp(Carried, Ascent, Weight),
@@ -1981,21 +1994,12 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
 		saturate(Altitude / max(Cover, SIM_CLOUD_ASCENT_FLOOR)),
 		Storm);
 
-    // -- Noise, the layer's top and its humidity ---------------------------
-
-    float Top = 0.0f;
-
-	[loop]
-    for (uint Below = Layer; Below < L; Below++)
-    {
-        Top += SimPhiSRV.Load(int4(C, Below, 0));
-    }
+    // -- Noise, and the layer's humidity ----------------------------------
 
     const float Humidity = SimTracerSRV.Load(int4(C, Layer, 0)).z / max(SimSaturation(Mu, Layer), 1e-6f);
 
     SimLatLonUAV[int3(C, Layer + 2u * L)] = float4(
-		SimNoiseSRV.Load(int4(C.x, C.y, Layer, 0)).xyz,
-		SimSoftSat(Top / SimLayerState[Layer].w));
+		SimNoiseSRV.Load(int4(C.x, C.y, Layer, 0)).xyz, 0.0f);
 
     SimLatLonUAV[int3(C, Layer + 3u * L)] = float4(
 		SimNoiseSRV.Load(int4(C.x, C.y, Layer + L, 0)).xyz,
@@ -2035,9 +2039,9 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
  *  eyewall ring's inflow against the inflow fraction of the target, inward
  *  on the bottom layer and outward on top. Every other slot's gains are
  *  zero. */
-groupshared float4 SimCellShared[GG_SIM_MAX_CELLS];
+groupshared float4 SimCellShared[FLOWSIM_MAX_CELLS];
 
-[numthreads(GG_SIM_MAX_CELLS, 1, 1)]
+[numthreads(FLOWSIM_MAX_CELLS, 1, 1)]
 void MainCellsCS(uint Slot : SV_GroupIndex)
 {
     const int Active = SimCellCount;
@@ -2064,7 +2068,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 
     const float Dt = SimDeltaTime;
     const float Radius = SimCellShape.x;
-    const uint Seed = (uint) SimStepIndex * (uint) GG_SIM_MAX_CELLS + Slot;
+    const uint Seed = (uint) SimStepIndex * (uint) FLOWSIM_MAX_CELLS + Slot;
 
     if (Cell.w <= 0.0f)
     {
@@ -2169,7 +2173,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 
 	// The eyewall, or as close in as the grid resolves: where the eyewall's
 	// gain is measured, and where the storm the cell's own inflow feeds sits.
-    const float Ring = clamp(SIM_CELL_RING_CELLS * SimDLon() / max(Radius, 1e-4f), min(SimCellShape.z, 0.9f), 0.9f);
+    const float Ring = clamp(SIM_CELL_RING_CELLS * SimDLon() / max(Radius, 1e-4f), min(SimCellWall(), 0.9f), 0.9f);
 
     float ParentPeak = SimCellParent(Cell.xyz).x;
     float3 Centroid = ParentPeak * Cell.xyz;
@@ -2194,7 +2198,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 	// rotating planet, and the one-sided push never drags it back. A cell left
 	// to the environment's steering slides off its core, and the eye it feeds
 	// is swept round a centre it is not on.
-    const float CoreReach = max(max(SimCellShape.z, SimCellShape.y + 1e-3f) * Radius, SIM_CELL_RING_CELLS * SimDLon());
+    const float CoreReach = max(SimCellWall() * Radius, SIM_CELL_RING_CELLS * SimDLon());
 
     const float CoreSpin = SimCellParent(Cell.xyz).y;
     float3 Core = CoreSpin * CoreSpin * Cell.xyz;
@@ -2446,7 +2450,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
  *  LayerCount + 1): slices [0, L) write SimCellFlow, slice L SimCellColumn.
  *  Runs after MainCellsCS, reading this step's cells and the output
  *  Reconstruct just wrote. */
-[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
+[numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
 void MainCellFieldCS(uint3 Id : SV_DispatchThreadID)
 {
     const int2 C = int2(Id.xy);
@@ -2536,7 +2540,7 @@ void MainCellFieldCS(uint3 Id : SV_DispatchThreadID)
  *  DRAG ON THE EDDY PART OF u AND ALL OF v. The zonal mean of u belongs to the
  *  nudge, and dragging it too makes the two settle at a compromise below the
  *  profile. */
-[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
+[numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
 void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 {
     if (SimOutOfBounds(Id))
@@ -2801,7 +2805,7 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
  *  a row poleward of the centre. A running mean is exactly conservative in the
  *  row, so it cannot perturb the zonal means the nudge acts on. Rows that need
  *  no filtering are still written: this pass ping-pongs. */
-[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
+[numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
 void MainFilterCS(uint3 Id : SV_DispatchThreadID)
 {
     if (SimOutOfBounds(Id))
@@ -2849,7 +2853,7 @@ void MainFilterCS(uint3 Id : SV_DispatchThreadID)
  *  modes: filtered phi* less the implicit share of depth times div V*, per
  *  layer, then the modal amplitudes. Dispatch (N_lon, N_lat, 1): one thread
  *  owns a whole column, since every mode reads every layer. */
-[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
+[numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
 void MainRhsCS(uint3 Id : SV_DispatchThreadID)
 {
     if (SimOutOfBounds(Id))
@@ -2900,7 +2904,7 @@ void MainRhsCS(uint3 Id : SV_DispatchThreadID)
 // rate, which is unstable once c dt exceeds the grid spacing.
 
 /** One row's spectrum. Radix-2, so N_lon is a power of two. */
-groupshared float2 SimFft[GG_SIM_LINE_MAX];
+groupshared float2 SimFft[FLOWSIM_LINE_MAX];
 
 float2 SimComplexMul(float2 A, float2 B)
 {
@@ -2922,7 +2926,7 @@ void SimFftInPlace(uint Thread, uint N, float Sign)
     for (uint Half = 1u; Half < N; Half *= 2u)
     {
 		[loop]
-        for (uint B = Thread; B < N / 2u; B += GG_SIM_THREADS_LINE)
+        for (uint B = Thread; B < N / 2u; B += FLOWSIM_THREADS_LINE)
         {
             const uint Pos = B & (Half - 1u);
             const uint I0 = (B - Pos) * 2u + Pos;
@@ -2943,7 +2947,7 @@ void SimFftInPlace(uint Thread, uint N, float Sign)
 }
 
 /** Rhs rows to spectra. Dispatch (N_lat, LayerCount, 1), one group per row. */
-[numthreads(GG_SIM_THREADS_LINE, 1, 1)]
+[numthreads(FLOWSIM_THREADS_LINE, 1, 1)]
 void MainHelmholtzForwardCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_GroupThreadID)
 {
     const int Row = (int) GroupId.x;
@@ -2951,7 +2955,7 @@ void MainHelmholtzForwardCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_Grou
     const uint N = (uint) SimGridSize.x;
 
 	[loop]
-    for (uint I = ThreadId.x; I < N; I += GG_SIM_THREADS_LINE)
+    for (uint I = ThreadId.x; I < N; I += FLOWSIM_THREADS_LINE)
     {
         SimFft[SimBitReverse(I, N)] = float2(SimRhsSRV.Load(int4(I, Row, Layer, 0)), 0.0f);
     }
@@ -2961,19 +2965,19 @@ void MainHelmholtzForwardCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_Grou
     SimFftInPlace(ThreadId.x, N, -1.0f);
 
 	[loop]
-    for (uint K = ThreadId.x; K < N; K += GG_SIM_THREADS_LINE)
+    for (uint K = ThreadId.x; K < N; K += FLOWSIM_THREADS_LINE)
     {
         SimSpectrumUAV[int3(K, Row, Layer)] = SimFft[K];
     }
 }
 
 /** Rows each thread of the column solve owns. */
-#define SIM_COLUMN_PER_THREAD (GG_SIM_COLUMN_MAX / GG_SIM_THREADS_LINE)
+#define SIM_COLUMN_PER_THREAD (FLOWSIM_COLUMN_MAX / FLOWSIM_THREADS_LINE)
 
-groupshared float SimColA[GG_SIM_COLUMN_MAX];
-groupshared float SimColB[GG_SIM_COLUMN_MAX];
-groupshared float SimColC[GG_SIM_COLUMN_MAX];
-groupshared float2 SimColD[GG_SIM_COLUMN_MAX];
+groupshared float SimColA[FLOWSIM_COLUMN_MAX];
+groupshared float SimColB[FLOWSIM_COLUMN_MAX];
+groupshared float SimColC[FLOWSIM_COLUMN_MAX];
+groupshared float2 SimColD[FLOWSIM_COLUMN_MAX];
 
 /** One wavenumber's tridiagonal system in latitude, from one spectrum texture
  *  into the other. Dispatch (N_lon, LayerCount, 1), one group per wavenumber
@@ -2983,7 +2987,7 @@ groupshared float2 SimColD[GG_SIM_COLUMN_MAX];
  *  d, coupling rows 2d apart, until no row couples to anything. Stable without
  *  pivoting because I - s L is strictly diagonally dominant. Each level reads
  *  into registers, then writes after a barrier, so one buffer serves. */
-[numthreads(GG_SIM_THREADS_LINE, 1, 1)]
+[numthreads(FLOWSIM_THREADS_LINE, 1, 1)]
 void MainHelmholtzColumnCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_GroupThreadID)
 {
     const int M = (int) GroupId.x;
@@ -2999,7 +3003,7 @@ void MainHelmholtzColumnCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_Group
 	[unroll]
     for (int Fill = 0; Fill < SIM_COLUMN_PER_THREAD; Fill++)
     {
-        const int J = (int) ThreadId.x + Fill * GG_SIM_THREADS_LINE;
+        const int J = (int) ThreadId.x + Fill * FLOWSIM_THREADS_LINE;
 
         if (J < NLat)
         {
@@ -3028,7 +3032,7 @@ void MainHelmholtzColumnCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_Group
 		[unroll]
         for (int Read = 0; Read < SIM_COLUMN_PER_THREAD; Read++)
         {
-            const int J = (int) ThreadId.x + Read * GG_SIM_THREADS_LINE;
+            const int J = (int) ThreadId.x + Read * FLOWSIM_THREADS_LINE;
 
             NewA[Read] = 0.0f;
             NewB[Read] = 1.0f;
@@ -3068,7 +3072,7 @@ void MainHelmholtzColumnCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_Group
 		[unroll]
         for (int Write = 0; Write < SIM_COLUMN_PER_THREAD; Write++)
         {
-            const int J = (int) ThreadId.x + Write * GG_SIM_THREADS_LINE;
+            const int J = (int) ThreadId.x + Write * FLOWSIM_THREADS_LINE;
 
             if (J < NLat)
             {
@@ -3085,7 +3089,7 @@ void MainHelmholtzColumnCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_Group
 	[unroll]
     for (int Store = 0; Store < SIM_COLUMN_PER_THREAD; Store++)
     {
-        const int J = (int) ThreadId.x + Store * GG_SIM_THREADS_LINE;
+        const int J = (int) ThreadId.x + Store * FLOWSIM_THREADS_LINE;
 
         if (J < NLat)
         {
@@ -3096,7 +3100,7 @@ void MainHelmholtzColumnCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_Group
 
 /** Solved spectra back to modal amplitudes in PhiStar. Dispatch (N_lat,
  *  LayerCount, 1). */
-[numthreads(GG_SIM_THREADS_LINE, 1, 1)]
+[numthreads(FLOWSIM_THREADS_LINE, 1, 1)]
 void MainHelmholtzInverseCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_GroupThreadID)
 {
     const int Row = (int) GroupId.x;
@@ -3104,7 +3108,7 @@ void MainHelmholtzInverseCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_Grou
     const uint N = (uint) SimGridSize.x;
 
 	[loop]
-    for (uint K = ThreadId.x; K < N; K += GG_SIM_THREADS_LINE)
+    for (uint K = ThreadId.x; K < N; K += FLOWSIM_THREADS_LINE)
     {
         SimFft[SimBitReverse(K, N)] = SimSpectrumSRV.Load(int4(K, Row, Layer, 0));
     }
@@ -3114,7 +3118,7 @@ void MainHelmholtzInverseCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_Grou
     SimFftInPlace(ThreadId.x, N, 1.0f);
 
 	[loop]
-    for (uint I = ThreadId.x; I < N; I += GG_SIM_THREADS_LINE)
+    for (uint I = ThreadId.x; I < N; I += FLOWSIM_THREADS_LINE)
     {
         SimPhiStarUAV[int3(I, Row, Layer)] = SimFft[I].x * SimInvGridSize.x;
     }
@@ -3122,7 +3126,7 @@ void MainHelmholtzInverseCS(uint3 GroupId : SV_GroupID, uint3 ThreadId : SV_Grou
 
 /** The implicit pressure gradient and the layers' thicknesses from the modal
  *  amplitudes, completing the step. Dispatch (N_lon, N_lat, LayerCount). */
-[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
+[numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
 void MainCorrectCS(uint3 Id : SV_DispatchThreadID)
 {
     if (SimOutOfBounds(Id))
@@ -3179,7 +3183,7 @@ int SimFlatIndex(uint3 Id)
 }
 
 /** Dispatch (N_lon, N_lat, LayerCount). */
-[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
+[numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
 void MainCaptureCS(uint3 Id : SV_DispatchThreadID)
 {
     if (SimOutOfBounds(Id))
@@ -3219,7 +3223,7 @@ void MainCaptureCS(uint3 Id : SV_DispatchThreadID)
     if (all(Id == 0u))
     {
 		[loop]
-        for (int Slot = 0; Slot < 2 * GG_SIM_MAX_CELLS; Slot++)
+        for (int Slot = 0; Slot < 2 * FLOWSIM_MAX_CELLS; Slot++)
         {
             const float4 Cell = SimCellSRV[Slot];
 
@@ -3234,7 +3238,7 @@ void MainCaptureCS(uint3 Id : SV_DispatchThreadID)
 
 /** Dispatch (N_lon, N_lat, LayerCount). Replaces the seeding passes when a
  *  snapshot is bound. */
-[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
+[numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
 void MainRestoreCS(uint3 Id : SV_DispatchThreadID)
 {
     if (SimOutOfBounds(Id))
@@ -3275,7 +3279,7 @@ void MainRestoreCS(uint3 Id : SV_DispatchThreadID)
     if (all(Id == 0u))
     {
 		[loop]
-        for (int Slot = 0; Slot < 2 * GG_SIM_MAX_CELLS; Slot++)
+        for (int Slot = 0; Slot < 2 * FLOWSIM_MAX_CELLS; Slot++)
         {
             const int Base = (int) SimRestoreFloatsPerCell * Total + 4 * Slot;
 
@@ -3439,7 +3443,7 @@ float4 SimResampleOutput(SimMeridianTaps Taps, uint Slice)
  *  lat-lon output carries there for the cells: 1, falling across each cell's
  *  eye tracer. The deck thins its columns by it, so the eye is a bowl of
  *  thinning cloud the flow shapes; cover is left as the sim has it. */
-[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
+[numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
 void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 {
     const float FaceSize = (float) SimAtlasFaceSize;
@@ -3554,7 +3558,7 @@ float3 SimSignedRamp(float V)
 
 /** Dispatch (DebugWidth, DebugHeight, 1). Reads the last Reconstruct's output
  *  for W, and the latest state for the rest. */
-[numthreads(GG_SIM_THREADS_2D, GG_SIM_THREADS_2D, 1)]
+[numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
 void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
 {
     if (any(int2(Id.xy) >= SimDebugSize))
@@ -3590,7 +3594,7 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
             {
                 const float4 Health = SimCellControl((uint) Slot, SIM_CELL_HEALTH);
 
-                Colour = (R < SimCellShape.z) ? Health.www : Health.xyz * (0.35f + 0.65f * Intensity);
+                Colour = (R < SimCellWall()) ? Health.www : Health.xyz * (0.35f + 0.65f * Intensity);
             }
         }
 
@@ -3703,7 +3707,7 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
         const float Applied = SimLaplacian(SimPhiStarSRV, C, Layer, Diagonal);
 
         Value = SimRhsSRV.Load(int4(C.x, C.y, Layer, 0))
-			- (SimPhiStarSRV.Load(int4(C.x, C.y, Layer, 0)) - SimLayerState[Layer].y * Applied);
+			- (SimPhiStarSRV.Load(int4(C.x, C.y, Layer, 0)) - SimLayerState[min(Layer, 7u)].y * Applied);
     }
     else if (SimDebugMode == SIM_DEBUG_ZONAL_ERROR)
     {
