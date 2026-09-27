@@ -128,10 +128,8 @@ namespace GasGiantShadow
 		// Any address mode works: every face of the atlas carries its own gutter.
 		P->FlowTargetSampler = TStaticSamplerState<SF_Bilinear, AM_Wrap, AM_Clamp, AM_Clamp>::GetRHI();
 
-		// A missing volume binds black rather than refusing the bake. Black is a
-		// defined value through GG_PerlinWorley, so the deck comes out uncarved
-		// and the shadow is still broadly right -- diagnosable at a glance,
-		// where a planet with no shadows at all looks like a broken pass.
+		// A missing volume binds black so the binding is complete. It is never
+		// weighted in: the actor zeroes a layer's amount when it has no volume.
 		P->DetailVolume = Params.DetailTexture.IsValid()
 			? Params.DetailTexture
 			: GBlackVolumeTexture->TextureRHI;

@@ -93,12 +93,30 @@
 #define TR_COLUMN_COHERENCE 1.0f
 #endif
 
+/** How the slab's ramps shrink in a column shallower than both: 0 a hard
+ *  minimum, whose slope break at depth 2 * SurfaceSoftness * CloudThickness
+ *  kinks the column's optical depth and can draw a lighting ring where depth
+ *  sweeps through it, as on an eye wall; 1 a smooth minimum with no break. */
+#ifndef TR_SLAB_SOFT_FIT
+#define TR_SLAB_SOFT_FIT 1
+#endif
+
 /** Coverage over which a column grows from no slab to its full depth. Sparse
  *  cloud is shallow cloud, and clear sky has no slab for the entry search to
  *  stop on. PITFALL: narrower makes the top a cliff at every coverage edge,
  *  steeper than CloudSlope bounds, and the entry search steps over cloud. */
 #ifndef TR_COVERAGE_DEPTH_RAMP
 #define TR_COVERAGE_DEPTH_RAMP 0.25f
+#endif
+
+/** The sim cloud at which a column's cloud amount, which ranks coverage and
+ *  drives type and relief, is 95% of the way to full: the amount is
+ *  1 - exp(-3 cloud / TR_CLOUD_FULL), a presence ease with no slope break.
+ *  Small, so CloudCover and CoverageSoftness decide where cloud shows.
+ *  PITFALL: a linear ramp here draws its end as an edge; a large value grades
+ *  coverage by the cloud and competes with those two. */
+#ifndef TR_CLOUD_FULL
+#define TR_CLOUD_FULL 1e-3f
 #endif
 
 /** Fraction of the cone-trace advance actually taken. Under 1 because CloudSlope
@@ -161,10 +179,8 @@ struct TRFieldParams
     float CoverageSoftness;
     float CoverageFray;
 
-	/** The sim cloud amount at which relief and type reach full, and the
-	 *  exponent type builds with: above 1 only the densest and stormiest columns
-	 *  approach full towering storm cloud. */
-    float CloudFull;
+	/** The exponent type builds with: above 1 only the densest and stormiest
+	 *  columns approach full towering storm cloud. */
     float TypeCurve;
 
 	/** Where the storm threshold sits in the storm index, 0 none to 1 all
@@ -182,14 +198,8 @@ struct TRFieldParams
 	 *  up move with one flow. */
     float CloudLayer;
 
-	/** How far column depth follows the scaled cloud amount: 0 every covered
-	 *  column is full depth, 1 depth is proportional to the amount. */
-    float CloudRelief;
-
-	/** Type = TypeBias + TypeCloud * amount + TypeTropical * tropicality
-	 *  + TypeStorm * storm. */
+	/** Type = TypeBias + TypeTropical * tropicality + TypeStorm * storm. */
     float TypeBias;
-    float TypeCloud;
     float TypeTropical;
     float TypeStorm;
 
@@ -307,7 +317,7 @@ struct TRFieldParams
  *    CloudProfile      CloudBase, CloudThickness, SurfaceSoftness, CeilingFalloff
  *    CloudCurves       TopCurve, BottomCurve, CloudSlope, WarpStretch
  *    CloudCoverage     CloudCover, StormPriority, CoverageSoftness, ErosionGain
- *    CloudType         TypeBias, TypeCloud, TypeTropical, ErosionAscent
+ *    CloudType         TypeBias, (unused), TypeTropical, ErosionAscent
  *    CloudLid          PressureScale, CeilingDepth, CeilingPressure, StratusDepth
  *    CloudLift         BaseTropical, BasePressure, AltitudeGain, AltitudeLift
  *    CloudMotion       DriftAngle, NoisePhase, WarpShift, SpinAngle
@@ -315,11 +325,11 @@ struct TRFieldParams
  *    <Layer>Sampling   Scale, Aspect, Erosion, FadeMean (detail) or
  *                      TypeStorm (structure)
  *    <Layer>Warp       FlowInherit, GenusSubsidence (structure) or
- *                      CloudRelief (detail), FadeNear, FadeSpan
+ *                      unused (detail), FadeNear, FadeSpan
  *    ShadowCascades    Cascade 1 half-width, cascade 2 half-width, CloudLayer,
  *                      CoverageFray
  *    CloudGenus<Name>  structure channel weights for that genus
- *    CloudResponse     CloudFull, TypeCurve, StormBalance, StormBlend
+ *    CloudResponse     (unused), TypeCurve, StormBalance, StormBlend
  *
  *  SpinAngle is the planet's own rotation, -RotationWeight * Time wrapped in
  *  double on the CPU; the sim runs in the rotating frame, so it turns the
@@ -367,7 +377,6 @@ TRFieldParams TR_BuildField(
     F.ErosionGain = max(CloudCoverage.w, 0.0f);
 
     F.TypeBias = CloudType.x;
-    F.TypeCloud = CloudType.y;
     F.TypeTropical = CloudType.z;
     F.ErosionAscent = CloudType.w;
 
@@ -405,7 +414,6 @@ TRFieldParams TR_BuildField(
     F.DetailErosion = saturate(DetailSampling.z);
     F.DetailFadeMean = saturate(DetailSampling.w);
     F.DetailFlowInherit = DetailWarp.x;
-    F.CloudRelief = saturate(DetailWarp.y);
 
     F.Thickness = max(PlanetRadius * HeightScale, 1e-4f);
 
@@ -430,7 +438,6 @@ TRFieldParams TR_BuildField(
     F.CloudLayer = ShadowCascades.z;
     F.CoverageFray = saturate(ShadowCascades.w);
 
-    F.CloudFull = max(CloudResponse.x, 1e-3f);
     F.TypeCurve = max(CloudResponse.y, 0.1f);
     F.StormBalance = saturate(CloudResponse.z);
     F.StormBlend = max(CloudResponse.w, 1e-3f);
@@ -473,7 +480,14 @@ float TR_CeilingFade(float Height, TRFieldParams F)
 float TR_SlabDensity(float Height, float Top, float Base, TRFieldParams F)
 {
     const float Depth = max(Top - Base, 1e-4f);
-    const float Fit = min(Depth / max(F.SpanTop + F.SpanBase, 1e-4f), 1.0f);
+    const float Ratio = Depth / max(F.SpanTop + F.SpanBase, 1e-4f);
+
+#if TR_SLAB_SOFT_FIT
+	// min(Ratio, 1) as a p-norm, p = 4: never above it, so the ramps still fit.
+    const float Fit = Ratio * rsqrt(sqrt(1.0f + Ratio * Ratio * Ratio * Ratio));
+#else
+    const float Fit = min(Ratio, 1.0f);
+#endif
 
     const float FromTop = saturate((Top - Height) / max(F.SpanTop * Fit, 1e-5f));
     const float FromBase = saturate((Height - Base) / max(F.SpanBase * Fit, 1e-5f));
@@ -601,21 +615,16 @@ TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler,
  *  layered cloud and cloud grown under weak lift stays low. No noise, which
  *  keeps the base exact.
  *
- *  DEPTH FOLLOWS THE CLOUD AMOUNT, the sim's cloud over CloudFull, by
- *  CloudRelief. The amount must span the sim's range, or relief and type
- *  saturate across whole systems and every column reads as full towering
- *  storm cloud. Coverage saturates across a narrow band, so without this every
- *  covered column is full depth and the sim's gradients -- spiral bands, a
- *  storm's rise toward its eyewall -- read as flat decks with cliff edges
- *  rather than as relief. PITFALL: relief steepens the top wherever the cloud
- *  field does; if cloud goes missing on grazing rays, raise CloudSlope.
+ *  DEPTH is the type's, StratusDepth to full, under the lid. Relief comes from
+ *  type, coverage's depth ramp and the sim's depth factor. PITFALL: relief
+ *  steepens the top wherever those do; if cloud goes missing on grazing rays,
+ *  raise CloudSlope.
  *
  *  SPARSE COLUMNS ARE SHALLOW. Depth ramps in over TR_COVERAGE_DEPTH_RAMP of
  *  coverage, so clear sky has no slab for the entry search to stop on.
  *
  *  THE SIM'S DEPTH FACTOR SCALES THE REST, so a storm cell's eye is a bowl
- *  sloping from the eyewall to its floor, whatever CloudFull does to the
- *  cloud amount. */
+ *  sloping from the eyewall to its floor, whatever the cloud amount does. */
 TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
 {
     TRColumn Col;
@@ -630,7 +639,7 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
     Col.Ascent = Weather.x;
     Col.Altitude = saturate(F.AltitudeGain * Weather.z);
 
-    const float Amount = saturate(Weather.y / F.CloudFull);
+    const float Amount = 1.0f - exp(-3.0f * max(Weather.y, 0.0f) / TR_CLOUD_FULL);
     const float Storm = saturate(Weather.w);
 
     const float Priority = Amount * (1.0f + F.StormPriority * Storm) / (1.0f + F.StormPriority);
@@ -643,7 +652,6 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
     Col.Coverage = smoothstep(Threshold - Soft, Threshold + Soft, Priority);
 
     Col.Type = saturate(F.TypeBias + F.TypeTropical * Tropical
-		+ F.TypeCloud * pow(Amount, F.TypeCurve)
 		+ F.TypeStorm * pow(Storm, F.TypeCurve));
 
 	// MATERIAL FROM A STORM INDEX: the raw column cloud, which grades from a
@@ -652,7 +660,7 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
 	// none at 0 to all cloud at 1, and StormBlend is the ramp's half-width.
 	// Nothing that shapes the density reads it.
 	//
-	// PITFALL: an index scaled by CloudFull saturates wherever the deck is
+	// PITFALL: an index built from the cloud amount saturates wherever the deck is
 	// dense, so the threshold stops moving anything and only the density
 	// settings change the balance. Taken from Type, the tropics term paints
 	// every tropical cloud storm-coloured, fading uniformly with latitude.
@@ -683,7 +691,6 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
     const float Lid = F.CeilingDepth * (1.0f + F.CeilingPressure * Col.Pressure);
 
     const float Depth = D * lerp(F.StratusDepth, 1.0f, Col.Type) * Lid
-		* lerp(1.0f, Amount, F.CloudRelief)
 		* smoothstep(0.0f, TR_COVERAGE_DEPTH_RAMP, Col.Coverage)
 		* In.Depth;
 
@@ -999,6 +1006,12 @@ float4 TR_DensityInColumn(
 		* lerp(1.0f, DepthFit, TR_COLUMN_COHERENCE);
     const float Shift = F.WarpShift * F.CloudThickness * Col.Ascent;
 
+	// ANCHORED AT THE COLUMN'S BASE: the stretch scales height from there, so a
+	// change in depth leaves the base's phase alone. PITFALL: anchored at the
+	// ground, every sample re-phases by its height above it, and the noise swims
+	// as columns deepen and shears into rings across an eye wall.
+    const float Rise = Col.Base + (Height - Col.Base - Shift) / Stretch;
+
 	// -- Shape: the noise coverage erodes --------------------------------------
 
     float Shape = Profile;
@@ -1007,7 +1020,7 @@ float4 TR_DensityInColumn(
 
     if (F.StructureAmount > 0.0f)
     {
-        const float UVWScale = F.StructureScale + (Height - Shift) * F.StructureVertical / Stretch;
+        const float UVWScale = F.StructureScale + Rise * F.StructureVertical;
 
         const float Noise = TR_BlendNoise(TR_StructureChannels(TR_SampleLayer(
 			StructureVolume, StructureSampler, N,
@@ -1042,14 +1055,16 @@ float4 TR_DensityInColumn(
 		// Faded toward the mean rather than off: see the header. Past the far
 		// edge, or once the mip has averaged the detail away, the fetch is
 		// skipped.
-        const float UVWScale = F.DetailScale + (Height - Shift) * F.DetailVertical / Stretch;
+        const float UVWScale = F.DetailScale + Rise * F.DetailVertical;
         const float Lod = TR_NoiseLod(DetailVolume, UVWScale, F.DetailMipBias, F);
 
         uint Width, VolumeHeight, Depth, Levels;
         DetailVolume.GetDimensions(0, Width, VolumeHeight, Depth, Levels);
 
+		// Floored at one mip, so a volume with few or no mips fades by footprint
+		// rather than reading its mean everywhere.
         const float Strength = F.DetailFade
-			* saturate(float(Levels) - 1.0f - float(TR_DETAIL_MEAN_MIPS) - Lod);
+			* saturate(max(float(Levels) - 1.0f - float(TR_DETAIL_MEAN_MIPS), 1.0f) - Lod);
 
         float Modifier = F.DetailFadeMean;
 

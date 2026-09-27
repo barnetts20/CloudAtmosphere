@@ -196,7 +196,7 @@ float4 SimCellCloud;
  *  wind holds its peak before falling off. The stamp's profile is unaffected. */
 float SimCellWindBreadth;
 
-/** Storm tracer a mature cell holds at least, on the stamp's profile. */
+/** Storm tracer a mature cell tops up toward, on the stamp's profile. */
 float SimCellSustain;
 
 /** Share of the deck's depth a full-intensity eye removes at its centre. */
@@ -895,7 +895,11 @@ float SimCellWindHold()
 {
     const float Wall = max(SimCellShape.z, SimCellShape.y + 1e-3f);
 
-    return min(lerp(Wall, 1.0f, saturate(SimCellWindBreadth)), 0.999f);
+	// The fall-off keeps SIM_CELL_RING_CELLS grid cells at least, or the rim is
+	// a grid-scale shear sheet.
+    const float Cap = max(1.0f - SIM_CELL_RING_CELLS * SimDLon() / max(SimCellShape.x, 1e-4f), Wall);
+
+    return min(lerp(Wall, 1.0f, saturate(SimCellWindBreadth)), min(Cap, 0.999f));
 }
 
 /** Vector strength at R, a distance from the centre in cell radii, [0, 1]:
@@ -1057,9 +1061,11 @@ float SimCellInflowGain(uint Slot, uint Layer)
  *  loop never asks for what the ceiling cannot deliver. */
 #define SIM_CELL_TARGET_CEILING 0.9f
 
-/** The storm tracer the live cells hold at P at least: SimCellSustain times
+/** The storm tracer the live cells top up toward at P: SimCellSustain times
  *  the strongest cell's strength times the stamp's profile, so it peaks
- *  along the eyewall and leaves the eye to the flow. */
+ *  along the eyewall and leaves the eye to the flow. Relaxed toward at the
+ *  formation rate against the storm's decay, so the storm settles near
+ *  rate / (rate + decay) of it. */
 float SimCellStormFloor(float3 P)
 {
     float Floor = 0.0f;
@@ -2001,7 +2007,24 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 
     if (Cell.w <= 0.0f)
     {
-        if (SimHash3(Seed).x >= SimCellLife.x * Dt / (float) max(Active, 1))
+		// ONE SPAWN A STEP, by the first free slot at every free slot's chance.
+		// Spacing is judged against the cells the step began with, so two
+		// slots spawning in one step could land inside each other's radius.
+        uint Free = 0u;
+        uint FirstFree = (uint) Active;
+
+		[loop]
+        for (int Other = 0; Other < Active; Other++)
+        {
+            if (SimCellShared[Other].w <= 0.0f)
+            {
+                FirstFree = min(FirstFree, (uint) Other);
+                ++Free;
+            }
+        }
+
+        if (Slot != FirstFree
+            || SimHash3(Seed).x >= SimCellLife.x * Dt * (float) Free / (float) max(Active, 1))
         {
             return;
         }
@@ -3355,6 +3378,7 @@ int2 SimDebugSize;
 #define SIM_DEBUG_EYE          16
 #define SIM_DEBUG_CELL_HEALTH  17
 #define SIM_DEBUG_GENESIS      18
+#define SIM_DEBUG_CELL_GAINS   19
 
 /** Diverging ramp, blue negative, red positive, dark at zero so a collapsed
  *  field reads as an empty frame rather than a plausible mid-grey. */
@@ -3407,6 +3431,36 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
                 const float4 Health = SimCellControl((uint) Slot, SIM_CELL_HEALTH);
 
                 Colour = (R < SimCellShape.z) ? Health.www : Health.xyz * (0.35f + 0.65f * Intensity);
+            }
+        }
+
+        SimDebugUAV[int2(Id.xy)] = float4(Colour, 1.0f);
+        return;
+    }
+
+    if (SimDebugMode == SIM_DEBUG_CELL_GAINS)
+    {
+		// Each cell's disc: red the debug layer's vortex gain, green its inflow
+		// gain, as a share of SIM_CELL_GAIN_LIMIT. A colour at full brightness
+		// is pinned: the loop is asking for more than the push delivers.
+        const float3 N = SimDirection(SimColumnToLon((float) C.x), Mu);
+        const uint Entry = Layer >> 2u;
+        const uint Lane = Layer & 3u;
+
+        float3 Colour = 0.0f;
+
+		[loop]
+        for (int Slot = 0; Slot < SimCellCount; Slot++)
+        {
+            float3 Axis;
+            float Sense, Intensity, R;
+
+            if (SimCellReach((uint) Slot, N, false, Axis, Sense, Intensity, R))
+            {
+                const float Vortex = SimCellControl((uint) Slot, Entry)[Lane];
+                const float Inflow = SimCellControl((uint) Slot, 2u + Entry)[Lane];
+
+                Colour = float3(abs(Vortex), abs(Inflow), 0.0f) / SIM_CELL_GAIN_LIMIT;
             }
         }
 

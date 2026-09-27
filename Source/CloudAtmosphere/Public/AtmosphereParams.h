@@ -484,22 +484,6 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StratusDepth = 0.25f;
 
-	/** How far column depth follows the sim's cloud amount (the field over
-	 *  CloudFull). At 1 depth is proportional to it, so
-	 *  the sim's gradients read as relief: spiral bands as ridges, storms rising
-	 *  toward the eyewall. At 0 every covered column is full depth, which reads
-	 *  as flat decks with cliff edges. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float CloudRelief = 1.0f;
-
-	/** The sim cloud value at which relief and type reach full, in the sim's
-	 *  own units (read it off the Column cloud debug view). Set it near the top
-	 *  of the sim's range so only the densest cloud builds full; at or below the
-	 *  typical value whole systems saturate into flat, full-height storm cloud.
-	 *  Also the scale of coverage's rank. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001"))
-	float CloudFull = 0.4f;
-
 	/** The sim layer the clouds are drawn from, -1 for the bottom. A layer's
 	 *  cloud is combined with every layer's above it, so the bottom reads the
 	 *  whole sky and 0 the top layer alone. Vertical motion, pressure and the
@@ -509,17 +493,11 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-1", ClampMax = "7"))
 	int32 CloudLayer = -1;
 
-	/** Cloud type, 0 stratiform to 1 towering, is TypeBias + TypeCloud * cloud
-	 *  amount^TypeCurve + TypeTropical * tropicality + TypeStorm *
-	 *  storm^TypeCurve, the amount being the sim's cloud over CloudFull. Type
-	 *  sets column depth and the noise genus, not the material, which follows
-	 *  storm alone. Driven by the cloud itself, so towers move and wind with
-	 *  the flow's structure. */
+	/** Cloud type, 0 stratiform to 1 towering, is TypeBias + TypeTropical *
+	 *  tropicality + TypeStorm * storm^TypeCurve. Type sets column depth and
+	 *  the noise genus, not the material, which follows storm alone. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float TypeBias = 0.2f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float TypeCloud = 0.6f;
+	float TypeBias = 0.8f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float TypeTropical = 0.3f;
@@ -530,9 +508,8 @@ struct CLOUDATMOSPHERE_API FTerrestrialProfileParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float TypeStorm = 0.5f;
 
-	/** Exponent the cloud and storm terms of type build with. 1 is linear;
-	 *  higher keeps most cloud layered and fair-weather and lets only the
-	 *  densest, stormiest columns approach full towering storm cloud. */
+	/** Exponent the storm term of type builds with. 1 is linear; higher lets
+	 *  only the stormiest columns approach full towering storm cloud. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1", ClampMax = "8.0"))
 	float TypeCurve = 2.0f;
 

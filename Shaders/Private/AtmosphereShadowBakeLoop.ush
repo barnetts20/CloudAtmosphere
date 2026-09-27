@@ -274,7 +274,10 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 		// drift the dyadic scheme exists to prevent. Cutting the step at the next
 		// multiple of its own length restores alignment, and since the cell over
 		// the step is a power of two, that also lands on every cell boundary.
-        Step = min(Step, (floor(T / Step) + 1.0f) * Step - T);
+        // PITFALL: T sits on a lattice multiple, and T / Step can round just
+        // below it, which makes the cut zero and the loop spin to its cap. The
+        // small bias rounds it onto the multiple.
+        Step = min(Step, (floor(T / Step + 1e-3f) + 1.0f) * Step - T);
 
 		// Trims the final partial step at the ray's end.
         Step = min(Step, RayLength - T);

@@ -102,6 +102,10 @@ enum class EFlowDebugMode : uint8
 	 *  red the genesis window, green the humidity, blue the storm. Bright where
 	 *  all three pass, dim where any fails, dimmer near a live cell. */
 	Genesis     UMETA(DisplayName = "Storm genesis"),
+
+	/** Each storm cell's disc: red the debug layer's vortex gain, green its
+	 *  inflow gain, as a share of the gain limit. Full brightness is pinned. */
+	CellGains   UMETA(DisplayName = "Storm cell gains"),
 };
 
 /** Per-layer settings. Profile values are multipliers on the shared jet
@@ -519,11 +523,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.01"))
 	float StormCellLifetime = 3.0f;
 
-	/** Storm tracer a mature cell holds its eyewall at, at least, on the
-	 *  stamp's profile, topped up at StormRate. Zero leaves the storm to the
-	 *  weather, so a cell lives only as long as its parent storm does. At or
-	 *  above GenesisStorm the cell keeps its own parent alive, and it ends
-	 *  when the genesis window or humidity fails, or at StormCellLifetime. */
+	/** Storm tracer a mature cell tops its eyewall up toward, on the stamp's
+	 *  profile, against the storm's decay, so the storm settles a little below
+	 *  it. Zero leaves the storm to the weather, so a cell lives only as long as
+	 *  its parent storm does. About a quarter above GenesisStorm the cell keeps
+	 *  its own parent alive, and it ends when the genesis window or humidity
+	 *  fails, or at StormCellLifetime. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellSustain = 0.0f;
 

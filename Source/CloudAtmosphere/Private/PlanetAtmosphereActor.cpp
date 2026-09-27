@@ -772,6 +772,16 @@ static void NoiseClock(const UFlowSimConfig* Config, double T, float& OutDriftAn
     OutPhase = (float)(Cycles - FMath::FloorToDouble(Cycles));
 }
 
+/** A layer's weights with its amount zeroed when it has no volume. No texture
+ *  is neutral for erosion and relief both, so a missing layer is left out
+ *  rather than read as whatever the material or the bake binds instead. */
+static FLinearColor LayerWeights(const FAtmosphereNoiseLayerParams& Layer)
+{
+    FLinearColor Weights = Layer.NoiseWeights;
+    Weights.A = Layer.Volume ? Weights.A : 0.0f;
+    return Weights;
+}
+
 static FTerrestrialFieldPins PackTerrestrialField(
     const FTerrestrialProfileParams& P, const FTerrestrialMotionParams& M,
     const FTerrestrialGenusParams& G,
@@ -790,7 +800,7 @@ static FTerrestrialFieldPins PackTerrestrialField(
     Out.CloudProfile = FLinearColor(P.CloudBase, P.CloudThickness, P.SurfaceSoftness, P.CeilingFalloff);
     Out.CloudCurves = FLinearColor(P.TopCurve, P.BottomCurve, P.CloudSlope, P.WarpStretch);
     Out.CloudCoverage = FLinearColor(P.CloudCover, P.StormPriority, P.CoverageSoftness, P.ErosionGain);
-    Out.CloudType = FLinearColor(P.TypeBias, P.TypeCloud, P.TypeTropical, P.ErosionAscent);
+    Out.CloudType = FLinearColor(P.TypeBias, 0.0f, P.TypeTropical, P.ErosionAscent);
     Out.CloudLid = FLinearColor(P.PressureScale, P.CeilingDepth, P.CeilingPressure, P.StratusDepth);
     Out.CloudLift = FLinearColor(P.BaseTropical, P.BasePressure, P.AltitudeGain, P.AltitudeLift);
     Out.CloudMotion = FLinearColor(DriftAngle, NoisePhase, P.WarpShift, SpinAngle);
@@ -808,7 +818,7 @@ static FTerrestrialFieldPins PackTerrestrialField(
     // Only the layer amount is read from NoiseWeights; its RGB octave weights
     // are the gas giant's.
     Out.NoiseLevels = FLinearColor(
-        Structure.MipBias, Structure.NoiseWeights.A, Detail.MipBias, Detail.NoiseWeights.A);
+        Structure.MipBias, LayerWeights(Structure).A, Detail.MipBias, LayerWeights(Detail).A);
 
     Out.StructureSampling = Sampling(Structure);
 
@@ -820,10 +830,8 @@ static FTerrestrialFieldPins PackTerrestrialField(
     Out.DetailSampling = Sampling(Detail);
     Out.DetailWarp = Warp(Detail);
 
-    // The genus blend's subsidence and the cloud relief ride in the warps'
-    // spare slots.
+    // The genus blend's subsidence rides in the structure warp's spare slot.
     Out.StructureWarp.G = G.Subsidence;
-    Out.DetailWarp.G = P.CloudRelief;
 
     Out.CloudGenusStratus = G.Stratus;
     Out.CloudGenusStratocumulus = G.Stratocumulus;
@@ -834,7 +842,8 @@ static FTerrestrialFieldPins PackTerrestrialField(
     Out.ShadowCascades = FLinearColor(
         (float)ShadowCascadeRadii.X, (float)ShadowCascadeRadii.Y, (float)P.CloudLayer, P.CoverageFray);
 
-    Out.CloudResponse = FLinearColor(P.CloudFull, P.TypeCurve, P.StormBalance, P.StormBlend);
+    // X is free.
+    Out.CloudResponse = FLinearColor(0.0f, P.TypeCurve, P.StormBalance, P.StormBlend);
 
     return Out;
 }
@@ -1074,7 +1083,7 @@ void APlanetAtmosphereActor::ApplyNoiseLayer(const TCHAR* Prefix, const FAtmosph
 {
     auto Name = [Prefix](const TCHAR* Member) { return FName(FString(Prefix) + Member); };
 
-    SetVectorChecked(MID_Atmosphere, Name(TEXT("NoiseWeights")), Layer.NoiseWeights);
+    SetVectorChecked(MID_Atmosphere, Name(TEXT("NoiseWeights")), LayerWeights(Layer));
     SetScalarChecked(MID_Atmosphere, Name(TEXT("Scale")), Layer.Scale);
     SetScalarChecked(MID_Atmosphere, Name(TEXT("Aspect")), Layer.Aspect);
     SetScalarChecked(MID_Atmosphere, Name(TEXT("Relief")), Layer.Relief);
@@ -1916,7 +1925,7 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.EdgeBias = Carve.EdgeBias;
         Params.ErosionDepth = Carve.ErosionDepth;
 
-        Params.StructureNoiseWeights = ToVector4(StructureLayer.NoiseWeights);
+        Params.StructureNoiseWeights = ToVector4(LayerWeights(StructureLayer));
         Params.StructureScale = StructureLayer.Scale;
         Params.StructureAspect = StructureLayer.Aspect;
         Params.StructureRelief = StructureLayer.Relief;
@@ -1928,7 +1937,7 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.StructureBandMix = StructureLayer.BandMix;
         Params.StructureCrossfade = StructureLayer.bCrossfade ? 1.0f : 0.0f;
 
-        Params.DetailNoiseWeights = ToVector4(DetailLayer.NoiseWeights);
+        Params.DetailNoiseWeights = ToVector4(LayerWeights(DetailLayer));
         Params.DetailScale = DetailLayer.Scale;
         Params.DetailAspect = DetailLayer.Aspect;
         Params.DetailRelief = DetailLayer.Relief;
