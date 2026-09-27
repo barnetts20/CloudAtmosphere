@@ -93,12 +93,9 @@
 #define TR_COLUMN_COHERENCE 1.0f
 #endif
 
-/** How the slab's ramps shrink in a column shallower than both: 0 a hard
- *  minimum, whose slope break at depth 2 * SurfaceSoftness * CloudThickness
- *  kinks the column's optical depth and can draw a lighting ring where depth
- *  sweeps through it, as on an eye wall; 1 a smooth minimum with no break. */
-#ifndef TR_SLAB_SOFT_FIT
-#define TR_SLAB_SOFT_FIT 1
+/** The least StratusDepth the stretch measures depth against. */
+#ifndef TR_STRETCH_MIN_STRATUS
+#define TR_STRETCH_MIN_STRATUS 0.1f
 #endif
 
 /** Coverage over which a column grows from no slab to its full depth. Sparse
@@ -482,12 +479,11 @@ float TR_SlabDensity(float Height, float Top, float Base, TRFieldParams F)
     const float Depth = max(Top - Base, 1e-4f);
     const float Ratio = Depth / max(F.SpanTop + F.SpanBase, 1e-4f);
 
-#if TR_SLAB_SOFT_FIT
 	// min(Ratio, 1) as a p-norm, p = 4: never above it, so the ramps still fit.
+	// PITFALL: a hard minimum's slope break kinks the column's optical depth at
+	// depth 2 * SurfaceSoftness * CloudThickness, and a depth sweeping through it
+	// draws a lighting ring, as on an eye wall.
     const float Fit = Ratio * rsqrt(sqrt(1.0f + Ratio * Ratio * Ratio * Ratio));
-#else
-    const float Fit = min(Ratio, 1.0f);
-#endif
 
     const float FromTop = saturate((Top - Height) / max(F.SpanTop * Fit, 1e-5f));
     const float FromBase = saturate((Height - Base) / max(F.SpanBase * Fit, 1e-5f));
@@ -999,8 +995,14 @@ float4 TR_DensityInColumn(
 	// SHIFT reads the volume from a different altitude. Both touch only the
 	// noise, so they cost the bounds nothing.
 
-    const float DepthFit = max((Col.Top - Col.Base)
-		/ max(F.CloudThickness * F.StratusDepth, 1e-3f), 1.0f);
+	// Against a stratiform depth floored at a tenth of the thickness, so a
+	// StratusDepth near zero cannot stretch a tower's noise flat.
+    const float StretchRatio = (Col.Top - Col.Base)
+		/ (F.CloudThickness * max(F.StratusDepth, TR_STRETCH_MIN_STRATUS));
+
+	// max(StretchRatio, 1) as a p-norm, p = 4. PITFALL: a hard maximum's slope
+	// break re-scales the noise abruptly where depth crosses StratusDepth.
+    const float DepthFit = sqrt(sqrt(1.0f + StretchRatio * StretchRatio * StretchRatio * StretchRatio));
 
     const float Stretch = max(1.0f + F.WarpStretch * Col.Ascent, 0.1f)
 		* lerp(1.0f, DepthFit, TR_COLUMN_COHERENCE);

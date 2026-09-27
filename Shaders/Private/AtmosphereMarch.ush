@@ -724,21 +724,30 @@ float4 Atmo_MainMarch(
                 const float3 AmbientScatter = P.Atmo.scatteringParams.rayBeta * AtmoDens.x
 					* P.Atmo.scatteringParams.atmoAmbient.rgb * AirAmbientFactor;
 
-                const float3 Inscattered = (DirectScatter + AmbientScatter) * CurrentStep;
-
                 const float3 Extinction = (P.Atmo.scatteringParams.rayBeta * AtmoDens.x
 					+ P.Atmo.scatteringParams.mieBeta * AtmoDens.y
 					+ P.Atmo.scatteringParams.absBeta * AtmoDens.z) * CurrentStep;
+
+				// THE LIGHT THAT SURVIVES THE STEP'S OWN EXTINCTION, (1 - exp(-tau)) /
+				// sigma per channel, as the cloud path weighs it; its series below
+				// 1e-3, where the quotient loses precision. PITFALL: weighted by the
+				// step length, in-scatter over-counts once a step's optical depth
+				// nears 1, as on the limb.
+                const float3 Tau = max(Extinction, 1e-6f);
+                const float3 StepWeight = CurrentStep * lerp((1.0f - exp(-Tau)) / Tau,
+					1.0f - 0.5f * Tau, step(Tau, 1e-3f));
+
+                const float3 Inscattered = (DirectScatter + AmbientScatter) * StepWeight;
 
 				// Light added BEFORE transmittance is updated, so this step's
 				// contribution is weighted by the transmittance in front of it
 				// rather than including its own extinction.
 #if ATMO_DEBUG_TERM == 1
 				DebugAccum += Transmittance * RayleighScatter
-					* SunTransmittance * P.Atmo.mainRayParams.lightCol * CurrentStep;
+					* SunTransmittance * P.Atmo.mainRayParams.lightCol * StepWeight;
 #elif ATMO_DEBUG_TERM == 2
 				DebugAccum += Transmittance * MieScatter
-					* SunTransmittance * P.Atmo.mainRayParams.lightCol * CurrentStep;
+					* SunTransmittance * P.Atmo.mainRayParams.lightCol * StepWeight;
 #elif ATMO_DEBUG_TERM == 6
 				DebugAccum = float3(MieLobe, MieLobe, MieLobe);
 #endif

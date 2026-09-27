@@ -848,7 +848,7 @@ float SimCellSeedScore(float3 P)
 /** The control block follows the cells' 2 GG_SIM_MAX_CELLS state entries, six
  *  float4 per slot: two of vortex gains and two of inflow gains, one component
  *  per layer each, the cell's health (SIM_CELL_HEALTH), then its low's pressure
- *  at the eyewall and least (SIM_CELL_CORE). */
+ *  at the eyewall, its least and the ring it was measured on (SIM_CELL_CORE). */
 #define SIM_CELL_CONTROL_BASE (2 * GG_SIM_MAX_CELLS)
 #define SIM_CELL_CONTROL_STRIDE 6
 #define SIM_CELL_HEALTH 4u
@@ -1156,7 +1156,11 @@ float SimCellEyeSource(float3 P, float Pressure)
                 const float4 Low = SimCellControl((uint) Slot, SIM_CELL_CORE);
                 const float Depth = Low.x - Low.y;
 
-                const float Near = 1.0f - smoothstep(SimCellShape.z, 2.0f * SimCellShape.z, R);
+				// Out over one to two of the ring the low was measured on, which the
+				// grid floors at two cells, on a quintic. PITFALL: faded over the
+				// eyewall radius instead, an eyewall under a cell clips the eye
+				// inside its isobar and one past half the radius is cut at the edge.
+                const float Near = 1.0f - SimSmootherstep(Low.z, min(2.0f * Low.z, 1.0f), R);
                 const float Rim = sqrt(max(1.0f - (Low.x - Pressure) / max(Depth, 1e-5f), 0.0f));
                 const float Core = (Depth > 1e-5f) ? 1.0f - SimSmootherstep(1.0f - SimCellEyeSoftness, 1.0f, Rim) : 0.0f;
 
@@ -2252,7 +2256,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
             }
         }
 
-        SimCellUAV[Block + SIM_CELL_CORE] = float4(Wall, Least, 0.0f, 0.0f);
+        SimCellUAV[Block + SIM_CELL_CORE] = float4(Wall, Least, Ring, 0.0f);
     }
 
     // -- Push gains ------------------------------------------------------------
