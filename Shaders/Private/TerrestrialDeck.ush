@@ -130,13 +130,11 @@
 #define TR_SLAB_ENTRY_PROBES 24
 #endif
 
-/** How a step integrates the slab profile: 0 Simpson's rule on three samples,
- *  which a slab thinner than the step falls between, so thin columns flicker
- *  as their surfaces drift across the samples; 1 exactly, from the profile's
- *  closed-form integral (TR_SlabCumulative), with the ceiling fade by
- *  Simpson's rule. */
-#ifndef TR_SLAB_EXACT
-#define TR_SLAB_EXACT 0
+/** Power on the sim's depth factor that a column's density scales by (see
+ *  TR_DensityInColumn): above 1 keeps more of an eyewall and clears the floor
+ *  sooner. */
+#ifndef TR_EYE_OPEN_POWER
+#define TR_EYE_OPEN_POWER 1.0f
 #endif
 
 /** The sim layer every column read comes from: CloudLayer, negative for the
@@ -587,6 +585,10 @@ struct TRColumn
 	/** The slab, atmosphere fractions. Exact: nothing outside moves them. */
     float Base;
     float Top;
+
+	/** The sim's depth factor: 1 away from storm cells, falling across an eye.
+	 *  Scales the depth and the density. */
+    float Thinning;
 };
 
 /** What a column is built from: the sim read at one spun direction. Only the
@@ -746,6 +748,7 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
 	// Capped at the shell, where the ceiling fade has already taken density to
 	// zero.
     Col.Top = min(Col.Base + Depth, 1.0f);
+    Col.Thinning = In.Depth;
 
     return Col;
 }
@@ -1033,8 +1036,12 @@ float4 TR_DensityInColumn(
 	TRFieldParams F)
 {
 	// -- Height profile, integrated across the step ----------------------------
+	//
+	// EXACTLY, from the profile's closed form; the ceiling fade, which varies
+	// slowly, by Simpson's rule. PITFALL: SAMPLED, a slab thinner than the step
+	// falls between the samples, and thin columns flicker as their surfaces
+	// drift across them.
 
-#if TR_SLAB_EXACT
     const float Fade = (TR_CeilingFade(Height - HalfStep, F) + 4.0f * TR_CeilingFade(Height, F)
 		+ TR_CeilingFade(Height + HalfStep, F)) / 6.0f;
 
@@ -1048,13 +1055,6 @@ float4 TR_DensityInColumn(
 		: TR_SlabDensity(Height, Col.Top, Col.Base, F);
 
     const float Profile = Slab * Fade;
-#else
-    const float Profile =
-		(TR_SlabDensity(Height - HalfStep, Col.Top, Col.Base, F) * TR_CeilingFade(Height - HalfStep, F)
-		+ 4.0f * TR_SlabDensity(Height, Col.Top, Col.Base, F) * TR_CeilingFade(Height, F)
-		+ TR_SlabDensity(Height + HalfStep, Col.Top, Col.Base, F) * TR_CeilingFade(Height + HalfStep, F))
-		/ 6.0f;
-#endif
 
     const float HeightFraction = saturate((Height - Col.Base) / max(Col.Top - Col.Base, 1e-4f));
 
@@ -1162,6 +1162,14 @@ float4 TR_DensityInColumn(
 
         Density = saturate((Density - Erode) / max(1.0f - Erode, 1e-3f));
     }
+
+	// THINNED IS FAINT: the eye's floor fades as it thins rather than holding
+	// its peak density. After erosion and coverage, as a plain scale, so the
+	// eyewall keeps its shape. PITFALL: A SLAB KEEPS ITS PEAK HOWEVER THIN, so
+	// at a high CloudOpticalDepth a thinned floor left at full density holds
+	// as an opaque sheet; scaled before erosion, the threshold cuts it away
+	// abruptly instead.
+    Density *= pow(saturate(Col.Thinning), TR_EYE_OPEN_POWER);
 
     return float4(Density, Col.Material, Col.Pressure, Col.Top);
 }
