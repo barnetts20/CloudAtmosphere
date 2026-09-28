@@ -19,20 +19,19 @@
 #define FIELD_SAMPLE_TINT 0
 #endif
 
+/** The per-pixel draws in [0, 1] for index Index: the samples' jitter and the
+ *  lattice phase. A field can point it at a texture in its FIELD_TEXTURE_DECL,
+ *  which is in scope wherever the march calls it. */
+#ifndef FIELD_STEP_JITTER
+#define FIELD_STEP_JITTER(Svxy, Index) Atmo_StepJitter(Svxy, Index)
+#endif
+
 /** Set by a field that samples along a ray through a per-ray cache, providing
  *  FieldRayCache, Field_RayBegin and Field_SampleOnRay. */
 #ifndef FIELD_RAY_CACHE
 #define FIELD_RAY_CACHE 0
 #endif
 
-/** Set by a field to let an empty cloud sample reuse the light of the last full
- *  read, this many samples in a row at most, instead of reading the shadow map
- *  and the transmittance table again. The field is sampled before the light,
- *  and the steps stay where the plan puts them. 0 reads the light at every
- *  sample. */
-#ifndef FIELD_EMPTY_LIGHT_REUSE
-#define FIELD_EMPTY_LIGHT_REUSE 0
-#endif
 
 // The march: a ray through the atmosphere and whatever cloud field the model
 // supplies, gathering light toward the camera.
@@ -559,18 +558,17 @@ float4 Atmo_MainMarch(
     float CloudUsed = 0.0f;
     float AirUsed = 0.0f;
 
+#if ATMO_LATTICE_OFFSET
+	// Hashed at a step index the march does not reach, so it is uncorrelated
+	// with the samples' own jitter.
+    const float LatticePhase = 1.0f - FIELD_STEP_JITTER(P.Atmo.mainRayParams.svxy, 7919);
+    float CloudLead = Atmo_LeadStep(CloudFirst, CloudGrow, LatticePhase);
+    const float AirLead = Atmo_LeadStep(AirFirst, AirGrow, LatticePhase);
+#endif
+
     int StepIndex = 0;
 
     const AtmoLightConstants LightConstants = Atmo_LightConstants(ShadowMap, ShadowCameras, P);
-
-#if FIELD_EMPTY_LIGHT_REUSE
-	// The last full light read, and how many empty samples may still reuse it.
-    int LightReuseLeft = 0;
-    float ReusedLobeShadow = 0.0f;
-    float ReusedCloudOptDepth = 0.0f;
-    float3 ReusedAirTransmittance = float3(0.0f, 0.0f, 0.0f);
-    float3 ReusedLightTint = float3(0.0f, 0.0f, 0.0f);
-#endif
 
     for (int s = 0; s < SegmentCount; s++)
     {
@@ -579,6 +577,20 @@ float4 Atmo_MainMarch(
 
         const bool IsCloud = Field_SegmentIsCloud(
 			RayOrigin, RayDir, Segments[s], P.Atmo.planetParams);
+
+#if ATMO_SEGMENT_BUDGET
+		// Each cloud crossing distributes the full budget over its own chord.
+        if (IsCloud)
+        {
+            Atmo_ChordSteps(max(SegEnd - SegStart, 0.0f), float(P.Atmo.mainRayParams.cloudSteps),
+				P.Atmo.mainRayParams.chordSpread, CloudFirst, CloudGrow);
+
+            CloudUsed = 0.0f;
+#if ATMO_LATTICE_OFFSET
+            CloudLead = Atmo_LeadStep(CloudFirst, CloudGrow, LatticePhase);
+#endif
+        }
+#endif
 
         float Pos = SegStart;
 
@@ -595,6 +607,15 @@ float4 Atmo_MainMarch(
             float CurrentStep = max(IsCloud
 				? CloudFirst + CloudGrow * CloudUsed
 				: AirFirst + AirGrow * AirUsed, 1e-4f);
+
+#if ATMO_LATTICE_OFFSET
+			// A class's first step is its lead; the sizes after it follow from
+			// the chord consumed, so the whole lattice shifts by the phase.
+            if ((IsCloud ? CloudUsed : AirUsed) <= 0.0f)
+            {
+                CurrentStep = max(IsCloud ? CloudLead : AirLead, 1e-4f);
+            }
+#endif
 
             CurrentStep = min(CurrentStep, SegEnd - Pos);
 
@@ -616,7 +637,7 @@ float4 Atmo_MainMarch(
                 AirUsed += CurrentStep;
             }
 
-            const float StepSeed = Atmo_StepJitter(P.Atmo.mainRayParams.svxy, StepIndex);
+            const float StepSeed = FIELD_STEP_JITTER(P.Atmo.mainRayParams.svxy, StepIndex);
 
 			// ONE-SIDED ON THE STEP THAT ENDS AT THE TERMINUS. A deck sample stands
 			// for a slab half a step either side of it, so jittered past the
@@ -685,10 +706,8 @@ float4 Atmo_MainMarch(
 
                 const float3 LocalPos = Atmo_ToLocal(SamplePos, P);
 
-				// The field sample, taken ahead of the light so an empty one can
-				// reuse the last read (FIELD_EMPTY_LIGHT_REUSE), and ahead of the
-				// tint so a field whose material coordinate is the tint's input can
-				// supply both.
+				// The field sample, taken ahead of the tint so a field whose
+				// material coordinate is the tint's input can supply both.
                 float4 Sample = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
                 if (IsCloud)
@@ -711,63 +730,33 @@ float4 Atmo_MainMarch(
                 float3 AirTransmittance;
                 float3 LightTint;
 
-#if FIELD_EMPTY_LIGHT_REUSE
-				// AN EMPTY CLOUD SAMPLE LIGHTS ONLY THE AIR, and the air's light
-				// changes little over a few fine steps: it reuses the last full
-				// read, which lags the shadow by at most that many steps.
+                AirTransmittance = Atmo_LightMarch(
+					ShadowMap, ShadowSampler, LightConstants,
+					TransmittanceTable, TransmittanceSampler, P, LocalPos, LobeShadow, CloudOptDepth);
+
+				// THE RECEIVER'S BAND COLOURS THE DECK IT WAS SHADOWED BY. The
+				// map holds one depth, not the colours of the bands the light
+				// crossed, and bands are far wider than the deck is deep so the
+				// path mostly stays in the receiver's band. Off near band edges
+				// at low sun. Only where the deck shadows at all, and from the
+				// sample when the field allows it -- a second column read
+				// otherwise.
+                LightTint = Field_NeutralTint(P.Scatter);
+
                 BRANCH
 
-                if (IsCloud && Sample.x <= 0.0f && LightReuseLeft > 0)
+                if (CloudOptDepth > 0.0f)
                 {
-                    LightReuseLeft--;
-
-                    LobeShadow = ReusedLobeShadow;
-                    CloudOptDepth = ReusedCloudOptDepth;
-                    AirTransmittance = ReusedAirTransmittance;
-                    LightTint = ReusedLightTint;
-                }
-                else
-#endif
-                {
-                    AirTransmittance = Atmo_LightMarch(
-						ShadowMap, ShadowSampler, LightConstants,
-						TransmittanceTable, TransmittanceSampler, P, LocalPos, LobeShadow, CloudOptDepth);
-
-					// THE RECEIVER'S BAND COLOURS THE DECK IT WAS SHADOWED BY. The
-					// map holds one depth, not the colours of the bands the light
-					// crossed, and bands are far wider than the deck is deep so the
-					// path mostly stays in the receiver's band. Off near band edges
-					// at low sun. Only where the deck shadows at all, and from the
-					// sample when the field allows it -- a second column read
-					// otherwise.
-                    LightTint = Field_NeutralTint(P.Scatter);
-
-                    BRANCH
-
-                    if (CloudOptDepth > 0.0f)
-                    {
 #if FIELD_SAMPLE_TINT
-                        if (IsCloud)
-                        {
-                            LightTint = Field_SampleLightTint(Sample, P.Scatter);
-                        }
-                        else
-#endif
-                        {
-                            LightTint = Field_LightTint(FlowField, FlowSampler, LocalPos, P.Field, P.Scatter);
-                        }
+                    if (IsCloud)
+                    {
+                        LightTint = Field_SampleLightTint(Sample, P.Scatter);
                     }
-
-#if FIELD_EMPTY_LIGHT_REUSE
-                    ReusedLobeShadow = LobeShadow;
-                    ReusedCloudOptDepth = CloudOptDepth;
-                    ReusedAirTransmittance = AirTransmittance;
-                    ReusedLightTint = LightTint;
-
-					// Air segments start no chain: an empty cloud sample after one
-					// reads in full.
-                    LightReuseLeft = IsCloud ? FIELD_EMPTY_LIGHT_REUSE : 0;
+                    else
 #endif
+                    {
+                        LightTint = Field_LightTint(FlowField, FlowSampler, LocalPos, P.Field, P.Scatter);
+                    }
                 }
 
                 const float3 LightBeta = P.Atmo.cloudParams.cloudAbsBeta * LightTint;

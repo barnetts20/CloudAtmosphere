@@ -163,11 +163,27 @@ public:
     // A GROUP OF ONE GETS NO WRAPPER: a substruct buys a fold-out, worth a click
     // only when there is more than one thing behind it.
 
-    /** RGB direction is the hue, RGB magnitude the intensity. The march and the
-     *  directional light both derive from this, so they cannot disagree about the
-     *  star; light DIRECTION comes from the actor's rotation. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Atmosphere")
-    FLinearColor LightColor = FLinearColor(30.0f, 28.5f, 27.0f, 10.0f);
+    /** The star's colour. Only its hue is read: the brightest channel counts as
+     *  1. The march and the directional light both derive from LightProduct, so
+     *  they cannot disagree about the star; light DIRECTION comes from the
+     *  actor's rotation. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Atmosphere", meta = (HideAlphaChannel))
+    FLinearColor LightColor = FLinearColor(1.0f, 0.95f, 0.9f, 1.0f);
+
+    /** The star's brightness, on its brightest channel. Every ambient is a ratio
+     *  of the light, so they follow it. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Atmosphere", meta = (ClampMin = "0.0"))
+    float LightIntensity = 30.0f;
+
+    /** LightColor's hue at LightIntensity: the light the march and the
+     *  directional light take. */
+    FLinearColor LightProduct() const
+    {
+        const float Peak = FMath::Max3(LightColor.R, LightColor.G, LightColor.B);
+        const float Scale = (Peak > 0.0f) ? FMath::Max(LightIntensity, 0.0f) / Peak : 0.0f;
+
+        return FLinearColor(LightColor.R * Scale, LightColor.G * Scale, LightColor.B * Scale, 1.0f);
+    }
 
     /** Parks or wakes the atmosphere: both passes, the light and the per-tick
      *  push, bake and transmittance update. THE ONLY RELIABLE OFF-SWITCH for the

@@ -77,6 +77,9 @@
 /** SIM_PROFILE_BANDED or SIM_PROFILE_THREE_CELL. */
 #define SimZonalProfile FlowSimUB.ZonalProfile
 
+/** 45 degrees over JetLatitude: the three cells' latitude scale. */
+#define SimJetLatitudeScale FlowSimUB.JetLatitudeScale
+
 #define SIM_PROFILE_BANDED     0
 #define SIM_PROFILE_THREE_CELL 1
 
@@ -168,9 +171,9 @@
 #define SimWindEvaporation FlowSimUB.WindEvaporation
 
 /** Storm cells; see MainCellsCS and SimCellStamp.
- *    Shape    x radius (radians), y eye and z eyewall radius as fractions of
- *             it, w vector strength at the eye's edge as a fraction of the
- *             eyewall's.
+ *    Shape    x radius (radians), y the vectors' inner ramp and z eyewall
+ *             radius as fractions of it, w vector strength at the ramp's edge
+ *             as a fraction of the eyewall's.
  *    Vortex   x falloff exponent past the eyewall, y rate the flow relaxes
  *             toward the target vortex, z the top layer's share of the target
  *             (the bottom's is 1), w target eyewall wind at full intensity.
@@ -184,10 +187,10 @@
  *             z and w genesis latitudes, radians.
  *    Genesis  x shear limit, y humidity threshold, z storm a seed needs,
  *             w cyclonic vorticity at which a seed counts fully.
- *    Cloud    x share of the way to full cover each layer's cloud is lifted
- *             at the eyewall, y rate of the lift, z inflow below and outflow
- *             above at the eyewall as a fraction of the target wind, w storm
- *             raised across the whole storm. */
+ *    Cloud    x rate each layer's cloud is lifted toward full cover at the
+ *             eyewall, y unused, z inflow below and outflow above at the
+ *             eyewall as a fraction of the target wind, w storm raised
+ *             across the whole storm. */
 #define SimCellShape FlowSimUB.CellShape
 #define SimCellVortex FlowSimUB.CellVortex
 #define SimCellDraft FlowSimUB.CellDraft
@@ -209,10 +212,7 @@
 /** Rate a cell is pulled onto its vortex's core, per unit time. */
 #define SimCellCoreFollow FlowSimUB.CellCoreFollow
 
-/** How far the eye tracer's source follows the storm's pressure low rather
- *  than the eye radius, and the share of the eye's radius its rim ramps over;
- *  see SimCellEyeSource. */
-#define SimCellEyeLow FlowSimUB.CellEyeLow
+/** Share of the low's eye its rim ramps over; see SimCellEyeSource. */
 #define SimCellEyeSoftness FlowSimUB.CellEyeSoftness
 
 /** Live cell slots, up to FLOWSIM_MAX_CELLS. */
@@ -429,10 +429,16 @@ void SimLayerJets(uint Layer, out float BandCount, out float JetStrength, out fl
 }
 
 /** Earth's three cells as an angular rate, peaking at 1: easterly trades to
- *  about 25 degrees, a westerly jet at 45, polar easterlies past about 65.
- *  Gaussians in mu, so the vorticity is smooth everywhere. */
+ *  about 25 degrees, a westerly jet at 45, polar easterlies past about 65,
+ *  each latitude scaled by JetLatitude / 45. Gaussians in mu, so the
+ *  vorticity is smooth everywhere. Mirrors FlowSimProfile::JetRate. */
 float SimThreeCellRate(float Mu)
 {
+    if (SimJetLatitudeScale != 1.0f)
+    {
+        Mu = sin(clamp(asin(clamp(Mu, -1.0f, 1.0f)) * SimJetLatitudeScale, -0.5f * PI, 0.5f * PI));
+    }
+
     const float A = abs(Mu);
 
     const float Jet = (A - 0.71f) / 0.17f;
@@ -1153,8 +1159,7 @@ float SimSmootherstep(float A, float B, float X)
 #define SIM_CELL_LOW_RINGS 4
 
 /** Where the cells' cores feed the eye tracer at P, [0, 1], given the bottom
- *  layer's pressure there: each cell's intensity times an S curve from its
- *  centre to the eye radius, or, as far as SimCellEyeLow, its low's core. The
+ *  layer's pressure there: each cell's strength over its low's core. The
  *  tracer settles on this profile, so it is the eye's cross-section: a rounded
  *  shoulder at the rim and a rounded floor.
  *
@@ -1198,25 +1203,18 @@ float SimCellEyeSource(float3 P, float Pressure)
 
         if (SimCellReach((uint) Slot, P, false, Axis, Sense, Intensity, R))
         {
-            float Eye = Intensity * (1.0f - smoothstep(0.0f, max(SimCellShape.y, 1e-4f), R));
+            const float4 Low = SimCellControl((uint) Slot, SIM_CELL_CORE);
+            const float Depth = Low.x - Low.y;
 
-            if (SimCellEyeLow > 0.0f)
-            {
-                const float4 Low = SimCellControl((uint) Slot, SIM_CELL_CORE);
-                const float Depth = Low.x - Low.y;
+			// Out over one to two of the ring the low was measured on, which the
+			// grid floors at two cells, on a quintic. PITFALL: faded over the
+			// eyewall radius instead, an eyewall under a cell clips the eye
+			// inside its isobar and one past half the radius is cut at the edge.
+            const float Near = 1.0f - SimSmootherstep(Low.z, min(2.0f * Low.z, 1.0f), R);
+            const float Rim = sqrt(max(1.0f - (Low.x - Pressure) / max(Depth, 1e-5f), 0.0f));
+            const float Core = (Depth > 1e-5f) ? 1.0f - SimSmootherstep(1.0f - SimCellEyeSoftness, 1.0f, Rim) : 0.0f;
 
-				// Out over one to two of the ring the low was measured on, which the
-				// grid floors at two cells, on a quintic. PITFALL: faded over the
-				// eyewall radius instead, an eyewall under a cell clips the eye
-				// inside its isobar and one past half the radius is cut at the edge.
-                const float Near = 1.0f - SimSmootherstep(Low.z, min(2.0f * Low.z, 1.0f), R);
-                const float Rim = sqrt(max(1.0f - (Low.x - Pressure) / max(Depth, 1e-5f), 0.0f));
-                const float Core = (Depth > 1e-5f) ? 1.0f - SimSmootherstep(1.0f - SimCellEyeSoftness, 1.0f, Rim) : 0.0f;
-
-                Eye = lerp(Eye, SimCellStrength(Intensity) * Near * Core, SimCellEyeLow);
-            }
-
-            Source = max(Source, Eye);
+            Source = max(Source, SimCellStrength(Intensity) * Near * Core);
         }
     }
 
@@ -1314,7 +1312,7 @@ float SimCellPotential(float3 P, uint Layer)
     return SimCellVortex.w * SimCellShape.x * Chi;
 }
 
-/** How far the cells lift each layer's cloud toward full cover, before the
+/** The rate the cells lift each layer's cloud toward full cover, before the
  *  eye's share: MainPredictCS scales it by one less the eye tracer.
  *
  *  THE STAMP CARRIES ITS OWN CLOUD, on the same ramp as its vectors: none at
@@ -2304,7 +2302,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 	// The low about the new centre: the bottom layer's mean pressure on the
 	// eyewall ring, and the least of it at the centre and on every ring out to
 	// it (SimCellEyeSource).
-    if (SimCellEyeLow > 0.0f && Intensity > 0.0f)
+    if (Intensity > 0.0f)
     {
         float Least = SimCellPressure(P);
         float Wall = 0.0f;
@@ -2704,7 +2702,7 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
     {
         const float Feed = CellColumn.z * (1.0f - Eye);
 
-        Cloud = saturate(Cloud + SimCellCloud.y * Dt * Feed * (1.0f - Cloud));
+        Cloud = saturate(Cloud + Dt * Feed * (1.0f - Cloud));
     }
 
     const float CloudAscent = clamp(Tracer.y + Dt * (Formed * Rising - Loss * Tracer.y), 0.0f, Cloud);

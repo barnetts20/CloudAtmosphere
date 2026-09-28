@@ -53,10 +53,22 @@
 	Texture3D DetailVolume, \
 	SamplerState DetailSampler, \
 	Texture3D StructureVolume, \
-	SamplerState StructureSampler
+	SamplerState StructureSampler, \
+	Texture2D BlueNoise
 
 #define FIELD_TEXTURE_ARGS \
-	FlowField, FlowSampler, DetailVolume, DetailSampler, StructureVolume, StructureSampler
+	FlowField, FlowSampler, DetailVolume, DetailSampler, StructureVolume, StructureSampler, BlueNoise
+
+/** 1 draws the march's per-pixel jitter from the BlueNoise texture
+ *  (Atmo_TextureJitter), 0 from interleaved gradient noise. The texture is a
+ *  march argument either way. */
+#ifndef TR_BLUE_NOISE
+#define TR_BLUE_NOISE 0
+#endif
+
+#if TR_BLUE_NOISE
+#define FIELD_STEP_JITTER(Svxy, Index) Atmo_TextureJitter(BlueNoise, Svxy, Index)
+#endif
 
 /** The clouds' material and how they are lit. Two sets, blended by the
  *  column's material coordinate: fair-weather cloud at 0 and storm cloud at 1,
@@ -157,7 +169,11 @@ bool Field_SegmentIsCloud(float3 Origin, float3 Dir, float4 Segment, PlanetParam
  *  climbs into the band, since the segment structure changes there.
  *
  *  Turning it back on costs that; leaving it off costs resolution, recoverable
- *  with CloudSteps. Resolution is the cheaper of the two to buy back. */
+ *  with CloudSteps. Resolution is the cheaper of the two to buy back.
+ *
+ *  PITFALL: A PLAN THAT PLACES STEPS BY THE FIELD DRAWS THE FIELD INTO THE
+ *  LATTICE. Steps that follow the occupied cells move as the weather does, and
+ *  at some angles the pattern reads as sampling artifacts. */
 #ifndef TR_SPLIT_AT_ENTRY
 #define TR_SPLIT_AT_ENTRY 0
 #endif
@@ -328,9 +344,8 @@ TRScatterParams TR_BuildScatter(
 CompositeParams TR_BuildAtmo(
 	float2 SvPosition,
 	float3 RayDir,
-	float3 CameraPosition,
+	float3 PlanetOffset,
 	float SceneDepth,
-	float3 PlanetCenter,
 	float3 LightDirection,
 	float3 LightColor,
 	float3 RayleighBeta,
@@ -379,7 +394,7 @@ CompositeParams TR_BuildAtmo(
     const float3 CloudScatterBeta = TR_CloudBeta(F, CloudOpticalDepth).xxx;
 
     CompositeParams Params = Atmo_BuildParams(
-		SvPosition, RayDir, CameraPosition, PlanetCenter,
+		SvPosition, RayDir, PlanetOffset,
 		F.PlanetRadius, F.PlanetRadius + F.Thickness, CloudOuter, CloudInner,
 		SceneDepth, LightDirection, LightColor,
 		float4(RayleighBeta, RayleighScaleHeight),
@@ -403,9 +418,11 @@ CompositeParams TR_BuildAtmo(
 }
 
 /** TR_BuildAtmo from the material's pins, which carry exactly these names. The
- *  per-pixel terms, and the field, arrive as arguments. */
+ *  per-pixel terms, and the field, arrive as arguments. PlanetOffset is the
+ *  PlanetCenter double vector parameter less the Camera Position node,
+ *  subtracted in the graph, where both are double. */
 #define TR_BUILD_ATMO(SvPosition, RayDir, SceneRayDistance, F) TR_BuildAtmo( \
-	SvPosition, RayDir, CameraPosition, SceneRayDistance, PlanetCenter, \
+	SvPosition, RayDir, PlanetOffset, SceneRayDistance, \
 	LightDirection, LightColor, \
 	RayleighBeta, RayleighScaleHeight, MieBeta, MieScaleHeight, MieG, \
 	AbsorptionBeta, AbsorptionAltitude, AbsorptionFalloff, \
@@ -520,10 +537,6 @@ float3 Field_LightTint(
 /** Field_LightTint from a sample already taken at the receiver: its second
  *  channel is the material TR_TypeCoarse would read, so no second column. */
 #define FIELD_SAMPLE_TINT 1
-
-#if TR_PLAN_SLAB
-#define FIELD_EMPTY_LIGHT_REUSE TR_PLAN_LIGHT_REUSE
-#endif
 
 float3 Field_SampleLightTint(float4 Sample, FieldMaterialParams S)
 {

@@ -426,7 +426,7 @@ CompositeParams GG_BuildAtmo(
     const float3 CloudScatterBeta = GG_DeckBeta(F, DeckOpticalDepth).xxx;
 
     CompositeParams Params = Atmo_BuildParams(
-		SvPosition, RayDir, CameraPosition, PlanetCenter,
+		SvPosition, RayDir, PlanetCenter - CameraPosition,
 		F.PlanetRadius, F.PlanetRadius + F.Thickness, CloudOuter, CloudInner,
 		SceneDepth, LightDirection, LightColor,
 		float4(RayleighBeta, RayleighScaleHeight),

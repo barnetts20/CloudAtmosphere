@@ -222,3 +222,22 @@ float Atmo_StepJitter(float2 svxy, int stepIndex)
 
     return frac(52.9829189 * frac(0.06711056 * p.x + 0.00583715 * p.y));
 }
+
+/** Atmo_StepJitter from a tiling noise texture, typically blue noise: texel
+ *  (svxy + shift) of its first channel, the shift an R2 sequence in the index so
+ *  each index reads the tile at a different, well-spread offset.
+ *
+ *  THE LOOKUP MOVES, NOT THE VALUE, for the reason Atmo_StepJitter's input
+ *  advances. The texture must be linear, uncompressed and without mips, read
+ *  with Load so no filter blends texels. */
+float Atmo_TextureJitter(Texture2D Noise, float2 svxy, int index)
+{
+    uint Width, Height;
+    Noise.GetDimensions(Width, Height);
+
+    const uint2 Size = uint2(max(Width, 1u), max(Height, 1u));
+    const float2 Shift = frac(float(index) * float2(0.75487766f, 0.56984029f)) * float2(Size);
+    const uint2 Texel = (uint2(svxy) + uint2(Shift)) % Size;
+
+    return Noise.Load(int3(Texel, 0)).r;
+}

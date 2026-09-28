@@ -115,6 +115,7 @@ namespace
 		P.JetParams = Params.JetParams;
 		P.WidthBias = Params.WidthBias;
 		P.ZonalProfile = Params.ZonalProfile;
+		P.JetLatitudeScale = Params.JetLatitudeScale;
 
 		for (int32 i = 0; i < 8; ++i)
 		{
@@ -183,7 +184,6 @@ namespace
 		P.CellSustain = Params.CellSustain;
 		P.CellEyeDepth = Params.CellEyeDepth;
 		P.CellCoreFollow = Params.CellCoreFollow;
-		P.CellEyeLow = Params.CellEyeLow;
 		P.CellEyeSoftness = Params.CellEyeSoftness;
 		P.CellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
 		P.StepIndex = Params.StepIndex;
@@ -256,7 +256,7 @@ namespace
 
 		Key.Append({ (float)Params.GridSize.X, (float)Params.GridSize.Y, (float)Params.GridSize.Z });
 		Key.Append({ Params.JetParams.X, Params.JetParams.Y, Params.JetParams.Z, Params.JetParams.W });
-		Key.Append({ Params.WidthBias, (float)Params.ZonalProfile, Params.PlanetaryVorticity });
+		Key.Append({ Params.WidthBias, (float)Params.ZonalProfile, Params.JetLatitudeScale, Params.PlanetaryVorticity });
 		Key.Append({ Params.ThermalParams.X, Params.ThermalParams.Y, Params.ThermalParams.Z, Params.ThermalParams.W });
 
 		for (int32 i = 0; i < 8; ++i)

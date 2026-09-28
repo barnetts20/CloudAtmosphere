@@ -81,12 +81,17 @@ float Atmo_PixelAngle()
  *  CAMERA AT THE ORIGIN. The march runs camera-relative, which raises the
  *  precision floor enormously at planetary scale -- planet-relative positions
  *  are millions of units and float32 has about seven digits. The fields sample
- *  their noise in planet-local space, never world space. */
+ *  their noise in planet-local space, never world space.
+ *
+ *  planetOffset is the planet's centre less the camera's position, formed in
+ *  double precision before it arrives. PITFALL: formed here from two absolute
+ *  float positions it carries their rounding, centimetres to metres at
+ *  planetary coordinates, and as the camera creeps the whole atmosphere steps
+ *  against the scene. */
 CompositeParams Atmo_BuildParams(
 	float2 svPosition,
 	float3 rayDir,
-	float3 cameraPos,
-	float3 atmoPos,
+	float3 planetOffset,
 	float planetRadius,
 	float atmoRadius,
 	float cloudOuterRadius,
@@ -109,13 +114,11 @@ CompositeParams Atmo_BuildParams(
 {
     const float atmoThickness = atmoRadius - planetRadius;
 
-    const float3 crPlanetPos = atmoPos - cameraPos;
-
     const float cosTheta = dot(rayDir, lightDirection);
 
     CompositeParams params;
 
-    params.planetParams.planetPos = crPlanetPos;
+    params.planetParams.planetPos = planetOffset;
     params.planetParams.planetRadius = planetRadius;
     params.planetParams.atmoRadius = atmoRadius;
     params.planetParams.cloudOuterRadius = cloudOuterRadius;

@@ -66,6 +66,30 @@
 #define TR_COLUMN_SPACING 0.5f
 #endif
 
+/** 1 blends the keyframes with a cubic B-spline over four of them, 0 linearly
+ *  between two. PITFALL: LINEAR BLENDING CREASES AT EVERY KEYFRAME. The
+ *  coverage and erosion thresholds turn the creases into lines, most through
+ *  thin cloud, and every pixel's keyframes sit on the same circles about the
+ *  nadir, so the lines are rings. The B-spline is C2 and its weights are
+ *  convex, so it neither creases nor overshoots; it smooths by about a quarter
+ *  of a cell. A per-pixel shift of the lattice instead shears the noise
+ *  displacement differently in neighbouring pixels and draws streaks. */
+#ifndef TR_COLUMN_CUBIC
+#define TR_COLUMN_CUBIC 0
+#endif
+
+/** 1 reads the column at every sample instead of blending keyframes: exact, at
+ *  a sim read per sample. PITFALL: KEYFRAMES ON A PER-RAY LATTICE DRAW THE
+ *  LATTICE. Each ray's keyframes are anchored at its own closest approach, so
+ *  the blending error follows the angle from there to the sample, which is set
+ *  by the ray's distance from the planet centre: lines concentric with the
+ *  planet's disc, sliding as the camera moves, densest near the limb where that
+ *  angle changes fastest, and a pinwheel at the nadir where the closest
+ *  approach has no direction. */
+#ifndef TR_COLUMN_DIRECT
+#define TR_COLUMN_DIRECT 1
+#endif
+
 /** How many mips below the top of its chain the detail volume stops being
  *  fetched and reads as its mean. At that mip a tile is a few texels and the
  *  detail's cells average out, so the fetch returns the mean anyway; the last
@@ -122,25 +146,6 @@
  *  sooner. */
 #ifndef TR_EYE_OPEN_POWER
 #define TR_EYE_OPEN_POWER 1.0f
-#endif
-
-/** 1 lets a view sample the field returns empty -- outside its column's slab,
- *  or eroded or uncovered to nothing -- reuse the light of the last full read
- *  for up to TR_PLAN_LIGHT_REUSE samples in a row (FIELD_EMPTY_LIGHT_REUSE),
- *  skipping the shadow map and transmittance reads. The steps stay where the plan puts them;
- *  only work is skipped. 0 reads the light at every sample.
- *
- *  PITFALL: A PLAN THAT PLACES STEPS BY THE FIELD DRAWS THE FIELD INTO THE
- *  LATTICE. Steps that follow the occupied keyframe cells move as the weather
- *  does, and at some angles the pattern reads as sampling artifacts. */
-#ifndef TR_PLAN_SLAB
-#define TR_PLAN_SLAB 0
-#endif
-
-/** Most empty samples in a row that reuse one light read under TR_PLAN_SLAB:
- *  how far, in fine steps, the air's cloud shadow may lag. */
-#ifndef TR_PLAN_LIGHT_REUSE
-#define TR_PLAN_LIGHT_REUSE 3
 #endif
 
 /** The sim layer every column read comes from: CloudLayer, negative for the
@@ -216,9 +221,8 @@ struct TRFieldParams
 	/** The geopotential anomaly that reads as a full low or high. */
     float PressureScale;
 
-	/** Headroom as a multiple of CloudThickness, and how far pressure moves it:
+	/** How far pressure moves a column's depth, as a share of CloudThickness:
 	 *  positive gives lows more room than highs. */
-    float CeilingDepth;
     float CeilingPressure;
 
 	/** How far tropicality and pressure move the base, multiples of
@@ -325,7 +329,7 @@ struct TRFieldParams
  *    CloudCurves       TopCurve, BottomCurve, CloudSlope, WarpStretch
  *    CloudCoverage     CloudCover, StormPriority, CoverageSoftness, (unused)
  *    CloudType         TypeBias, (unused), TypeTropical, (unused)
- *    CloudLid          PressureScale, CeilingDepth, CeilingPressure, StratusDepth
+ *    CloudLid          PressureScale, (unused), CeilingPressure, StratusDepth
  *    CloudLift         BaseTropical, BasePressure, AltitudeGain, AltitudeLift
  *    CloudMotion       DriftAngle, NoisePhase, WarpShift, SpinAngle
  *    NoiseLevels       StructureMipBias, structure volume bound, DetailMipBias,
@@ -387,7 +391,6 @@ TRFieldParams TR_BuildField(
     F.TypeTropical = CloudType.z;
 
     F.PressureScale = max(CloudLid.x, 1e-6f);
-    F.CeilingDepth = max(CloudLid.y, 1e-3f);
     F.CeilingPressure = clamp(CloudLid.z, -0.99f, 0.99f);
     F.StratusDepth = saturate(CloudLid.w);
 
@@ -740,7 +743,7 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
     Col.Base = F.CloudBase + D * (F.BaseTropical * Tropical + F.BasePressure * Col.Pressure
 		+ F.AltitudeLift * Col.Altitude * (1.0f - Col.Type));
 
-    const float Lid = F.CeilingDepth * (1.0f + F.CeilingPressure * Col.Pressure);
+    const float Lid = 1.0f + F.CeilingPressure * Col.Pressure;
 
     const float Depth = D * lerp(F.StratusDepth, 1.0f, Col.Type) * Lid
 		* smoothstep(0.0f, TR_COVERAGE_DEPTH_RAMP, Col.Coverage)
@@ -785,7 +788,7 @@ void TR_FieldReach(
     BaseUp = D * (max(F.BaseTropical, 0.0f) + abs(F.BasePressure) + max(F.AltitudeLift, 0.0f));
     BaseDown = D * (-min(F.BaseTropical, 0.0f) + abs(F.BasePressure) - min(F.AltitudeLift, 0.0f));
 
-    Depth = D * max(F.CeilingDepth * (1.0f + abs(F.CeilingPressure)), 1e-3f);
+    Depth = D * (1.0f + abs(F.CeilingPressure));
 }
 
 /** The highest any column top can reach, an atmosphere fraction, clamped at the
@@ -1208,8 +1211,14 @@ struct TRRayCache
     float Impact;
     float CellAngle;
     int Cell;
+#if TR_COLUMN_CUBIC
+    TRColumnKey Key0;
+#endif
     TRColumnKey KeyA;
     TRColumnKey KeyB;
+#if TR_COLUMN_CUBIC
+    TRColumnKey Key3;
+#endif
 };
 
 TRRayCache TR_RayCacheBegin(
@@ -1242,6 +1251,10 @@ TRRayCache TR_RayCacheBegin(
 
     C.KeyA = (TRColumnKey) 0;
     C.KeyB = (TRColumnKey) 0;
+#if TR_COLUMN_CUBIC
+    C.Key0 = (TRColumnKey) 0;
+    C.Key3 = (TRColumnKey) 0;
+#endif
 
     return C;
 }
@@ -1289,6 +1302,23 @@ float4 TR_DensityOnRay(
 
     const float3 N = normalize(Atmo_RotateZ(LocalPos / max(Radius, 1e-4f), F.SpinAngle));
 
+#if TR_COLUMN_DIRECT
+    const FlowColumnSample S = Flow_SampleColumn(
+		FlowField, FlowSampler, N, TR_FlowLayer(FlowField, F.CloudLayer), true);
+
+    const TRColumn Col = TR_ColumnFromInputs(TR_InputsFromSample(S), N, F);
+
+    BRANCH
+
+    if (TR_SlabMissed(Col, Height, HalfStep))
+    {
+        return float4(0.0f, Col.Material, Col.Pressure, Col.Top);
+    }
+
+    return TR_DensityInColumn(
+		DetailVolume, DetailSampler, StructureVolume, StructureSampler,
+		N, Height, HalfStep, Col, S.NoiseA.xyz, S.NoiseB.xyz, F);
+#else
     const float Lattice = atan2(T - C.TPerigee, C.Impact) / C.CellAngle;
     const int Cell = (int) floor(Lattice);
 
@@ -1296,6 +1326,23 @@ float4 TR_DensityOnRay(
 
     if (Cell != C.Cell)
     {
+#if TR_COLUMN_CUBIC
+		// Keys at Cell - 1 to Cell + 2; one read per cell advanced.
+        if (Cell == C.Cell + 1)
+        {
+            C.Key0 = C.KeyA;
+            C.KeyA = C.KeyB;
+            C.KeyB = C.Key3;
+        }
+        else
+        {
+            C.Key0 = TR_ReadKey(FlowField, FlowSampler, C, float(Cell - 1) * C.CellAngle, F);
+            C.KeyA = TR_ReadKey(FlowField, FlowSampler, C, float(Cell) * C.CellAngle, F);
+            C.KeyB = TR_ReadKey(FlowField, FlowSampler, C, float(Cell + 1) * C.CellAngle, F);
+        }
+
+        C.Key3 = TR_ReadKey(FlowField, FlowSampler, C, float(Cell + 2) * C.CellAngle, F);
+#else
         if (Cell == C.Cell + 1)
         {
             C.KeyA = C.KeyB;
@@ -1306,15 +1353,31 @@ float4 TR_DensityOnRay(
         }
 
         C.KeyB = TR_ReadKey(FlowField, FlowSampler, C, float(Cell + 1) * C.CellAngle, F);
+#endif
         C.Cell = Cell;
     }
 
     const float W = Lattice - float(Cell);
 
+#if TR_COLUMN_CUBIC
+	// Uniform cubic B-spline weights for keys Cell - 1 to Cell + 2.
+    const float W2 = W * W;
+    const float W3 = W2 * W;
+    const float4 B = float4(
+		(1.0f - W) * (1.0f - W) * (1.0f - W),
+		3.0f * W3 - 6.0f * W2 + 4.0f,
+		-3.0f * W3 + 3.0f * W2 + 3.0f * W + 1.0f,
+		W3) / 6.0f;
+
+#define TR_KEY_BLEND(Member) (B.x * C.Key0.Member + B.y * C.KeyA.Member + B.z * C.KeyB.Member + B.w * C.Key3.Member)
+#else
+#define TR_KEY_BLEND(Member) lerp(C.KeyA.Member, C.KeyB.Member, W)
+#endif
+
     TRColumnInputs In;
-    In.Pressure = lerp(C.KeyA.Inputs.Pressure, C.KeyB.Inputs.Pressure, W);
-    In.Weather = lerp(C.KeyA.Inputs.Weather, C.KeyB.Inputs.Weather, W);
-    In.Depth = lerp(C.KeyA.Inputs.Depth, C.KeyB.Inputs.Depth, W);
+    In.Pressure = TR_KEY_BLEND(Inputs.Pressure);
+    In.Weather = TR_KEY_BLEND(Inputs.Weather);
+    In.Depth = TR_KEY_BLEND(Inputs.Depth);
 
     const TRColumn Col = TR_ColumnFromInputs(In, N, F);
 
@@ -1328,6 +1391,9 @@ float4 TR_DensityOnRay(
     return TR_DensityInColumn(
 		DetailVolume, DetailSampler, StructureVolume, StructureSampler,
 		N, Height, HalfStep, Col,
-		lerp(C.KeyA.DisplacementA, C.KeyB.DisplacementA, W),
-		lerp(C.KeyA.DisplacementB, C.KeyB.DisplacementB, W), F);
+		TR_KEY_BLEND(DisplacementA),
+		TR_KEY_BLEND(DisplacementB), F);
+
+#undef TR_KEY_BLEND
+#endif
 }

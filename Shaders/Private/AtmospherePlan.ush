@@ -52,6 +52,37 @@ void Atmo_ChordSteps(float Length, float Count, float Spread, out float First, o
     Growth = R - 1.0f;
 }
 
+/** 1 starts each pixel's step lattice a fraction of a step into its first step,
+ *  so neighbouring pixels do not share step boundaries. The sample jitter
+ *  already makes each step an unbiased estimate; this breaks up the noise it
+ *  leaves, whose size follows where features fall inside a step and so forms
+ *  rings about the view centre wherever the lattice is shared. 0 starts every
+ *  lattice at the segment. */
+#ifndef ATMO_LATTICE_OFFSET
+#define ATMO_LATTICE_OFFSET 0
+#endif
+
+/** 1 gives each cloud segment its own CloudSteps budget over its own chord; 0
+ *  spreads one budget over every cloud segment on the ray. PITFALL: A SHARED
+ *  BUDGET STEPS DIFFERENTLY EITHER SIDE OF THE PLANET'S LIMB. A ray that misses
+ *  the planet crosses the band twice and spreads the budget over both
+ *  crossings, so its near crossing, the one the eye sees, gets steps about
+ *  twice as long as its neighbour's that stops at the planet. Wherever the
+ *  result depends on step length, the limb's line shows in the deck. */
+#ifndef ATMO_SEGMENT_BUDGET
+#define ATMO_SEGMENT_BUDGET 1
+#endif
+
+/** The first step of a lattice started Phase of a step in, Phase in (0, 1]: the
+ *  distribution's chord to fractional step Phase, after which the steps run as
+ *  Atmo_ChordSteps sizes them from the chord consumed. */
+float Atmo_LeadStep(float First, float Growth, float Phase)
+{
+    return (Growth > 1e-6f)
+		? First * (pow(1.0f + Growth, Phase) - 1.0f) / Growth
+		: First * Phase;
+}
+
 /** Builds the segment list for a ray. Returns the count; each segment is
  *  (start, end, stepSize, isCloudBand).
  *

@@ -62,14 +62,16 @@ static TSet<FString> GWarnedMaterialParameters;
 static TMap<const UMaterialInstanceDynamic*, TSet<FName>> GKnownScalarNames;
 static TMap<const UMaterialInstanceDynamic*, TSet<FName>> GKnownVectorNames;
 static TMap<const UMaterialInstanceDynamic*, TSet<FName>> GKnownTextureNames;
+static TMap<const UMaterialInstanceDynamic*, TSet<FName>> GKnownDoubleVectorNames;
 
-enum class EAtmoParamKind : uint8 { Scalar, Vector, Texture };
+enum class EAtmoParamKind : uint8 { Scalar, Vector, DoubleVector, Texture };
 
 static bool MaterialHasParameter(UMaterialInstanceDynamic* MID, EAtmoParamKind Kind, FName Name)
 {
     TMap<const UMaterialInstanceDynamic*, TSet<FName>>& Cache =
         Kind == EAtmoParamKind::Scalar ? GKnownScalarNames
         : Kind == EAtmoParamKind::Vector ? GKnownVectorNames
+        : Kind == EAtmoParamKind::DoubleVector ? GKnownDoubleVectorNames
         : GKnownTextureNames;
 
     TSet<FName>* Known = Cache.Find(MID);
@@ -83,6 +85,9 @@ static bool MaterialHasParameter(UMaterialInstanceDynamic* MID, EAtmoParamKind K
         {
         case EAtmoParamKind::Scalar:  MID->GetAllScalarParameterInfo(Infos, Guids); break;
         case EAtmoParamKind::Vector:  MID->GetAllVectorParameterInfo(Infos, Guids); break;
+        case EAtmoParamKind::DoubleVector:
+            MID->GetAllParameterInfoOfType(EMaterialParameterType::DoubleVector, Infos, Guids);
+            break;
         default:                      MID->GetAllTextureParameterInfo(Infos, Guids); break;
         }
 
@@ -104,6 +109,7 @@ static void ForgetMaterialParameters(const UMaterialInstanceDynamic* MID)
     GKnownScalarNames.Remove(MID);
     GKnownVectorNames.Remove(MID);
     GKnownTextureNames.Remove(MID);
+    GKnownDoubleVectorNames.Remove(MID);
 }
 
 // Keyed and reported by path, which names the actor: every actor's instances
@@ -152,6 +158,20 @@ static void SetVectorChecked(UMaterialInstanceDynamic* MID, FName Name, const FL
 #endif
 
     MID->SetVectorParameterValue(Name, Value);
+}
+
+static void SetDoubleVectorChecked(UMaterialInstanceDynamic* MID, FName Name, const FVector& Value)
+{
+    if (!MID) return;
+
+#if WITH_EDITOR
+    if (!MaterialHasParameter(MID, EAtmoParamKind::DoubleVector, Name))
+    {
+        WarnMissingParameter(MID, TEXT("double vector"), Name);
+    }
+#endif
+
+    MID->SetDoubleVectorParameterValue(Name, FVector4(Value, 0.0));
 }
 
 static void SetTextureChecked(UMaterialInstanceDynamic* MID, FName Name, UTexture* Value)
@@ -214,18 +234,18 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     // The absorber is the term to watch. It is a Lorentzian scaled by the
     // Rayleigh profile, so its column integral is roughly half a scale height,
     // and at a beta of 100 it alone closes the sky.
-    TerrestrialAir.RayleighBeta = FLinearColor(0.416289f, 1.270482f, 2.0f, 1.0f);
+    TerrestrialAir.RayleighDepth = FLinearColor(0.06236388f, 0.1903298f, 0.2996182f, 1.0f);
     TerrestrialAir.RayleighScaleHeight = 0.15f;
-    TerrestrialAir.MieBeta = FLinearColor(1.0f, 0.893109f, 0.755932f, 1.0f);
+    TerrestrialAir.MieDepth = FLinearColor(0.09999546f, 0.08930685f, 0.07558977f, 1.0f);
     TerrestrialAir.MieScaleHeight = 0.1f;
     TerrestrialAir.MieG = 0.95f;
-    TerrestrialAir.AbsorptionBeta = FLinearColor(0.5f, 0.403727f, 0.437888f, 1.0f);
+    TerrestrialAir.AbsorptionDepth = FLinearColor(0.04203038f, 0.0339376f, 0.0368092f, 1.0f);
 
     // NOT NEAR-BLACK, unlike the gas giant's. Under a cloud base there is a lit
     // surface bouncing light back up, and this term is the whole of it: left at
     // the gas giant value, standing under the deck is night.
-    TerrestrialAmbient.AtmosphereAmbient = FLinearColor(0.020f, 0.026f, 0.038f, 1.0f);
-    TerrestrialAmbient.AtmosphereAmbientFloor = 0.02f;
+    TerrestrialAmbient.AirAmbient = FLinearColor(6.666667e-4f, 9.122807e-4f, 1.407407e-3f, 1.0f);
+    TerrestrialAmbient.AirAmbientFloor = 0.02f;
     TerrestrialAmbient.CloudAmbient = FLinearColor(0.040f, 0.044f, 0.052f, 1.0f);
     TerrestrialAmbient.CloudAmbientFloor = 0.04f;
 
@@ -710,8 +730,7 @@ static void SolveTerrestrialBounds(FTerrestrialShapeParams& Shape, const FTerres
     const float BaseDown = D * (-FMath::Min(Lift.BaseTropical, 0.0f)
         + FMath::Abs(Lift.BasePressure) - FMath::Min(Lift.AltitudeLift, 0.0f));
 
-    const float Depth = D * FMath::Max(
-        Lift.CeilingDepth * (1.0f + FMath::Abs(Lift.CeilingPressure)), 1e-3f);
+    const float Depth = D * (1.0f + FMath::Abs(Lift.CeilingPressure));
 
     Shape.SolvedTopMax = FMath::Min(Shape.CloudBase + BaseUp + Depth, 1.0f);
     Shape.SolvedBaseMin = Shape.CloudBase - BaseDown;
@@ -820,7 +839,7 @@ static FTerrestrialFieldPins PackTerrestrialField(const APlanetAtmosphereActor& 
     Out.CloudCurves = FLinearColor(Shape.TopCurve, Shape.BottomCurve, A.TerrestrialCloudSlope, Warp.WarpStretch);
     Out.CloudCoverage = FLinearColor(Coverage.CloudCover, Coverage.StormPriority, Coverage.CoverageSoftness, 0.0f);
     Out.CloudType = FLinearColor(Type.TypeBias, 0.0f, Type.TypeTropical, 0.0f);
-    Out.CloudLid = FLinearColor(Lift.PressureScale, Lift.CeilingDepth, Lift.CeilingPressure, Type.StratusDepth);
+    Out.CloudLid = FLinearColor(Lift.PressureScale, 0.0f, Lift.CeilingPressure, Type.StratusDepth);
     Out.CloudLift = FLinearColor(Lift.BaseTropical, Lift.BasePressure, Lift.AltitudeGain, Lift.AltitudeLift);
     Out.CloudMotion = FLinearColor(DriftAngle, NoisePhase, Warp.WarpShift, SpinAngle);
 
@@ -835,7 +854,12 @@ static FTerrestrialFieldPins PackTerrestrialField(const APlanetAtmosphereActor& 
     Out.StructureWarp = FLinearColor(Structure.FlowInherit, Type.Subsidence, 0.0f, 0.0f);
 
     Out.DetailSampling = FLinearColor(Detail.Scale, Detail.Aspect, Detail.Erosion, Detail.FadeMean);
-    Out.DetailWarp = FLinearColor(Detail.FlowInherit, 0.0f, Detail.FadeNear, Detail.FadeSpan);
+    // The fade in planet radii: its authored feature count over the layer's
+    // features per radian.
+    const float FeatureRadii = 1.0f / FMath::Max(Detail.Scale, 0.01f);
+
+    Out.DetailWarp = FLinearColor(
+        Detail.FlowInherit, 0.0f, Detail.FadeStart * FeatureRadii, Detail.FadeLength * FeatureRadii);
 
     Out.CloudGenusStratus = Type.Stratus;
     Out.CloudGenusStratocumulus = Type.Stratocumulus;
@@ -863,13 +887,23 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
 
     // -- Planet, light, clock -------------------------------------------------
 
-    SetVectorChecked(MID_Atmosphere, TEXT("PlanetCenter"),
-        FLinearColor(PlanetCenter.X, PlanetCenter.Y, PlanetCenter.Z, 0.0f));
+    // DOUBLE ON THE TERRESTRIAL MATERIAL, where the graph subtracts the camera
+    // before the march sees it (Atmo_BuildParams). The gas giant's material
+    // still takes a float vector.
+    if (PlanetType == EPlanetAtmosphereType::GasGiant)
+    {
+        SetVectorChecked(MID_Atmosphere, TEXT("PlanetCenter"),
+            FLinearColor(PlanetCenter.X, PlanetCenter.Y, PlanetCenter.Z, 0.0f));
+    }
+    else
+    {
+        SetDoubleVectorChecked(MID_Atmosphere, TEXT("PlanetCenter"), PlanetCenter);
+    }
     SetScalarChecked(MID_Atmosphere, TEXT("PlanetRadius"), PlanetRadius);
 
     SetVectorChecked(MID_Atmosphere, TEXT("LightDirection"),
         FLinearColor(LightDir.X, LightDir.Y, LightDir.Z, 0.0f));
-    SetVectorChecked(MID_Atmosphere, TEXT("LightColor"), LightColor);
+    SetVectorChecked(MID_Atmosphere, TEXT("LightColor"), LightProduct());
 
     // The sim's clock, not the world's. Requires the material's Time parameter
     // to feed the Custom node directly -- wired through a multiply against an
@@ -940,18 +974,22 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
     const FAtmosphereAirParams& AirP = ActiveAir();
     const FAtmosphereAmbientParams& AmbientP = ActiveAmbient();
 
-    SetVectorChecked(MID_Atmosphere, TEXT("RayleighBeta"), AirP.RayleighBeta);
+    SetVectorChecked(MID_Atmosphere, TEXT("RayleighBeta"), AirP.RayleighBeta());
     SetScalarChecked(MID_Atmosphere, TEXT("RayleighScaleHeight"), AirP.RayleighScaleHeight);
-    SetVectorChecked(MID_Atmosphere, TEXT("MieBeta"), AirP.MieBeta);
+    SetVectorChecked(MID_Atmosphere, TEXT("MieBeta"), AirP.MieBeta());
     SetScalarChecked(MID_Atmosphere, TEXT("MieScaleHeight"), AirP.MieScaleHeight);
     SetScalarChecked(MID_Atmosphere, TEXT("MieG"), AirP.MieG);
     SetScalarChecked(MID_Atmosphere, TEXT("MieLobeDecay"), AirP.MieLobeDecay);
-    SetVectorChecked(MID_Atmosphere, TEXT("AbsorptionBeta"), AirP.AbsorptionBeta);
+    SetVectorChecked(MID_Atmosphere, TEXT("AbsorptionBeta"), AirP.AbsorptionBeta());
     SetScalarChecked(MID_Atmosphere, TEXT("AbsorptionAltitude"), AirP.AbsorptionAltitude);
     SetScalarChecked(MID_Atmosphere, TEXT("AbsorptionFalloff"), AirP.AbsorptionFalloff);
 
-    SetVectorChecked(MID_Atmosphere, TEXT("AtmosphereAmbient"), AmbientP.AtmosphereAmbient);
-    SetScalarChecked(MID_Atmosphere, TEXT("AtmosphereAmbientFloor"), AmbientP.AtmosphereAmbientFloor);
+    // The air's ambient is a ratio of the light, as the cloud's is in the march.
+    const FLinearColor Light = LightProduct();
+
+    SetVectorChecked(MID_Atmosphere, TEXT("AtmosphereAmbient"), FLinearColor(
+        AmbientP.AirAmbient.R * Light.R, AmbientP.AirAmbient.G * Light.G, AmbientP.AirAmbient.B * Light.B, AmbientP.AirAmbient.A));
+    SetScalarChecked(MID_Atmosphere, TEXT("AtmosphereAmbientFloor"), AmbientP.AirAmbientFloor);
     SetVectorChecked(MID_Atmosphere, TEXT("CloudAmbient"), AmbientP.CloudAmbient);
     SetScalarChecked(MID_Atmosphere, TEXT("CloudAmbientFloor"), AmbientP.CloudAmbientFloor);
     SetScalarChecked(MID_Atmosphere, TEXT("AmbientTerminator"), AmbientP.AmbientTerminator);
@@ -967,9 +1005,9 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
 
     SetScalarChecked(MID_Atmosphere, TEXT("LightExtinctionFraction"), MS.LightExtinctionFraction());
     SetScalarChecked(MID_Atmosphere, TEXT("OctaveCount"), static_cast<float>(MS.OctaveCount));
-    SetScalarChecked(MID_Atmosphere, TEXT("OctaveAttenuation"), MS.OctaveAttenuation);
-    SetScalarChecked(MID_Atmosphere, TEXT("OctaveContribution"), MS.OctaveContribution);
-    SetScalarChecked(MID_Atmosphere, TEXT("OctaveEccentricity"), MS.OctaveEccentricity);
+    SetScalarChecked(MID_Atmosphere, TEXT("OctaveAttenuation"), MS.OctaveAttenuation());
+    SetScalarChecked(MID_Atmosphere, TEXT("OctaveContribution"), MS.OctaveAttenuation());
+    SetScalarChecked(MID_Atmosphere, TEXT("OctaveEccentricity"), MS.OctaveEccentricity());
 
     SetScalarChecked(MID_Atmosphere, TEXT("TerminatorSoftness"),
         bTerrestrial() ? TerrestrialTerminatorSoftness : Terminator.TerminatorSoftness);
@@ -1673,17 +1711,16 @@ void APlanetAtmosphereActor::UpdateLightFromRotation()
     const FVector LightDir = GetRootComponent()->GetRelativeRotation().Vector();
     LightComp->SetWorldRotation((-LightDir).Rotation());
 
-    // Extract color and intensity from LightColor.
-    // RGB = normalized color, magnitude of RGB = intensity multiplier.
-    const FVector ColorVec(LightColor.R, LightColor.G, LightColor.B);
-    const float Magnitude = ColorVec.Size();
+    // The march's light as a unit colour and its length.
+    const FLinearColor Light = LightProduct();
+    const float Magnitude = FVector(Light.R, Light.G, Light.B).Size();
 
     if (Magnitude > KINDA_SMALL_NUMBER)
     {
         const FLinearColor NormalizedColor(
-            LightColor.R / Magnitude,
-            LightColor.G / Magnitude,
-            LightColor.B / Magnitude, 1.0f);
+            Light.R / Magnitude,
+            Light.G / Magnitude,
+            Light.B / Magnitude, 1.0f);
         LightComp->SetLightColor(NormalizedColor);
         LightComp->SetIntensity(Magnitude);
     }

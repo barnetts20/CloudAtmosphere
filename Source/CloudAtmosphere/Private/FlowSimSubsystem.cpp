@@ -237,7 +237,7 @@ namespace
 	}
 
 	/** Mirrors SimZonalRate: the layer's jets plus its share of the shear. */
-	float LayerZonalRate(const UFlowSimConfig& Config, const FFlowSimSpeeds& Speeds, float Mu, int32 Layer)
+	float LayerZonalRate(const UFlowSimConfig& Config, const FFlowSimScales& Speeds, float Mu, int32 Layer)
 	{
 		const FFlowLayerProfile P = LayerOf(Config, Layer);
 		const float Jets = FlowSimProfile::JetRate(Config, Mu, Speeds.JetStrength * P.JetScale, Config.EquatorialBoost * P.BoostScale);
@@ -454,7 +454,7 @@ namespace
  *  included. PITFALL: reading the shared profile alone under-reports a layer
  *  with JetScale above 1 or the top of a sheared stack, and the Froude check
  *  then passes a regime the sim cannot balance. */
-static float PeakRate(const UFlowSimConfig& Config, const FFlowSimSpeeds& Speeds)
+static float PeakRate(const UFlowSimConfig& Config, const FFlowSimScales& Speeds)
 {
 	const int32 Layers = LayerCountOf(Config);
 	const bool bBanded = (Config.ZonalProfile == EFlowZonalProfile::Banded);
@@ -561,7 +561,7 @@ float UFlowSimSubsystem::GetCourant() const
 	}
 
 	const int32 W = FlowSimShader::GridLongitude(Config->GridResolution);
-	return PeakRate(*Config, Config->ResolveSpeeds()) * CurrentStep * W / (2.0f * UE_PI);
+	return PeakRate(*Config, Config->ResolveScales()) * CurrentStep * W / (2.0f * UE_PI);
 }
 
 void UFlowSimSubsystem::ReportInertSettings() const
@@ -643,7 +643,7 @@ void UFlowSimSubsystem::ReportCourant() const
 	const float Step = Config->GetStepSize();
 	const float Steps = FMath::Max(Config->SimSpeed, 0.0f) / 60.0f / Step;
 	const float C = FlowSimProfile::WaveSpeed(*Config);
-	const FFlowSimSpeeds Speeds = Config->ResolveSpeeds();
+	const FFlowSimScales Speeds = Config->ResolveScales();
 
 	const float Advective = PeakRate(*Config, Speeds) * Step * W / (2.0f * UE_PI);
 	const float Gravity = C * Step * W / (2.0f * UE_PI);
@@ -657,20 +657,20 @@ void UFlowSimSubsystem::ReportCourant() const
 		Config->SimSpeed, Steps, Step,
 		Advective, Gravity, Froude, RotationPerStep, C);
 
-	// GRID DAMPING, per unit time: the implicit scheme's share at this step, and
+	// GRID DAMPING, per turnover: the implicit scheme's share at this step, and
 	// the divergence damping's per-step fraction that makes up the rest.
-	const float Implicit = Config->GetImplicitDampingRate(Step);
+	const float Implicit = Config->GetImplicitDampingRate(Step) * Speeds.Turnover;
 	const float Fraction = Config->GetDivergenceDamping(Step);
 
 	UE_LOG(LogFlowSim, Log,
-		TEXT("Grid damping %.2f per unit time: implicit scheme %.2f at this step, ")
+		TEXT("Grid damping %.2f per turnover: implicit scheme %.2f at this step, ")
 		TEXT("divergence damping %.5f of grid-scale divergence per step."),
 		Config->GridDamping, Implicit, Fraction);
 
 	if (Implicit > Config->GridDamping * 1.05f)
 	{
 		UE_LOG(LogFlowSim, Log,
-			TEXT("The implicit scheme alone damps %.2f per unit time at this step, past ")
+			TEXT("The implicit scheme alone damps %.2f per turnover at this step, past ")
 			TEXT("GridDamping %.2f. Lower ImplicitWeight toward 0.5 or the step for the authored rate."),
 			Implicit, Config->GridDamping);
 	}
@@ -732,9 +732,20 @@ void UFlowSimSubsystem::ReportCourant() const
 	const float Cells = Config->StormCellSpeed;
 
 	UE_LOG(LogFlowSim, Log,
-		TEXT("Speed root %.3f, turnover %.3f. Of the root: top layer's jets and shear %.2f, ")
+		TEXT("Speed root %.3f, turnover %.4f. Of the root: top layer's jets and shear %.2f, ")
 		TEXT("its eddies %.2f, storm cells %.2f; the ceiling eases in from 0.7."),
 		Speeds.Root, Speeds.Turnover, TopWind, TopEddies, Config->MaxStormCells > 0 ? Cells : 0.0f);
+
+	// The turnover-authored lifetimes in days, 2 pi / PlanetaryVorticity, to
+	// check against real weather.
+	const float Day = 2.0f * UE_PI / FMath::Max(Config->PlanetaryVorticity, 0.1f);
+
+	UE_LOG(LogFlowSim, Log,
+		TEXT("A turnover is %.3f of a day; %.2f turnovers a second at SimSpeed %.4f. In days: cloud %.2f, ")
+		TEXT("storm %.2f, storm cell %.2f, forcing pattern %.2f. Storm cell radius %.1f degrees."),
+		Speeds.Turnover / Day, FMath::Max(Config->SimSpeed, 0.0f) / Speeds.Turnover, Config->SimSpeed,
+		Speeds.CloudLifetime / Day, Speeds.StormLifetime / Day, Speeds.CellLifetime / Day,
+		Speeds.ForcingLifetime / Day, FMath::RadiansToDegrees(Speeds.CellRadius));
 
 	if (TopWind + TopEddies > 0.7f || (Config->MaxStormCells > 0 && Cells > 0.7f))
 	{
@@ -754,7 +765,7 @@ void UFlowSimSubsystem::ReportStack() const
 
 	const int32 N = LayerCountOf(*Config);
 	const FFlowSimStack Stack = BuildStack(*Config, FlowSimProfile::WaveSpeed(*Config));
-	const FFlowSimSpeeds Resolved = Config->ResolveSpeeds();
+	const FFlowSimScales Resolved = Config->ResolveScales();
 
 	FString Speeds;
 
@@ -958,7 +969,7 @@ bool UFlowSimSubsystem::QueueInitialState()
 
 	// Shape mismatch is a WARNING, not a refusal: the nudge re-registers the
 	// zonal mean over a few hundred steps.
-	const FFlowSimSpeeds Speeds = Config->ResolveSpeeds();
+	const FFlowSimScales Speeds = Config->ResolveScales();
 
 	FFlowSnapshotProvenance Now;
 	Now.BandCount = Config->BandCount;
@@ -1074,7 +1085,7 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 	Target->State = MoveTemp(Result);
 
 	Target->Provenance.BandCount = Config->BandCount;
-	const FFlowSimSpeeds Speeds = Config->ResolveSpeeds();
+	const FFlowSimScales Speeds = Config->ResolveScales();
 
 	Target->Provenance.JetStrength = Speeds.JetStrength;
 	Target->Provenance.EquatorialBoost = Config->EquatorialBoost;
@@ -1197,17 +1208,18 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 
 	const int32 Layers = Out.GridSize.Z;
 
-	// Every wind from the speed root.
-	const FFlowSimSpeeds Speeds = Config->ResolveSpeeds();
+	// Every wind from the speed root, every rate and lifetime from the turnover.
+	const FFlowSimScales Scales = Config->ResolveScales();
 
 	Out.JetParams = FVector4f(
 		Config->BandCount,
-		Speeds.JetStrength,
+		Scales.JetStrength,
 		Config->EquatorialBoost,
 		Config->Asymmetry);
 
 	Out.WidthBias = Config->WidthBias;
 	Out.ZonalProfile = (int32)Config->ZonalProfile;
+	Out.JetLatitudeScale = FlowSimProfile::JetLatitudeScale(*Config);
 
 	for (int32 i = 0; i < 8; ++i)
 	{
@@ -1228,100 +1240,105 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 
 	Out.ForcingChannel = FMath::Clamp(Config->ForcingChannel, 0, 3);
 
-	Out.NudgeRate = Config->NudgeRate;
-	Out.ForcingAmplitude = Speeds.EddySpeed;
-	Out.ForcingFrequency = Config->ForcingFrequency;
-	Out.ForcingLifetime = FMath::Max(Config->ForcingLifetime, 0.01f);
-	Out.DragRate = Config->DragRate;
-	Out.LayerCoupling = Config->LayerCoupling;
+	Out.NudgeRate = Scales.NudgeRate;
+	Out.ForcingAmplitude = Scales.EddySpeed;
+	Out.ForcingFrequency = Scales.ForcingFrequency;
+	Out.ForcingLifetime = Scales.ForcingLifetime;
+	Out.DragRate = Scales.DragRate;
+	Out.LayerCoupling = Scales.LayerCoupling;
 	Out.DivergenceDamping = Config->GetDivergenceDamping(Out.DeltaTime);
 	Out.FroudeCeiling = FMath::Max(Config->SpeedRoot, 0.1f);
 	Out.ShockDamping = FMath::Max(Config->ShockDamping, 0.0f);
 	Out.bSharpCentreVelocity = Config->bSharpCentreVelocity;
 
-	Out.ThermalRelaxation = FMath::Max(Config->ThermalRelaxation, 0.0f);
+	Out.ThermalRelaxation = Scales.ThermalRelaxation;
 	Out.ThermalParams = FVector4f(
-		Speeds.ThermalShear,
+		Scales.ThermalShear,
 		Config->ThermalShape == EFlowThermalShape::FollowJets ? 1.0f : 0.0f,
 		FMath::DegreesToRadians(FMath::Clamp(Config->BaroclinicLatitude, 0.0f, 90.0f)),
 		FMath::DegreesToRadians(FMath::Max(Config->BaroclinicWidth, 1.0f)));
 
 	// -- Moisture, cloud and storms -------------------------------------------
 
-	Out.CondensationRate = FMath::Max(Config->CondensationRate, 0.0f);
-	Out.EvaporationRate = FMath::Max(Config->EvaporationRate, 0.0f);
-	Out.CloudLifetime = FMath::Max(Config->CloudLifetime, 1e-3f);
+	Out.CondensationRate = Scales.CondensationRate;
+	Out.EvaporationRate = Scales.EvaporationRate;
+	Out.CloudLifetime = Scales.CloudLifetime;
 
 	Out.MoistureParams = FVector4f(
 		0.0f,
 		FMath::Max(Config->SaturationPoleRatio, 0.0f),
 		FMath::Clamp(Config->CondensationOnset, 0.0f, 0.99f),
-		FMath::Max(Config->SurfaceEvaporation, 0.0f));
+		Scales.SurfaceEvaporation);
 
 	Out.LatentHeating = FMath::Max(Config->LatentHeating, 0.0f);
-	Out.AscentSmoothing = FMath::Max(Config->AscentSmoothing, 0.0f);
-	Out.WindEvaporation = Speeds.WindEvaporation;
+	Out.AscentSmoothing = Scales.AscentSmoothing;
+	Out.WindEvaporation = Scales.WindEvaporation;
+
+	const float StormDecay = 1.0f / Scales.StormLifetime;
 
 	Out.StormParams = FVector4f(
-		FMath::Max(Config->StormRate, 0.0f),
+		FMath::Max(Config->StormAmount, 0.0f) * StormDecay,
 		FMath::Clamp(Config->StormThreshold, 0.0f, 0.99f),
 		FMath::Max(Config->StormSpin, 0.0f),
-		1.0f / FMath::Max(Config->StormLifetime, 1e-3f));
+		StormDecay);
 
 	// -- Storm cells ------------------------------------------------------------
 
 	const float GenesisMin = FMath::DegreesToRadians(FMath::Clamp(Config->GenesisLatitudeMin, 0.0f, 90.0f));
 	const float GenesisMax = FMath::DegreesToRadians(FMath::Clamp(Config->GenesisLatitudeMax, 0.0f, 90.0f));
 
-	const float Eye = FMath::Clamp(Config->StormCellEye, 0.0f, 0.9f);
+	const float Wall = FMath::Clamp(Config->StormCellEyewall, 0.01f, 0.95f);
 
 	Out.CellShape = FVector4f(
-		FMath::DegreesToRadians(FMath::Clamp(Config->StormCellRadius, 0.5f, 45.0f)),
-		Eye,
-		FMath::Clamp(Config->StormCellEyewall, Eye + 0.01f, 0.95f),
+		Scales.CellRadius,
+		FMath::Clamp(Config->StormCellEyeRatio, 0.0f, 0.9f) * Wall,
+		Wall,
 		FMath::Clamp(Config->StormCellEyeStrength, 0.0f, 1.0f));
 
 	Out.CellVortex = FVector4f(
 		FMath::Max(Config->StormCellFalloff, 0.1f),
-		FMath::Max(Config->StormCellForcing, 0.0f),
+		Scales.CellForcing,
 		FMath::Clamp(Config->StormCellTopShare, -1.0f, 1.0f),
-		Speeds.CellWind);
+		Scales.CellWind);
 
 	Out.CellDraft = FVector4f(
 		FMath::Clamp(Config->StormCellDraft, -1.0f, 1.0f),
 		FMath::Clamp(Config->StormCellEyeDraft, -1.0f, 1.0f),
-		FMath::Clamp(Config->StormCellBandStorm, 0.0f, 1.0f),
+		FMath::Clamp(Config->StormCellStorm + FMath::Max(Config->StormCellBandExcess, 0.0f), 0.0f, 1.0f),
 		FMath::Clamp(Config->StormCellPressure, 0.0f, 2.0f));
 
 	Out.CellLife = FVector4f(
-		FMath::Max(Config->StormCellSpawnRate, 0.0f),
-		FMath::Max(Config->StormCellGrowth, 0.0f),
-		FMath::Max(Config->StormCellDecay, 0.0f),
-		FMath::Max(Config->StormCellLifetime, 0.01f));
+		Scales.CellSpawnRate,
+		Scales.CellGrowth,
+		Scales.CellGrowth * (1.0f - FMath::Clamp(Config->StormCellPersistence, 0.0f, 1.0f)),
+		Scales.CellLifetime);
 
 	Out.CellMotion = FVector4f(
-		Speeds.CellDrift,
-		FMath::Max(Config->StormCellFollow, 0.0f),
+		Scales.CellDrift,
+		Scales.CellFollow,
 		FMath::Min(GenesisMin, GenesisMax),
 		FMath::Max(GenesisMin, GenesisMax));
 
 	Out.CellGenesis = FVector4f(
-		Speeds.GenesisShear,
-		FMath::Clamp(Config->GenesisHumidity, 0.0f, 1.0f),
+		Scales.GenesisShear,
+		FMath::Clamp(Config->CondensationOnset + Config->GenesisHumidityMargin, 0.0f, 1.0f),
 		FMath::Clamp(Config->GenesisStorm, 0.01f, 1.0f),
 		FMath::Max(Config->GenesisSpin, 0.0f));
 
+	// The lift's rate r that settles a full-intensity eyewall at the cover
+	// against the cloud's decay alone: Cover = r / (r + 1 / CloudLifetime).
+	const float CellCover = FMath::Clamp(Config->StormCellCloudCover, 0.0f, 0.99f);
+
 	Out.CellCloud = FVector4f(
-		FMath::Clamp(Config->StormCellCloud, 0.0f, 1.0f),
-		FMath::Max(Config->StormCellCloudRate, 0.0f),
+		CellCover / (1.0f - CellCover) / Out.CloudLifetime,
+		0.0f,
 		FMath::Clamp(Config->StormCellInflow, 0.0f, 1.0f),
 		FMath::Clamp(Config->StormCellStorm, 0.0f, 1.0f));
 
 	Out.CellWindBreadth = FMath::Clamp(Config->StormCellWindBreadth, 0.0f, 0.95f);
-	Out.CellSustain = FMath::Clamp(Config->StormCellSustain, 0.0f, 1.0f);
+	Out.CellSustain = FMath::Clamp(FMath::Max(Config->StormCellSustainRatio, 0.0f) * Out.CellGenesis.Z, 0.0f, 1.0f);
 	Out.CellEyeDepth = FMath::Clamp(Config->StormCellEyeDepth, 0.0f, 1.0f);
-	Out.CellCoreFollow = FMath::Max(Config->StormCellCoreFollow, 0.0f);
-	Out.CellEyeLow = FMath::Clamp(Config->StormCellEyeLow, 0.0f, 1.0f);
+	Out.CellCoreFollow = Scales.CellCoreFollow;
 	Out.CellEyeSoftness = FMath::Clamp(Config->StormCellEyeSoftness, 0.05f, 1.0f);
 
 	Out.CellCount = FMath::Clamp(Config->MaxStormCells, 0, FlowSimShader::MaxStormCells);
@@ -1347,11 +1364,11 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	//   Divergence vorticity times the Rossby number of the fastest flow, the
 	//              root over the wave speed.
 	//   Height     pressure over the density step an interface carries it by.
-	const float Peak = PeakRate(*Config, Speeds);
+	const float Peak = PeakRate(*Config, Scales);
 	const float Radius = FMath::Max(Config->DeformationRadius, 0.01f);
-	const float ZetaScale = FMath::Max(FlowSimOutput::Vorticity * Speeds.Root / Radius, 1e-4f);
-	const float PressureScale = FMath::Max(FlowSimOutput::Pressure * Speeds.Root * Speeds.WaveSpeed, 1e-5f);
-	const float DivScale = FMath::Max(FlowSimOutput::Divergence * (Speeds.Root / Speeds.WaveSpeed) * Speeds.Root / Radius, 1e-4f);
+	const float ZetaScale = FMath::Max(FlowSimOutput::Vorticity * Scales.Root / Radius, 1e-4f);
+	const float PressureScale = FMath::Max(FlowSimOutput::Pressure * Scales.Root * Scales.WaveSpeed, 1e-5f);
+	const float DivScale = FMath::Max(FlowSimOutput::Divergence * (Scales.Root / Scales.WaveSpeed) * Scales.Root / Radius, 1e-4f);
 
 	Out.OutputScales = FVector3f(PressureScale, ZetaScale, DivScale);
 	Out.AtlasFaceSize = FlowSimShader::GridResolution(Config->GridResolution);

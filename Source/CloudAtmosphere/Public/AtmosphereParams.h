@@ -251,7 +251,9 @@ struct CLOUDATMOSPHERE_API FTerrestrialShapeParams
 	float CloudBase = 0.15f;
 
 	/** Depth of a fully towering column before the pressure lid, as a fraction of
-	 *  atmosphere thickness. PITFALL: keep CloudBase plus this below
+	 *  atmosphere thickness, and the unit of every lift and warp offset. THE
+	 *  MARCHED BAND IS BOUNDED BY THIS, so it also sets how much of the shell
+	 *  gets fine-stepped. PITFALL: keep CloudBase plus this below
 	 *  1 - CeilingFalloff, or the ceiling thins every tall column. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", ClampMax = "1.0"))
 	float CloudThickness = 0.5f;
@@ -402,12 +404,8 @@ struct CLOUDATMOSPHERE_API FTerrestrialLiftParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.000001"))
 	float PressureScale = 0.5f;
 
-	/** Headroom as a multiple of CloudThickness, and how far pressure moves it:
-	 *  positive gives a low more room than a high. THE MARCHED BAND IS BOUNDED BY
-	 *  THIS, so it also sets how much of the shell gets fine-stepped. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001"))
-	float CeilingDepth = 1.0f;
-
+	/** How far pressure moves a column's depth, as a share of CloudThickness:
+	 *  positive gives a low more room than a high. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-0.99", ClampMax = "0.99"))
 	float CeilingPressure = 0.5f;
 
@@ -520,15 +518,15 @@ struct CLOUDATMOSPHERE_API FTerrestrialDetailLayerParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-2.0", ClampMax = "4.0"))
 	float MipBias = 1.0f;
 
-	/** Where the grain starts fading to the mean, in planet radii from the
-	 *  camera, and over how far; the fetch is skipped beyond. A FADE BELONGS
-	 *  WITH ITS SCALE: the distance a layer starts aliasing at goes as one over
-	 *  its Scale. */
+	/** Where the grain starts fading to the mean, and over how far, in noise
+	 *  features from the camera: multiples of 1 / Scale planet radii, since the
+	 *  distance a layer starts aliasing at goes as its feature size. The fetch is
+	 *  skipped beyond. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float FadeNear = 0.0f;
+	float FadeStart = 0.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float FadeSpan = 0.3f;
+	float FadeLength = 9.0f;
 
 	/** The noise's mean, what the layer settles to as it fades. 0.5 for an
 	 *  equalized volume. PITFALL: cloud thickening or thinning across the fade
@@ -601,17 +599,20 @@ struct CLOUDATMOSPHERE_API FTerrestrialCloudMaterialParams
 // fraction of atmosphere thickness and every relief amount a fraction of
 // GradientThickness. Fade distances are planet radii.
 
-/** The air: its colour and how it scatters.
+/** The air: how much of it there is, its colour, and how it scatters.
  *
- *  Coefficients are divided by atmosphere thickness in Atmo_BuildParams, so
- *  they are thickness-relative and survive a resize. */
+ *  EACH DEPTH IS A VERTICAL COLUMN, the optical depth per channel from the
+ *  ground to the shell top, so its colour is the air's and its amount how
+ *  thick the air reads. The scale heights only shape how the column is spread
+ *  with altitude. The *Beta() helpers give the per-thickness coefficients the
+ *  material takes, which Atmo_BuildParams divides by atmosphere thickness. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FAtmosphereAirParams
 {
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
-	FLinearColor RayleighBeta = FLinearColor(11.899769f, 24.921608f, 32.0f, 1.0f);
+	FLinearColor RayleighDepth = FLinearColor(4.774597f, 9.999406f, 12.8395f, 1.0f);
 
 	/** As a fraction of atmosphere thickness. Under about half the deck's top
 	 *  there is no Rayleigh above the cloud and the limb reads as a hard edge. */
@@ -619,7 +620,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereAirParams
 	float RayleighScaleHeight = 0.45f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
-	FLinearColor MieBeta = FLinearColor(10.0f, 8.93109f, 7.559319f, 1.0f);
+	FLinearColor MieDepth = FLinearColor(2.454211f, 2.191878f, 1.855216f, 1.0f);
 
 	/** A deck whose peaks reach most of the way up the shell needs aerosol still
 	 *  present above them. */
@@ -636,10 +637,10 @@ struct CLOUDATMOSPHERE_API FAtmosphereAirParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float MieLobeDecay = 2.0f;
 
-	/** A Lorentzian layer, ozone-like, rather than a profile falling off from
-	 *  the ground. */
+	/** A Lorentzian layer, ozone-like, scaled by the Rayleigh profile, rather
+	 *  than a profile falling off from the ground. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
-	FLinearColor AbsorptionBeta = FLinearColor(100.0f, 80.995651f, 87.670341f, 1.0f);
+	FLinearColor AbsorptionDepth = FLinearColor(15.98955f, 12.95084f, 14.0181f, 1.0f);
 
 	/** Altitude the absorber layer is centred on, as a fraction of thickness. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
@@ -648,6 +649,50 @@ struct CLOUDATMOSPHERE_API FAtmosphereAirParams
 	/** Half-width of the absorber layer. Floored, as AtmoT_Profile floors it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001"))
 	float AbsorptionFalloff = 0.1f;
+
+	FLinearColor RayleighBeta() const { return ToBeta(RayleighDepth, ExponentialColumn(RayleighScaleHeight)); }
+	FLinearColor MieBeta() const { return ToBeta(MieDepth, ExponentialColumn(MieScaleHeight)); }
+	FLinearColor AbsorptionBeta() const { return ToBeta(AbsorptionDepth, AbsorberColumn()); }
+
+private:
+	/** The column of exp(-h / H) over the shell, h and H in thicknesses, with
+	 *  AtmoT_Profile's floor on H. */
+	static float ExponentialColumn(float ScaleHeight)
+	{
+		const float H = FMath::Max(ScaleHeight, 1e-4f);
+		return H * -FMath::Exp(-1.0f / H) + H;
+	}
+
+	/** The column of Atmo_Density's absorber over the shell, by Simpson's rule
+	 *  on 64 intervals: a Lorentzian of half-width AbsorptionFalloff, floored as
+	 *  AtmoT_Profile floors it, about AbsorptionAltitude, times the Rayleigh
+	 *  profile. */
+	float AbsorberColumn() const
+	{
+		constexpr int32 Intervals = 64;
+
+		const float H = FMath::Max(RayleighScaleHeight, 1e-4f);
+		const float W = FMath::Max(AbsorptionFalloff, 1e-4f);
+
+		float Sum = 0.0f;
+
+		for (int32 i = 0; i <= Intervals; ++i)
+		{
+			const float X = (float)i / Intervals;
+			const float U = (AbsorptionAltitude - X) / W;
+			const float Weight = (i == 0 || i == Intervals) ? 1.0f : ((i & 1) ? 4.0f : 2.0f);
+
+			Sum += Weight * FMath::Exp(-X / H) / (1.0f + U * U);
+		}
+
+		return Sum / (3.0f * Intervals);
+	}
+
+	static FLinearColor ToBeta(const FLinearColor& Depth, float Column)
+	{
+		const float Inv = 1.0f / FMath::Max(Column, 1e-8f);
+		return FLinearColor(Depth.R * Inv, Depth.G * Inv, Depth.B * Inv, 1.0f);
+	}
 };
 
 /** Light that bounced several times, for the air and the cloud, and where it
@@ -658,18 +703,19 @@ struct CLOUDATMOSPHERE_API FAtmosphereAmbientParams
 {
 	GENERATED_BODY()
 
-	/** The air's ambient. Near-black under a deck opaque to the limb, with no lit
-	 *  surface under the air to bounce anything up. */
+	/** The air's ambient, as a ratio of the star's light per channel. Near-black
+	 *  under a deck opaque to the limb, with no lit surface under the air to
+	 *  bounce anything up. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
-	FLinearColor AtmosphereAmbient = FLinearColor(0.0001f, 0.0001f, 0.0001f, 1.0f);
+	FLinearColor AirAmbient = FLinearColor(3.333333e-6f, 3.508772e-6f, 3.703704e-6f, 1.0f);
 
 	/** What the ambient's terminator falloff lerps from. At zero the term has
 	 *  almost no range, being swamped by direct light everywhere it is not zero;
 	 *  the floor buys it a night side. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float AtmosphereAmbientFloor = 0.0001f;
+	float AirAmbientFloor = 0.0001f;
 
-	/** The cloud's ambient. */
+	/** The cloud's ambient, as a ratio of the star's light per channel. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
 	FLinearColor CloudAmbient = FLinearColor(0.0001f, 0.0001f, 0.0001f, 1.0f);
 
@@ -1054,11 +1100,11 @@ struct CLOUDATMOSPHERE_API FAtmospherePhaseParams
 	float ForwardWeight = 0.5f;
 };
 
-/** Octaves after Wrenninge: octave i sees the deck toward the light at
- *  Attenuation^i of its optical depth, weighs Contribution^i, and uses the phase
- *  with its g scaled by Eccentricity^i. Later octaves reach deeper and scatter
- *  more broadly -- the glow inside thick cloud, and a softer rim. One exp per
- *  octave per deck sample. */
+/** Octaves after Wrenninge: octave i sees the cloud toward the light at
+ *  ScatteringGlow^i of its optical depth, weighs ScatteringGlow^i, and uses the
+ *  phase with its g scaled by (1 - ScatteringSpread)^i. Later octaves reach
+ *  deeper and scatter more broadly -- the glow inside thick cloud, and a softer
+ *  rim. One exp per octave per cloud sample. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FAtmosphereMultipleScatteringParams
 {
@@ -1072,23 +1118,22 @@ struct CLOUDATMOSPHERE_API FAtmosphereMultipleScatteringParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float SunlightPenetration = 0.5f;
 
+	/** How much light the later octaves carry: each sees this much less of the
+	 *  depth toward the light and weighs this much less. Higher glows brighter
+	 *  inside thick cloud; thin cloud brightens by the sum of the weights, every
+	 *  octave seeing it at full transmittance. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ScatteringGlow = 0.6f;
+
+	/** How much broader each later octave's phase is. Higher makes them more
+	 *  isotropic and releases them from the lobe shadow in proportion; 0 keeps
+	 *  every octave as forward-peaked as the first. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ScatteringSpread = 0.4f;
+
 	/** Octaves including single scattering. 1 is single scattering only. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1", ClampMax = "4"))
 	int32 OctaveCount = 3;
-
-	/** Optical-depth factor per octave. Lower lets later octaves reach deeper. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float OctaveAttenuation = 0.6f;
-
-	/** Weight factor per octave. Thin cloud brightens by the sum of the weights,
-	 *  every octave seeing it at full transmittance. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float OctaveContribution = 0.6f;
-
-	/** Phase anisotropy factor per octave. Lower makes later octaves more isotropic
-	 *  and releases them from the lobe shadow in proportion. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float OctaveEccentricity = 0.6f;
 
 	/** The light ray's extinction as a fraction of the view ray's: the value the
 	 *  march and the bake read. */
@@ -1096,6 +1141,10 @@ struct CLOUDATMOSPHERE_API FAtmosphereMultipleScatteringParams
 	{
 		return 1.0f - FMath::Clamp(SunlightPenetration, 0.0f, 1.0f);
 	}
+
+	/** The per-octave factors the material takes. */
+	float OctaveAttenuation() const { return FMath::Clamp(ScatteringGlow, 0.0f, 1.0f); }
+	float OctaveEccentricity() const { return 1.0f - FMath::Clamp(ScatteringSpread, 0.0f, 1.0f); }
 };
 
 /** The gas giant's planet shadow: softness shapes the shadow the air and the

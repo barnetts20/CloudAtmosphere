@@ -466,13 +466,17 @@ namespace AtmosphereLoad
 	// A file written before a rename is read under the current names. Rows are
 	// dotted paths ("Group.Member", "Group" or "Member") and apply in order, so
 	// a later row renaming an earlier row's New chains. An empty New retires a
-	// member: its value is dropped and the load says so. Renames only; a member
-	// whose meaning changed has no row, and a preset carries its value.
+	// member: its value is dropped and the load says so. Nothing is converted: a
+	// member whose meaning changed is retired, and a preset carries its value.
 
 	struct FRename
 	{
 		const TCHAR* Old;
 		const TCHAR* New;
+
+		/** Nonzero applies the row only to a file below this config version:
+		 *  a member that kept its name under a new meaning. */
+		int32 Before = 0;
 	};
 
 	TConstArrayView<FRename> SimRenames()
@@ -489,6 +493,47 @@ namespace AtmosphereLoad
 			{ TEXT("bForcingBipolar"), TEXT("") },
 			{ TEXT("SaturationEquator"), TEXT("") },
 			{ TEXT("FilterMaxHalfWidth"), TEXT("") },
+
+			// New meanings, retired for the defaults: the eye comes from the low
+			// alone and its ramp is a ratio of the eyewall; genesis humidity is a
+			// margin over the onset, the sustain a multiple of GenesisStorm and
+			// the genesis shear a multiple of ShearSpeed; the storm is an amount
+			// over its lifetime, the cell cloud an equilibrium cover, the band an
+			// excess over the whole storm and the decay a persistence.
+			{ TEXT("StormCellEye"), TEXT("") },
+			{ TEXT("StormCellEyeLow"), TEXT("") },
+			{ TEXT("GenesisHumidity"), TEXT("") },
+			{ TEXT("StormCellSustain"), TEXT("") },
+			{ TEXT("GenesisShearSpeed"), TEXT("") },
+			{ TEXT("StormRate"), TEXT("") },
+			{ TEXT("StormCellCloud"), TEXT("") },
+			{ TEXT("StormCellCloudRate"), TEXT("") },
+			{ TEXT("StormCellBandStorm"), TEXT("") },
+			{ TEXT("StormCellDecay"), TEXT("") },
+
+			// Version 7 authors every rate and lifetime in turnovers, and the
+			// storm cells' radius and the forcing frequency against
+			// DeformationRadius, under the same names.
+			{ TEXT("NudgeRate"), TEXT(""), 7 },
+			{ TEXT("DragRate"), TEXT(""), 7 },
+			{ TEXT("ThermalRelaxation"), TEXT(""), 7 },
+			{ TEXT("LayerCoupling"), TEXT(""), 7 },
+			{ TEXT("GridDamping"), TEXT(""), 7 },
+			{ TEXT("SurfaceEvaporation"), TEXT(""), 7 },
+			{ TEXT("CondensationRate"), TEXT(""), 7 },
+			{ TEXT("EvaporationRate"), TEXT(""), 7 },
+			{ TEXT("CloudLifetime"), TEXT(""), 7 },
+			{ TEXT("AscentSmoothing"), TEXT(""), 7 },
+			{ TEXT("StormLifetime"), TEXT(""), 7 },
+			{ TEXT("StormCellSpawnRate"), TEXT(""), 7 },
+			{ TEXT("StormCellLifetime"), TEXT(""), 7 },
+			{ TEXT("StormCellGrowth"), TEXT(""), 7 },
+			{ TEXT("StormCellFollow"), TEXT(""), 7 },
+			{ TEXT("StormCellCoreFollow"), TEXT(""), 7 },
+			{ TEXT("StormCellForcing"), TEXT(""), 7 },
+			{ TEXT("ForcingLifetime"), TEXT(""), 7 },
+			{ TEXT("StormCellRadius"), TEXT(""), 7 },
+			{ TEXT("ForcingFrequency"), TEXT(""), 7 },
 		};
 		return Rows;
 	}
@@ -584,6 +629,38 @@ namespace AtmosphereLoad
 			{ TEXT("TerrestrialMultipleScattering.LightExtinctionFraction"), TEXT("") },
 			{ TEXT("MultipleScattering.LightExtinctionFraction"), TEXT("") },
 			{ TEXT("ShadowCascadeRadii"), TEXT("") },
+
+			// Multiple scattering as glow and spread: attenuation carries over as
+			// glow; the contribution folds into it and the eccentricity inverts,
+			// so both retire for the defaults.
+			{ TEXT("TerrestrialMultipleScattering.OctaveAttenuation"), TEXT("TerrestrialMultipleScattering.ScatteringGlow") },
+			{ TEXT("TerrestrialMultipleScattering.OctaveContribution"), TEXT("") },
+			{ TEXT("TerrestrialMultipleScattering.OctaveEccentricity"), TEXT("") },
+			{ TEXT("MultipleScattering.OctaveAttenuation"), TEXT("MultipleScattering.ScatteringGlow") },
+			{ TEXT("MultipleScattering.OctaveContribution"), TEXT("") },
+			{ TEXT("MultipleScattering.OctaveEccentricity"), TEXT("") },
+
+			// The air as column depths and its ambient as a ratio of the light, and
+			// the detail fade in noise features: new meanings, retired for the
+			// defaults. The ambient floor keeps its meaning.
+			{ TEXT("TerrestrialAir.RayleighBeta"), TEXT("") },
+			{ TEXT("TerrestrialAir.MieBeta"), TEXT("") },
+			{ TEXT("TerrestrialAir.AbsorptionBeta"), TEXT("") },
+			{ TEXT("Air.RayleighBeta"), TEXT("") },
+			{ TEXT("Air.MieBeta"), TEXT("") },
+			{ TEXT("Air.AbsorptionBeta"), TEXT("") },
+			{ TEXT("TerrestrialAmbient.AtmosphereAmbient"), TEXT("") },
+			{ TEXT("TerrestrialAmbient.AtmosphereAmbientFloor"), TEXT("TerrestrialAmbient.AirAmbientFloor") },
+			{ TEXT("Ambient.AtmosphereAmbient"), TEXT("") },
+			{ TEXT("Ambient.AtmosphereAmbientFloor"), TEXT("Ambient.AirAmbientFloor") },
+			{ TEXT("TerrestrialDetailLayer.FadeNear"), TEXT("") },
+			{ TEXT("TerrestrialDetailLayer.FadeSpan"), TEXT("") },
+
+			// Tower depth is CloudThickness alone. Exact where CeilingDepth was 1;
+			// otherwise CloudThickness takes the product, the lift terms,
+			// SurfaceSoftness and WarpShift divide by CeilingDepth, and
+			// CloudOpticalDepth re-solves.
+			{ TEXT("TerrestrialLift.CeilingDepth"), TEXT("") },
 		};
 		return Rows;
 	}
@@ -708,8 +785,8 @@ namespace AtmosphereLoad
 	}
 
 	/** A section's Values, or its Overrides when it has none, under the
-	 *  current names. */
-	void ApplyRenames(const FJsonObject& Section, TConstArrayView<FRename> Rows, const FString& Label)
+	 *  current names, for a file at FileVersion. */
+	void ApplyRenames(const FJsonObject& Section, TConstArrayView<FRename> Rows, const FString& Label, int32 FileVersion = MAX_int32)
 	{
 		const TSharedPtr<FJsonObject>* Values = nullptr;
 		const TSharedPtr<FJsonObject>* Overrides = nullptr;
@@ -723,6 +800,11 @@ namespace AtmosphereLoad
 
 		for (const FRename& Row : Rows)
 		{
+			if (Row.Before > 0 && FileVersion >= Row.Before)
+			{
+				continue;
+			}
+
 			if (Values)
 			{
 				RenameValues(*Values, Row, Retired);
@@ -1145,7 +1227,7 @@ namespace AtmosphereLoad
 					(int32)FileVersion, Current);
 			}
 
-			ApplyRenames(**Sim, SimRenames(), TEXT("Sim section"));
+			ApplyRenames(**Sim, SimRenames(), TEXT("Sim section"), FileVersion < 0.0 ? Current : (int32)FileVersion);
 
 			if (Config)
 			{

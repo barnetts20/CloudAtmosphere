@@ -14,7 +14,7 @@ namespace
 		{
 			/** PITFALL: never lower this number. The engine refuses a package
 			 *  saved at a version above Latest. */
-			Current = 6,
+			Current = 7,
 
 			Latest = Current
 		};
@@ -79,6 +79,13 @@ float FlowSimProfile::JetRate(const UFlowSimConfig& Config, float Mu, float Stre
 {
 	if (Config.ZonalProfile == EFlowZonalProfile::ThreeCell)
 	{
+		const float Scale = JetLatitudeScale(Config);
+
+		if (Scale != 1.0f)
+		{
+			Mu = FMath::Sin(FMath::Clamp(FMath::Asin(FMath::Clamp(Mu, -1.0f, 1.0f)) * Scale, -0.5f * UE_PI, 0.5f * UE_PI));
+		}
+
 		const float A = FMath::Abs(Mu);
 		const float Jet = (A - 0.71f) / 0.17f;
 		const float Trades = Mu / 0.33f;
@@ -102,6 +109,11 @@ float FlowSimProfile::JetRate(const UFlowSimConfig& Config, float Mu, float Stre
 	}
 
 	return Strength * (Saturated + Boost * FMath::Exp(-Mu * Mu * 12.0f));
+}
+
+float FlowSimProfile::JetLatitudeScale(const UFlowSimConfig& Config)
+{
+	return 45.0f / FMath::Clamp(Config.JetLatitude, 15.0f, 75.0f);
 }
 
 float FlowSimProfile::ThermalShape(const UFlowSimConfig& Config, float Mu)
@@ -140,7 +152,12 @@ float UFlowSimConfig::GetNoiseDriftRate() const
 // crossfade all read this value, so they reset together.
 float UFlowSimConfig::GetNoiseResetTime() const
 {
-	return FMath::Max(FMath::Max(NoiseResetTurnovers, 0.05f) * FMath::Max(DeformationRadius, 0.01f) / GetSpeedRoot(), 1e-3f);
+	return FMath::Max(FMath::Max(NoiseResetTurnovers, 0.05f) * GetTurnover(), 1e-3f);
+}
+
+float UFlowSimConfig::GetTurnover() const
+{
+	return FMath::Max(DeformationRadius, 0.01f) / GetSpeedRoot();
 }
 
 // ---------------------------------------------------------------------------
@@ -174,18 +191,18 @@ float UFlowSimConfig::GetImplicitDampingRate(float Step) const
 
 float UFlowSimConfig::GetDivergenceDamping(float Step) const
 {
-	const float Rate = FMath::Max(GridDamping - GetImplicitDampingRate(Step), 0.0f);
+	const float Rate = FMath::Max(FMath::Max(GridDamping, 0.0f) / GetTurnover() - GetImplicitDampingRate(Step), 0.0f);
 
 	return FMath::Min(1.0f - FMath::Exp(-Rate * FMath::Max(Step, 0.0f)), MaxDampingFraction);
 }
 
-FFlowSimSpeeds UFlowSimConfig::ResolveSpeeds() const
+FFlowSimScales UFlowSimConfig::ResolveScales() const
 {
-	FFlowSimSpeeds S;
+	FFlowSimScales S;
 
 	S.WaveSpeed = FlowSimProfile::WaveSpeed(*this);
 	S.Root = GetSpeedRoot();
-	S.Turnover = FMath::Max(DeformationRadius, 0.01f) / S.Root;
+	S.Turnover = GetTurnover();
 
 	S.JetStrength = JetSpeed * S.Root / JetPeak(*this);
 	S.ThermalShear = ShearSpeed * S.Root / ShapePeak(*this);
@@ -193,9 +210,35 @@ FFlowSimSpeeds UFlowSimConfig::ResolveSpeeds() const
 	S.EddySpeed = FMath::Max(EddySpeed, 0.0f) * S.Root;
 	S.CellWind = FMath::Max(StormCellSpeed, 0.0f) * S.Root;
 	S.CellDrift = FMath::Max(StormCellDriftSpeed, 0.0f) * S.Root;
-	S.GenesisShear = FMath::Max(GenesisShearSpeed * S.Root, 0.01f);
+	S.GenesisShear = FMath::Max(GenesisShearRatio * FMath::Max(FMath::Abs(ShearSpeed), 0.1f) * S.Root, 0.01f);
 
 	S.WindEvaporation = FMath::Max(WindEvaporationGain, 0.0f) / S.Root;
+
+	const float PerTurnover = 1.0f / S.Turnover;
+
+	S.NudgeRate = NudgeRate * PerTurnover;
+	S.DragRate = DragRate * PerTurnover;
+	S.ThermalRelaxation = FMath::Max(ThermalRelaxation, 0.0f) * PerTurnover;
+	S.LayerCoupling = LayerCoupling * PerTurnover;
+	S.SurfaceEvaporation = FMath::Max(SurfaceEvaporation, 0.0f) * PerTurnover;
+	S.CondensationRate = FMath::Max(CondensationRate, 0.0f) * PerTurnover;
+	S.EvaporationRate = FMath::Max(EvaporationRate, 0.0f) * PerTurnover;
+	S.CellSpawnRate = FMath::Max(StormCellSpawnRate, 0.0f) * PerTurnover;
+	S.CellGrowth = FMath::Max(StormCellGrowth, 0.0f) * PerTurnover;
+	S.CellFollow = FMath::Max(StormCellFollow, 0.0f) * PerTurnover;
+	S.CellCoreFollow = FMath::Max(StormCellCoreFollow, 0.0f) * PerTurnover;
+	S.CellForcing = FMath::Max(StormCellForcing, 0.0f) * PerTurnover;
+
+	S.CloudLifetime = FMath::Max(CloudLifetime * S.Turnover, 1e-3f);
+	S.AscentSmoothing = FMath::Max(AscentSmoothing, 0.0f) * S.Turnover;
+	S.StormLifetime = FMath::Max(StormLifetime * S.Turnover, 1e-3f);
+	S.CellLifetime = FMath::Max(StormCellLifetime * S.Turnover, 0.01f);
+	S.ForcingLifetime = FMath::Max(ForcingLifetime * S.Turnover, 0.01f);
+
+	const float DR = FMath::Max(DeformationRadius, 0.01f);
+
+	S.CellRadius = FMath::Clamp(StormCellRadius * DR, FMath::DegreesToRadians(0.5f), FMath::DegreesToRadians(45.0f));
+	S.ForcingFrequency = ForcingFrequency / DR;
 
 	return S;
 }
