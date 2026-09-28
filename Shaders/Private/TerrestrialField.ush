@@ -1,5 +1,19 @@
 #pragma once
 
+// The march options this field runs with, ahead of AtmospherePlan.ush, whose
+// defaults are the gas giant's (see there).
+#ifndef ATMO_CAMERA_LATTICE
+#define ATMO_CAMERA_LATTICE 1
+#endif
+
+#ifndef ATMO_ENTRY_REFINE
+#define ATMO_ENTRY_REFINE 1
+#endif
+
+#ifndef ATMO_LATTICE_OFFSET
+#define ATMO_LATTICE_OFFSET 1
+#endif
+
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmospherePlan.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereSetup.ush"
@@ -63,7 +77,7 @@
  *  (Atmo_TextureJitter), 0 from interleaved gradient noise. The texture is a
  *  march argument either way. */
 #ifndef TR_BLUE_NOISE
-#define TR_BLUE_NOISE 0
+#define TR_BLUE_NOISE 1
 #endif
 
 #if TR_BLUE_NOISE

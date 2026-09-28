@@ -521,21 +521,42 @@ float TR_RampIntegral(float U, float C)
     return U * P * P * (3.0f / (2.0f * C + 1.0f) - 2.0f * P / (3.0f * C + 1.0f));
 }
 
-/** TR_SlabDensity integrated from below the base up to Height, Ramps being
- *  TR_SlabRamps. The ramps fit inside the depth, so they never overlap and the
- *  profile is the base ramp, a plateau at 1 and the top ramp in turn. */
-float TR_SlabCumulative(float Height, float Top, float Base, float2 Ramps, TRFieldParams F)
+/** max(smoothstep(0, 1, U^C) - P0, 0) integrated from 0 to U, U0 being where
+ *  the ramp reaches P0. */
+float TR_RampExcess(float U, float U0, float C, float P0)
+{
+    const float X = max(U, U0);
+
+    return TR_RampIntegral(X, C) - TR_RampIntegral(U0, C) - P0 * (X - U0);
+}
+
+/** Where smoothstep(0, 1, U^C) reaches P, P in [0, 1]. */
+float TR_RampInverse(float P, float C)
+{
+    const float X = 0.5f - sin(asin(1.0f - 2.0f * P) / 3.0f);
+
+    return pow(saturate(X), 1.0f / C);
+}
+
+/** max(TR_SlabDensity - P0, 0), the profile's excess over a level, integrated
+ *  from below the base up to Height, Ramps being TR_SlabRamps. The ramps fit
+ *  inside the depth, so they never overlap and the profile is the base ramp,
+ *  a plateau at 1 and the top ramp in turn. */
+float TR_SlabExcessCumulative(float Height, float Top, float Base, float2 Ramps, float P0, TRFieldParams F)
 {
     const float Ct = max(F.TopCurve, 1e-4f);
     const float Cb = max(F.BottomCurve, 1e-4f);
+
+    const float U0t = TR_RampInverse(P0, Ct);
+    const float U0b = TR_RampInverse(P0, Cb);
 
     const float FromBase = saturate((Height - Base) / Ramps.y);
     const float FromTop = saturate((Top - Height) / Ramps.x);
 
     const float Plateau = max(min(Height, Top - Ramps.x) - (Base + Ramps.y), 0.0f);
 
-    return Ramps.y * TR_RampIntegral(FromBase, Cb) + Plateau
-		+ Ramps.x * (TR_RampIntegral(1.0f, Ct) - TR_RampIntegral(FromTop, Ct));
+    return Ramps.y * TR_RampExcess(FromBase, U0b, Cb, P0) + Plateau * (1.0f - P0)
+		+ Ramps.x * (TR_RampExcess(1.0f, U0t, Ct, P0) - TR_RampExcess(FromTop, U0t, Ct, P0));
 }
 
 /** Extinction per atmosphere thickness, solved so a ray down a full-depth
@@ -1041,24 +1062,23 @@ float4 TR_DensityInColumn(
 {
 	// -- Height profile, integrated across the step ----------------------------
 	//
-	// EXACTLY, from the profile's closed form; the ceiling fade, which varies
-	// slowly, by Simpson's rule. PITFALL: SAMPLED, a slab thinner than the step
-	// falls between the samples, and thin columns flicker as their surfaces
-	// drift across them.
+	// EXACTLY, from the profile's closed form, after coverage and erosion (see
+	// below); the ceiling fade, which varies slowly, by Simpson's rule.
+	// PITFALL: SAMPLED, a slab thinner than the step falls between the samples,
+	// and thin columns flicker as their surfaces drift across them.
 
     const float Fade = (TR_CeilingFade(Height - HalfStep, F) + 4.0f * TR_CeilingFade(Height, F)
 		+ TR_CeilingFade(Height + HalfStep, F)) / 6.0f;
 
-	// The mean over the step from the integral's difference, point-sampled
-	// where the step is too short for the difference to hold its precision.
     const float2 Ramps = TR_SlabRamps(Col.Top, Col.Base, F);
 
-    const float Slab = (HalfStep > 1e-5f)
-		? (TR_SlabCumulative(Height + HalfStep, Col.Top, Col.Base, Ramps, F)
-			- TR_SlabCumulative(Height - HalfStep, Col.Top, Col.Base, Ramps, F)) / (2.0f * HalfStep)
-		: TR_SlabDensity(Height, Col.Top, Col.Base, F);
+	// The profile's peak within the step, the plateau clamped into the span,
+	// which gates the noise fetches.
+    const float PeakHeight = clamp(clamp(Height, Col.Base + Ramps.y, Col.Top - Ramps.x),
+		Height - HalfStep, Height + HalfStep);
 
-    const float Profile = Slab * Fade;
+    const float PeakSlab = TR_SlabDensity(PeakHeight, Col.Top, Col.Base, F);
+    const float Profile = PeakSlab * Fade;
 
     const float HeightFraction = saturate((Height - Col.Base) / max(Col.Top - Col.Base, 1e-4f));
 
@@ -1124,6 +1144,10 @@ float4 TR_DensityInColumn(
 
     float Density = saturate((Shape - Threshold) / max(1.0f - Threshold, 1e-3f)) * Coverage;
 
+	// Density and erosion at the step's peak profile, which gate the detail
+	// fetch; the step's mean replaces them below.
+    float DetailErode = 0.0f;
+
 	// -- Detail: erosion of the edges ------------------------------------------
 
     BRANCH
@@ -1163,9 +1187,33 @@ float4 TR_DensityInColumn(
 				Weights), Strength);
         }
 
-        const float Erode = Modifier * F.DetailErosion * TR_DETAIL_EROSION_SCALE;
+        DetailErode = Modifier * F.DetailErosion * TR_DETAIL_EROSION_SCALE;
+    }
 
-        Density = saturate((Density - Erode) / max(1.0f - Erode, 1e-3f));
+	// THE MEAN OF THE DENSITY, NOT THE DENSITY OF THE MEAN. Density is zero
+	// below a profile level P0 and linear above it, so its mean over the step
+	// is Gain times the profile's mean excess over P0. PITFALL: coverage and
+	// erosion applied to the step-averaged profile cut away any step that
+	// spans more height than the slab, so cloud clears as steps lengthen:
+	// grazing views see through the deck the camera finds opaque from inside,
+	// and density slides with the step lattice.
+    if (Density > 0.0f)
+    {
+		// Shape is the profile times ShapeScale; density starts where Shape
+		// clears the threshold plus what detail erodes, in coverage units.
+        const float ShapeScale = Shape / max(PeakSlab, 1e-6f);
+        const float ShapeRange = max(1.0f - Threshold, 1e-3f);
+        const float Level = Threshold + ShapeRange * DetailErode / max(Coverage, 1e-6f);
+        const float P0 = min(Level / max(ShapeScale, 1e-6f), 1.0f);
+
+        const float Gain = ShapeScale * Coverage / (ShapeRange * max(1.0f - DetailErode, 1e-3f));
+
+        const float Excess = (HalfStep > 1e-5f)
+			? (TR_SlabExcessCumulative(Height + HalfStep, Col.Top, Col.Base, Ramps, P0, F)
+				- TR_SlabExcessCumulative(Height - HalfStep, Col.Top, Col.Base, Ramps, P0, F)) / (2.0f * HalfStep)
+			: max(TR_SlabDensity(Height, Col.Top, Col.Base, F) - P0, 0.0f);
+
+        Density = (P0 < 1.0f) ? saturate(Gain * Excess) : 0.0f;
     }
 
 	// THINNED IS FAINT: the eye's floor fades as it thins rather than holding

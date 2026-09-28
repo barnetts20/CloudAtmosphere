@@ -62,15 +62,135 @@ void Atmo_ChordSteps(float Length, float Count, float Spread, out float First, o
 #define ATMO_LATTICE_OFFSET 0
 #endif
 
-/** 1 gives each cloud segment its own CloudSteps budget over its own chord; 0
- *  spreads one budget over every cloud segment on the ray. PITFALL: A SHARED
- *  BUDGET STEPS DIFFERENTLY EITHER SIDE OF THE PLANET'S LIMB. A ray that misses
- *  the planet crosses the band twice and spreads the budget over both
- *  crossings, so its near crossing, the one the eye sees, gets steps about
- *  twice as long as its neighbour's that stops at the planet. Wherever the
- *  result depends on step length, the limb's line shows in the deck. */
-#ifndef ATMO_SEGMENT_BUDGET
-#define ATMO_SEGMENT_BUDGET 1
+/** 1 places cloud steps on a lattice anchored at the camera: step length is a
+ *  function of distance alone, so every ray's steps agree wherever the rays
+ *  agree, whatever their chords. 0 spreads CloudSteps over each ray's chord.
+ *  A cloud segment widens to the lattice points either side of it, so no
+ *  cloud step is cut short by a shell; only the terminus trims one. PITFALL:
+ *  A STEP CUT AT A SHELL IS A SAWTOOTH ACROSS THE SCREEN. Its length runs
+ *  from zero to a full step each time the shell crossing passes a lattice
+ *  point, every step-length bias follows it, and the lattice's spheres show
+ *  as rings about the camera.
+ *  PITFALL: A CHORD BUDGET STEPS DIFFERENTLY WHEREVER THE CHORD JUMPS. The
+ *  chord ends at the planet on one side of the limb and runs on to the far
+ *  shell on the other, so neighbouring rays through the same cloud step at
+ *  different lengths and the limb shows through opaque deck. */
+#ifndef ATMO_CAMERA_LATTICE
+#define ATMO_CAMERA_LATTICE 0
+#endif
+
+/** Camera lattice step growth: each step past the knee is this fraction of
+ *  its distance from the camera. Smaller is finer and costs about 1/x steps
+ *  per e-fold of distance, so the cost is in grazing views from in or near
+ *  the deck, where a ray starts close and runs far: about
+ *  (1 + ln(Distance * x / Floor)) / x steps, ending at ATMO_MAX_ITER.
+ *
+ *  ONE VALUE PER FRAME, FROM THE CAMERA'S ALTITUDE: GROWTH in or below the
+ *  deck, GROWTH_FAR from FAR_ALTITUDE cloud shell depths above it, blended
+ *  geometrically between. A camera above the deck starts its rays far from it
+ *  and pays little for fine steps. Equal values disable the blend. */
+#ifndef ATMO_CAMERA_LATTICE_GROWTH
+#define ATMO_CAMERA_LATTICE_GROWTH 0.1f
+#endif
+
+#ifndef ATMO_CAMERA_LATTICE_GROWTH_FAR
+#define ATMO_CAMERA_LATTICE_GROWTH_FAR 0.02f
+#endif
+
+#ifndef ATMO_CAMERA_LATTICE_FAR_ALTITUDE
+#define ATMO_CAMERA_LATTICE_FAR_ALTITUDE 4.0f
+#endif
+
+/** The lattice growth for a camera Altitude shell depths above the cloud
+ *  shell's top. */
+float Atmo_LatticeGrowth(float Altitude)
+{
+    const float Blend = smoothstep(0.0f, ATMO_CAMERA_LATTICE_FAR_ALTITUDE, Altitude);
+
+    return exp(lerp(log(max(ATMO_CAMERA_LATTICE_GROWTH, 1e-3f)),
+		log(max(ATMO_CAMERA_LATTICE_GROWTH_FAR, 1e-3f)), Blend));
+}
+
+/** The camera lattice: Floor-length steps near the camera, then steps
+ *  growing in proportion to distance from Knee = Floor / Growth. Floor is the
+ *  shell depth over CloudSteps. Cap bounds a step's rise through the shell to
+ *  ChordSpread floors, so a far camera still crosses the deck in several
+ *  steps; it depends on the ray's slope, so the step applies it. U counts
+ *  steps from the camera. */
+struct AtmoCameraLattice
+{
+    float Floor;
+    float Cap;
+    float LogRatio;
+    float Knee;
+    float UKnee;
+};
+
+AtmoCameraLattice Atmo_CameraLattice(float ShellDepth, float Count, float Spread, float Growth)
+{
+    AtmoCameraLattice L;
+    L.Floor = max(ShellDepth, 1e-4f) / max(Count, 1.0f);
+    L.Cap = L.Floor * max(Spread, 1.0f);
+    L.LogRatio = log(1.0f + Growth);
+
+    L.Knee = L.Floor / Growth;
+    L.UKnee = L.Knee / L.Floor;
+
+    return L;
+}
+
+float Atmo_LatticeCoord(AtmoCameraLattice L, float T)
+{
+    return (T < L.Knee) ? T / L.Floor : L.UKnee + log(T / L.Knee) / L.LogRatio;
+}
+
+float Atmo_LatticeDistance(AtmoCameraLattice L, float U)
+{
+    return (U < L.UKnee) ? U * L.Floor : L.Knee * exp((U - L.UKnee) * L.LogRatio);
+}
+
+/** The lattice point at or before distance T, the lattice shifted by Phase
+ *  steps; never behind the camera. */
+float Atmo_LatticeFloor(AtmoCameraLattice L, float T, float Phase)
+{
+    return max(Atmo_LatticeDistance(L, floor(Atmo_LatticeCoord(L, T) - Phase + 1e-3f) + Phase), 0.0f);
+}
+
+/** From distance T to the next point of the lattice divided Division times,
+ *  shifted by Phase steps, no longer than Cap over RadialRate, divided alike.
+ *  A point closer than half a step, as after a capped step, is passed for the
+ *  one beyond it, so the cap leaves no slivers. */
+float Atmo_LatticeStep(AtmoCameraLattice L, float T, float Phase, float RadialRate, float Division)
+{
+    const float Unit = 1.0f / Division;
+    const float U = (floor((Atmo_LatticeCoord(L, T) - Phase) * Division + 1e-3f) + 1.0f) * Unit + Phase;
+    const float Next = Atmo_LatticeDistance(L, U);
+
+    const float End = (Next - T < 0.5f * (Next - Atmo_LatticeDistance(L, U - Unit)))
+		? Atmo_LatticeDistance(L, U + Unit)
+		: Next;
+
+    return min(End - T, L.Cap * Unit / max(RadialRate, 1e-3f));
+}
+
+/** 1 re-marches the lattice step in which a camera-lattice ray first meets
+ *  cloud, and the ATMO_ENTRY_SPAN steps after it, at ATMO_ENTRY_SUBSTEPS
+ *  substeps each; again at every re-entry after a clear sample. A step's
+ *  single sample decides its whole transmittance, and near the cloud's
+ *  surface that decision carries a bias that follows where the surface falls
+ *  in the step: rings about the camera. Substeps divide the bias, and they
+ *  lie on the divided lattice, so the entry moves no step boundary. Needs
+ *  ATMO_CAMERA_LATTICE. */
+#ifndef ATMO_ENTRY_REFINE
+#define ATMO_ENTRY_REFINE 0
+#endif
+
+#ifndef ATMO_ENTRY_SUBSTEPS
+#define ATMO_ENTRY_SUBSTEPS 4.0f
+#endif
+
+#ifndef ATMO_ENTRY_SPAN
+#define ATMO_ENTRY_SPAN 2.0f
 #endif
 
 /** The first step of a lattice started Phase of a step in, Phase in (0, 1]: the

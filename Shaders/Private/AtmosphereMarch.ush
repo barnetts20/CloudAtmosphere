@@ -562,34 +562,66 @@ float4 Atmo_MainMarch(
 	// Hashed at a step index the march does not reach, so it is uncorrelated
 	// with the samples' own jitter.
     const float LatticePhase = 1.0f - FIELD_STEP_JITTER(P.Atmo.mainRayParams.svxy, 7919);
-    float CloudLead = Atmo_LeadStep(CloudFirst, CloudGrow, LatticePhase);
+    const float CloudLead = Atmo_LeadStep(CloudFirst, CloudGrow, LatticePhase);
     const float AirLead = Atmo_LeadStep(AirFirst, AirGrow, LatticePhase);
 #endif
 
     int StepIndex = 0;
 
+#if ATMO_CAMERA_LATTICE
+    const float ShellDepth = max(
+		P.Atmo.planetParams.cloudOuterRadius - P.Atmo.planetParams.cloudInnerRadius, 1e-4f);
+
+    const float CameraAltitude = (length(RayOrigin - P.Atmo.planetParams.planetPos)
+		- P.Atmo.planetParams.cloudOuterRadius) / ShellDepth;
+
+    const AtmoCameraLattice CloudLattice = Atmo_CameraLattice(ShellDepth,
+		float(P.Atmo.mainRayParams.cloudSteps), P.Atmo.mainRayParams.chordSpread,
+		Atmo_LatticeGrowth(CameraAltitude));
+
+#if ATMO_LATTICE_OFFSET
+    const float CloudPhase = LatticePhase;
+#else
+    const float CloudPhase = 0.0f;
+#endif
+#endif
+
     const AtmoLightConstants LightConstants = Atmo_LightConstants(ShadowMap, ShadowCameras, P);
+
+#if ATMO_CAMERA_LATTICE
+	// Where the previous segment's last step ended, which may be past its end.
+    float CarryPos = 0.0f;
+#endif
 
     for (int s = 0; s < SegmentCount; s++)
     {
-        const float SegStart = Segments[s].x;
-        const float SegEnd = Segments[s].y;
+        float SegStart = Segments[s].x;
+        float SegEnd = Segments[s].y;
 
         const bool IsCloud = Field_SegmentIsCloud(
 			RayOrigin, RayDir, Segments[s], P.Atmo.planetParams);
 
-#if ATMO_SEGMENT_BUDGET
-		// Each cloud crossing distributes the full budget over its own chord.
+#if ATMO_CAMERA_LATTICE
+		// Cloud starts at the lattice point before its shell crossing, and air
+		// ahead of cloud stops there. The widened part holds no cloud, so the
+		// full step's sample is unbiased.
         if (IsCloud)
         {
-            Atmo_ChordSteps(max(SegEnd - SegStart, 0.0f), float(P.Atmo.mainRayParams.cloudSteps),
-				P.Atmo.mainRayParams.chordSpread, CloudFirst, CloudGrow);
-
-            CloudUsed = 0.0f;
-#if ATMO_LATTICE_OFFSET
-            CloudLead = Atmo_LeadStep(CloudFirst, CloudGrow, LatticePhase);
-#endif
+            SegStart = Atmo_LatticeFloor(CloudLattice, SegStart, CloudPhase);
         }
+        else if (s + 1 < SegmentCount
+			&& Field_SegmentIsCloud(RayOrigin, RayDir, Segments[s + 1], P.Atmo.planetParams))
+        {
+            SegEnd = min(SegEnd, Atmo_LatticeFloor(CloudLattice, Segments[s + 1].x, CloudPhase));
+        }
+
+        SegStart = max(SegStart, CarryPos);
+#endif
+
+#if ATMO_CAMERA_LATTICE && ATMO_ENTRY_REFINE
+		// Substeps run to RefineUntil; a clear coarse sample arms the next entry.
+        float RefineUntil = -1.0f;
+        bool RefineArmed = true;
 #endif
 
         float Pos = SegStart;
@@ -617,7 +649,25 @@ float4 Atmo_MainMarch(
             }
 #endif
 
-            CurrentStep = min(CurrentStep, SegEnd - Pos);
+#if ATMO_CAMERA_LATTICE
+            if (IsCloud)
+            {
+                const float3 StepUp = normalize(RayOrigin + RayDir * Pos - P.Atmo.planetParams.planetPos);
+
+#if ATMO_ENTRY_REFINE
+                const float Division = (Pos < RefineUntil) ? ATMO_ENTRY_SUBSTEPS : 1.0f;
+#else
+                const float Division = 1.0f;
+#endif
+
+                CurrentStep = min(max(Atmo_LatticeStep(
+					CloudLattice, Pos, CloudPhase, abs(dot(RayDir, StepUp)), Division), 1e-4f), MaxDist - Pos);
+            }
+            else
+#endif
+            {
+                CurrentStep = min(CurrentStep, SegEnd - Pos);
+            }
 
 			// THE TRIMMED SIZE, NOT THE ONE ASKED FOR. A step clipped at a
 			// segment boundary covers less chord than the distribution planned,
@@ -722,6 +772,24 @@ float4 Atmo_MainMarch(
 						FIELD_TEXTURE_ARGS, LocalPos, SampleT, StepHalfHeight, P.Field, RayCache);
 #else
                     Sample = Field_Sample(FIELD_TEXTURE_ARGS, LocalPos, StepHalfHeight, P.Field);
+#endif
+
+#if ATMO_CAMERA_LATTICE && ATMO_ENTRY_REFINE
+					// The first cloud on a coarse step: nothing is accumulated,
+					// and the step is taken again as substeps.
+                    if (Pos >= RefineUntil)
+                    {
+                        if (RefineArmed && Sample.x > 0.0f)
+                        {
+                            RefineArmed = false;
+                            RefineUntil = Atmo_LatticeDistance(CloudLattice,
+								Atmo_LatticeCoord(CloudLattice, Pos) + ATMO_ENTRY_SPAN);
+                            StepIndex++;
+                            continue;
+                        }
+
+                        RefineArmed = RefineArmed || Sample.x <= 0.0f;
+                    }
 #endif
                 }
 
@@ -923,6 +991,10 @@ float4 Atmo_MainMarch(
             Pos += CurrentStep;
             StepIndex++;
         }
+
+#if ATMO_CAMERA_LATTICE
+        CarryPos = Pos;
+#endif
 
         if (max(Transmittance.x, max(Transmittance.y, Transmittance.z))
 			< ATMO_OPAQUE_TRANSMITTANCE)
