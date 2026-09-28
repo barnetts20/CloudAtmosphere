@@ -148,7 +148,6 @@ namespace
 		P.ImplicitWeight = Params.ImplicitWeight;
 
 		P.ForcingChannel = Params.ForcingChannel;
-		P.ForcingBipolar = Params.bForcingBipolar ? 1 : 0;
 		P.HasForcing = Params.ForcingTexture.IsValid() ? 1 : 0;
 
 		P.NudgeRate = Params.NudgeRate;
@@ -193,7 +192,6 @@ namespace
 		P.NoiseResetTime = Params.NoiseResetTime;
 
 		P.FilterLatitude = Params.FilterLatitude;
-		P.FilterMaxHalfWidth = Params.FilterMaxHalfWidth;
 
 		P.OutputScales = Params.OutputScales;
 		P.AtlasFaceSize = Params.AtlasFaceSize;

@@ -211,10 +211,6 @@ struct TRFieldParams
     float TypeTropical;
     float TypeStorm;
 
-	/** Column erosion = StructureErosion * ErosionGain * (1 - ErosionAscent * W). */
-    float ErosionGain;
-    float ErosionAscent;
-
 	/** The geopotential anomaly that reads as a full low or high. */
     float PressureScale;
 
@@ -248,17 +244,17 @@ struct TRFieldParams
     float DriftAngle;
     float NoisePhase;
 
-	/** Mips added to the layer's footprint mip, and the layer's amount (0
-	 *  skips it). FlowInherit is the share of the sim's noise displacement the
-	 *  layer follows. */
+	/** Mips added to the layer's footprint mip, and whether the layer is read:
+	 *  a bound volume and erosion above zero. FlowInherit is the share of the
+	 *  sim's noise displacement the layer follows. */
     float StructureMipBias;
-    float StructureAmount;
+    bool StructureActive;
     float StructureScale;
     float StructureErosion;
     float StructureFlowInherit;
 
     float DetailMipBias;
-    float DetailAmount;
+    bool DetailActive;
     float DetailScale;
     float DetailErosion;
     float DetailFlowInherit;
@@ -292,8 +288,9 @@ struct TRFieldParams
     float StructureVertical;
     float DetailVertical;
 
-	/** Per-layer fade range, in planet radii from the camera. The march reads
-	 *  both edges to set the per-sample fades. */
+	/** Per-layer fade range, in planet radii from the camera, which the march
+	 *  reads to set the per-sample fades. The structure layer applies at every
+	 *  range, so its pair only completes the march's interface. */
     float StructureFadeNear;
     float StructureFadeFar;
     float DetailFadeNear;
@@ -324,16 +321,17 @@ struct TRFieldParams
  *
  *    CloudProfile      CloudBase, CloudThickness, SurfaceSoftness, CeilingFalloff
  *    CloudCurves       TopCurve, BottomCurve, CloudSlope, WarpStretch
- *    CloudCoverage     CloudCover, StormPriority, CoverageSoftness, ErosionGain
- *    CloudType         TypeBias, (unused), TypeTropical, ErosionAscent
+ *    CloudCoverage     CloudCover, StormPriority, CoverageSoftness, (unused)
+ *    CloudType         TypeBias, (unused), TypeTropical, (unused)
  *    CloudLid          PressureScale, CeilingDepth, CeilingPressure, StratusDepth
  *    CloudLift         BaseTropical, BasePressure, AltitudeGain, AltitudeLift
  *    CloudMotion       DriftAngle, NoisePhase, WarpShift, SpinAngle
- *    NoiseLevels       StructureMipBias, StructureAmount, DetailMipBias, DetailAmount
- *    <Layer>Sampling   Scale, Aspect, Erosion, FadeMean (detail) or
- *                      TypeStorm (structure)
- *    <Layer>Warp       FlowInherit, GenusSubsidence (structure) or
- *                      unused (detail), FadeNear, FadeSpan
+ *    NoiseLevels       StructureMipBias, structure volume bound, DetailMipBias,
+ *                      detail volume bound
+ *    StructureSampling Scale, Aspect, Erosion, TypeStorm
+ *    StructureWarp     FlowInherit, GenusSubsidence, (unused), (unused)
+ *    DetailSampling    Scale, Aspect, Erosion, FadeMean
+ *    DetailWarp        FlowInherit, (unused), FadeNear, FadeSpan
  *    ShadowCascades    Cascade 1 half-width, cascade 2 half-width, CloudLayer,
  *                      CoverageFray
  *    CloudGenus<Name>  structure channel weights for that genus
@@ -382,11 +380,9 @@ TRFieldParams TR_BuildField(
     F.CloudCover = CloudCoverage.x;
     F.StormPriority = max(CloudCoverage.y, 0.0f);
     F.CoverageSoftness = max(CloudCoverage.z, 1e-3f);
-    F.ErosionGain = max(CloudCoverage.w, 0.0f);
 
     F.TypeBias = CloudType.x;
     F.TypeTropical = CloudType.z;
-    F.ErosionAscent = CloudType.w;
 
     F.PressureScale = max(CloudLid.x, 1e-6f);
     F.CeilingDepth = max(CloudLid.y, 1e-3f);
@@ -404,9 +400,9 @@ TRFieldParams TR_BuildField(
     F.SpinAngle = CloudMotion.w;
 
     F.StructureMipBias = NoiseLevels.x;
-    F.StructureAmount = saturate(NoiseLevels.y);
     F.StructureScale = StructureSampling.x;
     F.StructureErosion = max(StructureSampling.z, 0.0f);
+    F.StructureActive = NoiseLevels.y > 0.5f && F.StructureErosion > 0.0f;
     F.TypeStorm = max(StructureSampling.w, 0.0f);
     F.StructureFlowInherit = StructureWarp.x;
     F.GenusSubsidence = max(StructureWarp.y, 0.0f);
@@ -417,9 +413,9 @@ TRFieldParams TR_BuildField(
     F.GenusCirrus = CloudGenusCirrus;
 
     F.DetailMipBias = NoiseLevels.z;
-    F.DetailAmount = saturate(NoiseLevels.w);
     F.DetailScale = DetailSampling.x;
     F.DetailErosion = saturate(DetailSampling.z);
+    F.DetailActive = NoiseLevels.w > 0.5f && F.DetailErosion > 0.0f;
     F.DetailFadeMean = saturate(DetailSampling.w);
     F.DetailFlowInherit = DetailWarp.x;
 
@@ -433,10 +429,11 @@ TRFieldParams TR_BuildField(
     F.StructureVertical = StructureSampling.x * StructureSampling.y * HeightScale;
     F.DetailVertical = DetailSampling.x * DetailSampling.y * HeightScale;
 
-	// Each far edge held above its own near one, so a zero span cannot collapse
-	// a cascade onto the one inside it.
-    F.StructureFadeNear = max(StructureWarp.z, 0.0f);
-    F.StructureFadeFar = F.StructureFadeNear + max(StructureWarp.w, 1e-4f);
+    F.StructureFadeNear = 0.0f;
+    F.StructureFadeFar = 1.0f;
+
+	// The far edge held above the near one, so a zero span cannot collapse a
+	// cascade onto the one inside it.
     F.DetailFadeNear = max(DetailWarp.z, 0.0f);
     F.DetailFadeFar = F.DetailFadeNear + max(DetailWarp.w, 1e-4f);
 
@@ -673,9 +670,8 @@ float TR_MaterialFromWeather(float4 Weather, TRFieldParams F)
  *  turns every stormy column into a full tower of storm material, a deck
  *  erosion barely touches beside the cloud around it.
  *
- *  EROSION IS BREAKUP. Sinking air erodes harder than rising air when
- *  ErosionAscent is positive, so subsidence breaks into patches and large-scale
- *  ascent fills into sheets.
+ *  EROSION IS BREAKUP: the structure layer's, or none where the layer is not
+ *  read.
  *
  *  THE BASE is the condensation level: tropicality and pressure, plus the
  *  altitude the cloud formed at for all but towering columns. A tower stays
@@ -735,8 +731,7 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
     Col.Genus = lerp(Layered, F.GenusCumulus, Col.Type);
     Col.Cirrus = Col.Altitude * (1.0f - Col.Type);
 
-    Col.Erosion = F.StructureErosion * F.ErosionGain * max(1.0f - F.ErosionAscent * Weather.x, 0.0f)
-		* F.StructureAmount;
+    Col.Erosion = F.StructureActive ? F.StructureErosion : 0.0f;
 
     const float D = F.CloudThickness;
 
@@ -1096,7 +1091,7 @@ float4 TR_DensityInColumn(
 
     BRANCH
 
-    if (F.StructureAmount > 0.0f)
+    if (F.StructureActive)
     {
         const float UVWScale = F.StructureScale + Rise * F.StructureVertical;
 
@@ -1128,7 +1123,7 @@ float4 TR_DensityInColumn(
 
     BRANCH
 
-    if (F.DetailAmount > 0.0f && Density > 0.0f)
+    if (F.DetailActive && Density > 0.0f)
     {
 		// Faded toward the mean rather than off: see the header. Past the far
 		// edge, or once the mip has averaged the detail away, the fetch is
@@ -1163,8 +1158,7 @@ float4 TR_DensityInColumn(
 				Weights), Strength);
         }
 
-        const float Erode = Modifier * F.DetailErosion * F.DetailAmount
-			* TR_DETAIL_EROSION_SCALE;
+        const float Erode = Modifier * F.DetailErosion * TR_DETAIL_EROSION_SCALE;
 
         Density = saturate((Density - Erode) / max(1.0f - Erode, 1e-3f));
     }

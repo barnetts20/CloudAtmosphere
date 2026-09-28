@@ -136,11 +136,6 @@ struct FFlowLayerProfile
 	 *  interface more room to rise toward the poles before it reaches the top. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer", meta = (ClampMin = "0.1"))
 	float DepthScale = 1.0f;
-
-	/** The forcing multiplier of configs saved before the speed root, converted
-	 *  into EddyScale by UFlowSimConfig::PostLoad. */
-	UPROPERTY()
-	float ForcingScale_DEPRECATED = 1.0f;
 };
 
 namespace FlowSimStep
@@ -379,12 +374,10 @@ public:
 	// surface evaporates into the bottom layer; rising air near saturation
 	// condenses it into cloud, releasing latent heat.
 
-	/** Saturation at the equator and at the poles, bottom layer. */
+	/** The bottom layer's saturation at the poles as a fraction of the
+	 *  equator's, which is the vapour unit. 1 is uniform moisture. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0"))
-	float SaturationEquator = 1.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0"))
-	float SaturationPole = 0.25f;
+	float SaturationPoleRatio = 0.25f;
 
 	/** The top layer's saturation as a fraction of the bottom's; layers between
 	 *  fall geometrically. Cold air aloft holds little. */
@@ -742,14 +735,10 @@ public:
 
 	// -- Polar filter -------------------------------------------------------
 
-	/** cos(latitude) below which the longitudinal filter engages. */
+	/** cos(latitude) below which the longitudinal filter engages. Its width
+	 *  follows from the grid: FilterLatitude / cos(latitude) texels. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Polar Filter", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float FilterLatitude = 0.9f;
-
-	/** Bound on the filter width, so the innermost polar rows do not turn into a
-	 *  loop over the whole grid. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Polar Filter", meta = (ClampMin = "1", ClampMax = "256"))
-	int32 FilterMaxHalfWidth = 8;
 
 	// -- Solver -------------------------------------------------------------
 
@@ -784,13 +773,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing Volume")
 	TObjectPtr<UVolumeTexture> ForcingVolume;
 
+	/** The channel read, decoded from [0, 1] to [-1, 1]. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing Volume", meta = (ClampMin = "0", ClampMax = "3"))
 	int32 ForcingChannel = 1;
-
-	/** True when the channel was baked signed. MUST MATCH THE RECIPE: a unipolar
-	 *  decode of a signed bake biases the forcing. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing Volume")
-	bool bForcingBipolar = true;
 
 	// -- Start state --------------------------------------------------------
 
@@ -848,51 +833,9 @@ public:
 
 	virtual void Serialize(FArchive& Ar) override;
 
-	/** Converts a config saved before GridResolution, the speed root or
-	 *  GridDamping, at the grid, regime and step it was saved with, so it runs
-	 *  as it did. */
+	/** Warns when the asset was saved at an older config version, whose values
+	 *  load under the current meanings; nothing is converted. */
 	virtual void PostLoad() override;
-
-	// -- Values of configs saved before a conversion ----------------------------
-	//
-	// PostLoad converts them. Each defaults to its old default, since a value
-	// equal to that was never saved.
-
-	UPROPERTY()
-	int32 GridLongitude_DEPRECATED = 512;
-
-	UPROPERTY()
-	float JetStrength_DEPRECATED = 1.0f;
-
-	UPROPERTY()
-	float ThermalShear_DEPRECATED = 1.5f;
-
-	UPROPERTY()
-	float ForcingAmplitude_DEPRECATED = 0.3f;
-
-	UPROPERTY()
-	float WindEvaporation_DEPRECATED = 1.0f;
-
-	UPROPERTY()
-	float GenesisShear_DEPRECATED = 1.0f;
-
-	UPROPERTY()
-	float StormCellDrift_DEPRECATED = 0.05f;
-
-	UPROPERTY()
-	float StormCellWind_DEPRECATED = 2.0f;
-
-	UPROPERTY()
-	float NoiseDrift_DEPRECATED = 0.5f;
-
-	UPROPERTY()
-	float NoiseResetPeriod_DEPRECATED = 0.5f;
-
-	UPROPERTY()
-	float DivergenceDamping_DEPRECATED = 0.05f;
-
-	UPROPERTY()
-	float ForcingScale_DEPRECATED = 0.25f;
 };
 
 /** The zonal profiles on the CPU, mirroring FlowSim.usf, for the speed root and
@@ -965,7 +908,6 @@ struct FFlowSimParams
 	float ImplicitWeight = 0.6f;
 
 	int32 ForcingChannel = 1;
-	bool bForcingBipolar = true;
 
 	float NudgeRate = 1.0f;
 	float ForcingAmplitude = 0.3f;
@@ -989,9 +931,9 @@ struct FFlowSimParams
 	float EvaporationRate = 3.0f;
 	float CloudLifetime = 3.0f;
 
-	/** x saturation at the equator, y at the poles, z condensation onset,
-	 *  w surface evaporation. */
-	FVector4f MoistureParams = FVector4f(1.0f, 0.25f, 0.7f, 2.0f);
+	/** x unused, y saturation at the poles as a fraction of the equator's,
+	 *  z condensation onset, w surface evaporation. */
+	FVector4f MoistureParams = FVector4f(0.0f, 0.25f, 0.7f, 2.0f);
 	float WindEvaporation = 1.0f;
 	float LatentHeating = 0.1f;
 	float AscentSmoothing = 0.3f;
@@ -1034,7 +976,6 @@ struct FFlowSimParams
 
 
 	float FilterLatitude = 0.9f;
-	int32 FilterMaxHalfWidth = 8;
 
 	/** Where the output sits between the state before the frame's last step
 	 *  (0) and after it (1). */

@@ -202,30 +202,7 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     DetailLayer = FAtmosphereNoiseLayerParams::MakeDetailDefaults();
     Geometry.HeightScale = 1.0f;
 
-    TerrestrialStructureLayer = FAtmosphereNoiseLayerParams::MakeStructureDefaults();
-    TerrestrialDetailLayer = FAtmosphereNoiseLayerParams::MakeDetailDefaults();
-
-    // THE STRUCTURE LAYER IS THE CLOUD SHAPE coverage erodes, so its scale sets
-    // cloud size: a few features per system rather than per planet. Erosion is
-    // how much the noise shapes the column; below 1 some of the column fills
-    // regardless of the noise.
-    TerrestrialStructureLayer.Scale = 6.0f;
-    TerrestrialStructureLayer.Aspect = 2.0f;
-    TerrestrialStructureLayer.Erosion = 0.85f;
-    TerrestrialStructureLayer.FlowInherit = 1.0f;
-    TerrestrialStructureLayer.FadeNear = 0.3f;
-    TerrestrialStructureLayer.FadeSpan = 0.6f;
-
-    // THE DETAIL LAYER ERODES EDGES: wispy bases, billowy tops.
-    TerrestrialDetailLayer.Scale = 30.0f;
-    TerrestrialDetailLayer.Aspect = 1.0f;
-    TerrestrialDetailLayer.Erosion = 0.6f;
-    TerrestrialDetailLayer.FlowInherit = 1.0f;
-    TerrestrialDetailLayer.FadeSpan = 0.3f;
-
-    TerrestrialGeometry.HeightScale = 0.2f;
-
-    TerrestrialExtinction.LightExtinctionFraction = 1.0f;
+    TerrestrialMultipleScattering.SunlightPenetration = 0.0f;
 
     // SIZED TO BE LOOKED THROUGH FROM UNDERNEATH, which is the whole difference
     // from the gas giant's air. Every beta is per atmosphere thickness and every
@@ -237,27 +214,24 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     // The absorber is the term to watch. It is a Lorentzian scaled by the
     // Rayleigh profile, so its column integral is roughly half a scale height,
     // and at a beta of 100 it alone closes the sky.
-    TerrestrialAtmosphereLighting.RayleighBeta = FLinearColor(0.416289f, 1.270482f, 2.0f, 1.0f);
-    TerrestrialAtmosphereLighting.RayleighScaleHeight = 0.15f;
-    TerrestrialAtmosphereLighting.MieBeta = FLinearColor(1.0f, 0.893109f, 0.755932f, 1.0f);
-    TerrestrialAtmosphereLighting.MieScaleHeight = 0.1f;
-    TerrestrialAtmosphereLighting.MieG = 0.95f;
-    TerrestrialAtmosphereLighting.AbsorptionBeta = FLinearColor(0.5f, 0.403727f, 0.437888f, 1.0f);
+    TerrestrialAir.RayleighBeta = FLinearColor(0.416289f, 1.270482f, 2.0f, 1.0f);
+    TerrestrialAir.RayleighScaleHeight = 0.15f;
+    TerrestrialAir.MieBeta = FLinearColor(1.0f, 0.893109f, 0.755932f, 1.0f);
+    TerrestrialAir.MieScaleHeight = 0.1f;
+    TerrestrialAir.MieG = 0.95f;
+    TerrestrialAir.AbsorptionBeta = FLinearColor(0.5f, 0.403727f, 0.437888f, 1.0f);
 
     // NOT NEAR-BLACK, unlike the gas giant's. Under a cloud base there is a lit
     // surface bouncing light back up, and this term is the whole of it: left at
     // the gas giant value, standing under the deck is night.
-    TerrestrialAtmosphereLighting.AtmosphereAmbient = FLinearColor(0.020f, 0.026f, 0.038f, 1.0f);
-    TerrestrialAtmosphereLighting.AtmosphereAmbientFloor = 0.02f;
-
-    TerrestrialPhase.CloudAmbient = FLinearColor(0.040f, 0.044f, 0.052f, 1.0f);
-    TerrestrialPhase.CloudAmbientFloor = 0.04f;
+    TerrestrialAmbient.AtmosphereAmbient = FLinearColor(0.020f, 0.026f, 0.038f, 1.0f);
+    TerrestrialAmbient.AtmosphereAmbientFloor = 0.02f;
+    TerrestrialAmbient.CloudAmbient = FLinearColor(0.040f, 0.044f, 0.052f, 1.0f);
+    TerrestrialAmbient.CloudAmbientFloor = 0.04f;
 
     // A cloud shadow lands on lit terrain here rather than on more cloud, so it
     // carries more of the surface's brightness than the deck's does.
     TerrestrialSurfaceShadow.DirectFraction = 0.85f;
-
-
 
     TerrestrialMarchMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(MatPath_Terrestrial));
     GasGiantMarchMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(MatPath_GasGiant));
@@ -283,16 +257,34 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     if (DefaultStructureVolume.Succeeded())
     {
         StructureLayer.Volume = DefaultStructureVolume.Object;
-
-        // BOTH TERRESTRIAL LAYERS ON THE COARSE VOLUME, at different scales. The
-        // detail layer's own asset is tuned for a deck's fine finish, which on a
-        // band reads as static rather than as cloud.
-        TerrestrialStructureLayer.Volume = DefaultStructureVolume.Object;
-        TerrestrialDetailLayer.Volume = DefaultStructureVolume.Object;
     }
     else
     {
         UE_LOG(LogCloudAtmosphere, Warning, TEXT("PlanetAtmosphereActor: Failed to load default deck structure volume"));
+    }
+
+    // THE TYPED CLOUD NOISE, which the genus weights and the detail channels
+    // read as noise types. The gas giant's octave ladders are another layout.
+    static ConstructorHelpers::FObjectFinder<UVolumeTexture> DefaultCloudStructureVolume(
+        TEXT("/CloudAtmosphere/Noise/CloudNoise_4_128"));
+    if (DefaultCloudStructureVolume.Succeeded())
+    {
+        TerrestrialStructureLayer.Volume = DefaultCloudStructureVolume.Object;
+    }
+    else
+    {
+        UE_LOG(LogCloudAtmosphere, Warning, TEXT("PlanetAtmosphereActor: Failed to load default cloud structure volume"));
+    }
+
+    static ConstructorHelpers::FObjectFinder<UVolumeTexture> DefaultCloudDetailVolume(
+        TEXT("/CloudAtmosphere/Noise/CloudNoise_8_128"));
+    if (DefaultCloudDetailVolume.Succeeded())
+    {
+        TerrestrialDetailLayer.Volume = DefaultCloudDetailVolume.Object;
+    }
+    else
+    {
+        UE_LOG(LogCloudAtmosphere, Warning, TEXT("PlanetAtmosphereActor: Failed to load default cloud detail volume"));
     }
 
     static ConstructorHelpers::FObjectFinder<UFlowSimConfig> DefaultSimConfig(
@@ -700,24 +692,29 @@ static float SolveTopMaxReadout(float DeckTop, float GradientThickness, float Ba
     return DeckTop + FMath::Max(GradientThickness, 1e-4f) * UpReach;
 }
 
+/** The terrestrial planet shadow is a step: the transmittance table carries a
+ *  grazing sun ray's attenuation, and any softness visibly above the floor reads
+ *  worse. At a step the lobe power has nothing left to shape. */
+static constexpr float TerrestrialTerminatorSoftness = 1e-4f;
+static constexpr float TerrestrialLobeShadowPower = 6.0f;
+
 /** READOUT ONLY, NEVER PUSHED. Mirrors TR_FieldReach, TR_TopMax and
  *  TR_BaseMin. A mismatch misreports the readouts and changes nothing drawn. */
-static void SolveTerrestrialBounds(
-    const FTerrestrialProfileParams& Profile, float& OutTopMax, float& OutBaseMin)
+static void SolveTerrestrialBounds(FTerrestrialShapeParams& Shape, const FTerrestrialLiftParams& Lift)
 {
-    const float D = FMath::Max(Profile.CloudThickness, 1e-4f);
+    const float D = FMath::Max(Shape.CloudThickness, 1e-4f);
 
-    const float BaseUp = D * (FMath::Max(Profile.BaseTropical, 0.0f)
-        + FMath::Abs(Profile.BasePressure) + FMath::Max(Profile.AltitudeLift, 0.0f));
+    const float BaseUp = D * (FMath::Max(Lift.BaseTropical, 0.0f)
+        + FMath::Abs(Lift.BasePressure) + FMath::Max(Lift.AltitudeLift, 0.0f));
 
-    const float BaseDown = D * (-FMath::Min(Profile.BaseTropical, 0.0f)
-        + FMath::Abs(Profile.BasePressure) - FMath::Min(Profile.AltitudeLift, 0.0f));
+    const float BaseDown = D * (-FMath::Min(Lift.BaseTropical, 0.0f)
+        + FMath::Abs(Lift.BasePressure) - FMath::Min(Lift.AltitudeLift, 0.0f));
 
     const float Depth = D * FMath::Max(
-        Profile.CeilingDepth * (1.0f + FMath::Abs(Profile.CeilingPressure)), 1e-3f);
+        Lift.CeilingDepth * (1.0f + FMath::Abs(Lift.CeilingPressure)), 1e-3f);
 
-    OutTopMax = FMath::Min(Profile.CloudBase + BaseUp + Depth, 1.0f);
-    OutBaseMin = Profile.CloudBase - BaseDown;
+    Shape.SolvedTopMax = FMath::Min(Shape.CloudBase + BaseUp + Depth, 1.0f);
+    Shape.SolvedBaseMin = Shape.CloudBase - BaseDown;
 }
 
 /** The terrestrial field's packed pins, in TR_BuildField's layout. ONE PACKER
@@ -765,9 +762,9 @@ static void NoiseClock(const UFlowSimConfig* Config, double T, float& OutDriftAn
     OutPhase = (float)(Cycles - FMath::FloorToDouble(Cycles));
 }
 
-/** A layer's weights with its amount zeroed when it has no volume. No texture
- *  is neutral for erosion and relief both, so a missing layer is left out
- *  rather than read as whatever the material or the bake binds instead. */
+/** A gas giant layer's weights with its amount zeroed when it has no volume. No
+ *  texture is neutral for erosion and relief both, so a missing layer is left
+ *  out rather than read as whatever the material or the bake binds instead. */
 static FLinearColor LayerWeights(const FAtmosphereNoiseLayerParams& Layer)
 {
     FLinearColor Weights = Layer.NoiseWeights;
@@ -775,68 +772,82 @@ static FLinearColor LayerWeights(const FAtmosphereNoiseLayerParams& Layer)
     return Weights;
 }
 
-static FTerrestrialFieldPins PackTerrestrialField(
-    const FTerrestrialProfileParams& P, const FTerrestrialMotionParams& M,
-    const FTerrestrialGenusParams& G,
-    const FAtmosphereNoiseLayerParams& Structure, const FAtmosphereNoiseLayerParams& Detail,
-    const FVector2D& ShadowCascadeRadii, const UFlowSimConfig* SimConfig, double Time)
+/** The cloud material as the view and the bake read it: albedo held to [0, 1],
+ *  extinction non-negative, and fair-weather extinction's amount at 1, since
+ *  CloudOpticalDepth carries it. */
+static FTerrestrialCloudMaterialParams ResolveCloudMaterial(const FTerrestrialCloudMaterialParams& M)
 {
+    const auto NonNegative = [](const FLinearColor& C)
+        {
+            return FLinearColor(FMath::Max(C.R, 0.0f), FMath::Max(C.G, 0.0f), FMath::Max(C.B, 0.0f), FMath::Max(C.A, 0.0f));
+        };
+
+    FTerrestrialCloudMaterialParams Out = M;
+
+    Out.CloudScatter = M.CloudScatter.GetClamped(0.0f, 1.0f);
+    Out.StormScatter = M.StormScatter.GetClamped(0.0f, 1.0f);
+    Out.CloudExtinction = NonNegative(M.CloudExtinction);
+    Out.CloudExtinction.A = 1.0f;
+    Out.StormExtinction = NonNegative(M.StormExtinction);
+
+    return Out;
+}
+
+/** Reads the actor's terrestrial groups; the pins are grouped by the shader's
+ *  needs, not the panel's, so most pins draw on several groups. */
+static FTerrestrialFieldPins PackTerrestrialField(const APlanetAtmosphereActor& A, double Time)
+{
+    const FTerrestrialShapeParams& Shape = A.TerrestrialShape;
+    const FTerrestrialCoverageParams& Coverage = A.TerrestrialCoverage;
+    const FTerrestrialTypeParams& Type = A.TerrestrialType;
+    const FTerrestrialLiftParams& Lift = A.TerrestrialLift;
+    const FTerrestrialWarpParams& Warp = A.TerrestrialWarp;
+    const FTerrestrialStructureLayerParams& Structure = A.TerrestrialStructureLayer;
+    const FTerrestrialDetailLayerParams& Detail = A.TerrestrialDetailLayer;
+    const FVector2D& Cascades = A.TerrestrialSurfaceShadow.CascadeRadii;
+
     FTerrestrialFieldPins Out;
 
     float DriftAngle, NoisePhase;
-    NoiseClock(SimConfig, Time, DriftAngle, NoisePhase);
+    NoiseClock(A.Simulation.Config, Time, DriftAngle, NoisePhase);
 
     // The planet's own spin, wrapped in double like the drift. Negated: turning
     // the sample point back carries the field forward.
-    const float SpinAngle = (float)FMath::Fmod(-(double)M.RotationWeight * Time, 2.0 * UE_DOUBLE_PI);
+    const float SpinAngle = (float)FMath::Fmod(-(double)A.TerrestrialPlanet.SpinRate * Time, 2.0 * UE_DOUBLE_PI);
 
-    Out.CloudProfile = FLinearColor(P.CloudBase, P.CloudThickness, P.SurfaceSoftness, P.CeilingFalloff);
-    Out.CloudCurves = FLinearColor(P.TopCurve, P.BottomCurve, P.CloudSlope, P.WarpStretch);
-    Out.CloudCoverage = FLinearColor(P.CloudCover, P.StormPriority, P.CoverageSoftness, P.ErosionGain);
-    Out.CloudType = FLinearColor(P.TypeBias, 0.0f, P.TypeTropical, P.ErosionAscent);
-    Out.CloudLid = FLinearColor(P.PressureScale, P.CeilingDepth, P.CeilingPressure, P.StratusDepth);
-    Out.CloudLift = FLinearColor(P.BaseTropical, P.BasePressure, P.AltitudeGain, P.AltitudeLift);
-    Out.CloudMotion = FLinearColor(DriftAngle, NoisePhase, P.WarpShift, SpinAngle);
+    // Free slots stay zero.
+    Out.CloudProfile = FLinearColor(Shape.CloudBase, Shape.CloudThickness, Shape.SurfaceSoftness, Shape.CeilingFalloff);
+    Out.CloudCurves = FLinearColor(Shape.TopCurve, Shape.BottomCurve, A.TerrestrialCloudSlope, Warp.WarpStretch);
+    Out.CloudCoverage = FLinearColor(Coverage.CloudCover, Coverage.StormPriority, Coverage.CoverageSoftness, 0.0f);
+    Out.CloudType = FLinearColor(Type.TypeBias, 0.0f, Type.TypeTropical, 0.0f);
+    Out.CloudLid = FLinearColor(Lift.PressureScale, Lift.CeilingDepth, Lift.CeilingPressure, Type.StratusDepth);
+    Out.CloudLift = FLinearColor(Lift.BaseTropical, Lift.BasePressure, Lift.AltitudeGain, Lift.AltitudeLift);
+    Out.CloudMotion = FLinearColor(DriftAngle, NoisePhase, Warp.WarpShift, SpinAngle);
 
-    const auto Sampling = [](const FAtmosphereNoiseLayerParams& L)
-        {
-            return FLinearColor(L.Scale, L.Aspect, L.Erosion, L.FadeMean);
-        };
-
-    const auto Warp = [](const FAtmosphereNoiseLayerParams& L)
-        {
-            return FLinearColor(L.FlowInherit, 0.0f, L.FadeNear, L.FadeSpan);
-        };
-
-    // Only the layer amount is read from NoiseWeights; its RGB octave weights
-    // are the gas giant's.
+    // Each layer's volume flag: a layer without one is left out, since no
+    // texture is not neutral noise.
     Out.NoiseLevels = FLinearColor(
-        Structure.MipBias, LayerWeights(Structure).A, Detail.MipBias, LayerWeights(Detail).A);
+        Structure.MipBias, Structure.Volume ? 1.0f : 0.0f, Detail.MipBias, Detail.Volume ? 1.0f : 0.0f);
 
-    Out.StructureSampling = Sampling(Structure);
+    // The structure layer's spare slots carry the storm's share of cloud type
+    // and the genus blend's subsidence.
+    Out.StructureSampling = FLinearColor(Structure.Scale, Structure.Aspect, Structure.Erosion, Type.TypeStorm);
+    Out.StructureWarp = FLinearColor(Structure.FlowInherit, Type.Subsidence, 0.0f, 0.0f);
 
-    // FadeMean is the detail layer's alone; the structure's slot carries the
-    // storm's share of cloud type.
-    Out.StructureSampling.A = P.TypeStorm;
-    Out.StructureWarp = Warp(Structure);
+    Out.DetailSampling = FLinearColor(Detail.Scale, Detail.Aspect, Detail.Erosion, Detail.FadeMean);
+    Out.DetailWarp = FLinearColor(Detail.FlowInherit, 0.0f, Detail.FadeNear, Detail.FadeSpan);
 
-    Out.DetailSampling = Sampling(Detail);
-    Out.DetailWarp = Warp(Detail);
-
-    // The genus blend's subsidence rides in the structure warp's spare slot.
-    Out.StructureWarp.G = G.Subsidence;
-
-    Out.CloudGenusStratus = G.Stratus;
-    Out.CloudGenusStratocumulus = G.Stratocumulus;
-    Out.CloudGenusCumulus = G.Cumulus;
-    Out.CloudGenusCirrus = G.Cirrus;
+    Out.CloudGenusStratus = Type.Stratus;
+    Out.CloudGenusStratocumulus = Type.Stratocumulus;
+    Out.CloudGenusCumulus = Type.Cumulus;
+    Out.CloudGenusCirrus = Type.Cirrus;
 
     // The cloud layer and coverage fray ride in the cascade pin's spare slots.
     Out.ShadowCascades = FLinearColor(
-        (float)ShadowCascadeRadii.X, (float)ShadowCascadeRadii.Y, (float)P.CloudLayer, P.CoverageFray);
+        (float)Cascades.X, (float)Cascades.Y, (float)Coverage.CloudLayer, Coverage.CoverageFray);
 
-    // X is free.
-    Out.CloudResponse = FLinearColor(0.0f, P.TypeCurve, P.StormBalance, P.StormBlend);
+    Out.CloudResponse = FLinearColor(
+        0.0f, Type.TypeCurve, A.TerrestrialCloudMaterial.StormBalance, A.TerrestrialCloudMaterial.StormBlend);
 
     return Out;
 }
@@ -901,7 +912,7 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
     // because both materials expand the same build macro; the values behind them
     // are not.
 
-    SetScalarChecked(MID_Atmosphere, TEXT("HeightScale"), ActiveGeometry().HeightScale);
+    SetScalarChecked(MID_Atmosphere, TEXT("HeightScale"), ActiveHeightScale());
 
     // -- The field's own ----------------------------------------------------------
 
@@ -914,63 +925,61 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
         ApplyTerrestrialModelParams();
     }
 
-    // The noise volumes, which both models bind under the same names.
-    if (ActiveStructureLayer().Volume)
+    if (UVolumeTexture* Volume = ActiveStructureVolume())
     {
-        SetTextureChecked(MID_Atmosphere, TEXT("StructureVolume"), ActiveStructureLayer().Volume);
+        SetTextureChecked(MID_Atmosphere, TEXT("StructureVolume"), Volume);
     }
 
-    if (ActiveDetailLayer().Volume)
+    if (UVolumeTexture* Volume = ActiveDetailVolume())
     {
-        SetTextureChecked(MID_Atmosphere, TEXT("DetailVolume"), ActiveDetailLayer().Volume);
+        SetTextureChecked(MID_Atmosphere, TEXT("DetailVolume"), Volume);
     }
 
-    // -- Atmosphere Lighting ------------------------------------------------------
+    // -- Air and ambient ----------------------------------------------------------
 
-    const FAtmosphereLightingParams& Air = ActiveAtmosphereLighting();
+    const FAtmosphereAirParams& AirP = ActiveAir();
+    const FAtmosphereAmbientParams& AmbientP = ActiveAmbient();
 
-    SetVectorChecked(MID_Atmosphere, TEXT("RayleighBeta"), Air.RayleighBeta);
-    SetScalarChecked(MID_Atmosphere, TEXT("RayleighScaleHeight"), Air.RayleighScaleHeight);
-    SetVectorChecked(MID_Atmosphere, TEXT("MieBeta"), Air.MieBeta);
-    SetScalarChecked(MID_Atmosphere, TEXT("MieScaleHeight"), Air.MieScaleHeight);
-    SetScalarChecked(MID_Atmosphere, TEXT("MieG"), Air.MieG);
-    SetVectorChecked(MID_Atmosphere, TEXT("AbsorptionBeta"), Air.AbsorptionBeta);
-    SetScalarChecked(MID_Atmosphere, TEXT("AbsorptionAltitude"), Air.AbsorptionAltitude);
-    SetScalarChecked(MID_Atmosphere, TEXT("AbsorptionFalloff"), Air.AbsorptionFalloff);
-    SetVectorChecked(MID_Atmosphere, TEXT("AtmosphereAmbient"), Air.AtmosphereAmbient);
-    SetScalarChecked(MID_Atmosphere, TEXT("AtmosphereAmbientFloor"), Air.AtmosphereAmbientFloor);
+    SetVectorChecked(MID_Atmosphere, TEXT("RayleighBeta"), AirP.RayleighBeta);
+    SetScalarChecked(MID_Atmosphere, TEXT("RayleighScaleHeight"), AirP.RayleighScaleHeight);
+    SetVectorChecked(MID_Atmosphere, TEXT("MieBeta"), AirP.MieBeta);
+    SetScalarChecked(MID_Atmosphere, TEXT("MieScaleHeight"), AirP.MieScaleHeight);
+    SetScalarChecked(MID_Atmosphere, TEXT("MieG"), AirP.MieG);
+    SetScalarChecked(MID_Atmosphere, TEXT("MieLobeDecay"), AirP.MieLobeDecay);
+    SetVectorChecked(MID_Atmosphere, TEXT("AbsorptionBeta"), AirP.AbsorptionBeta);
+    SetScalarChecked(MID_Atmosphere, TEXT("AbsorptionAltitude"), AirP.AbsorptionAltitude);
+    SetScalarChecked(MID_Atmosphere, TEXT("AbsorptionFalloff"), AirP.AbsorptionFalloff);
+
+    SetVectorChecked(MID_Atmosphere, TEXT("AtmosphereAmbient"), AmbientP.AtmosphereAmbient);
+    SetScalarChecked(MID_Atmosphere, TEXT("AtmosphereAmbientFloor"), AmbientP.AtmosphereAmbientFloor);
+    SetVectorChecked(MID_Atmosphere, TEXT("CloudAmbient"), AmbientP.CloudAmbient);
+    SetScalarChecked(MID_Atmosphere, TEXT("CloudAmbientFloor"), AmbientP.CloudAmbientFloor);
+    SetScalarChecked(MID_Atmosphere, TEXT("AmbientTerminator"), AmbientP.AmbientTerminator);
 
     // -- Cloud Lighting -------------------------------------------------------------
 
-    const FAtmosphereExtinctionParams& Ext = ActiveExtinction();
     const FAtmospherePhaseParams& PhaseP = ActivePhase();
     const FAtmosphereMultipleScatteringParams& MS = ActiveMultipleScattering();
-    const FAtmosphereTerminatorParams& Term = ActiveTerminator();
-
-    // DensityCurve is pushed by the gas giant alone: the terrestrial band shapes
-    // each of its two ramps separately and its material carries no such pin.
-    SetScalarChecked(MID_Atmosphere, TEXT("LightExtinctionFraction"), Ext.LightExtinctionFraction);
 
     SetScalarChecked(MID_Atmosphere, TEXT("ForwardG"), PhaseP.ForwardG);
     SetScalarChecked(MID_Atmosphere, TEXT("BackwardG"), PhaseP.BackwardG);
     SetScalarChecked(MID_Atmosphere, TEXT("ForwardWeight"), PhaseP.ForwardWeight);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudAmbient"), PhaseP.CloudAmbient);
-    SetScalarChecked(MID_Atmosphere, TEXT("CloudAmbientFloor"), PhaseP.CloudAmbientFloor);
 
+    SetScalarChecked(MID_Atmosphere, TEXT("LightExtinctionFraction"), MS.LightExtinctionFraction());
     SetScalarChecked(MID_Atmosphere, TEXT("OctaveCount"), static_cast<float>(MS.OctaveCount));
     SetScalarChecked(MID_Atmosphere, TEXT("OctaveAttenuation"), MS.OctaveAttenuation);
     SetScalarChecked(MID_Atmosphere, TEXT("OctaveContribution"), MS.OctaveContribution);
     SetScalarChecked(MID_Atmosphere, TEXT("OctaveEccentricity"), MS.OctaveEccentricity);
 
-    SetScalarChecked(MID_Atmosphere, TEXT("TerminatorSoftness"), Term.TerminatorSoftness);
-    SetScalarChecked(MID_Atmosphere, TEXT("AmbientTerminator"), Term.AmbientTerminator);
-    SetScalarChecked(MID_Atmosphere, TEXT("MieLobeDecay"), Term.MieLobeDecay);
-    SetScalarChecked(MID_Atmosphere, TEXT("LobeShadowPower"), Term.LobeShadowPower);
+    SetScalarChecked(MID_Atmosphere, TEXT("TerminatorSoftness"),
+        bTerrestrial() ? TerrestrialTerminatorSoftness : Terminator.TerminatorSoftness);
+    SetScalarChecked(MID_Atmosphere, TEXT("LobeShadowPower"),
+        bTerrestrial() ? TerrestrialLobeShadowPower : Terminator.LobeShadowPower);
 
     // -- Pipeline -----------------------------------------------------------------
 
-    SetScalarChecked(MID_Atmosphere, TEXT("AtmosphereSteps"), Raymarch.AtmosphereSteps);
-    SetScalarChecked(MID_Atmosphere, TEXT("CloudSteps"), Raymarch.CloudSteps);
+    SetScalarChecked(MID_Atmosphere, TEXT("AtmosphereSteps"), static_cast<float>(Raymarch.AtmosphereSteps));
+    SetScalarChecked(MID_Atmosphere, TEXT("CloudSteps"), static_cast<float>(Raymarch.CloudSteps));
     SetScalarChecked(MID_Atmosphere, TEXT("ChordSpread"), Raymarch.ChordSpread);
 
     // -- Surface Shadows ----------------------------------------------------------
@@ -1000,7 +1009,7 @@ void APlanetAtmosphereActor::ApplyGasGiantModelParams()
     SetScalarChecked(MID_Atmosphere, TEXT("DeckBackstop"), GasGiantProfile.DeckBackstop);
     SetScalarChecked(MID_Atmosphere, TEXT("DeckSlope"), GasGiantProfile.DeckSlope);
     SetScalarChecked(MID_Atmosphere, TEXT("DeckOpticalDepth"), GasGiantProfile.DeckOpticalDepth);
-    SetScalarChecked(MID_Atmosphere, TEXT("DensityCurve"), Extinction.DensityCurve);
+    SetScalarChecked(MID_Atmosphere, TEXT("DensityCurve"), GasGiantProfile.DensityCurve);
 
     // The band shape and the deck's relief.
     SetScalarChecked(MID_Atmosphere, TEXT("BandSharpness"), GasGiantBandShape.BandSharpness);
@@ -1037,13 +1046,9 @@ void APlanetAtmosphereActor::ApplyGasGiantModelParams()
 
 void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
 {
-    SolveTerrestrialBounds(
-        TerrestrialProfile, TerrestrialProfile.SolvedTopMax, TerrestrialProfile.SolvedBaseMin);
+    SolveTerrestrialBounds(TerrestrialShape, TerrestrialLift);
 
-    const FTerrestrialFieldPins Pins = PackTerrestrialField(
-        TerrestrialProfile, TerrestrialMotion, TerrestrialGenus,
-        TerrestrialStructureLayer, TerrestrialDetailLayer,
-        ShadowCascadeRadii, Simulation.Config, GetFieldTime());
+    const FTerrestrialFieldPins Pins = PackTerrestrialField(*this, GetFieldTime());
 
     SetVectorChecked(MID_Atmosphere, TEXT("CloudProfile"), Pins.CloudProfile);
     SetVectorChecked(MID_Atmosphere, TEXT("CloudCurves"), Pins.CloudCurves);
@@ -1064,12 +1069,13 @@ void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
     SetVectorChecked(MID_Atmosphere, TEXT("ShadowCascades"), Pins.ShadowCascades);
     SetVectorChecked(MID_Atmosphere, TEXT("CloudResponse"), Pins.CloudResponse);
 
-    SetScalarChecked(MID_Atmosphere, TEXT("CloudOpticalDepth"), TerrestrialProfile.CloudOpticalDepth);
+    const FTerrestrialCloudMaterialParams Material = ResolveCloudMaterial(TerrestrialCloudMaterial);
 
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudScatter"), TerrestrialCloudMaterial.CloudScatter);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudExtinction"), TerrestrialCloudMaterial.CloudExtinction);
-    SetVectorChecked(MID_Atmosphere, TEXT("StormScatter"), TerrestrialCloudMaterial.StormScatter);
-    SetVectorChecked(MID_Atmosphere, TEXT("StormExtinction"), TerrestrialCloudMaterial.StormExtinction);
+    SetScalarChecked(MID_Atmosphere, TEXT("CloudOpticalDepth"), Material.CloudOpticalDepth);
+    SetVectorChecked(MID_Atmosphere, TEXT("CloudScatter"), Material.CloudScatter);
+    SetVectorChecked(MID_Atmosphere, TEXT("CloudExtinction"), Material.CloudExtinction);
+    SetVectorChecked(MID_Atmosphere, TEXT("StormScatter"), Material.StormScatter);
+    SetVectorChecked(MID_Atmosphere, TEXT("StormExtinction"), Material.StormExtinction);
 }
 
 void APlanetAtmosphereActor::ApplyNoiseLayer(const TCHAR* Prefix, const FAtmosphereNoiseLayerParams& Layer)
@@ -1151,7 +1157,8 @@ bool APlanetAtmosphereActor::PrepareShadowTarget()
     Claim.Frame = GFrameCounter;
     bWarnedSharedShadowTarget = false;
 
-    const int32 Edge = FMath::Clamp(ShadowResolution, 64, 4096);
+    // The property's own range, which a Blueprint or a loaded file can bypass.
+    const int32 Edge = FMath::Clamp(ShadowResolution, 128, 4096);
 
     // bCanCreateUAV must be set BEFORE the resource is created, or the texture
     // comes back without UAV support and every dispatch that writes it silently
@@ -1248,13 +1255,13 @@ void APlanetAtmosphereActor::UpdateTransmittanceTable(float PlanetRadius)
 
     // The values ApplyMarchParams pushes: the table is keyed to them, and
     // AtmoT_Profile converts them on both sides.
-    const FAtmosphereLightingParams& Air = ActiveAtmosphereLighting();
+    const FAtmosphereAirParams& AirP = ActiveAir();
 
     FAtmosphereTransmittanceParams Params;
     Params.PlanetRadius = PlanetRadius;
-    Params.AtmosphereRadius = ActiveGeometry().GetAtmosphereRadius(PlanetRadius);
+    Params.AtmosphereRadius = PlanetRadius * (1.0f + ActiveHeightScale());
     Params.ProfilePins = FVector4f(
-        Air.RayleighScaleHeight, Air.MieScaleHeight, Air.AbsorptionAltitude, Air.AbsorptionFalloff);
+        AirP.RayleighScaleHeight, AirP.MieScaleHeight, AirP.AbsorptionAltitude, AirP.AbsorptionFalloff);
     Params.TableResource = TableRes;
 
     if (Params.IsUsable() && !Params.Matches(TransmittanceBaked))
@@ -1400,24 +1407,24 @@ bool APlanetAtmosphereActor::FillSharedShadowParams(
 
     // Only what both fields read. Each model's own members are filled by its
     // branch in RequestShadowBake.
-    const FAtmosphereNoiseLayerParams& Structure = ActiveStructureLayer();
-    const FAtmosphereNoiseLayerParams& Detail = ActiveDetailLayer();
-
     Params.PlanetRadius = PlanetRadius;
-    Params.HeightScale = ActiveGeometry().HeightScale;
+    Params.HeightScale = ActiveHeightScale();
     Params.Time = static_cast<float>(GetFieldTime());
 
     // -- Extinction ---------------------------------------------------------
 
-    Params.LightExtinctionFraction = ActiveExtinction().LightExtinctionFraction;
+    Params.LightExtinctionFraction = ActiveMultipleScattering().LightExtinctionFraction();
 
     // -- Volumes ------------------------------------------------------------
     //
     // Resources of the properties ApplyMarchParams already pushes, not a second
     // reference to the assets: a compute pass cannot reach a UObject.
 
-    Params.DetailResource = Detail.Volume ? Detail.Volume->GetResource() : nullptr;
-    Params.StructureResource = Structure.Volume ? Structure.Volume->GetResource() : nullptr;
+    UVolumeTexture* Structure = ActiveStructureVolume();
+    UVolumeTexture* Detail = ActiveDetailVolume();
+
+    Params.DetailResource = Detail ? Detail->GetResource() : nullptr;
+    Params.StructureResource = Structure ? Structure->GetResource() : nullptr;
 
     return true;
 }
@@ -1458,7 +1465,7 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.DeckBackstop = GasGiantProfile.DeckBackstop;
         Params.DeckSlope = GasGiantProfile.DeckSlope;
         Params.DeckOpticalDepth = GasGiantProfile.DeckOpticalDepth;
-        Params.DensityCurve = Extinction.DensityCurve;
+        Params.DensityCurve = GasGiantProfile.DensityCurve;
 
         Params.BandSharpness = GasGiantBandShape.BandSharpness;
         Params.BandBias = GasGiantBandShape.BandBias;
@@ -1523,10 +1530,7 @@ void APlanetAtmosphereActor::RequestShadowBake(
             return;
         }
 
-        const FTerrestrialFieldPins Pins = PackTerrestrialField(
-            TerrestrialProfile, TerrestrialMotion, TerrestrialGenus,
-            TerrestrialStructureLayer, TerrestrialDetailLayer,
-            ShadowCascadeRadii, Simulation.Config, GetFieldTime());
+        const FTerrestrialFieldPins Pins = PackTerrestrialField(*this, GetFieldTime());
 
         Params.CloudProfile = ToVector4(Pins.CloudProfile);
         Params.CloudCurves = ToVector4(Pins.CloudCurves);
@@ -1547,9 +1551,11 @@ void APlanetAtmosphereActor::RequestShadowBake(
         Params.ShadowCascades = ToVector4(Pins.ShadowCascades);
         Params.CloudResponse = ToVector4(Pins.CloudResponse);
 
-        Params.CloudOpticalDepth = TerrestrialProfile.CloudOpticalDepth;
-        Params.CloudExtinction = ToVector4(TerrestrialCloudMaterial.CloudExtinction);
-        Params.StormExtinction = ToVector4(TerrestrialCloudMaterial.StormExtinction);
+        const FTerrestrialCloudMaterialParams Material = ResolveCloudMaterial(TerrestrialCloudMaterial);
+
+        Params.CloudOpticalDepth = Material.CloudOpticalDepth;
+        Params.CloudExtinction = ToVector4(Material.CloudExtinction);
+        Params.StormExtinction = ToVector4(Material.StormExtinction);
 
         if (Sim->RequestShadowBake(Params))
         {

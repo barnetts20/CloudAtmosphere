@@ -448,7 +448,8 @@ float SimLaplacian(Texture2DArray<float> Field, int2 C, uint Layer, out float Ou
 		OutDiagonal);
 }
 
-/** Half-width, in texels, of the longitudinal box filter at this latitude.
+/** Half-width, in texels, of the longitudinal box filter at this latitude,
+ *  held within the row.
  *
  *  THE POLE PROBLEM. Physical longitudinal spacing is cos(phi) * dlambda, which
  *  goes to zero at the poles: grid-scale longitudinal modes there are far finer
@@ -459,7 +460,7 @@ float SimLaplacian(Texture2DArray<float> Field, int2 C, uint Layer, out float Ou
  *  What it costs is polar detail. Discrete long-lived polar vortex clusters
  *  would not emerge from a solve at this resolution anyway and belong on an
  *  authored path. */
-int SimFilterHalfWidth(float Mu, float FilterLatitude, int MaxHalfWidth)
+int SimFilterHalfWidth(float Mu, float FilterLatitude)
 {
     const float CosPhi = sqrt(max(1.0f - Mu * Mu, 0.0f));
 
@@ -470,5 +471,5 @@ int SimFilterHalfWidth(float Mu, float FilterLatitude, int MaxHalfWidth)
 
     const float Width = FilterLatitude / max(CosPhi, 1e-4f);
 
-    return clamp((int) round((Width - 1.0f) * 0.5f), 0, MaxHalfWidth);
+    return clamp((int) round((Width - 1.0f) * 0.5f), 0, (SimGridSize.x - 1) / 2);
 }

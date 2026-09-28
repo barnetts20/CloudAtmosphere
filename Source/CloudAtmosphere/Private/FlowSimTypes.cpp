@@ -6,33 +6,17 @@
 
 namespace
 {
-	/** Versions of UFlowSimConfig's saved data. */
+	/** Versions of UFlowSimConfig's saved data. An asset saved at an older
+	 *  version loads its values under the current meanings, unconverted. */
 	struct FFlowSimConfigVersion
 	{
 		enum Type : int32
 		{
-			Initial = 0,
+			/** PITFALL: never lower this number. The engine refuses a package
+			 *  saved at a version above Latest. */
+			Current = 6,
 
-			/** Winds authored as fractions of the speed root. */
-			SpeedRoot = 1,
-
-			/** Grid-scale damping authored per unit time. */
-			DampingRate = 2,
-
-			/** Storm cell inflow authored as a fraction of the speed root. */
-			InflowSpeed = 3,
-
-			/** Storm cell inflow authored as a fraction of the target wind. */
-			InflowRatio = 4,
-
-			/** One grid resolution, the atlas face edge, in place of the columns
-			 *  and rows. */
-			GridResolution = 5,
-
-			/** The forcing noise frequency as ForcingFrequency. */
-			ForcingFrequency = 6,
-
-			Latest = ForcingFrequency
+			Latest = Current
 		};
 
 		static const FGuid Guid;
@@ -220,59 +204,6 @@ FFlowSimSpeeds UFlowSimConfig::ResolveSpeeds() const
 // Loading
 // ---------------------------------------------------------------------------
 
-namespace
-{
-	/** Winds from the values saved before the speed root. */
-	void ConvertToSpeedRoot(UFlowSimConfig& Config)
-	{
-		// A ceiling of 0 turned the ceiling off; the root needs one, so it takes
-		// the loosest.
-		if (Config.FroudeCeiling <= 0.0f)
-		{
-			Config.FroudeCeiling = 1.0f;
-		}
-
-		// EVERY VALUE AT THE REGIME IT WAS SAVED WITH: the fractions reproduce the
-		// same rates, so the converted config runs exactly as it did.
-		const float Root = Config.GetSpeedRoot();
-		const float Turnover = FMath::Max(Config.DeformationRadius, 0.01f) / Root;
-
-		Config.JetSpeed = Config.JetStrength_DEPRECATED * JetPeak(Config) / Root;
-		Config.ShearSpeed = Config.ThermalShear_DEPRECATED * ShapePeak(Config) / Root;
-
-		// Layer 0's forcing-to-drag ratio becomes EddySpeed, and each layer's
-		// ratio against it that layer's EddyScale.
-		float Reference = 1.0f;
-
-		if (Config.LayerProfiles.Num() > 0 && Config.LayerProfiles[0].ForcingScale_DEPRECATED > 0.0f)
-		{
-			Reference = Config.LayerProfiles[0].ForcingScale_DEPRECATED / FMath::Max(Config.LayerProfiles[0].DragScale, 1e-3f);
-		}
-
-		Config.EddySpeed = Config.ForcingAmplitude_DEPRECATED * Reference / Root;
-
-		for (FFlowLayerProfile& Layer : Config.LayerProfiles)
-		{
-			Layer.EddyScale = Layer.ForcingScale_DEPRECATED / FMath::Max(Layer.DragScale, 1e-3f) / Reference;
-		}
-
-		Config.StormCellSpeed = Config.StormCellWind_DEPRECATED / Root;
-		Config.StormCellDriftSpeed = Config.StormCellDrift_DEPRECATED / Root;
-		Config.GenesisShearSpeed = Config.GenesisShear_DEPRECATED / Root;
-		Config.WindEvaporationGain = Config.WindEvaporation_DEPRECATED * Root;
-
-		const float JetRate = Config.JetStrength_DEPRECATED * (Config.LayerProfiles.Num() > 0 ? Config.LayerProfiles[0].JetScale : 1.0f);
-
-		Config.NoiseDriftSpeed = Config.NoiseDrift_DEPRECATED * JetRate / Root;
-		Config.NoiseResetTurnovers = FMath::Max(Config.NoiseResetPeriod_DEPRECATED, 0.05f) / FMath::Max(FMath::Abs(JetRate), 1e-3f) / Turnover;
-
-		UE_LOG(LogFlowSim, Display,
-			TEXT("Converted '%s' to the speed root (%.3f): jet %.3f, shear %.3f, eddies %.3f, storm cells %.3f of it. ")
-			TEXT("Save the asset to keep the conversion."),
-			*Config.GetName(), Root, Config.JetSpeed, Config.ShearSpeed, Config.EddySpeed, Config.StormCellSpeed);
-	}
-}
-
 void UFlowSimConfig::Serialize(FArchive& Ar)
 {
 	Ar.UsingCustomVersion(FFlowSimConfigVersion::Guid);
@@ -291,49 +222,11 @@ void UFlowSimConfig::PostLoad()
 
 	const int32 Version = GetLinkerCustomVersion(FFlowSimConfigVersion::Guid);
 
-	// First: the conversions below read the grid. Every saved grid is 2:1, so
-	// a quarter of the columns reproduces it.
-	if (Version < FFlowSimConfigVersion::GridResolution)
+	if (Version < FFlowSimConfigVersion::Current)
 	{
-		GridResolution = FlowSimShader::GridResolution(GridLongitude_DEPRECATED / 4);
-
-		UE_LOG(LogFlowSim, Display,
-			TEXT("Converted '%s' to GridResolution %d (%dx%d). Save the asset to keep the conversion."),
-			*GetName(), GridResolution, FlowSimShader::GridLongitude(GridResolution), FlowSimShader::GridLatitude(GridResolution));
-	}
-
-	if (Version < FFlowSimConfigVersion::SpeedRoot)
-	{
-		ConvertToSpeedRoot(*this);
-	}
-
-	if (Version < FFlowSimConfigVersion::ForcingFrequency)
-	{
-		ForcingFrequency = ForcingScale_DEPRECATED;
-	}
-
-	if (Version < FFlowSimConfigVersion::DampingRate)
-	{
-		// The per-step fraction as a rate at the step it was saved with, plus
-		// the implicit scheme's share there, which it was adding to.
-		const float Step = GetStepSize();
-		const float Fraction = FMath::Clamp(DivergenceDamping_DEPRECATED, 0.0f, MaxDampingFraction);
-
-		GridDamping = -FMath::Loge(1.0f - Fraction) / Step + GetImplicitDampingRate(Step);
-
-		UE_LOG(LogFlowSim, Display,
-			TEXT("Converted '%s' to GridDamping %.3f per unit time (step %g). Save the asset to keep the conversion."),
-			*GetName(), GridDamping, Step);
-	}
-
-	// Earlier versions store the inflow as a fraction of the target wind
-	// already; only the speed-root form needs converting.
-	if (Version == FFlowSimConfigVersion::InflowSpeed)
-	{
-		StormCellInflow = FMath::Clamp(StormCellInflow / FMath::Max(StormCellSpeed, 1e-3f), 0.0f, 1.0f);
-
-		UE_LOG(LogFlowSim, Display,
-			TEXT("Converted '%s' to StormCellInflow %.3f of the target wind. Save the asset to keep the conversion."),
-			*GetName(), StormCellInflow);
+		UE_LOG(LogFlowSim, Warning,
+			TEXT("'%s' is config version %d, older than %d: its values apply under the current meanings, unconverted. ")
+			TEXT("Load a preset with CloudAtmosphere.LoadParams and save the asset."),
+			*GetName(), Version, (int32)FFlowSimConfigVersion::Current);
 	}
 }

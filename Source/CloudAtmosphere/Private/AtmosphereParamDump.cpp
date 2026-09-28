@@ -40,8 +40,7 @@ namespace AtmosphereDump
 {
 	using FFilter = TFunctionRef<bool(const FProperty*)>;
 
-	/** The sim config's saved-data version, the one its PostLoad converts
-	 *  from; -1 if unregistered. */
+	/** The sim config's saved-data version; -1 if unregistered. */
 	int32 ConfigVersion()
 	{
 		for (const FCustomVersion& Version : FCurrentCustomVersions::GetAll().GetAllVersions())
@@ -462,6 +461,284 @@ namespace AtmosphereLoad
 		return Names;
 	}
 
+	// -- Renamed members ------------------------------------------------------
+	//
+	// A file written before a rename is read under the current names. Rows are
+	// dotted paths ("Group.Member", "Group" or "Member") and apply in order, so
+	// a later row renaming an earlier row's New chains. An empty New retires a
+	// member: its value is dropped and the load says so. Renames only; a member
+	// whose meaning changed has no row, and a preset carries its value.
+
+	struct FRename
+	{
+		const TCHAR* Old;
+		const TCHAR* New;
+	};
+
+	TConstArrayView<FRename> SimRenames()
+	{
+		static const FRename Rows[] = {
+			{ TEXT("ForcingScale"), TEXT("ForcingFrequency") },
+			{ TEXT("SaturationPole"), TEXT("SaturationPoleRatio") },
+
+			// Retired: the forcing always decodes unipolar (a file saved with true
+			// runs at twice its eddy forcing), the equator's saturation is the
+			// vapour unit (the pole's ratio above is exact where it was 1), and
+			// the polar filter's width follows from the grid.
+			{ TEXT("bForcingBipolar"), TEXT("") },
+			{ TEXT("SaturationEquator"), TEXT("") },
+			{ TEXT("FilterMaxHalfWidth"), TEXT("") },
+		};
+		return Rows;
+	}
+
+	TConstArrayView<FRename> AtmosphereRenames()
+	{
+		static const FRename Rows[] = {
+			// Retired or moved: erosion lives in the structure layer's own Erosion,
+			// the extinction group's members in the material, scattering and gas
+			// giant profile groups; the rest are noise-layer members neither model
+			// reads.
+			{ TEXT("TerrestrialProfile.ErosionGain"), TEXT("") },
+			{ TEXT("TerrestrialProfile.ErosionAscent"), TEXT("") },
+			{ TEXT("TerrestrialStructureLayer.NoiseWeights"), TEXT("") },
+			{ TEXT("TerrestrialStructureLayer.Relief"), TEXT("") },
+			{ TEXT("TerrestrialStructureLayer.ShearInherit"), TEXT("") },
+			{ TEXT("TerrestrialStructureLayer.FadeNear"), TEXT("") },
+			{ TEXT("TerrestrialStructureLayer.FadeSpan"), TEXT("") },
+			{ TEXT("TerrestrialStructureLayer.FadeMean"), TEXT("") },
+			{ TEXT("TerrestrialStructureLayer.BandMix"), TEXT("") },
+			{ TEXT("TerrestrialStructureLayer.bCrossfade"), TEXT("") },
+			{ TEXT("TerrestrialDetailLayer.NoiseWeights"), TEXT("") },
+			{ TEXT("TerrestrialDetailLayer.Relief"), TEXT("") },
+			{ TEXT("TerrestrialDetailLayer.ShearInherit"), TEXT("") },
+			{ TEXT("TerrestrialDetailLayer.BandMix"), TEXT("") },
+			{ TEXT("TerrestrialDetailLayer.bCrossfade"), TEXT("") },
+			{ TEXT("TerrestrialProfile.CloudOpticalDepth"), TEXT("TerrestrialCloudMaterial.CloudOpticalDepth") },
+			{ TEXT("TerrestrialExtinction.LightExtinctionFraction"), TEXT("TerrestrialMultipleScattering.LightExtinctionFraction") },
+			{ TEXT("TerrestrialExtinction.DensityCurve"), TEXT("") },
+			{ TEXT("Extinction.LightExtinctionFraction"), TEXT("MultipleScattering.LightExtinctionFraction") },
+			{ TEXT("Extinction.DensityCurve"), TEXT("GasGiantProfile.DensityCurve") },
+			{ TEXT("StructureLayer.FadeMean"), TEXT("") },
+			{ TEXT("StructureLayer.MipBias"), TEXT("") },
+			{ TEXT("DetailLayer.FadeMean"), TEXT("") },
+			{ TEXT("DetailLayer.MipBias"), TEXT("") },
+
+			// The terrestrial groups by what they act on: the profile splits into
+			// shape, coverage, type, lift and warp, the genus joins type, the shell
+			// height and spin form the planet group, and the lighting group splits
+			// into air and ambient, taking the ambient terminator and the Mie lobe
+			// decay with it. The terrestrial planet shadow is fixed, so the rest of
+			// its terminator group retires.
+			{ TEXT("TerrestrialGeometry"), TEXT("TerrestrialPlanet") },
+			{ TEXT("TerrestrialMotion.RotationWeight"), TEXT("TerrestrialPlanet.SpinRate") },
+			{ TEXT("TerrestrialProfile"), TEXT("TerrestrialShape") },
+			{ TEXT("TerrestrialShape.CloudLayer"), TEXT("TerrestrialCoverage.CloudLayer") },
+			{ TEXT("TerrestrialShape.CloudCover"), TEXT("TerrestrialCoverage.CloudCover") },
+			{ TEXT("TerrestrialShape.StormPriority"), TEXT("TerrestrialCoverage.StormPriority") },
+			{ TEXT("TerrestrialShape.CoverageSoftness"), TEXT("TerrestrialCoverage.CoverageSoftness") },
+			{ TEXT("TerrestrialShape.CoverageFray"), TEXT("TerrestrialCoverage.CoverageFray") },
+			{ TEXT("TerrestrialShape.TypeBias"), TEXT("TerrestrialType.TypeBias") },
+			{ TEXT("TerrestrialShape.TypeTropical"), TEXT("TerrestrialType.TypeTropical") },
+			{ TEXT("TerrestrialShape.TypeStorm"), TEXT("TerrestrialType.TypeStorm") },
+			{ TEXT("TerrestrialShape.TypeCurve"), TEXT("TerrestrialType.TypeCurve") },
+			{ TEXT("TerrestrialShape.StratusDepth"), TEXT("TerrestrialType.StratusDepth") },
+			{ TEXT("TerrestrialGenus"), TEXT("TerrestrialType") },
+			{ TEXT("TerrestrialShape.PressureScale"), TEXT("TerrestrialLift.PressureScale") },
+			{ TEXT("TerrestrialShape.CeilingDepth"), TEXT("TerrestrialLift.CeilingDepth") },
+			{ TEXT("TerrestrialShape.CeilingPressure"), TEXT("TerrestrialLift.CeilingPressure") },
+			{ TEXT("TerrestrialShape.BaseTropical"), TEXT("TerrestrialLift.BaseTropical") },
+			{ TEXT("TerrestrialShape.BasePressure"), TEXT("TerrestrialLift.BasePressure") },
+			{ TEXT("TerrestrialShape.AltitudeGain"), TEXT("TerrestrialLift.AltitudeGain") },
+			{ TEXT("TerrestrialShape.AltitudeLift"), TEXT("TerrestrialLift.AltitudeLift") },
+			{ TEXT("TerrestrialShape.WarpStretch"), TEXT("TerrestrialWarp.WarpStretch") },
+			{ TEXT("TerrestrialShape.WarpShift"), TEXT("TerrestrialWarp.WarpShift") },
+			{ TEXT("TerrestrialShape.CloudSlope"), TEXT("TerrestrialCloudSlope") },
+			{ TEXT("TerrestrialShape.StormBalance"), TEXT("TerrestrialCloudMaterial.StormBalance") },
+			{ TEXT("TerrestrialShape.StormBlend"), TEXT("TerrestrialCloudMaterial.StormBlend") },
+			{ TEXT("TerrestrialAtmosphereLighting"), TEXT("TerrestrialAir") },
+			{ TEXT("TerrestrialAir.AtmosphereAmbient"), TEXT("TerrestrialAmbient.AtmosphereAmbient") },
+			{ TEXT("TerrestrialAir.AtmosphereAmbientFloor"), TEXT("TerrestrialAmbient.AtmosphereAmbientFloor") },
+			{ TEXT("TerrestrialPhase.CloudAmbient"), TEXT("TerrestrialAmbient.CloudAmbient") },
+			{ TEXT("TerrestrialPhase.CloudAmbientFloor"), TEXT("TerrestrialAmbient.CloudAmbientFloor") },
+			{ TEXT("TerrestrialTerminator.AmbientTerminator"), TEXT("TerrestrialAmbient.AmbientTerminator") },
+			{ TEXT("TerrestrialTerminator.MieLobeDecay"), TEXT("TerrestrialAir.MieLobeDecay") },
+			{ TEXT("TerrestrialTerminator.TerminatorSoftness"), TEXT("") },
+			{ TEXT("TerrestrialTerminator.LobeShadowPower"), TEXT("") },
+
+			// The gas giant's air and ambient split the same way; its terminator
+			// keeps its softness and lobe power.
+			{ TEXT("AtmosphereLighting"), TEXT("Air") },
+			{ TEXT("Air.AtmosphereAmbient"), TEXT("Ambient.AtmosphereAmbient") },
+			{ TEXT("Air.AtmosphereAmbientFloor"), TEXT("Ambient.AtmosphereAmbientFloor") },
+			{ TEXT("Phase.CloudAmbient"), TEXT("Ambient.CloudAmbient") },
+			{ TEXT("Phase.CloudAmbientFloor"), TEXT("Ambient.CloudAmbientFloor") },
+			{ TEXT("Terminator.AmbientTerminator"), TEXT("Ambient.AmbientTerminator") },
+			{ TEXT("Terminator.MieLobeDecay"), TEXT("Air.MieLobeDecay") },
+
+			// Retired for the defaults: sunlight penetration is one less the
+			// light-ray extinction fraction, and each model's default gives its
+			// former default; the cascade radii moved to the surface shadows at
+			// new defaults.
+			{ TEXT("TerrestrialMultipleScattering.LightExtinctionFraction"), TEXT("") },
+			{ TEXT("MultipleScattering.LightExtinctionFraction"), TEXT("") },
+			{ TEXT("ShadowCascadeRadii"), TEXT("") },
+		};
+		return Rows;
+	}
+
+	/** The object holding Path's last segment, creating groups on the way when
+	 *  bCreate; null where a segment is missing or not an object. */
+	TSharedPtr<FJsonObject> Holder(const TSharedPtr<FJsonObject>& Root, const TArray<FString>& Path, bool bCreate)
+	{
+		TSharedPtr<FJsonObject> Scope = Root;
+
+		for (int32 i = 0; i + 1 < Path.Num() && Scope.IsValid(); ++i)
+		{
+			const TSharedPtr<FJsonObject>* Next = nullptr;
+
+			if (Scope->TryGetObjectField(Path[i], Next))
+			{
+				Scope = *Next;
+			}
+			else if (bCreate && !Scope->HasField(Path[i]))
+			{
+				const TSharedPtr<FJsonObject> Created = MakeShared<FJsonObject>();
+				Scope->SetObjectField(Path[i], Created);
+				Scope = Created;
+			}
+			else
+			{
+				Scope = nullptr;
+			}
+		}
+
+		return Scope;
+	}
+
+	/** Value into Target under Key. A group merges member by member; anything
+	 *  Target already holds is kept. */
+	void Merge(FJsonObject& Target, const FString& Key, const TSharedPtr<FJsonValue>& Value)
+	{
+		const TSharedPtr<FJsonObject>* Existing = nullptr;
+
+		if (Value->Type == EJson::Object && Target.TryGetObjectField(Key, Existing))
+		{
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Value->AsObject()->Values)
+			{
+				Merge(**Existing, Field.Key, Field.Value);
+			}
+		}
+		else if (!Target.HasField(Key))
+		{
+			Target.SetField(Key, Value);
+		}
+	}
+
+	/** One row over a Values object, whose groups nest. A group the move
+	 *  empties is removed. */
+	void RenameValues(const TSharedPtr<FJsonObject>& Values, const FRename& Row, TArray<FString>& Retired)
+	{
+		TArray<FString> From;
+		TArray<FString> To;
+		FString(Row.Old).ParseIntoArray(From, TEXT("."));
+		FString(Row.New).ParseIntoArray(To, TEXT("."));
+
+		const TSharedPtr<FJsonObject> Source = From.IsEmpty() ? nullptr : Holder(Values, From, false);
+		const TSharedPtr<FJsonValue> Value = Source.IsValid() ? Source->TryGetField(From.Last()) : nullptr;
+
+		if (!Value.IsValid())
+		{
+			return;
+		}
+
+		Source->RemoveField(From.Last());
+
+		if (To.IsEmpty())
+		{
+			Retired.Add(Row.Old);
+		}
+		else if (const TSharedPtr<FJsonObject> Target = Holder(Values, To, true))
+		{
+			Merge(*Target, To.Last(), Value);
+		}
+
+		for (int32 n = From.Num() - 1; n > 0; --n)
+		{
+			From.SetNum(n);
+			const TSharedPtr<FJsonObject> Parent = Holder(Values, From, false);
+			const TSharedPtr<FJsonObject>* Group = nullptr;
+
+			if (!Parent.IsValid() || !Parent->TryGetObjectField(From.Last(), Group) || (*Group)->Values.Num() > 0)
+			{
+				break;
+			}
+
+			Parent->RemoveField(From.Last());
+		}
+	}
+
+	/** One row over an Overrides object, whose keys are flat paths. */
+	void RenameOverrides(FJsonObject& Overrides, const FRename& Row, TArray<FString>& Retired)
+	{
+		const FString Old = Row.Old;
+		TArray<FString> Keys;
+		Overrides.Values.GetKeys(Keys);
+
+		for (const FString& Key : Keys)
+		{
+			if (Key != Old && !Key.StartsWith(Old + TEXT(".")))
+			{
+				continue;
+			}
+
+			const TSharedPtr<FJsonValue> Value = Overrides.TryGetField(Key);
+			Overrides.RemoveField(Key);
+
+			if (*Row.New == TEXT('\0'))
+			{
+				Retired.Add(Key);
+			}
+			else if (const FString Renamed = Row.New + Key.Mid(Old.Len()); !Overrides.HasField(Renamed))
+			{
+				Overrides.SetField(Renamed, Value);
+			}
+		}
+	}
+
+	/** A section's Values, or its Overrides when it has none, under the
+	 *  current names. */
+	void ApplyRenames(const FJsonObject& Section, TConstArrayView<FRename> Rows, const FString& Label)
+	{
+		const TSharedPtr<FJsonObject>* Values = nullptr;
+		const TSharedPtr<FJsonObject>* Overrides = nullptr;
+
+		if (!Section.TryGetObjectField(TEXT("Values"), Values))
+		{
+			Section.TryGetObjectField(TEXT("Overrides"), Overrides);
+		}
+
+		TArray<FString> Retired;
+
+		for (const FRename& Row : Rows)
+		{
+			if (Values)
+			{
+				RenameValues(*Values, Row, Retired);
+			}
+			else if (Overrides)
+			{
+				RenameOverrides(**Overrides, Row, Retired);
+			}
+		}
+
+		if (Retired.Num() > 0)
+		{
+			UE_LOG(LogAtmosphereDump, Display, TEXT("%s: %d retired member(s) not applied: %s"),
+				*Label, Retired.Num(), *FString::Join(Retired, TEXT(", ")));
+		}
+	}
+
 #if WITH_EDITOR
 	/** Holds a number to its ClampMin and ClampMax, which the panel enforces and
 	 *  a file does not. True when it moved. */
@@ -696,59 +973,6 @@ namespace AtmosphereLoad
 		}
 	}
 
-	/** A Values or Overrides group written with GridLongitude and GridLatitude,
-	 *  as GridResolution: a quarter of the columns, which every 2:1 grid
-	 *  reproduces. A group that has GridResolution keeps it. */
-	void AliasGrid(FJsonObject& Group)
-	{
-		const TSharedPtr<FJsonValue> Columns = Group.TryGetField(TEXT("GridLongitude"));
-
-		if (Columns.IsValid() && !Group.HasField(TEXT("GridResolution")))
-		{
-			double Value = 0.0;
-
-			if (Columns->TryGetNumber(Value))
-			{
-				Group.SetNumberField(TEXT("GridResolution"), Value / 4.0);
-			}
-			else if (Columns->Type == EJson::Object)
-			{
-				const TSharedPtr<FJsonObject> Pair = Columns->AsObject();
-				TSharedPtr<FJsonObject> Converted = MakeShared<FJsonObject>();
-				double Default = 0.0;
-
-				if (Pair->TryGetNumberField(TEXT("Value"), Value))
-				{
-					Converted->SetNumberField(TEXT("Value"), Value / 4.0);
-
-					if (Pair->TryGetNumberField(TEXT("Default"), Default))
-					{
-						Converted->SetNumberField(TEXT("Default"), Default / 4.0);
-					}
-
-					Group.SetObjectField(TEXT("GridResolution"), Converted);
-				}
-			}
-		}
-
-		Group.RemoveField(TEXT("GridLongitude"));
-		Group.RemoveField(TEXT("GridLatitude"));
-	}
-
-	/** A field written under a member's former name, moved to its current one.
-	 *  A group that has the current name keeps it. */
-	void AliasRenamed(FJsonObject& Group, const TCHAR* Old, const TCHAR* New)
-	{
-		const TSharedPtr<FJsonValue> Value = Group.TryGetField(Old);
-
-		if (Value.IsValid() && !Group.HasField(New))
-		{
-			Group.SetField(New, Value);
-		}
-
-		Group.RemoveField(Old);
-	}
-
 	/** One section onto one object: its Values when the section has them, the
 	 *  full state, otherwise its Overrides of the C++ defaults over what the
 	 *  object already holds. */
@@ -850,8 +1074,10 @@ namespace AtmosphereLoad
 				continue;
 			}
 
-			ApplySection(*Target, APlanetAtmosphereActor::StaticClass(), **Section,
-				FString::Printf(TEXT("Atmosphere '%s'"), *Target->GetActorNameOrLabel()), Excluded);
+			const FString Label = FString::Printf(TEXT("Atmosphere '%s'"), *Target->GetActorNameOrLabel());
+
+			ApplyRenames(**Section, AtmosphereRenames(), Label);
+			ApplySection(*Target, APlanetAtmosphereActor::StaticClass(), **Section, Label, Excluded);
 		}
 	}
 
@@ -901,8 +1127,8 @@ namespace AtmosphereLoad
 			UFlowSimConfig* Config = Sub ? Sub->GetConfig() : nullptr;
 
 			// NO CONVERSION ON LOAD. A file from an older config version applies its
-			// values under today's meanings; renamed members are skipped as unknown,
-			// except the grid, which is read as GridResolution.
+			// values under today's meanings; renamed members are read under their
+			// current names (SimRenames).
 			double FileVersion = -1.0;
 			const int32 Current = AtmosphereDump::ConfigVersion();
 
@@ -918,16 +1144,7 @@ namespace AtmosphereLoad
 					(int32)FileVersion, Current);
 			}
 
-			for (const TCHAR* Group : { TEXT("Values"), TEXT("Overrides") })
-			{
-				const TSharedPtr<FJsonObject>* Fields = nullptr;
-
-				if ((*Sim)->TryGetObjectField(Group, Fields))
-				{
-					AliasGrid(**Fields);
-					AliasRenamed(**Fields, TEXT("ForcingScale"), TEXT("ForcingFrequency"));
-				}
-			}
+			ApplyRenames(**Sim, SimRenames(), TEXT("Sim section"));
 
 			if (Config)
 			{
@@ -962,5 +1179,6 @@ static FAutoConsoleCommandWithWorldAndArgs GAtmosphereLoadParamsCmd(
 	TEXT("Apply a parameter file in DumpParams' layout to the running sim config and the world's atmosphere actors: ")
 	TEXT("each section's Values, or its Overrides when it has no Values. Any subset of members may be given. ")
 	TEXT("File from Saved/CloudAtmosphere or a full path; optional Sim or Atmospheres limits it. Assets, targets, ")
-	TEXT("debug views and start state are left alone unless Pipeline is given; numbers are held to their ranges."),
+	TEXT("debug views and start state are left alone unless Pipeline is given; numbers are held to their ranges; ")
+	TEXT("members written under a former name are read under the current one."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AtmosphereLoad::Load));

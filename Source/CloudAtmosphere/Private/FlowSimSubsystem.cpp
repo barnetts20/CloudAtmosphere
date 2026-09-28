@@ -611,8 +611,7 @@ void UFlowSimSubsystem::ReportInertSettings() const
 	if (Config->FilterLatitude <= 0.0f)
 	{
 		UE_LOG(LogFlowSim, Log,
-			TEXT("FilterLatitude is 0, so the polar filter is disabled entirely ")
-			TEXT("and FilterMaxHalfWidth has no effect."));
+			TEXT("FilterLatitude is 0, so the polar filter is disabled entirely."));
 	}
 
 	if (Config->DragRate <= 0.0f)
@@ -773,17 +772,39 @@ void UFlowSimSubsystem::ReportStack() const
 
 	// Storms grow once the shear exceeds about beta times twice the square of
 	// the local deformation radius (two equal layers, the classic criterion).
-	const float Lat = FMath::DegreesToRadians(FMath::Clamp(Config->BaroclinicLatitude, 10.0f, 80.0f));
+	// Judged where the shear wind peaks: the zone's centre, or under FollowJets
+	// the strongest jet between 10 and 80 degrees.
+	float Lat = FMath::DegreesToRadians(FMath::Clamp(Config->BaroclinicLatitude, 10.0f, 80.0f));
+
+	if (Config->ThermalShape == EFlowThermalShape::FollowJets)
+	{
+		float PeakWind = -1.0f;
+
+		for (int32 Degree = 10; Degree <= 80; ++Degree)
+		{
+			const float Candidate = FMath::DegreesToRadians((float)Degree);
+			const float Wind = FMath::Abs(FlowSimProfile::ThermalShape(*Config, FMath::Sin(Candidate))) * FMath::Cos(Candidate);
+
+			if (Wind > PeakWind)
+			{
+				PeakWind = Wind;
+				Lat = Candidate;
+			}
+		}
+	}
+
+	const float Shape = FMath::Abs(FlowSimProfile::ThermalShape(*Config, FMath::Sin(Lat)));
+	const float ShearWind = FMath::Abs(Resolved.ThermalShear) * Shape * FMath::Cos(Lat);
 	const float F = Config->PlanetaryVorticity * FMath::Sin(Lat);
 	const float Beta = Config->PlanetaryVorticity * FMath::Cos(Lat);
 	const float LocalRadius = FlowSimProfile::WaveSpeed(*Config) / FMath::Max(F, 1e-3f);
 	const float Critical = 2.0f * Beta * LocalRadius * LocalRadius;
-	const float Drive = FMath::Abs(Resolved.ThermalShear) * FMath::Cos(Lat) / FMath::Max(Critical, 1e-6f);
+	const float Drive = ShearWind / FMath::Max(Critical, 1e-6f);
 
 	UE_LOG(LogFlowSim, Log,
 		TEXT("Thermal shear %.2f against a critical %.2f at %.0f degrees: %.2fx. ")
 		TEXT("Storms grow from the shear above about 1."),
-		FMath::Abs(Resolved.ThermalShear) * FMath::Cos(Lat), Critical, Config->BaroclinicLatitude, Drive);
+		ShearWind, Critical, FMath::RadiansToDegrees(Lat), Drive);
 
 	// The balanced interfaces, from the same profile the balance pass
 	// integrates: where a layer thins toward nothing, it has run into the top
@@ -1206,7 +1227,6 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	// -- Forcing ------------------------------------------------------------
 
 	Out.ForcingChannel = FMath::Clamp(Config->ForcingChannel, 0, 3);
-	Out.bForcingBipolar = Config->bForcingBipolar;
 
 	Out.NudgeRate = Config->NudgeRate;
 	Out.ForcingAmplitude = Speeds.EddySpeed;
@@ -1233,8 +1253,8 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.CloudLifetime = FMath::Max(Config->CloudLifetime, 1e-3f);
 
 	Out.MoistureParams = FVector4f(
-		FMath::Max(Config->SaturationEquator, 0.0f),
-		FMath::Max(Config->SaturationPole, 0.0f),
+		0.0f,
+		FMath::Max(Config->SaturationPoleRatio, 0.0f),
 		FMath::Clamp(Config->CondensationOnset, 0.0f, 0.99f),
 		FMath::Max(Config->SurfaceEvaporation, 0.0f));
 
@@ -1312,7 +1332,6 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.NoiseResetTime = Config->GetNoiseResetTime();
 
 	Out.FilterLatitude = FMath::Clamp(Config->FilterLatitude, 0.0f, 1.0f);
-	Out.FilterMaxHalfWidth = FMath::Clamp(Config->FilterMaxHalfWidth, 1, 256);
 
 	// -- Output normalisation -------------------------------------------------
 	//

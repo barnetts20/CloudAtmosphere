@@ -148,8 +148,9 @@
 #define SimEvaporationRate FlowSimUB.EvaporationRate
 #define SimCloudDecay FlowSimUB.CloudDecay
 
-/** x saturation at the equator, y at the poles, z relative humidity where
- *  rising air starts to condense, w surface evaporation rate. */
+/** x unused, y saturation at the poles as a fraction of the equator's (the
+ *  vapour unit), z relative humidity where rising air starts to condense,
+ *  w surface evaporation rate. */
 #define SimMoistureParams FlowSimUB.MoistureParams
 
 /** Share of a layer's depth moved up across the interface above it per unit
@@ -233,11 +234,9 @@
 #define SIM_STORM_HEMISPHERE 20.0f
 
 #define SimForcingChannel FlowSimUB.ForcingChannel
-#define SimForcingBipolar FlowSimUB.ForcingBipolar
 #define SimHasForcing FlowSimUB.HasForcing
 
 #define SimFilterLatitude FlowSimUB.FilterLatitude
-#define SimFilterMaxHalfWidth FlowSimUB.FilterMaxHalfWidth
 
 /** 1 to rebuild centre velocities to fourth order, 0 for the two-face average;
  *  see SimCentreComponents. */
@@ -497,8 +496,9 @@ float SimSense(float Z, float Sharpness)
     return SimSoftSat(Z * Sharpness);
 }
 
-/** PITFALL: a missing volume binds black, and a unipolar decode of black is a
- *  constant -1 -- a uniform source rather than an absent one. Hence the flag. */
+/** The forcing channel, decoded from [0, 1] to [-1, 1].
+ *  PITFALL: a missing volume binds black, which decodes to a constant -1 -- a
+ *  uniform source rather than an absent one. Hence the flag. */
 float SimSampleForcing(float3 UVW)
 {
     if (SimHasForcing == 0)
@@ -512,7 +512,7 @@ float SimSampleForcing(float3 UVW)
 		: (SimForcingChannel == 1) ? S.g
 		: (SimForcingChannel == 2) ? S.b : S.a;
 
-    return (SimForcingBipolar != 0) ? Raw : (Raw * 2.0f - 1.0f);
+    return Raw * 2.0f - 1.0f;
 }
 
 /** PCG hash. */
@@ -630,7 +630,7 @@ bool SimNoiseResets(uint Phase)
 float SimSaturation(float Mu, uint Layer)
 {
     return SimLayerState[min(Layer, 7u)].z
-		* lerp(SimMoistureParams.y, SimMoistureParams.x, 1.0f - Mu * Mu);
+		* lerp(SimMoistureParams.y, 1.0f, 1.0f - Mu * Mu);
 }
 
 /** Condensation per unit time as a fraction of saturation: rising air
@@ -2816,9 +2816,9 @@ void MainFilterCS(uint3 Id : SV_DispatchThreadID)
     const int2 C = int2(Id.xy);
     const uint Layer = Id.z;
 
-    const int HalfRow = SimFilterHalfWidth(SimRowToMu((float) C.y), SimFilterLatitude, SimFilterMaxHalfWidth);
+    const int HalfRow = SimFilterHalfWidth(SimRowToMu((float) C.y), SimFilterLatitude);
     const int HalfFace = (C.y > 0)
-		? SimFilterHalfWidth(SimFaceToMu((float) C.y), SimFilterLatitude, SimFilterMaxHalfWidth)
+		? SimFilterHalfWidth(SimFaceToMu((float) C.y), SimFilterLatitude)
 		: 0;
 
     float SumU = 0.0f;
