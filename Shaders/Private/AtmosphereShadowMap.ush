@@ -425,9 +425,63 @@ float AtmoShadow_TauSlice(
     return lerp(lerp(T00, T10, Frac.x), lerp(T01, T11, Frac.x), Frac.y);
 }
 
+/** What a lookup derives from the light, the cameras and the frame alone:
+ *  constant across a pixel's samples, so a march builds it once. A level whose
+ *  extent is zero carries a zero half-width and is skipped. */
+struct AtmoShadowReader
+{
+    float3 L;
+    float3 U;
+    float3 V;
+    float2 MapSize;
+    float Extent0;
+    float CullRadius;
+    float Thickness;
+    float2 Centre[ATMO_SHADOW_CASCADES];
+    float HalfWidth[ATMO_SHADOW_CASCADES];
+};
+
+AtmoShadowReader AtmoShadow_MakeReader(
+	Texture2DArray ShadowMap,
+	float3 LightLocal,
+	AtmoShadowCameras Cameras,
+	AtmoShadowFrame Frame)
+{
+    AtmoShadowReader R;
+
+    R.L = normalize(LightLocal);
+    AtmoShadow_Basis(R.L, R.U, R.V);
+
+    uint MapWidth, MapHeight, MapSlices;
+    ShadowMap.GetDimensions(MapWidth, MapHeight, MapSlices);
+
+    R.MapSize = float2(MapWidth, MapHeight);
+    R.Extent0 = Frame.Extents[0];
+    R.CullRadius = Frame.CullRadius;
+    R.Thickness = Frame.Thickness;
+
+    R.Centre[0] = float2(0.0f, 0.0f);
+    R.HalfWidth[0] = 1.0f;
+
+    UNROLL
+
+    for (int Level = 1; Level < ATMO_SHADOW_CASCADES; Level++)
+    {
+        const float Extent = Frame.Extents[Level];
+
+        R.HalfWidth[Level] = (Extent > 0.0f) ? AtmoShadow_CascadeHalfWidth(Level, Extent, R.Extent0) : 0.0f;
+
+        R.Centre[Level] = (Extent > 0.0f)
+			? AtmoShadow_CascadeCentre(Level, Cameras.Level[Level], R.U, R.V, R.HalfWidth[Level], R.Extent0, R.MapSize)
+			: float2(0.0f, 0.0f);
+    }
+
+    return R;
+}
+
 /** Optical depth between a planet-local position and the light, on the fastest
- *  absorption channel. LightLocal points toward the light. Ceiling bounds the
- *  tail past the last node; see ATMO_SHADOW_SATURATION.
+ *  absorption channel, through a reader built for that light. Ceiling bounds
+ *  the tail past the last node; see ATMO_SHADOW_SATURATION.
  *
  *  ONE PARAMETERISATION, SEVERAL SCALES: every cascade is the whole field at a
  *  different extent, anchored to the same shell entry, so their depths are
@@ -442,6 +496,74 @@ float AtmoShadow_TauSlice(
  *  VALID ANYWHERE INSIDE THE SHELL, not only where the medium is. A point on a
  *  surface below the deck reads the whole column above it, which is what makes
  *  this the same call for shadows cast onto geometry. */
+float AtmoShadow_ReadTau(
+	Texture2DArray ShadowMap,
+	SamplerState ShadowSampler,
+	AtmoShadowReader R,
+	float3 LocalPos,
+	float2 JitterTexels,
+	float Ceiling)
+{
+	// Outside the shell and on its lit side, nothing lies toward the light.
+    if (dot(LocalPos, LocalPos) >= R.CullRadius * R.CullRadius && dot(LocalPos, R.L) >= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    const float2 Plane = float2(dot(LocalPos, R.U), dot(LocalPos, R.V));
+
+	// (U, V, L) is orthonormal, so the in-plane offset IS the ray's closest
+	// approach to the centre and its length squared is the perpendicular term.
+    const float HalfChordSq = R.CullRadius * R.CullRadius - dot(Plane, Plane);
+
+    if (HalfChordSq <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+	// Depth from the shell entry, matching what the bake marched from. Shared by
+	// every cascade: a property of the geometry, not of any lattice.
+    const float Depth = (dot(LocalPos, -R.L) + sqrt(HalfChordSq)) / R.Thickness;
+
+	// Every cascade windows the same warped disc, so the point's disc coordinate
+	// is shared by all of them.
+    const float2 Disc = AtmoShadow_PlaneToDisc(Plane / R.Extent0);
+
+    float Tau = AtmoShadow_TauSlice(
+		ShadowMap, ShadowSampler, 0, Disc, float2(0.0f, 0.0f), 1.0f,
+		Depth, JitterTexels, R.MapSize, Ceiling);
+
+    UNROLL
+
+    for (int Level = 1; Level < ATMO_SHADOW_CASCADES; Level++)
+    {
+        const float HalfWidth = R.HalfWidth[Level];
+
+        if (HalfWidth <= 0.0f)
+        {
+            continue;
+        }
+
+		// Square support, so the edge measure is the larger axis.
+        const float2 Relative = (Disc - R.Centre[Level]) / HalfWidth;
+        const float Edge = max(abs(Relative.x), abs(Relative.y));
+
+        if (Edge >= 1.0f)
+        {
+            continue;
+        }
+
+        const float Finer = AtmoShadow_TauSlice(
+			ShadowMap, ShadowSampler, Level, Disc, R.Centre[Level], HalfWidth, Depth,
+			JitterTexels, R.MapSize, Ceiling);
+
+        Tau = lerp(Finer, Tau, smoothstep(ATMO_SHADOW_NEAR_BLEND, 1.0f, Edge));
+    }
+
+    return Tau;
+}
+
+/** AtmoShadow_ReadTau for a single lookup, building its own reader. */
 float AtmoShadow_Tau(
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
@@ -452,73 +574,8 @@ float AtmoShadow_Tau(
 	float Ceiling,
 	AtmoShadowFrame Frame)
 {
-    const float3 L = normalize(LightLocal);
-
-    float3 U, V;
-    AtmoShadow_Basis(L, U, V);
-
-    const float2 Plane = float2(dot(LocalPos, U), dot(LocalPos, V));
-
-	// (U, V, L) is orthonormal, so the in-plane offset IS the ray's closest
-	// approach to the centre and its length squared is the perpendicular term.
-    const float HalfChordSq = Frame.CullRadius * Frame.CullRadius - dot(Plane, Plane);
-
-    if (HalfChordSq <= 0.0f)
-    {
-        return 0.0f;
-    }
-
-	// Depth from the shell entry, matching what the bake marched from. Shared by
-	// every cascade: a property of the geometry, not of any lattice.
-    const float Depth = (dot(LocalPos, -L) + sqrt(HalfChordSq)) / Frame.Thickness;
-
-    uint MapWidth, MapHeight, MapSlices;
-    ShadowMap.GetDimensions(MapWidth, MapHeight, MapSlices);
-
-    const float2 MapSize = float2(MapWidth, MapHeight);
-
-	// Every cascade windows the same warped disc, so the point's disc coordinate
-	// is shared by all of them.
-    const float Extent0 = Frame.Extents[0];
-    const float2 Disc = AtmoShadow_PlaneToDisc(Plane / Extent0);
-
-    float Tau = AtmoShadow_TauSlice(
-		ShadowMap, ShadowSampler, 0, Disc, float2(0.0f, 0.0f), 1.0f,
-		Depth, JitterTexels, MapSize, Ceiling);
-
-    UNROLL
-
-    for (int Level = 1; Level < ATMO_SHADOW_CASCADES; Level++)
-    {
-        const float Extent = Frame.Extents[Level];
-
-        if (Extent <= 0.0f)
-        {
-            continue;
-        }
-
-        const float HalfWidth = AtmoShadow_CascadeHalfWidth(Level, Extent, Extent0);
-
-        const float2 Centre = AtmoShadow_CascadeCentre(
-			Level, Cameras.Level[Level], U, V, HalfWidth, Extent0, MapSize);
-
-		// Square support, so the edge measure is the larger axis.
-        const float2 Relative = (Disc - Centre) / HalfWidth;
-        const float Edge = max(abs(Relative.x), abs(Relative.y));
-
-        if (Edge >= 1.0f)
-        {
-            continue;
-        }
-
-        const float Finer = AtmoShadow_TauSlice(
-			ShadowMap, ShadowSampler, Level, Disc, Centre, HalfWidth, Depth,
-			JitterTexels, MapSize, Ceiling);
-
-        Tau = lerp(Finer, Tau, smoothstep(ATMO_SHADOW_NEAR_BLEND, 1.0f, Edge));
-    }
-
-    return Tau;
+    return AtmoShadow_ReadTau(ShadowMap, ShadowSampler,
+		AtmoShadow_MakeReader(ShadowMap, LightLocal, Cameras, Frame), LocalPos, JitterTexels, Ceiling);
 }
 
 /** Band-weighted optical depth between a point on OPAQUE GEOMETRY and the light,

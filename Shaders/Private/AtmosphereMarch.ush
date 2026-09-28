@@ -25,6 +25,15 @@
 #define FIELD_RAY_CACHE 0
 #endif
 
+/** Set by a field to let an empty cloud sample reuse the light of the last full
+ *  read, this many samples in a row at most, instead of reading the shadow map
+ *  and the transmittance table again. The field is sampled before the light,
+ *  and the steps stay where the plan puts them. 0 reads the light at every
+ *  sample. */
+#ifndef FIELD_EMPTY_LIGHT_REUSE
+#define FIELD_EMPTY_LIGHT_REUSE 0
+#endif
+
 // The march: a ray through the atmosphere and whatever cloud field the model
 // supplies, gathering light toward the camera.
 //
@@ -167,6 +176,47 @@ float3 Atmo_ToLocal(float3 WorldPos, AtmoMarchParams P)
 
 
 
+/** What the light read derives from the pixel alone, built once before the
+ *  loop: the shadow reader, the bake's fold constant and the ceiling, and the
+ *  transmittance table's units. */
+struct AtmoLightConstants
+{
+    AtmoShadowReader Shadow;
+    float2 Fold;
+    float Ceiling;
+    float Thickness;
+    float2 Radii;
+};
+
+AtmoLightConstants Atmo_LightConstants(Texture2DArray ShadowMap, AtmoShadowCameras ShadowCameras, AtmoMarchParams P)
+{
+    AtmoLightConstants C;
+
+    C.Shadow = AtmoShadow_MakeReader(ShadowMap,
+		mul(P.WorldToLocal, P.Atmo.lightRayParams.lightDir), ShadowCameras, Field_ShadowFrame(P.Field));
+
+	// THE FOLD CONSTANT IS DIVIDED BACK OUT. The bake scales its accumulation by
+	// what Field_FoldConstant reports, so its thresholds mean transmittance;
+	// undoing it leaves the material-weighted depth, which the caller multiplies
+	// by cloudAbsBeta and the receiver's own tint. The second channel is the
+	// ceiling scale, set on the most transmissive term the caller exponentiates.
+    C.Fold = Field_FoldConstant(P.Atmo, P.Scatter);
+
+	// THE CEILING IS SET ON THE MOST TRANSMISSIVE TERM. The caller exponentiates
+	// the depth per channel at the receiving band's tint over the largest tint,
+	// and each octave at Attenuation^i of that, so saturated deck is only dark
+	// if the smallest of those products is. See ATMO_SHADOW_SATURATION.
+    const float DeepestOctave =
+		pow(max(P.Scatter.OctaveAttenuation, 1e-4f), P.Scatter.OctaveCount - 1.0f);
+
+    C.Ceiling = ATMO_SHADOW_SATURATION / max(C.Fold.y * DeepestOctave, ATMO_SHADOW_MIN_TAU_SCALE);
+
+    C.Thickness = AtmoT_Thickness(P.Atmo.planetParams.planetRadius, P.Atmo.planetParams.atmoRadius);
+    C.Radii = AtmoT_Radii(P.Atmo.planetParams.planetRadius, P.Atmo.planetParams.atmoRadius);
+
+    return C;
+}
+
 /** Light reaching a sample, as the air's transmittance with the planet shadow
  *  folded in, plus the deck's band-weighted depth toward the light separately.
  *
@@ -181,10 +231,11 @@ float3 Atmo_ToLocal(float3 WorldPos, AtmoMarchParams P)
 float3 Atmo_LightMarch(
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
-	AtmoShadowCameras ShadowCameras,
+	AtmoLightConstants C,
 	Texture2D TransmittanceTable,
 	SamplerState TransmittanceSampler,
 	AtmoMarchParams P,
+	float3 LocalPos,
 	out float OutLobeShadow,
 	out float OutCloudOptDepth)
 {
@@ -245,22 +296,12 @@ float3 Atmo_LightMarch(
 	// crushed, so no new endpoint appears at either end.
     OutLobeShadow = pow(PlanetShadow, P.Scatter.LobeShadowPower);
 
-    const float3 LocalOrigin = Atmo_ToLocal(Start, P);
-    const float3 LocalDir = mul(P.WorldToLocal, LightDir);
-
 	// THE DECK, AS ONE TEXTURE READ. Looked up rather than estimated, and the
 	// difference is not just cost: a per-ray estimator's error is additive in
 	// OPTICAL DEPTH and so multiplicative in brightness, where half a unit of
 	// noise is a 1.6x swing between neighbouring pixels -- stipple rather than
 	// grain, tightening only as the square root of the sample count. A map has no
 	// per-pixel error to tighten.
-	//
-	// THE FOLD CONSTANT IS DIVIDED BACK OUT. The bake scales its accumulation by
-	// what Field_FoldConstant reports, so its thresholds mean transmittance;
-	// undoing it leaves the material-weighted depth, which the caller multiplies
-	// by cloudAbsBeta and the receiver's own tint. The second channel is the
-	// ceiling scale, set on the most transmissive term the caller exponentiates.
-    const float2 Fold = Field_FoldConstant(P.Atmo, P.Scatter);
 
 	// Salted by the pixel AND by the parent step, so neither successive samples
 	// along one ray nor neighbouring pixels read the map in phase. Both axes
@@ -272,41 +313,26 @@ float3 Atmo_LightMarch(
 		Atmo_HashJitter(P.Atmo.mainRayParams.svxy,
 			uint(P.Atmo.lightRayParams.parentStepIndex) * 2749u + 23u) - 0.5f);
 
-	// THE CEILING IS SET ON THE MOST TRANSMISSIVE TERM. The caller exponentiates
-	// this depth per channel at the receiving band's tint over the largest tint,
-	// and each octave at Attenuation^i of that, so saturated deck is only dark
-	// if the smallest of those products is. See ATMO_SHADOW_SATURATION.
-    const float DeepestOctave =
-		pow(max(P.Scatter.OctaveAttenuation, 1e-4f), P.Scatter.OctaveCount - 1.0f);
-
-    const float TauScale = max(Fold.y * DeepestOctave, ATMO_SHADOW_MIN_TAU_SCALE);
-
-    const float ShadowTau = AtmoShadow_Tau(
-		ShadowMap, ShadowSampler, LocalOrigin, LocalDir, ShadowCameras,
-		ShadowJitter, ATMO_SHADOW_SATURATION / TauScale, Field_ShadowFrame(P.Field));
+    const float ShadowTau = AtmoShadow_ReadTau(
+		ShadowMap, ShadowSampler, C.Shadow, LocalPos, ShadowJitter, C.Ceiling);
 
 	// PITFALL: no saturation snap. The depth is read, not accumulated, so a
 	// threshold here would only turn a smooth field into a hard contour, and
 	// that contour lands on the map's lattice as an axis-aligned staircase along
 	// the shadow edge. The deep end is handled by AtmoShadow_Tau's ceiling.
-    OutCloudOptDepth = ShadowTau / max(Fold.x, 1e-8f);
+    OutCloudOptDepth = ShadowTau / max(C.Fold.x, 1e-8f);
 
 	// THE AIR. Density integrals from the table, in thickness units, scaled back
 	// to world units so the betas apply exactly as they do to a marched depth.
 	// Below the horizon the table holds the horizon value: PlanetShadow above owns
 	// the occlusion and is already fading to zero across the band the clamp
 	// covers.
-    const float Thickness = AtmoT_Thickness(
-		P.Atmo.planetParams.planetRadius, P.Atmo.planetParams.atmoRadius);
-    const float2 Radii = AtmoT_Radii(
-		P.Atmo.planetParams.planetRadius, P.Atmo.planetParams.atmoRadius);
-
     const float3 FromCentre = Start - P.Atmo.planetParams.planetPos;
     const float Dist = length(FromCentre);
     const float Mu = dot(FromCentre, LightDir) / max(Dist, 1e-4f);
 
     const float3 AtmoOptDepth = AtmoT_Lookup(TransmittanceTable, TransmittanceSampler,
-		Dist / Thickness, Mu, Radii.x, Radii.y) * Thickness;
+		Dist / C.Thickness, Mu, C.Radii.x, C.Radii.y) * C.Thickness;
 
     return PlanetShadow * exp(-(P.Atmo.scatteringParams.rayBeta * AtmoOptDepth.x
 		+ P.Atmo.scatteringParams.mieBeta * AtmoOptDepth.y
@@ -535,6 +561,17 @@ float4 Atmo_MainMarch(
 
     int StepIndex = 0;
 
+    const AtmoLightConstants LightConstants = Atmo_LightConstants(ShadowMap, ShadowCameras, P);
+
+#if FIELD_EMPTY_LIGHT_REUSE
+	// The last full light read, and how many empty samples may still reuse it.
+    int LightReuseLeft = 0;
+    float ReusedLobeShadow = 0.0f;
+    float ReusedCloudOptDepth = 0.0f;
+    float3 ReusedAirTransmittance = float3(0.0f, 0.0f, 0.0f);
+    float3 ReusedLightTint = float3(0.0f, 0.0f, 0.0f);
+#endif
+
     for (int s = 0; s < SegmentCount; s++)
     {
         const float SegStart = Segments[s].x;
@@ -646,19 +683,16 @@ float4 Atmo_MainMarch(
 
                 P.Field.PixelFootprint = SampleDistance * PixelAngle;
 
-                float LobeShadow;
-                float CloudOptDepth;
-                const float3 AirTransmittance = Atmo_LightMarch(
-					ShadowMap, ShadowSampler, ShadowCameras,
-					TransmittanceTable, TransmittanceSampler, P, LobeShadow, CloudOptDepth);
+                const float3 LocalPos = Atmo_ToLocal(SamplePos, P);
 
-				// The field sample, taken ahead of the tint so a field whose
-				// material coordinate is the tint's input can supply both.
+				// The field sample, taken ahead of the light so an empty one can
+				// reuse the last read (FIELD_EMPTY_LIGHT_REUSE), and ahead of the
+				// tint so a field whose material coordinate is the tint's input can
+				// supply both.
                 float4 Sample = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
                 if (IsCloud)
                 {
-                    const float3 LocalPos = Atmo_ToLocal(SamplePos, P);
                     const float3 LocalUp = LocalPos / max(DistFromCentre, 1e-4f);
 
                     const float RadialRate = abs(dot(LocalDir, LocalUp));
@@ -672,29 +706,68 @@ float4 Atmo_MainMarch(
 #endif
                 }
 
-				// THE RECEIVER'S BAND COLOURS THE DECK IT WAS SHADOWED BY. The map
-				// holds one depth, not the colours of the bands the light crossed,
-				// and bands are far wider than the deck is deep so the path mostly
-				// stays in the receiver's band. Off near band edges at low sun. Only
-				// where the deck shadows at all, and from the sample when the field
-				// allows it -- a second column read otherwise.
-                float3 LightTint = Field_NeutralTint(P.Scatter);
+                float LobeShadow;
+                float CloudOptDepth;
+                float3 AirTransmittance;
+                float3 LightTint;
 
+#if FIELD_EMPTY_LIGHT_REUSE
+				// AN EMPTY CLOUD SAMPLE LIGHTS ONLY THE AIR, and the air's light
+				// changes little over a few fine steps: it reuses the last full
+				// read, which lags the shadow by at most that many steps.
                 BRANCH
 
-                if (CloudOptDepth > 0.0f)
+                if (IsCloud && Sample.x <= 0.0f && LightReuseLeft > 0)
                 {
-#if FIELD_SAMPLE_TINT
-                    if (IsCloud)
-                    {
-                        LightTint = Field_SampleLightTint(Sample, P.Scatter);
-                    }
-                    else
+                    LightReuseLeft--;
+
+                    LobeShadow = ReusedLobeShadow;
+                    CloudOptDepth = ReusedCloudOptDepth;
+                    AirTransmittance = ReusedAirTransmittance;
+                    LightTint = ReusedLightTint;
+                }
+                else
 #endif
+                {
+                    AirTransmittance = Atmo_LightMarch(
+						ShadowMap, ShadowSampler, LightConstants,
+						TransmittanceTable, TransmittanceSampler, P, LocalPos, LobeShadow, CloudOptDepth);
+
+					// THE RECEIVER'S BAND COLOURS THE DECK IT WAS SHADOWED BY. The
+					// map holds one depth, not the colours of the bands the light
+					// crossed, and bands are far wider than the deck is deep so the
+					// path mostly stays in the receiver's band. Off near band edges
+					// at low sun. Only where the deck shadows at all, and from the
+					// sample when the field allows it -- a second column read
+					// otherwise.
+                    LightTint = Field_NeutralTint(P.Scatter);
+
+                    BRANCH
+
+                    if (CloudOptDepth > 0.0f)
                     {
-                        LightTint = Field_LightTint(FlowField, FlowSampler,
-							Atmo_ToLocal(SamplePos, P), P.Field, P.Scatter);
+#if FIELD_SAMPLE_TINT
+                        if (IsCloud)
+                        {
+                            LightTint = Field_SampleLightTint(Sample, P.Scatter);
+                        }
+                        else
+#endif
+                        {
+                            LightTint = Field_LightTint(FlowField, FlowSampler, LocalPos, P.Field, P.Scatter);
+                        }
                     }
+
+#if FIELD_EMPTY_LIGHT_REUSE
+                    ReusedLobeShadow = LobeShadow;
+                    ReusedCloudOptDepth = CloudOptDepth;
+                    ReusedAirTransmittance = AirTransmittance;
+                    ReusedLightTint = LightTint;
+
+					// Air segments start no chain: an empty cloud sample after one
+					// reads in full.
+                    LightReuseLeft = IsCloud ? FIELD_EMPTY_LIGHT_REUSE : 0;
+#endif
                 }
 
                 const float3 LightBeta = P.Atmo.cloudParams.cloudAbsBeta * LightTint;

@@ -128,7 +128,7 @@ float FlowSimProfile::WaveSpeed(const UFlowSimConfig& Config)
 
 float UFlowSimConfig::GetSpeedRoot() const
 {
-	return FMath::Max(FroudeCeiling, 0.1f) * FlowSimProfile::WaveSpeed(*this);
+	return FMath::Max(SpeedRoot, 0.1f) * FlowSimProfile::WaveSpeed(*this);
 }
 
 float UFlowSimConfig::GetNoiseDriftRate() const

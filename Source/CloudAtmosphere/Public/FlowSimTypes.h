@@ -192,73 +192,33 @@ struct FFlowSimSpeeds
 /** Everything the sim needs, authored. Re-read at the top of each frame, so the
  *  asset can be edited while the sim runs; only the grid dimensions are latched.
  *
- *  EVERY WIND IS A FRACTION OF ONE SPEED, the root: FroudeCeiling times the
+ *  EVERY WIND IS A FRACTION OF ONE SPEED, the root: SpeedRoot times the
  *  wave speed DeformationRadius and PlanetaryVorticity set. The ceiling caps
  *  faces at the root, easing in from 0.7 of it, so winds authored under 0.7
  *  are not clipped, and a config holds its look as the regime changes. The
- *  Rossby number of the fastest flow is FroudeCeiling itself. The start log
+ *  Rossby number of the fastest flow is SpeedRoot itself. The start log
  *  reports the wave speeds, the budget against 0.7 and the storm criterion. */
-UCLASS(BlueprintType)
+UCLASS(BlueprintType, meta = (PrioritizeCategories = "Planet Time Quality Layers Rates Numerics Pipeline Debug"))
 class CLOUDATMOSPHERE_API UFlowSimConfig : public UDataAsset
 {
 	GENERATED_BODY()
 
 public:
-	// -- Grid ---------------------------------------------------------------
+	// -- Planet: winds ------------------------------------------------------
+	//
+	// Every wind is a fraction of the speed root. Each layer's target is the
+	// jet profile plus its share of ShearSpeed: all of it on the top layer,
+	// none on the bottom. The nudge holds the winds to it and the thermal
+	// relaxation holds the interfaces at the heights in balance with it, which
+	// is the temperature contrast storms draw on.
 
-	/** Edge of one face of the cube atlas the output is resampled onto, in
-	 *  texels, rounded down to a power of two. The solver's grid follows: four
-	 *  times it in longitude columns, twice it in latitude rows, so 64 runs at
-	 *  256 x 128. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (ClampMin = "16", ClampMax = "512"))
-	int32 GridResolution = 64;
-
-	/** Layers in the stack, 0 on top, coupled through their pressure. Two is
-	 *  the smallest with baroclinic storms; one is a single shallow layer. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid", meta = (ClampMin = "1", ClampMax = "8"))
-	int32 LayerCount = 2;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grid")
-	TArray<FFlowLayerProfile> LayerProfiles;
-
-	// -- Jet profile --------------------------------------------------------
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Winds")
 	EFlowZonalProfile ZonalProfile = EFlowZonalProfile::Banded;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile", meta = (ClampMin = "1.0"))
-	float BandCount = 3.0f;
-
-	/** The jets' peak eastward wind as a fraction of the speed root, on a layer
-	 *  whose JetScale and BoostScale are 1. Negative reverses them. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile")
-	float JetSpeed = 0.35f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile")
-	float EquatorialBoost = 0.5f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile")
-	float Asymmetry = 0.5f;
-
-	/** Positive widens the prograde zones. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Jet Profile")
-	float WidthBias = 0.0f;
-
-	// -- Physics ------------------------------------------------------------
-
-	/** 2 * Omega. Sets the beta effect that arrests the inverse cascade into
-	 *  jets, and with DeformationRadius the wave speed the speed root scales.
-	 *
-	 *  PITFALL: also the explicit Coriolis step. Above about 0.5 radians of
-	 *  rotation per step the split between explicit rotation and implicit
-	 *  pressure radiates gravity waves. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.1"))
-	float PlanetaryVorticity = 24.0f;
 
 	/** Rossby deformation radius at 45 degrees, in planet radii: the size eddies
 	 *  settle at. On a stack it is the first internal mode's, the one weather
 	 *  systems grow at; the stack's depth follows from it and Stratification. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.01"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Winds", meta = (ClampMin = "0.01"))
 	float DeformationRadius = 0.2f;
 
 	/** THE SPEED ROOT, in Froude number against the first internal mode's wave
@@ -266,145 +226,111 @@ public:
 	 *  all forcing every face eases toward it from 0.7 of it, so the flow stays
 	 *  short of the speeds where shallow water steepens into bores. About 0.6
 	 *  is the top of the usable range; lower slows the whole system. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.1", ClampMax = "1.0"))
-	float FroudeCeiling = 0.6f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Winds", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float SpeedRoot = 0.6f;
 
-	/** Density step at each interface, as a fraction of the surface's. Small
-	 *  keeps the free surface nearly flat, so pressure systems are carried by
-	 *  the interfaces. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.01", ClampMax = "1.0"))
-	float Stratification = 0.1f;
-
-	/** Sim time per second of real time: THE SPEED HANDLE. The step is
-	 *  StepSize whatever the speed, so speed sets the steps per frame and the
-	 *  cost with it, and never the look. Zero freezes the sim. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.0"))
-	float SimSpeed = 0.0025f;
-
-	/** Sim time per step: a look and cost control, independent of speed.
-	 *
-	 *  PITFALL: THE WEATHER DEPENDS ON THE STEP, and no conversion of the
-	 *  per-step settings removes that. The semi-Lagrangian interpolation
-	 *  smooths once per step, and the solver splits grid-scale gravity waves
-	 *  between pressure and divergence by an amount the step sets. Larger
-	 *  steps give sharper, thicker cloud. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics", meta = (ClampMin = "0.000001", ClampMax = "0.0086"))
-	float StepSize = 1e-5f;
-
-	float GetStepSize() const { return FMath::Clamp(StepSize, FlowSimStep::Min, FlowSimStep::SpinUp); }
-
-	// -- Forcing ------------------------------------------------------------
-
-	/** Relaxation of each layer's ZONAL-MEAN eastward velocity toward its
-	 *  profile, per unit time. PITFALL: every nudge is an unbalanced push that
-	 *  the flow answers with gravity waves, so strong nudging reads as
-	 *  ripples. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
-	float NudgeRate = 1.0f;
-
-	/** Equilibrium eddy speed the stochastic stirring sustains against the drag,
-	 *  as a fraction of the speed root per unit slope of the forcing noise; each
-	 *  layer scales it by its EddyScale. Divergence-free. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing", meta = (ClampMin = "0.0"))
-	float EddySpeed = 0.15f;
-
-	/** Forcing noise frequency, in volume UVW per unit sphere. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
-	float ForcingFrequency = 0.25f;
-
-	/** How long one forcing pattern lives, in sim time. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing", meta = (ClampMin = "0.01"))
-	float ForcingLifetime = 0.5f;
-
-	/** Linear drag on the eddy part of the eastward velocity and all of the
-	 *  northward, per unit time, scaled per layer. The energy sink that arrests
-	 *  the cascade, and what turns flow into lows and out of highs. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
-	float DragRate = 1.5f;
-
-	/** Relaxation of each layer's velocity toward its neighbours': interfacial
-	 *  friction. Strong coupling erodes the shear storms grow from. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing")
-	float LayerCoupling = 0.1f;
-
-	/** Rebuild centre velocities to fourth order from the faces rather than as
-	 *  a two-face average. Keeps a compact vortex from bleeding into a cross
-	 *  along the grid axes. PITFALL: it also damps fast motion far less --
-	 *  about twice the eddy speed, more W and more cloud at the same settings --
-	 *  so the deck's coverage tuning does not carry over, and the faster flow
-	 *  pulls the two noise phases apart until their crossfade reads as density
-	 *  sliding under the clouds. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver")
-	bool bSharpCentreVelocity = false;
-
-	// -- Thermal forcing ----------------------------------------------------
-	//
-	// Each layer's target is the jet profile plus its share of ShearSpeed:
-	// all of it on the top layer, none on the bottom. The nudge holds the
-	// winds to it and the relaxation holds the interfaces at the heights in
-	// balance with it, which is the temperature contrast storms draw on.
-
-	/** Rate interfaces relax toward their balanced heights, per unit time, by
-	 *  moving mass between layers; column mass is untouched. On a single layer
-	 *  its thickness relaxes instead. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Thermal Forcing", meta = (ClampMin = "0.0"))
-	float ThermalRelaxation = 0.5f;
+	/** The jets' peak eastward wind as a fraction of the speed root, on a layer
+	 *  whose JetScale and BoostScale are 1. Negative reverses them. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Winds")
+	float JetSpeed = 0.35f;
 
 	/** Peak eastward wind of the top layer over the bottom's, as a fraction of
 	 *  the speed root. Storms grow from it past the criterion the start log
 	 *  reports; well past that the interface reaches the top of the stack. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Thermal Forcing")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Winds", meta = (EditCondition = "LayerCount > 1", EditConditionHides))
 	float ShearSpeed = 0.2f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Thermal Forcing")
-	EFlowThermalShape ThermalShape = EFlowThermalShape::Midlatitude;
+	/** Equilibrium eddy speed the stochastic stirring sustains against the drag,
+	 *  as a fraction of the speed root per unit slope of the forcing noise; each
+	 *  layer scales it by its EddyScale. Divergence-free. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Winds", meta = (ClampMin = "0.0"))
+	float EddySpeed = 0.15f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Winds", meta = (EditCondition = "ZonalProfile == EFlowZonalProfile::Banded", EditConditionHides, ClampMin = "1.0"))
+	float BandCount = 3.0f;
 
 	/** Centre of the midlatitude zone, degrees. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Thermal Forcing", meta = (ClampMin = "0.0", ClampMax = "90.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Winds", meta = (EditCondition = "ThermalShape == EFlowThermalShape::Midlatitude", EditConditionHides, ClampMin = "0.0", ClampMax = "90.0"))
 	float BaroclinicLatitude = 45.0f;
 
 	/** Half-width of the midlatitude zone, degrees. Storms need it to span a
 	 *  few deformation radii. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Thermal Forcing", meta = (ClampMin = "1.0", ClampMax = "90.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Winds", meta = (EditCondition = "ThermalShape == EFlowThermalShape::Midlatitude", EditConditionHides, ClampMin = "1.0", ClampMax = "90.0"))
 	float BaroclinicWidth = 24.0f;
 
-	// -- Moisture -----------------------------------------------------------
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Winds", meta = (EditCondition = "ZonalProfile == EFlowZonalProfile::Banded", EditConditionHides))
+	float EquatorialBoost = 0.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Winds", meta = (EditCondition = "ZonalProfile == EFlowZonalProfile::Banded", EditConditionHides))
+	float Asymmetry = 0.5f;
+
+	/** Positive widens the prograde zones. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Winds", meta = (EditCondition = "ZonalProfile == EFlowZonalProfile::Banded", EditConditionHides))
+	float WidthBias = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Winds")
+	EFlowThermalShape ThermalShape = EFlowThermalShape::Midlatitude;
+
+	/** 2 * Omega. Sets the beta effect that arrests the inverse cascade into
+	 *  jets, and with DeformationRadius the wave speed the speed root scales.
+	 *
+	 *  PITFALL: also the explicit Coriolis step. Above about 0.5 radians of
+	 *  rotation per step the split between explicit rotation and implicit
+	 *  pressure radiates gravity waves. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Winds", meta = (ClampMin = "0.1"))
+	float PlanetaryVorticity = 24.0f;
+
+	// -- Planet: moisture ---------------------------------------------------
 	//
 	// Vapour per layer, in units of the equator's surface saturation. The
 	// surface evaporates into the bottom layer; rising air near saturation
-	// condenses it into cloud, releasing latent heat.
-
-	/** The bottom layer's saturation at the poles as a fraction of the
-	 *  equator's, which is the vapour unit. 1 is uniform moisture. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0"))
-	float SaturationPoleRatio = 0.25f;
-
-	/** The top layer's saturation as a fraction of the bottom's; layers between
-	 *  fall geometrically. Cold air aloft holds little. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float UpperSaturation = 0.3f;
+	// condenses it into an advected cloud fraction, releasing latent heat, and
+	// sinking air evaporates it. Rates are per unit time against vertical
+	// motion normalised to (-1, 1).
 
 	/** Relative humidity at which rising air starts to condense; it condenses
 	 *  fully at saturation. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0", ClampMax = "0.99"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Moisture", meta = (ClampMin = "0.0", ClampMax = "0.99"))
 	float CondensationOnset = 0.7f;
 
 	/** Rate the surface moistens the bottom layer toward saturation. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Moisture", meta = (ClampMin = "0.0"))
 	float SurfaceEvaporation = 2.0f;
 
-	/** How much the bottom layer's wind raises surface evaporation, as the gain
-	 *  at the speed root: the moisture supply under a storm's own winds. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0"))
-	float WindEvaporationGain = 1.0f;
+	/** The bottom layer's saturation at the poles as a fraction of the
+	 *  equator's, which is the vapour unit. 1 is uniform moisture. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Moisture", meta = (ClampMin = "0.0"))
+	float SaturationPoleRatio = 0.25f;
 
 	/** Share of a layer's depth moved up across the interface above it per
 	 *  unit of vapour condensed: the latent heat that deepens lows under
 	 *  condensing air. On a single layer it draws mass up into the layer.
 	 *  PITFALL: a positive feedback; strong values run away into grid-scale
 	 *  convection. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Moisture", meta = (ClampMin = "0.0"))
 	float LatentHeating = 0.1f;
+
+	/** How long cloud survives in still air before raining out, in sim time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Moisture", meta = (ClampMin = "0.001"))
+	float CloudLifetime = 3.0f;
+
+	/** The top layer's saturation as a fraction of the bottom's; layers between
+	 *  fall geometrically. Cold air aloft holds little. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Moisture", meta = (EditCondition = "LayerCount > 1", EditConditionHides, ClampMin = "0.0", ClampMax = "1.0"))
+	float UpperSaturation = 0.3f;
+
+	/** How much the bottom layer's wind raises surface evaporation, as the gain
+	 *  at the speed root: the moisture supply under a storm's own winds. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Moisture", meta = (ClampMin = "0.0"))
+	float WindEvaporationGain = 1.0f;
+
+	/** How fast rising saturated air fills a column with cloud. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Moisture", meta = (ClampMin = "0.0"))
+	float CondensationRate = 5.0f;
+
+	/** How fast sinking air evaporates cloud back into vapour. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Moisture", meta = (ClampMin = "0.0"))
+	float EvaporationRate = 3.0f;
 
 	/** Time constant, in simulated time, of the low-pass the vertical motion
 	 *  takes along the flow before anything reads it: condensation, latent heat,
@@ -414,103 +340,62 @@ public:
 	 *  cleaner and makes cloud respond more slowly to new ascent; condensation
 	 *  from passing waves goes too, so cloud amount falls (about half at 0.3)
 	 *  and the deck's CloudFull wants lowering to match. 0 reads it raw. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0.0", ClampMax = "5.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Moisture", meta = (ClampMin = "0.0", ClampMax = "5.0"))
 	float AscentSmoothing = 0.3f;
 
-	// -- Cloud --------------------------------------------------------------
-	//
-	// An advected cloud fraction fed by condensation, cleared by sinking air,
-	// and carried by the wind in between. Rates are per unit time against
-	// vertical motion normalised to (-1, 1).
-
-	/** How fast rising saturated air fills a column with cloud. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud", meta = (ClampMin = "0.0"))
-	float CondensationRate = 5.0f;
-
-	/** How fast sinking air evaporates cloud back into vapour. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud", meta = (ClampMin = "0.0"))
-	float EvaporationRate = 3.0f;
-
-	/** How long cloud survives in still air before raining out, in sim time. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cloud", meta = (ClampMin = "0.001"))
-	float CloudLifetime = 3.0f;
-
-	// -- Storms -------------------------------------------------------------
+	// -- Planet: storms -----------------------------------------------------
 	//
 	// An advected storm intensity, 0 to 1, grown where condensation is
 	// intense and the air spins cyclonically. The deck draws it as storm cloud.
 
-	/** How fast a storm builds at full drive, per unit time. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storms", meta = (ClampMin = "0.0"))
-	float StormRate = 4.0f;
-
 	/** Condensing ascent, W near saturation, below which nothing builds. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storms", meta = (ClampMin = "0.0", ClampMax = "0.99"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Storms", meta = (ClampMin = "0.0", ClampMax = "0.99"))
 	float StormThreshold = 0.1f;
 
-	/** How much normalised cyclonic vorticity raises the drive. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storms", meta = (ClampMin = "0.0"))
-	float StormSpin = 2.0f;
+	/** How fast a storm builds at full drive, per unit time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Storms", meta = (ClampMin = "0.0"))
+	float StormRate = 4.0f;
 
 	/** How long a storm lasts once its drive is gone, in sim time. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storms", meta = (ClampMin = "0.001"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Storms", meta = (ClampMin = "0.001"))
 	float StormLifetime = 1.0f;
 
-	// -- Storm cells ----------------------------------------------------------
+	/** How much normalised cyclonic vorticity raises the drive. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Storms", meta = (ClampMin = "0.0"))
+	float StormSpin = 2.0f;
+
+	// -- Planet: hurricanes -------------------------------------------------
 	//
 	// Tracked tropical storms riding on the sim's own. Each spawns on a storm
 	// with cyclonic spin in the genesis band, follows it, and fades once it is
-	// gone. While alive it pushes the flow around it toward a vortex, which the
-	// flow then carries the weather around, and it raises the deepest storm
-	// cloud in its eyewall band on the output.
+	// gone. While alive it pushes the flow toward a vortex -- vectors tangent to
+	// circles about its centre, rising from StormCellEyeStrength at the eye's
+	// edge to a peak at the eyewall and falling to zero at the radius -- and
+	// the flow carries the weather around it.
+	//
+	// PITFALL: the sim grid resolves the push and the atlas the band. Nothing
+	// under about two grid cells survives: at GridResolution 128 the eyewall
+	// wants to sit at least 1.4 degrees out, at 256 at least 0.7.
 
 	/** Cells alive at once, up to FlowSimShader::MaxStormCells. Zero turns them
 	 *  off. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0", ClampMax = "32"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (ClampMin = "0", ClampMax = "32"))
 	int32 MaxStormCells = 12;
 
 	/** Spawn attempts per unit sim time, planet-wide. Each tests eight points
 	 *  in the genesis band for a storm to seed on. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0"))
 	float StormCellSpawnRate = 4.0f;
 
 	/** Latitudes, degrees, between which cells form. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0", ClampMax = "90.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "90.0"))
 	float GenesisLatitudeMin = 8.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0", ClampMax = "90.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "90.0"))
 	float GenesisLatitudeMax = 22.0f;
 
-	/** Speed difference between the top and bottom layers at which the window
-	 *  closes, as a fraction of the speed root: shear tears a storm apart. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.01"))
-	float GenesisShearSpeed = 0.5f;
-
-	/** Bottom layer's relative humidity a cell needs to form; it weakens below
-	 *  0.15 under this. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float GenesisHumidity = 0.85f;
-
-	/** Storm intensity a seed needs beneath it. A cell weakens once the storm
-	 *  within half its radius falls below this. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.01", ClampMax = "1.0"))
-	float GenesisStorm = 0.2f;
-
-	/** Normalised cyclonic vorticity at which a seed counts fully; below it the
-	 *  seed is weighted down. Zero ignores spin. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
-	float GenesisSpin = 0.05f;
-
-	/** Rates intensity grows while conditions hold and decays once they fail,
-	 *  per unit time. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
-	float StormCellGrowth = 2.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
-	float StormCellDecay = 1.0f;
-
 	/** Sim time after which a cell decays whatever the conditions. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.01"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.01"))
 	float StormCellLifetime = 3.0f;
 
 	/** Storm tracer a mature cell tops its eyewall up toward, on the stamp's
@@ -519,90 +404,16 @@ public:
 	 *  its parent storm does. About a quarter above GenesisStorm the cell keeps
 	 *  its own parent alive, and it ends when the genesis window or humidity
 	 *  fails, or at StormCellLifetime. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellSustain = 0.0f;
 
-	/** Poleward-west drift on top of the steering flow, as a fraction of the
-	 *  speed root. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
-	float StormCellDriftSpeed = 0.05f;
-
-	/** Rate a cell is pulled toward the centre of the storm beneath it, per
-	 *  unit time. Keeps it on its parent. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
-	float StormCellFollow = 2.0f;
-
-	/** Rate a cell is pulled onto the core of the vortex in the flow, the
-	 *  cyclonic vorticity peak within its eyewall, per unit time. Keeps the eye
-	 *  on the centre of rotation as the vortex drifts; zero leaves the cell to
-	 *  the steering flow. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cells", meta = (ClampMin = "0.0"))
-	float StormCellCoreFollow = 8.0f;
-
-	// -- Storm stamp ------------------------------------------------------------
-	//
-	// A cell's vortex: vectors tangent to circles about its centre, cyclonic,
-	// rising from zero at the centre to StormCellEyeStrength at the eye's edge,
-	// peaking at the eyewall and falling to zero at the radius. The flow is
-	// pushed along them; the eyewall band is drawn on the output.
-	//
-	// PITFALL: the sim grid resolves the push and the atlas the band. Nothing
-	// under about two grid cells survives: at GridResolution 128 the eyewall
-	// wants to sit at least 1.4 degrees out, at 256 at least 0.7.
-
 	/** Outer radius, degrees of arc, where every effect reaches zero. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.5", ClampMax = "45.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.5", ClampMax = "45.0"))
 	float StormCellRadius = 8.0f;
 
-	/** Eye radius, as a fraction of the radius: the deck thins toward the
-	 *  centre on an S curve out to it, carried and wound by the flow. The eye
-	 *  reads at about half this radius. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "0.9"))
-	float StormCellEye = 0.08f;
-
 	/** Where the vectors peak, as a fraction of the radius. Outside the eye. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.01", ClampMax = "0.95"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.01", ClampMax = "0.95"))
 	float StormCellEyewall = 0.18f;
-
-	/** Vector strength at the eye's edge, as a fraction of the eyewall's. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float StormCellEyeStrength = 0.2f;
-
-	/** Share of the deck's column depth a full-intensity eye removes at its
-	 *  centre: 1 thins it to nothing, lower leaves a floor of cloud. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float StormCellEyeDepth = 0.8f;
-
-	/** How far the eye follows the storm's pressure low rather than
-	 *  StormCellEye's circle. At 1 the eye is what the isobar through the
-	 *  eyewall encloses, deepening to full at the low's minimum: it sits on the
-	 *  centre of rotation the cloud spirals into, whatever the vorticity's
-	 *  shape. StormCellEyeDepth sets how far it thins the deck and
-	 *  StormCellEyeDraft how hard it sinks the sim's cloud. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float StormCellEyeLow = 0.0f;
-
-	/** Share of the low's eye, in radius from the eyewall inward, that its rim
-	 *  ramps over on a curve with no crease at either end. Higher starts the
-	 *  descent gently from the eyewall and shrinks the fully clear floor; 1
-	 *  ramps all the way to the centre. Lower gives a broad clear floor inside
-	 *  a steeper wall. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.05", ClampMax = "1.0"))
-	float StormCellEyeSoftness = 0.75f;
-
-	/** How fast the vectors fall from the eyewall to the radius, as the power
-	 *  of the remaining distance: 1 is linear, higher tightens the storm onto
-	 *  its core. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.1"))
-	float StormCellFalloff = 1.5f;
-
-	/** Share of the span from the eyewall to the radius over which the wind
-	 *  holds its peak before StormCellFalloff takes it to zero: the breadth of
-	 *  the band of strongest winds, which a storm needs to read as a
-	 *  hurricane. Shapes the vortex push only; the cloud, storm and draft
-	 *  still peak at the eyewall. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "0.95"))
-	float StormCellWindBreadth = 0.0f;
 
 	/** Eyewall wind a mature cell holds on the bottom layer, as a fraction of
 	 *  the speed root. The push is closed-loop: each step it closes part of the
@@ -613,19 +424,91 @@ public:
 	 *  rides on; StormCellWindBreadth widens the band of peak wind.
 	 *  PITFALL: far past the ceiling the push runs pinned at its limit, the clip
 	 *  flattens the whole vortex to the cap, and nothing regulates it. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0"))
 	float StormCellSpeed = 0.6f;
+
+	/** How strongly a cell lifts every layer's cloud toward full cover at the
+	 *  eyewall, scaled by the vector ramp elsewhere. A lift on top of the
+	 *  weather already there, so a hurricane always holds more cloud than its
+	 *  surroundings and is the last thing cover or erosion removes. Against the
+	 *  cloud's decay alone the eyewall settles near r / (r + 1 / CloudLifetime),
+	 *  r being this times StormCellCloudRate: 0.75 at the defaults. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellCloud = 0.25f;
+
+	/** Speed difference between the top and bottom layers at which the window
+	 *  closes, as a fraction of the speed root: shear tears a storm apart. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0 && LayerCount > 1", EditConditionHides, ClampMin = "0.01"))
+	float GenesisShearSpeed = 0.5f;
+
+	/** Bottom layer's relative humidity a cell needs to form; it weakens below
+	 *  0.15 under this. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "1.0"))
+	float GenesisHumidity = 0.85f;
+
+	/** Storm intensity a seed needs beneath it. A cell weakens once the storm
+	 *  within half its radius falls below this. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.01", ClampMax = "1.0"))
+	float GenesisStorm = 0.2f;
+
+	/** Normalised cyclonic vorticity at which a seed counts fully; below it the
+	 *  seed is weighted down. Zero ignores spin. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0"))
+	float GenesisSpin = 0.05f;
+
+	/** Rates intensity grows while conditions hold and decays once they fail,
+	 *  per unit time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0"))
+	float StormCellGrowth = 2.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0"))
+	float StormCellDecay = 1.0f;
+
+	/** Poleward-west drift on top of the steering flow, as a fraction of the
+	 *  speed root. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0"))
+	float StormCellDriftSpeed = 0.05f;
+
+	/** Rate a cell is pulled toward the centre of the storm beneath it, per
+	 *  unit time. Keeps it on its parent. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0"))
+	float StormCellFollow = 2.0f;
+
+	/** Rate a cell is pulled onto the core of the vortex in the flow, the
+	 *  cyclonic vorticity peak within its eyewall, per unit time. Keeps the eye
+	 *  on the centre of rotation as the vortex drifts; zero leaves the cell to
+	 *  the steering flow. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0"))
+	float StormCellCoreFollow = 8.0f;
+
+	/** How fast the vectors fall from the eyewall to the radius, as the power
+	 *  of the remaining distance: 1 is linear, higher tightens the storm onto
+	 *  its core. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.1"))
+	float StormCellFalloff = 1.5f;
+
+	/** Share of the span from the eyewall to the radius over which the wind
+	 *  holds its peak before StormCellFalloff takes it to zero: the breadth of
+	 *  the band of strongest winds, which a storm needs to read as a
+	 *  hurricane. Shapes the vortex push only; the cloud, storm and draft
+	 *  still peak at the eyewall. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "0.95"))
+	float StormCellWindBreadth = 0.0f;
+
+	/** Vector strength at the eye's edge, as a fraction of the eyewall's. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellEyeStrength = 0.2f;
 
 	/** Rate the flow relaxes toward the cell's vortex and inflow, per unit
 	 *  time: higher spins a cell up faster and holds it tighter against the
 	 *  flow around it. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0"))
 	float StormCellForcing = 1.5f;
 
 	/** The top layer's share of the target wind; the bottom layer's is 1, and
 	 *  those between are linear. Negative spins the top the other way, as a
 	 *  storm's outflow does. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0 && LayerCount > 1", EditConditionHides, ClampMin = "-1.0", ClampMax = "1.0"))
 	float StormCellTopShare = 0.0f;
 
 	/** Inflow on the bottom layer and outflow on the top at the eyewall, as a
@@ -635,76 +518,274 @@ public:
 	 *  speed ceiling. The storm's secondary circulation: it turns what the
 	 *  vortex alone winds into rings into trailing spiral bands. Zero turns it
 	 *  off. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0 && LayerCount > 1", EditConditionHides, ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellInflow = 0.2f;
-
-	// -- Storm cloud ------------------------------------------------------------
-	//
-	// Each cell carries its own cloud on the same ramp as its vectors: none at
-	// the centre, the most at the eyewall, none at the radius. It only raises
-	// the bottom layer's cloud, so the weather already there still counts, and
-	// the flow winds the two together. The eye clears in every layer. The storm
-	// tracer is not fed, so a cell still fades with its parent storm.
-
-	/** How strongly a cell lifts every layer's cloud toward full cover at the
-	 *  eyewall, scaled by the vector ramp elsewhere. A lift on top of the
-	 *  weather already there, so a hurricane always holds more cloud than its
-	 *  surroundings and is the last thing cover or erosion removes. Against the
-	 *  cloud's decay alone the eyewall settles near r / (r + 1 / CloudLifetime),
-	 *  r being this times StormCellCloudRate: 0.75 at the defaults. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float StormCellCloud = 0.25f;
 
 	/** Rate of that lift, per unit time. Against the flow's rotation it sets
 	 *  how far the cloud trails. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Cloud", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0"))
 	float StormCellCloudRate = 4.0f;
-
-	/** Vertical motion added with the vector strength, in W's units: rising
-	 *  air makes the column towering and fills it in. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
-	float StormCellDraft = 0.5f;
 
 	/** Vertical motion in the eye, in W's units, carried with the eye tracer.
 	 *  Negative sinks: in the sim the cloud the flow carries through the eye
 	 *  evaporates and none condenses there, at a rate EvaporationRate times
 	 *  this sets, so the eye clears and the flow winds what it clears; on the
 	 *  output it adds to W. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "-1.0", ClampMax = "1.0"))
 	float StormCellEyeDraft = -0.5f;
+
+	/** Eye radius, as a fraction of the radius: the deck thins toward the
+	 *  centre on an S curve out to it, carried and wound by the flow. The eye
+	 *  reads at about half this radius. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "0.9"))
+	float StormCellEye = 0.08f;
+
+	/** How far the eye follows the storm's pressure low rather than
+	 *  StormCellEye's circle. At 1 the eye is what the isobar through the
+	 *  eyewall encloses, deepening to full at the low's minimum: it sits on the
+	 *  centre of rotation the cloud spirals into, whatever the vorticity's
+	 *  shape. StormCellEyeDepth sets how far it thins the deck and
+	 *  StormCellEyeDraft how hard it sinks the sim's cloud. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellEyeLow = 0.0f;
+
+	// -- Planet: hurricane look ---------------------------------------------
+	//
+	// How the cells read on the deck: storm, pressure and the eye's depth.
 
 	/** Storm intensity raised across the whole storm, full from the centre
 	 *  through the eyewall and easing to none at the radius, joined to the
 	 *  sim's own by a smooth max. Storm deepens and darkens the cloud already
 	 *  there without adding any, so a hurricane reads as storm throughout; with
 	 *  the sim's storm tuned lower, the cells make the heaviest storm anywhere. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Look", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellStorm = 1.0f;
-
-	/** Storm intensity the eyewall band is raised to, on top of StormCellStorm:
-	 *  the band runs from 40% of peak vector strength inward to the eyewall. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float StormCellBandStorm = 1.0f;
 
 	/** Pressure drop full through the eyewall and easing to none at the
 	 *  radius, in the output's normalised units: the whole storm is a low. The
 	 *  deck raises the lid and lowers the base under lows. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm Stamp", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Look", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "2.0"))
 	float StormCellPressure = 0.5f;
 
-	// -- Noise coordinates --------------------------------------------------
+	/** Share of the deck's column depth a full-intensity eye removes at its
+	 *  centre: 1 thins it to nothing, lower leaves a floor of cloud. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Look", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellEyeDepth = 0.8f;
+
+	/** Share of the low's eye, in radius from the eyewall inward, that its rim
+	 *  ramps over on a curve with no crease at either end. Higher starts the
+	 *  descent gently from the eyewall and shrinks the fully clear floor; 1
+	 *  ramps all the way to the centre. Lower gives a broad clear floor inside
+	 *  a steeper wall. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Look", meta = (EditCondition = "MaxStormCells > 0 && StormCellEyeLow > 0", EditConditionHides, ClampMin = "0.05", ClampMax = "1.0"))
+	float StormCellEyeSoftness = 0.75f;
+
+	/** Storm intensity the eyewall band is raised to, on top of StormCellStorm:
+	 *  the band runs from 40% of peak vector strength inward to the eyewall. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricane Look", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "1.0"))
+	float StormCellBandStorm = 1.0f;
+
+	/** Vertical motion added with the vector strength, in W's units: rising
+	 *  air makes the column towering and fills it in. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricane Look", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "-1.0", ClampMax = "1.0"))
+	float StormCellDraft = 0.5f;
+
+	// -- Planet: noise motion -----------------------------------------------
 
 	/** Solid-body drift the noise carries on its own, as a fraction of the
 	 *  speed root: an angular rate on the unit sphere. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Coordinates")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Noise Motion")
 	float NoiseDriftSpeed = 0.3f;
 
 	/** How long a displacement accumulates before it resets, in eddy turnovers
 	 *  (DeformationRadius over the speed root). The noise's warp grows with the
 	 *  flow's strain times the reset time, and strain scales with the root, so
 	 *  this holds the winding per reset at any speed. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise Coordinates", meta = (ClampMin = "0.05"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Noise Motion", meta = (ClampMin = "0.05"))
 	float NoiseResetTurnovers = 3.0f;
+
+	// -- Time ---------------------------------------------------------------
+
+	/** Sim time per second of real time: THE SPEED HANDLE. The step is
+	 *  StepSize whatever the speed, so speed sets the steps per frame and the
+	 *  cost with it, and never the look. Zero freezes the sim. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Time", meta = (ClampMin = "0.0"))
+	float SimSpeed = 0.0025f;
+
+	/** Substeps to run before the sim is considered ready. Skipped once
+	 *  InitialState is bound. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Time", meta = (ClampMin = "0", ClampMax = "8192"))
+	int32 SpinUpSteps = 300;
+
+	// -- Quality ------------------------------------------------------------
+
+	/** Edge of one face of the cube atlas the output is resampled onto, in
+	 *  texels, rounded down to a power of two. The solver's grid follows: four
+	 *  times it in longitude columns, twice it in latitude rows, so 64 runs at
+	 *  256 x 128. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Quality", meta = (ClampMin = "16", ClampMax = "512"))
+	int32 GridResolution = 64;
+
+	/** Sim time per step: a look and cost control, independent of speed.
+	 *
+	 *  PITFALL: THE WEATHER DEPENDS ON THE STEP, and no conversion of the
+	 *  per-step settings removes that. The semi-Lagrangian interpolation
+	 *  smooths once per step, and the solver splits grid-scale gravity waves
+	 *  between pressure and divergence by an amount the step sets. Larger
+	 *  steps give sharper, thicker cloud. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Quality", meta = (ClampMin = "0.000001", ClampMax = "0.0086"))
+	float StepSize = 1e-5f;
+
+	/** Layers in the stack, 0 on top, coupled through their pressure. Two is
+	 *  the smallest with baroclinic storms; one is a single shallow layer. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Quality", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 LayerCount = 2;
+
+	// -- Layers -------------------------------------------------------------
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Layers")
+	TArray<FFlowLayerProfile> LayerProfiles;
+
+	/** Relaxation of each layer's velocity toward its neighbours': interfacial
+	 *  friction. Strong coupling erodes the shear storms grow from. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Layers", meta = (EditCondition = "LayerCount > 1", EditConditionHides))
+	float LayerCoupling = 0.1f;
+
+	/** Density step at each interface, as a fraction of the surface's. Small
+	 *  keeps the free surface nearly flat, so pressure systems are carried by
+	 *  the interfaces. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Layers", meta = (EditCondition = "LayerCount > 1", EditConditionHides, ClampMin = "0.01", ClampMax = "1.0"))
+	float Stratification = 0.1f;
+
+	// -- Rates --------------------------------------------------------------
+
+	/** Relaxation of each layer's ZONAL-MEAN eastward velocity toward its
+	 *  profile, per unit time. PITFALL: every nudge is an unbalanced push that
+	 *  the flow answers with gravity waves, so strong nudging reads as
+	 *  ripples. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rates")
+	float NudgeRate = 1.0f;
+
+	/** Linear drag on the eddy part of the eastward velocity and all of the
+	 *  northward, per unit time, scaled per layer. The energy sink that arrests
+	 *  the cascade, and what turns flow into lows and out of highs. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rates")
+	float DragRate = 1.5f;
+
+	/** Rate interfaces relax toward their balanced heights, per unit time, by
+	 *  moving mass between layers; column mass is untouched. On a single layer
+	 *  its thickness relaxes instead. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rates", meta = (ClampMin = "0.0"))
+	float ThermalRelaxation = 0.5f;
+
+	/** How long one forcing pattern lives, in sim time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rates", meta = (ClampMin = "0.01"))
+	float ForcingLifetime = 0.5f;
+
+	/** Forcing noise frequency, in volume UVW per unit sphere. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rates")
+	float ForcingFrequency = 0.25f;
+
+	// -- Numerics -----------------------------------------------------------
+
+	/** Weight of the implicit half of the gravity-wave terms. 0.5 is neutral;
+	 *  above it gravity waves are damped, by an amount that grows with the
+	 *  step, and that damping counts toward GridDamping. A stack runs at least
+	 *  FlowSimStep::StackWeight at large steps. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Numerics", meta = (ClampMin = "0.5", ClampMax = "1.0"))
+	float ImplicitWeight = 0.6f;
+
+	/** Rate, per unit sim time, at which grid-scale waves of the first internal
+	 *  mode decay, whatever the step: the implicit scheme's own damping at the
+	 *  step, and divergence damping making up the rest. Smooths W, ripples and
+	 *  bores at the grid scale; longer waves lose less, as their scale squared.
+	 *  Where the implicit scheme alone damps more (a large step, a high
+	 *  ImplicitWeight) that wins, and the start log says so. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Numerics", meta = (ClampMin = "0.0"))
+	float GridDamping = 20.0f;
+
+	/** Gain of the compression-activated divergence damping: where a front
+	 *  steepens, the grid-scale divergence a step removes grows by this times
+	 *  the local compression per step. Higher widens and softens travelling
+	 *  fronts more; 0 leaves only GridDamping. The total is capped at
+	 *  the explicit scheme's stability bound, so any value is stable. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Numerics", meta = (ClampMin = "0.0", ClampMax = "50.0"))
+	float ShockDamping = 2.0f;
+
+	/** Rebuild centre velocities to fourth order from the faces rather than as
+	 *  a two-face average. Keeps a compact vortex from bleeding into a cross
+	 *  along the grid axes. PITFALL: it also damps fast motion far less --
+	 *  about twice the eddy speed, more W and more cloud at the same settings --
+	 *  so the deck's coverage tuning does not carry over, and the faster flow
+	 *  pulls the two noise phases apart until their crossfade reads as density
+	 *  sliding under the clouds. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Numerics")
+	bool bSharpCentreVelocity = false;
+
+	/** cos(latitude) below which the longitudinal filter engages. Its width
+	 *  follows from the grid: FilterLatitude / cos(latitude) texels. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Numerics", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float FilterLatitude = 0.9f;
+
+	// -- Pipeline -----------------------------------------------------------
+	//
+	// Assets, targets and start state: what a machine or a session owns rather
+	// than what a tune is.
+
+	/** Band-limited tiling noise, read as a forcing streamfunction. Optional:
+	 *  with none bound the forcing is exactly zero. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline")
+	TObjectPtr<UVolumeTexture> ForcingVolume;
+
+	/** The channel read, decoded from [0, 1] to [-1, 1]. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline", meta = (ClampMin = "0", ClampMax = "3"))
+	int32 ForcingChannel = 1;
+
+	/** A captured state to start from. Empty means seed and spin up. A grid or
+	 *  layout mismatch is refused and falls back to seeding. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline")
+	TObjectPtr<UFlowSnapshot> InitialState;
+
+	/** RGBA16F 2D array, the cube atlas with 4 * LayerCount slices; see
+	 *  FlowField.ush. This is what the material samples. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline")
+	TObjectPtr<UTextureRenderTarget2DArray> FlowTarget;
+
+	/** Reconfigure the targets to match the grid if they do not already. A
+	 *  mismatched target is refused, and a refused sim looks exactly like one
+	 *  that runs and produces nothing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline")
+	bool bAutoResizeTargets = true;
+
+	/** Spin-up substeps per frame. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline", meta = (ClampMin = "1", ClampMax = "64"))
+	int32 MaxSpinUpStepsPerFrame = 8;
+
+	// -- Debug --------------------------------------------------------------
+
+	/** Any 2D render target. Sized to the grid it is one texel per cell. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
+	TObjectPtr<UTextureRenderTarget2D> DebugTarget;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
+	EFlowDebugMode DebugMode = EFlowDebugMode::Vorticity;
+
+	/** Layer to view; the vertical mode, for the residual. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (ClampMin = "0", ClampMax = "7"))
+	int32 DebugLayer = 0;
+
+	/** Value mapped to full colour. ZERO DERIVES IT PER MODE: the fields differ
+	 *  in magnitude by orders, so one number is right for one of them. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (ClampMin = "0.0"))
+	float DebugScale = 0.0f;
+
+	/** Halt stepping without tearing the state down. The debug view keeps
+	 *  updating. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
+	bool bPaused = false;
+
+	/** StepSize held to the solver's range. */
+	float GetStepSize() const { return FMath::Clamp(StepSize, FlowSimStep::Min, FlowSimStep::SpinUp); }
 
 	/** NoiseDriftSpeed as an angular rate, radians per unit sim time. */
 	float GetNoiseDriftRate() const;
@@ -712,7 +793,7 @@ public:
 	/** NoiseResetTurnovers in sim time. */
 	float GetNoiseResetTime() const;
 
-	/** The speed root: FroudeCeiling times the first internal mode's wave
+	/** The speed root: SpeedRoot times the first internal mode's wave
 	 *  speed. */
 	float GetSpeedRoot() const;
 
@@ -732,104 +813,6 @@ public:
 	 *  step: GridDamping less the implicit scheme's share, as a fraction of
 	 *  that step. */
 	float GetDivergenceDamping(float Step) const;
-
-	// -- Polar filter -------------------------------------------------------
-
-	/** cos(latitude) below which the longitudinal filter engages. Its width
-	 *  follows from the grid: FilterLatitude / cos(latitude) texels. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Polar Filter", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float FilterLatitude = 0.9f;
-
-	// -- Solver -------------------------------------------------------------
-
-	/** Weight of the implicit half of the gravity-wave terms. 0.5 is neutral;
-	 *  above it gravity waves are damped, by an amount that grows with the
-	 *  step, and that damping counts toward GridDamping. A stack runs at least
-	 *  FlowSimStep::StackWeight at large steps. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "0.5", ClampMax = "1.0"))
-	float ImplicitWeight = 0.6f;
-
-	/** Rate, per unit sim time, at which grid-scale waves of the first internal
-	 *  mode decay, whatever the step: the implicit scheme's own damping at the
-	 *  step, and divergence damping making up the rest. Smooths W, ripples and
-	 *  bores at the grid scale; longer waves lose less, as their scale squared.
-	 *  Where the implicit scheme alone damps more (a large step, a high
-	 *  ImplicitWeight) that wins, and the start log says so. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "0.0"))
-	float GridDamping = 20.0f;
-
-	/** Gain of the compression-activated divergence damping: where a front
-	 *  steepens, the grid-scale divergence a step removes grows by this times
-	 *  the local compression per step. Higher widens and softens travelling
-	 *  fronts more; 0 leaves only GridDamping. The total is capped at
-	 *  the explicit scheme's stability bound, so any value is stable. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (ClampMin = "0.0", ClampMax = "50.0"))
-	float ShockDamping = 2.0f;
-
-	// -- Forcing volume -----------------------------------------------------
-
-	/** Band-limited tiling noise, read as a forcing streamfunction. Optional:
-	 *  with none bound the forcing is exactly zero. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing Volume")
-	TObjectPtr<UVolumeTexture> ForcingVolume;
-
-	/** The channel read, decoded from [0, 1] to [-1, 1]. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Forcing Volume", meta = (ClampMin = "0", ClampMax = "3"))
-	int32 ForcingChannel = 1;
-
-	// -- Start state --------------------------------------------------------
-
-	/** A captured state to start from. Empty means seed and spin up. A grid or
-	 *  layout mismatch is refused and falls back to seeding. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Start State")
-	TObjectPtr<UFlowSnapshot> InitialState;
-
-	// -- Spin-up ------------------------------------------------------------
-
-	/** Substeps to run before the sim is considered ready. Skipped once
-	 *  InitialState is bound. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spin Up", meta = (ClampMin = "0", ClampMax = "8192"))
-	int32 SpinUpSteps = 300;
-
-	/** Spin-up substeps per frame. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spin Up", meta = (ClampMin = "1", ClampMax = "64"))
-	int32 MaxSpinUpStepsPerFrame = 8;
-
-	// -- Targets ------------------------------------------------------------
-
-	/** RGBA16F 2D array, the cube atlas with 4 * LayerCount slices; see
-	 *  FlowField.ush. This is what the material samples. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Targets")
-	TObjectPtr<UTextureRenderTarget2DArray> FlowTarget;
-
-	/** Any 2D render target. Sized to the grid it is one texel per cell. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Targets")
-	TObjectPtr<UTextureRenderTarget2D> DebugTarget;
-
-	/** Reconfigure the targets to match the grid if they do not already. A
-	 *  mismatched target is refused, and a refused sim looks exactly like one
-	 *  that runs and produces nothing. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Targets")
-	bool bAutoResizeTargets = true;
-
-	// -- Debug --------------------------------------------------------------
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
-	EFlowDebugMode DebugMode = EFlowDebugMode::Vorticity;
-
-	/** Layer to view; the vertical mode, for the residual. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (ClampMin = "0", ClampMax = "7"))
-	int32 DebugLayer = 0;
-
-	/** Value mapped to full colour. ZERO DERIVES IT PER MODE: the fields differ
-	 *  in magnitude by orders, so one number is right for one of them. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (ClampMin = "0.0"))
-	float DebugScale = 0.0f;
-
-	/** Halt stepping without tearing the state down. The debug view keeps
-	 *  updating. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
-	bool bPaused = false;
 
 	virtual void Serialize(FArchive& Ar) override;
 

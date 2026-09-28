@@ -124,21 +124,23 @@
 #define TR_EYE_OPEN_POWER 1.0f
 #endif
 
-/** 1 trims each fine segment of a view ray to the keyframe cells its slab
- *  can occupy (TR_PlanSlabSegments), so the cloud steps are spent inside the
- *  cloud rather than across the whole band the field could reach. 0 marches
- *  the whole band. */
+/** 1 lets a view sample the field returns empty -- outside its column's slab,
+ *  or eroded or uncovered to nothing -- reuse the light of the last full read
+ *  for up to TR_PLAN_LIGHT_REUSE samples in a row (FIELD_EMPTY_LIGHT_REUSE),
+ *  skipping the shadow map and transmittance reads. The steps stay where the plan puts them;
+ *  only work is skipped. 0 reads the light at every sample.
+ *
+ *  PITFALL: A PLAN THAT PLACES STEPS BY THE FIELD DRAWS THE FIELD INTO THE
+ *  LATTICE. Steps that follow the occupied keyframe cells move as the weather
+ *  does, and at some angles the pattern reads as sampling artifacts. */
 #ifndef TR_PLAN_SLAB
 #define TR_PLAN_SLAB 0
 #endif
 
-/** Keyframe cells the trim walks per segment before it gives up and keeps the
- *  rest of the segment fine. */
-#define TR_PLAN_MAX_CELLS 256
-
-/** Margin, in cloud thicknesses, the trim widens each cell's slab by. */
-#ifndef TR_PLAN_MARGIN
-#define TR_PLAN_MARGIN 0.05f
+/** Most empty samples in a row that reuse one light read under TR_PLAN_SLAB:
+ *  how far, in fine steps, the air's cloud shadow may lag. */
+#ifndef TR_PLAN_LIGHT_REUSE
+#define TR_PLAN_LIGHT_REUSE 3
 #endif
 
 /** The sim layer every column read comes from: CloudLayer, negative for the
@@ -1264,182 +1266,6 @@ TRColumnKey TR_ReadKey(
 
     return Key;
 }
-
-/** The ray parameter at a keyframe lattice angle. */
-float TR_KeyT(TRRayCache C, float Angle)
-{
-    return C.TPerigee + C.Impact * tan(Angle);
-}
-
-/** A keyframe's column inputs alone, without the noise: what the trim reads. */
-TRColumnInputs TR_ReadKeyInputs(
-	Texture2DArray FlowField, SamplerState FlowSampler, TRRayCache C, float Angle, TRFieldParams F, out float3 N)
-{
-    float SinA, CosA;
-    sincos(min(Angle, 0.5f * PI), SinA, CosA);
-
-    N = normalize(Atmo_RotateZ(C.Perigee * CosA + C.Dir * SinA, F.SpinAngle));
-
-    return TR_ReadColumn(FlowField, FlowSampler, N, F);
-}
-
-/** The ray's height, an atmosphere fraction, at parameter T. */
-float TR_RayHeight(float3 LocalOrigin, float3 LocalDir, float T, TRFieldParams F)
-{
-    return (length(LocalOrigin + LocalDir * T) - F.PlanetRadius) / F.Thickness;
-}
-
-#ifdef ATMO_MAX_SEGMENTS
-
-/** Trims each fine segment to the first and last keyframe cells whose slab the
- *  ray can reach, handing the empty ends to the coarse segments beside them.
- *
- *  EXACT AT THE KEYFRAMES. The density interpolates the column's inputs between
- *  the same keyframes, so a cell's slab is known from its two ends; the
- *  surfaces are not linear between them, so each cell is also read at its
- *  middle and widened by TR_PLAN_MARGIN cloud thicknesses and half the ends'
- *  difference. Gaps inside a segment stay fine.
- *
- *  THE BOUNDARIES ARE KEYFRAME LATTICE POINTS: geometry, not field. Which
- *  cells are occupied changes as the weather moves, but a trim can only land
- *  on the lattice. */
-void TR_PlanSlabSegments(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	float3 LocalOrigin,
-	float3 LocalDir,
-	float CoarseStep,
-	TRFieldParams F,
-	inout float4 Segments[ATMO_MAX_SEGMENTS],
-	inout int SegmentCount)
-{
-    const TRRayCache C = TR_RayCacheBegin(FlowField, LocalOrigin, LocalDir, F);
-    const float Margin = TR_PLAN_MARGIN * F.CloudThickness;
-    const float TPerigee = C.TPerigee;
-
-	[loop]
-    for (int s = 0; s < SegmentCount; s++)
-    {
-        if (Segments[s].w < 0.5f)
-        {
-            continue;
-        }
-
-        const float SegStart = Segments[s].x;
-        const float SegEnd = Segments[s].y;
-
-        const int CellFirst = (int) floor(atan2(SegStart - TPerigee, C.Impact) / C.CellAngle);
-        const int CellLast = (int) floor(atan2(SegEnd - TPerigee, C.Impact) / C.CellAngle);
-
-        float First = -1.0f;
-        float Last = -1.0f;
-
-        float3 NA;
-        TRColumnInputs InA = TR_ReadKeyInputs(FlowField, FlowSampler, C, float(CellFirst) * C.CellAngle, F, NA);
-
-		[loop]
-        for (int Cell = CellFirst; Cell <= CellLast; Cell++)
-        {
-            const float TA = max(TR_KeyT(C, float(Cell) * C.CellAngle), SegStart);
-            const float TB = min(TR_KeyT(C, float(Cell + 1) * C.CellAngle), SegEnd);
-
-			// Out of cells: the rest of the segment stays fine.
-            if (Cell - CellFirst >= TR_PLAN_MAX_CELLS)
-            {
-                First = (First < 0.0f) ? TA : First;
-                Last = SegEnd;
-                break;
-            }
-
-            float3 NB;
-            const TRColumnInputs InB = TR_ReadKeyInputs(FlowField, FlowSampler, C, float(Cell + 1) * C.CellAngle, F, NB);
-
-            TRColumnInputs InM;
-            InM.Pressure = 0.5f * (InA.Pressure + InB.Pressure);
-            InM.Weather = 0.5f * (InA.Weather + InB.Weather);
-            InM.Depth = 0.5f * (InA.Depth + InB.Depth);
-
-            const TRColumn ColA = TR_ColumnFromInputs(InA, NA, F);
-            const TRColumn ColB = TR_ColumnFromInputs(InB, NB, F);
-            const TRColumn ColM = TR_ColumnFromInputs(InM, normalize(NA + NB), F);
-
-            const float Depth = max(max(ColA.Top - ColA.Base, ColB.Top - ColB.Base), ColM.Top - ColM.Base);
-
-            const float Widen = Margin + 0.5f * (abs(ColA.Top - ColB.Top) + abs(ColA.Base - ColB.Base));
-            const float Low = min(min(ColA.Base, ColB.Base), ColM.Base) - Widen;
-            const float High = max(max(ColA.Top, ColB.Top), ColM.Top) + Widen;
-
-			// The ray's height over the cell: its ends, and the perigee inside.
-            const float HA = TR_RayHeight(LocalOrigin, LocalDir, TA, F);
-            const float HB = TR_RayHeight(LocalOrigin, LocalDir, TB, F);
-            const float HP = (TPerigee > TA && TPerigee < TB) ? TR_RayHeight(LocalOrigin, LocalDir, TPerigee, F) : min(HA, HB);
-
-            if (Depth > 1e-5f && max(HA, HB) >= Low && min(HP, min(HA, HB)) <= High)
-            {
-                First = (First < 0.0f) ? TA : First;
-                Last = TB;
-            }
-
-            InA = InB;
-            NA = NB;
-        }
-
-		// No slab anywhere on the segment: the whole of it is air.
-        if (First < 0.0f)
-        {
-            Segments[s] = float4(SegStart, SegEnd, CoarseStep, 0.0f);
-            continue;
-        }
-
-		// The empty ends go to the coarse neighbours, or to a new coarse segment
-		// while slots remain; without either the end stays fine.
-        if (First > SegStart + 1e-4f)
-        {
-            if (s > 0 && Segments[s - 1].w < 0.5f)
-            {
-                Segments[s - 1].y = First;
-                Segments[s].x = First;
-            }
-            else if (SegmentCount < ATMO_MAX_SEGMENTS)
-            {
-				[loop]
-                for (int k = SegmentCount; k > s; k--)
-                {
-                    Segments[k] = Segments[k - 1];
-                }
-
-                Segments[s] = float4(SegStart, First, CoarseStep, 0.0f);
-                Segments[s + 1].x = First;
-                SegmentCount++;
-                s++;
-            }
-        }
-
-        if (Last < SegEnd - 1e-4f)
-        {
-            if (s + 1 < SegmentCount && Segments[s + 1].w < 0.5f)
-            {
-                Segments[s + 1].x = Last;
-                Segments[s].y = Last;
-            }
-            else if (SegmentCount < ATMO_MAX_SEGMENTS)
-            {
-				[loop]
-                for (int k = SegmentCount; k > s + 1; k--)
-                {
-                    Segments[k] = Segments[k - 1];
-                }
-
-                Segments[s + 1] = float4(Last, SegEnd, CoarseStep, 0.0f);
-                Segments[s].y = Last;
-                SegmentCount++;
-                s++;
-            }
-        }
-    }
-}
-
-#endif
 
 /** TR_Density for a sample at parameter T on the ray the cache was begun with,
  *  LocalPos being that point. Samples must arrive in increasing T for the

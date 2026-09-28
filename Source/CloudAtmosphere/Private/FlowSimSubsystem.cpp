@@ -685,9 +685,9 @@ void UFlowSimSubsystem::ReportCourant() const
 
 	// The cells' two targets share one ceiling, SIM_CELL_TARGET_CEILING of the
 	// Froude ceiling: the inflow gets what the vortex leaves.
-	if (Config->MaxStormCells > 0 && Config->FroudeCeiling > 0.0f && Config->StormCellInflow > 0.0f)
+	if (Config->MaxStormCells > 0 && Config->SpeedRoot > 0.0f && Config->StormCellInflow > 0.0f)
 	{
-		const float Room = 0.9f * FMath::Max(Config->FroudeCeiling, 0.1f) * C;
+		const float Room = 0.9f * FMath::Max(Config->SpeedRoot, 0.1f) * C;
 		const float Wind = Speeds.CellWind;
 		const float Inflow = FMath::Clamp(Config->StormCellInflow, 0.0f, 1.0f) * Wind;
 		const float Left = FMath::Sqrt(FMath::Max(Room * Room - Wind * Wind, 0.0f));
@@ -696,7 +696,7 @@ void UFlowSimSubsystem::ReportCourant() const
 		{
 			UE_LOG(LogFlowSim, Warning,
 				TEXT("Storm cell inflow target %.3f is cut to %.3f in a full-strength cell: its vortex ")
-				TEXT("target %.3f leaves that much under the ceiling %.3f. Lower StormCellSpeed or raise FroudeCeiling."),
+				TEXT("target %.3f leaves that much under the ceiling %.3f. Lower StormCellSpeed or raise SpeedRoot."),
 				Inflow, Left, Wind, Room);
 		}
 	}
@@ -1235,7 +1235,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.DragRate = Config->DragRate;
 	Out.LayerCoupling = Config->LayerCoupling;
 	Out.DivergenceDamping = Config->GetDivergenceDamping(Out.DeltaTime);
-	Out.FroudeCeiling = FMath::Max(Config->FroudeCeiling, 0.1f);
+	Out.FroudeCeiling = FMath::Max(Config->SpeedRoot, 0.1f);
 	Out.ShockDamping = FMath::Max(Config->ShockDamping, 0.0f);
 	Out.bSharpCentreVelocity = Config->bSharpCentreVelocity;
 

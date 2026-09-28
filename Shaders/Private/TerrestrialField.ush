@@ -157,9 +157,7 @@ bool Field_SegmentIsCloud(float3 Origin, float3 Dir, float4 Segment, PlanetParam
  *  climbs into the band, since the segment structure changes there.
  *
  *  Turning it back on costs that; leaving it off costs resolution, recoverable
- *  with CloudSteps. Resolution is the cheaper of the two to buy back.
- *  TR_PLAN_SLAB concentrates the samples without the trace's blind spots, and
- *  takes precedence. */
+ *  with CloudSteps. Resolution is the cheaper of the two to buy back. */
 #ifndef TR_SPLIT_AT_ENTRY
 #define TR_SPLIT_AT_ENTRY 0
 #endif
@@ -175,15 +173,6 @@ void Field_PlanSegments(
 	inout float4 Segments[ATMO_MAX_SEGMENTS],
 	inout int SegmentCount)
 {
-#if TR_PLAN_SLAB
-    if (SegmentCount > 0)
-    {
-        TR_PlanSlabSegments(FlowField, FlowSampler, LocalOrigin, LocalDir, CoarseStep, F, Segments, SegmentCount);
-    }
-
-    return;
-#endif
-
     if (SegmentCount <= 0 || SegmentCount >= ATMO_MAX_SEGMENTS)
     {
         return;
@@ -531,6 +520,10 @@ float3 Field_LightTint(
 /** Field_LightTint from a sample already taken at the receiver: its second
  *  channel is the material TR_TypeCoarse would read, so no second column. */
 #define FIELD_SAMPLE_TINT 1
+
+#if TR_PLAN_SLAB
+#define FIELD_EMPTY_LIGHT_REUSE TR_PLAN_LIGHT_REUSE
+#endif
 
 float3 Field_SampleLightTint(float4 Sample, FieldMaterialParams S)
 {

@@ -480,6 +480,7 @@ namespace AtmosphereLoad
 		static const FRename Rows[] = {
 			{ TEXT("ForcingScale"), TEXT("ForcingFrequency") },
 			{ TEXT("SaturationPole"), TEXT("SaturationPoleRatio") },
+			{ TEXT("FroudeCeiling"), TEXT("SpeedRoot") },
 
 			// Retired: the forcing always decodes unipolar (a file saved with true
 			// runs at twice its eddy forcing), the equator's saturation is the
