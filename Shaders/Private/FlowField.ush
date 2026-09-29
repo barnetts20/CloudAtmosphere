@@ -45,30 +45,17 @@ struct FlowReadParams
     float BandSharpness;
 };
 
-/** Flow field reconstruction: 0 hardware bilinear, one tap, C0; 1 cubic
- *  B-spline, four taps, C2. A performance handle. If blocks survive at 1 the
- *  edge is a genuine step in the sim data, and the answer is sim resolution or
- *  a softer BandSharpness. */
-#ifndef FLOW_FIELD_FILTER
-#define FLOW_FIELD_FILTER 1
-#endif
-
 /** Texels either side of a face edge over which neighbouring faces cross-fade.
  *  Each face resamples the sim on its own lattice, so their reconstructions
  *  disagree at grid-scale detail and a hard switch shows as a seam; carried
- *  noise magnifies it, since a displacement mismatch shifts the noise phase.
- *  0 disables the blend. */
-#ifndef FLOW_ATLAS_BLEND
+ *  noise magnifies it, since a displacement mismatch shifts the noise phase. */
 #define FLOW_ATLAS_BLEND 2
-#endif
 
-/** Gutter texels around each face in the atlas: the blend band plus the
- *  B-spline's two-texel footprint. PITFALL: FlowSimShader::AtlasGutter sizes
- *  the texture in C++ and must equal this, or every face reads its neighbour's
- *  tile. */
-#ifndef FLOW_ATLAS_GUTTER
+/** Gutter texels around each face in the atlas: the blend band plus the cubic
+ *  B-spline read's two-texel footprint. PITFALL: FlowSimShader::AtlasGutter
+ *  sizes the texture in C++ and must equal this, or every face reads its
+ *  neighbour's tile. */
 #define FLOW_ATLAS_GUTTER (FLOW_ATLAS_BLEND + 2)
-#endif
 
 // -- Cube atlas ---------------------------------------------------------------
 
@@ -211,7 +198,6 @@ FlowFaceSet Flow_FaceSet(float3 N, float FaceSize)
 {
     FlowFaceSet Set;
 
-#if FLOW_ATLAS_BLEND > 0
 
     const float Band = 2.0f * FLOW_ATLAS_BLEND / FaceSize;
 
@@ -237,19 +223,6 @@ FlowFaceSet Flow_FaceSet(float3 N, float FaceSize)
         Set.Weight[Slot] /= Total;
     }
 
-#else
-
-    const uint Primary = Flow_Face(N);
-
-	[unroll]
-    for (uint Axis = 0; Axis < 3u; ++Axis)
-    {
-        Set.Face[Axis] = Primary;
-        Set.Coord[Axis] = Flow_FaceCoord(N, Primary);
-        Set.Weight[Axis] = Axis == 0u ? 1.0f : 0.0f;
-    }
-
-#endif
 
     return Set;
 }
@@ -265,8 +238,7 @@ void Flow_AtlasMetrics(Texture2DArray FlowField, out float FaceSize, out float2 
 }
 
 /** Where one face tile's reconstruction taps land at a coordinate and how
- *  they weigh: shared by every slice read there. Under FLOW_FIELD_FILTER 0
- *  only UV0 is used. */
+ *  they weigh: shared by every slice read there. */
 struct FlowTileTaps
 {
     float2 UV0;
@@ -281,14 +253,6 @@ FlowTileTaps Flow_TileTaps(uint Face, float2 Coord, float FaceSize, float2 InvSi
 
     const float2 Pixel = Flow_AtlasTexel(Face, Coord, FaceSize);
 
-#if FLOW_FIELD_FILTER == 0
-
-    Taps.UV0 = Pixel * InvSize;
-    Taps.UV1 = Taps.UV0;
-    Taps.S0 = float2(1.0f, 1.0f);
-    Taps.S1 = float2(0.0f, 0.0f);
-
-#else
 
 	// Bilinear is continuous in value but not in gradient, and anything built
 	// on this field responds to its slope, so the slope jumps surface as
@@ -315,7 +279,6 @@ FlowTileTaps Flow_TileTaps(uint Face, float2 Coord, float FaceSize, float2 InvSi
     Taps.UV0 = (Corner + 0.5f + (W1 / Taps.S0 - 1.0f)) * InvSize;
     Taps.UV1 = (Corner + 0.5f + (W3 / Taps.S1 + 1.0f)) * InvSize;
 
-#endif
 
     return Taps;
 }
@@ -324,11 +287,6 @@ FlowTileTaps Flow_TileTaps(uint Face, float2 Coord, float FaceSize, float2 InvSi
  *  tap stays inside the tile for coordinates within the blend band. */
 float4 Flow_TapSlice(Texture2DArray FlowField, SamplerState FlowSampler, FlowTileTaps Taps, float Slice)
 {
-#if FLOW_FIELD_FILTER == 0
-
-    return FlowField.SampleLevel(FlowSampler, float3(Taps.UV0, Slice), 0.0f);
-
-#else
 
     return
 		  Taps.S0.x * Taps.S0.y * FlowField.SampleLevel(FlowSampler, float3(Taps.UV0.x, Taps.UV0.y, Slice), 0.0f)
@@ -336,7 +294,6 @@ float4 Flow_TapSlice(Texture2DArray FlowField, SamplerState FlowSampler, FlowTil
 		+ Taps.S0.x * Taps.S1.y * FlowField.SampleLevel(FlowSampler, float3(Taps.UV0.x, Taps.UV1.y, Slice), 0.0f)
 		+ Taps.S1.x * Taps.S1.y * FlowField.SampleLevel(FlowSampler, float3(Taps.UV1.x, Taps.UV1.y, Slice), 0.0f);
 
-#endif
 }
 
 /** Samples one slice of one face's tile, raw. */

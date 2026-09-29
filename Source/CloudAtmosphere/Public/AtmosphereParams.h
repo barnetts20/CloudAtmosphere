@@ -46,11 +46,8 @@ enum class EPlanetAtmosphereType : uint8
 	GasGiant
 };
 
-/** Stage 3 blur, which softens the limb against the scene behind it.
- *
- *  ONE INSTANCE FOR BOTH MODELS: the composite runs in a single material shared
- *  by both march paths, so a per-model copy would be a second value that can
- *  never reach a shader. */
+/** Stage 3 blur, which softens the limb against the scene behind it. The gas
+ *  giant's composite material only; the terrestrial composite takes no blur. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FAtmosphereCompositeParams
 {
@@ -215,8 +212,8 @@ struct CLOUDATMOSPHERE_API FAtmosphereGeometryParams
 // shaped by a height profile, is what coverage erodes into individual clouds,
 // and the detail layer erodes their edges. See TerrestrialDeck.ush.
 //
-// PACKED ON THE WAY OUT. Each group travels to the material and the bake as a
-// few float4 pins, packed in ApplyTerrestrialModelParams and unpacked once in
+// PACKED ON THE WAY OUT. Each group travels to the compute march and the bake as
+// a few float4 pins, packed in PackTerrestrialField and unpacked once in
 // TR_BuildField; the members here keep their own names.
 //
 // CLOUD THICKNESS IS THE UNIT. Every height below except CloudBase is a
@@ -481,9 +478,9 @@ struct CLOUDATMOSPHERE_API FTerrestrialStructureLayerParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float FlowInherit = 1.0f;
 
-	/** Offset to the mip the volume is read at, from the march pixel's
-	 *  footprint. 1 accounts for the half-resolution march; lower is sharper
-	 *  and shimmers in motion. The volume needs its mips. */
+	/** Mips added to the one the volume is read at from the pixel's footprint:
+	 *  lower is sharper and shimmers more in motion, which the temporal resolve
+	 *  partly averages. The volume needs its mips. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-2.0", ClampMax = "4.0"))
 	float MipBias = 1.0f;
 };
@@ -577,6 +574,35 @@ struct CLOUDATMOSPHERE_API FTerrestrialCloudMaterialParams
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	FLinearColor StormExtinction = FLinearColor(1.0f, 1.0f, 1.0f, 2.0f);
+};
+
+/** How the terrestrial march spreads its samples over pixels, frames and
+ *  distance. For a performance tier, with Raymarch's step counts. */
+USTRUCT(BlueprintType)
+struct CLOUDATMOSPHERE_API FTerrestrialSamplingParams
+{
+	GENERATED_BODY()
+
+	/** One pixel of each CellSize square is marched per frame and the rest come
+	 *  from history, so the march costs 1 / CellSize^2 of a full-resolution one
+	 *  and a pixel refreshes every CellSize^2 frames. Larger is cheaper, slower
+	 *  to settle and softer in motion. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1", ClampMax = "16"))
+	int32 CellSize = 4;
+
+	/** Least share a pixel's own new sample takes of its history. Lower averages
+	 *  more frames and settles smoother; higher follows change sooner. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float FreshWeight = 0.15f;
+
+	/** How much longer each cloud step is than the last, with the camera in or
+	 *  under the deck and from four shell depths above it, blended between by
+	 *  altitude. Lower is finer and costlier; equal values retire the blend. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "1.0"))
+	float LatticeGrowth = 0.2f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "1.0"))
+	float LatticeGrowthFar = 0.02f;
 };
 
 // Gas giant parameter groups.

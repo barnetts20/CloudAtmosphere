@@ -6,14 +6,6 @@
 // Space is camera-relative: the view ray starts at the origin and planetPos is
 // the planet centre relative to the camera. Lengths are world units.
 
-/** Jitter span as a fraction of a step. At 1 each sample is uniform over its own
- *  step, a stratified estimator with no gaps or overlap; below 1 the step lattice
- *  returns as banding, above 1 strata overlap. 0 is a diagnostic that exposes
- *  step banding. */
-#ifndef ATMO_STEP_JITTER
-#define ATMO_STEP_JITTER 1.0
-#endif
-
 /** Most multiple-scattering octaves a march runs. The per-octave constants are
  *  packed in float4s, so this cannot exceed 4. */
 #ifndef ATMO_MS_MAX_OCTAVES
@@ -67,6 +59,7 @@ struct MainRayParams
     int atmoSteps;
     int cloudSteps;
     float chordSpread; // last step over first, within a class
+    float jitterShift; // per-frame shift of the per-pixel draws, under ATMO_JITTER_FRAME
 };
 
 /** Light-ray state, filled per view step by the march. */

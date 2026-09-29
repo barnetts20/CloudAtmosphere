@@ -22,7 +22,14 @@
 // top-left corner of the screen by that factor, with its depth cut moving with
 // it, so the occlusion looks right while the whole image is misplaced.
 
-/** World ray direction through a viewport UV, from the UNJITTERED projection.
+/** The projection rays are built from: the unjittered one after the upscaler.
+ *  A pass composited before it defines this as the jittered projection, so its
+ *  rays land on the pixels the jittered depth buffer holds. */
+#ifndef ATMO_RAY_VIEW_TO_CLIP
+#define ATMO_RAY_VIEW_TO_CLIP View.ViewToClipNoAA
+#endif
+
+/** World ray direction through a viewport UV, from ATMO_RAY_VIEW_TO_CLIP.
  *
  *  PITFALL: ClipToTranslatedWorld carries the temporal AA jitter, and these
  *  passes run after the upscaler resolves it, so a ray built from it wobbles by
@@ -37,7 +44,7 @@
  *  direction for every pixel. */
 float3 Atmo_RayDirection(float2 viewportUV)
 {
-    const float4x4 P = View.ViewToClipNoAA;
+    const float4x4 P = ATMO_RAY_VIEW_TO_CLIP;
 
     if (P[3][3] >= 1.0f)
     {
@@ -159,6 +166,7 @@ CompositeParams Atmo_BuildParams(
     params.mainRayParams.atmoSteps = mainAtmoSteps;
     params.mainRayParams.cloudSteps = mainCloudSteps;
     params.mainRayParams.chordSpread = chordSpread;
+    params.mainRayParams.jitterShift = 0.0f;
 
     params.lightRayParams.lightDir = lightDirection;
 

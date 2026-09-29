@@ -9,7 +9,11 @@
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/TextureRenderTarget2DArray.h"
 #include "AtmosphereTransmittance.h"
+#include "AtmosphereViewExtension.h"
+#include "Engine/Texture2D.h"
 #include "GasGiantShadowMap.h"
+#include "RenderingThread.h"
+#include "SceneViewExtension.h"
 #include "TerrestrialShadowMap.h"
 #include "FlowSimSubsystem.h"
 #include "FlowSimTypes.h"
@@ -23,7 +27,6 @@
 // relocated asset is a data edit rather than a code one.
 // --------------------------------------------------------------------------
 
-static const TCHAR* MatPath_Terrestrial = TEXT("/CloudAtmosphere/Material/MT_TerrestrialAtmosphere_Default_Inst.MT_TerrestrialAtmosphere_Default_Inst");
 static const TCHAR* MatPath_GasGiant = TEXT("/CloudAtmosphere/Material/MT_GasGiantAtmosphere_Default_Inst.MT_GasGiantAtmosphere_Default_Inst");
 static const TCHAR* MatPath_Postprocess = TEXT("/CloudAtmosphere/Material/MT_Atmosphere_Postprocess_Inst.MT_Atmosphere_Postprocess_Inst");
 
@@ -62,16 +65,14 @@ static TSet<FString> GWarnedMaterialParameters;
 static TMap<const UMaterialInstanceDynamic*, TSet<FName>> GKnownScalarNames;
 static TMap<const UMaterialInstanceDynamic*, TSet<FName>> GKnownVectorNames;
 static TMap<const UMaterialInstanceDynamic*, TSet<FName>> GKnownTextureNames;
-static TMap<const UMaterialInstanceDynamic*, TSet<FName>> GKnownDoubleVectorNames;
 
-enum class EAtmoParamKind : uint8 { Scalar, Vector, DoubleVector, Texture };
+enum class EAtmoParamKind : uint8 { Scalar, Vector, Texture };
 
 static bool MaterialHasParameter(UMaterialInstanceDynamic* MID, EAtmoParamKind Kind, FName Name)
 {
     TMap<const UMaterialInstanceDynamic*, TSet<FName>>& Cache =
         Kind == EAtmoParamKind::Scalar ? GKnownScalarNames
         : Kind == EAtmoParamKind::Vector ? GKnownVectorNames
-        : Kind == EAtmoParamKind::DoubleVector ? GKnownDoubleVectorNames
         : GKnownTextureNames;
 
     TSet<FName>* Known = Cache.Find(MID);
@@ -85,9 +86,6 @@ static bool MaterialHasParameter(UMaterialInstanceDynamic* MID, EAtmoParamKind K
         {
         case EAtmoParamKind::Scalar:  MID->GetAllScalarParameterInfo(Infos, Guids); break;
         case EAtmoParamKind::Vector:  MID->GetAllVectorParameterInfo(Infos, Guids); break;
-        case EAtmoParamKind::DoubleVector:
-            MID->GetAllParameterInfoOfType(EMaterialParameterType::DoubleVector, Infos, Guids);
-            break;
         default:                      MID->GetAllTextureParameterInfo(Infos, Guids); break;
         }
 
@@ -109,7 +107,6 @@ static void ForgetMaterialParameters(const UMaterialInstanceDynamic* MID)
     GKnownScalarNames.Remove(MID);
     GKnownVectorNames.Remove(MID);
     GKnownTextureNames.Remove(MID);
-    GKnownDoubleVectorNames.Remove(MID);
 }
 
 // Keyed and reported by path, which names the actor: every actor's instances
@@ -158,20 +155,6 @@ static void SetVectorChecked(UMaterialInstanceDynamic* MID, FName Name, const FL
 #endif
 
     MID->SetVectorParameterValue(Name, Value);
-}
-
-static void SetDoubleVectorChecked(UMaterialInstanceDynamic* MID, FName Name, const FVector& Value)
-{
-    if (!MID) return;
-
-#if WITH_EDITOR
-    if (!MaterialHasParameter(MID, EAtmoParamKind::DoubleVector, Name))
-    {
-        WarnMissingParameter(MID, TEXT("double vector"), Name);
-    }
-#endif
-
-    MID->SetDoubleVectorParameterValue(Name, FVector4(Value, 0.0));
 }
 
 static void SetTextureChecked(UMaterialInstanceDynamic* MID, FName Name, UTexture* Value)
@@ -253,7 +236,6 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     // carries more of the surface's brightness than the deck's does.
     TerrestrialSurfaceShadow.DirectFraction = 0.85f;
 
-    TerrestrialMarchMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(MatPath_Terrestrial));
     GasGiantMarchMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(MatPath_GasGiant));
     PostprocessMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(MatPath_Postprocess));
 
@@ -307,6 +289,19 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
         UE_LOG(LogCloudAtmosphere, Warning, TEXT("PlanetAtmosphereActor: Failed to load default cloud detail volume"));
     }
 
+    // The engine's scalar blue noise: eight 128 x 128 slices stacked, which the
+    // march wraps as one tile.
+    static ConstructorHelpers::FObjectFinder<UTexture2D> DefaultBlueNoise(
+        TEXT("/Engine/EngineMaterials/FastBlueNoise_scalar_128x128x8"));
+    if (DefaultBlueNoise.Succeeded())
+    {
+        BlueNoise = DefaultBlueNoise.Object;
+    }
+    else
+    {
+        UE_LOG(LogCloudAtmosphere, Warning, TEXT("PlanetAtmosphereActor: Failed to load default blue noise"));
+    }
+
     static ConstructorHelpers::FObjectFinder<UFlowSimConfig> DefaultSimConfig(
         TEXT("/CloudAtmosphere/NoiseRecipes/GasGiantSimScratch"));
     if (DefaultSimConfig.Succeeded())
@@ -338,6 +333,7 @@ void APlanetAtmosphereActor::BeginPlay()
 void APlanetAtmosphereActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     StopFlowSimulation();
+    ReleaseViewExtension();
     Super::EndPlay(EndPlayReason);
 }
 
@@ -345,7 +341,15 @@ void APlanetAtmosphereActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 void APlanetAtmosphereActor::Destroyed()
 {
     StopFlowSimulation();
+    ReleaseViewExtension();
     Super::Destroyed();
+}
+
+// A level unloaded in the editor routes neither.
+void APlanetAtmosphereActor::BeginDestroy()
+{
+    ReleaseViewExtension();
+    Super::BeginDestroy();
 }
 
 void APlanetAtmosphereActor::OnConstruction(const FTransform& Transform)
@@ -384,11 +388,10 @@ void APlanetAtmosphereActor::PostEditChangeProperty(FPropertyChangedEvent& Prope
 
     const FName Changed = PropertyChangedEvent.GetPropertyName();
 
-    // PlanetType selects the material, not just the parameter set, so it cannot
+    // PlanetType selects the path, not just the parameter set, so it cannot
     // take effect through the per-tick sweep alone.
     const bool bTypeChanged =
         Changed == GET_MEMBER_NAME_CHECKED(APlanetAtmosphereActor, PlanetType) ||
-        Changed == GET_MEMBER_NAME_CHECKED(APlanetAtmosphereActor, TerrestrialMarchMaterial) ||
         Changed == GET_MEMBER_NAME_CHECKED(APlanetAtmosphereActor, GasGiantMarchMaterial) ||
         Changed == GET_MEMBER_NAME_CHECKED(APlanetAtmosphereActor, PostprocessMaterial);
 
@@ -416,12 +419,11 @@ void APlanetAtmosphereActor::PostEditUndo()
         return;
     }
 
-    const TSoftObjectPtr<UMaterialInterface>& March =
-        (PlanetType == EPlanetAtmosphereType::GasGiant) ? GasGiantMarchMaterial : TerrestrialMarchMaterial;
+    const bool bGasGiant = PlanetType == EPlanetAtmosphereType::GasGiant;
 
     const bool bStale = BuiltType != PlanetType
-        || !MID_Atmosphere || MID_Atmosphere->Parent != March.Get()
-        || !MID_Postprocess || MID_Postprocess->Parent != PostprocessMaterial.Get();
+        || (bGasGiant && (!MID_Atmosphere || MID_Atmosphere->Parent != GasGiantMarchMaterial.Get()
+            || !MID_Postprocess || MID_Postprocess->Parent != PostprocessMaterial.Get()));
 
     if (bStale)
     {
@@ -605,40 +607,57 @@ void APlanetAtmosphereActor::CreateMaterialInstances()
     // THE MODEL IS CHOSEN ONCE, HERE, and recorded in BuiltType. The parameter
     // sweep dispatches on BuiltType rather than PlanetType so a type change
     // that has not been rebuilt yet cannot push one model's parameters at the
-    // other model's material, which would do nothing and log nothing.
-    const bool bGasGiant = (PlanetType == EPlanetAtmosphereType::GasGiant);
-
-    UMaterialInterface* BaseAtmo = bGasGiant
-        ? LoadMaterialAsset(GasGiantMarchMaterial, TEXT("Gas giant march"))
-        : LoadMaterialAsset(TerrestrialMarchMaterial, TEXT("Terrestrial march"));
-    UMaterialInterface* BasePost = LoadMaterialAsset(PostprocessMaterial, TEXT("Postprocess"));
-
-    if (!BaseAtmo || !BasePost)
-    {
-        return;
-    }
-
-    MID_Atmosphere = UMaterialInstanceDynamic::Create(BaseAtmo, this, TEXT("MID_Atmosphere"));
-    MID_Postprocess = UMaterialInstanceDynamic::Create(BasePost, this, TEXT("MID_Postprocess"));
-
-    MID_Atmosphere->SetFlags(RF_Transient);
-    MID_Postprocess->SetFlags(RF_Transient);
-
-#if WITH_EDITOR
-    ForgetMaterialParameters(MID_Atmosphere);
-    ForgetMaterialParameters(MID_Postprocess);
-#endif
-
+    // other model's path, which would do nothing and log nothing.
     BuiltType = PlanetType;
+    MID_Atmosphere = nullptr;
+    MID_Postprocess = nullptr;
 
     // The map holds the previous model's deck until every level is rebaked.
     bShadowPrimed = false;
 
-    // Order is the pipeline order: march, composite. Rebuilt rather
-    // than assigned by index, so a stale instance cannot survive a swap and
-    // write the same UserSceneTexture as its replacement.
+    // The terrestrial model draws through the view extension and takes no
+    // material.
+    if (PlanetType == EPlanetAtmosphereType::GasGiant)
+    {
+        UMaterialInterface* BaseAtmo = LoadMaterialAsset(GasGiantMarchMaterial, TEXT("Gas giant march"));
+        UMaterialInterface* BasePost = LoadMaterialAsset(PostprocessMaterial, TEXT("Postprocess"));
+
+        if (BaseAtmo && BasePost)
+        {
+            MID_Atmosphere = UMaterialInstanceDynamic::Create(BaseAtmo, this, TEXT("MID_Atmosphere"));
+            MID_Postprocess = UMaterialInstanceDynamic::Create(BasePost, this, TEXT("MID_Postprocess"));
+
+            MID_Atmosphere->SetFlags(RF_Transient);
+            MID_Postprocess->SetFlags(RF_Transient);
+
+#if WITH_EDITOR
+            ForgetMaterialParameters(MID_Atmosphere);
+            ForgetMaterialParameters(MID_Postprocess);
+#endif
+        }
+    }
+
+    ApplyBlendables();
+}
+
+void APlanetAtmosphereActor::ApplyBlendables()
+{
+    if (!PostProcessComponent)
+    {
+        return;
+    }
+
+    // Order is the pipeline order: march, composite. Rebuilt rather than
+    // assigned by index, so a stale instance cannot survive a swap and write
+    // the same UserSceneTexture as its replacement.
     FPostProcessSettings& Settings = PostProcessComponent->Settings;
     Settings.WeightedBlendables.Array.Empty();
+
+    if (!MID_Atmosphere || !MID_Postprocess)
+    {
+        return;
+    }
+
     Settings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, MID_Atmosphere));
     Settings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, MID_Postprocess));
 }
@@ -649,8 +668,6 @@ void APlanetAtmosphereActor::CreateMaterialInstances()
 
 void APlanetAtmosphereActor::UpdateMaterialParameters()
 {
-    if (!MID_Atmosphere || !MID_Postprocess) return;
-
     const FVector PlanetCenter = GetActorLocation();
     const float PlanetRadius = static_cast<float>(GetActorScale3D().GetMax());
 
@@ -658,16 +675,23 @@ void APlanetAtmosphereActor::UpdateMaterialParameters()
     // regardless of parent rotation. The user/gizmo sets relative rotation directly.
     const FVector LightDir = GetRootComponent()->GetRelativeRotation().Vector();
 
-    // BOTH MODELS TAKE THE SAME THREE STEPS. Which field they describe is
-    // decided inside, on BuiltType, so nothing about the sequence is per model.
+    if (bTerrestrial())
+    {
+        RequestShadowBake(PlanetRadius, PlanetCenter, LightDir);
+        UpdateTransmittanceTable(PlanetRadius);
+        UpdateComputeMarch(PlanetRadius, PlanetCenter, LightDir);
+        return;
+    }
+
+    UpdateComputeMarch(PlanetRadius, PlanetCenter, LightDir);
+
+    if (!MID_Atmosphere || !MID_Postprocess) return;
+
     ApplyMarchParams(PlanetRadius, PlanetCenter, LightDir);
     RequestShadowBake(PlanetRadius, PlanetCenter, LightDir);
     UpdateTransmittanceTable(PlanetRadius);
 
     // --- Postprocess (slot 1) ---
-    //
-    // One material for both models, so every blur parameter comes from
-    // Environment and none of it is per-model.
     //
     // EVERY ARGUMENT Atmo_Composite TAKES IS PUSHED FROM HERE, and nothing else
     // is. The pass reads the atmosphere buffer and the depth buffer, and does not
@@ -690,8 +714,9 @@ void APlanetAtmosphereActor::UpdateMaterialParameters()
     const float BlurFade = FMath::SmoothStep(Composite.BlurFadeStart,
         Composite.BlurFadeStart + FMath::Max(Composite.BlurFadeSpan, 1e-3f), CameraRadii);
 
-    SetScalarChecked(MID_Postprocess, TEXT("Blur Radius"),
-        FMath::Lerp(Composite.MaxBlurRadius, Composite.MinBlurRadius, BlurFade));
+    const float BlurRadius = FMath::Lerp(Composite.MaxBlurRadius, Composite.MinBlurRadius, BlurFade);
+
+    SetScalarChecked(MID_Postprocess, TEXT("Blur Radius"), BlurRadius);
     SetScalarChecked(MID_Postprocess, TEXT("Blur Falloff Factor"), Composite.BlurFalloffFactor);
     SetScalarChecked(MID_Postprocess, TEXT("Depth Sharpness"), Composite.DepthSharpness);
     SetScalarChecked(MID_Postprocess, TEXT("Depth Tap Scale"), Composite.DepthTapScale);
@@ -737,7 +762,7 @@ static void SolveTerrestrialBounds(FTerrestrialShapeParams& Shape, const FTerres
 }
 
 /** The terrestrial field's packed pins, in TR_BuildField's layout. ONE PACKER
- *  FOR THE MATERIAL AND THE BAKE, so the two cannot pack differently. */
+ *  FOR THE MARCH AND THE BAKE, so the two cannot pack differently. */
 struct FTerrestrialFieldPins
 {
     FLinearColor CloudProfile;
@@ -887,18 +912,8 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
 
     // -- Planet, light, clock -------------------------------------------------
 
-    // DOUBLE ON THE TERRESTRIAL MATERIAL, where the graph subtracts the camera
-    // before the march sees it (Atmo_BuildParams). The gas giant's material
-    // still takes a float vector.
-    if (PlanetType == EPlanetAtmosphereType::GasGiant)
-    {
-        SetVectorChecked(MID_Atmosphere, TEXT("PlanetCenter"),
-            FLinearColor(PlanetCenter.X, PlanetCenter.Y, PlanetCenter.Z, 0.0f));
-    }
-    else
-    {
-        SetDoubleVectorChecked(MID_Atmosphere, TEXT("PlanetCenter"), PlanetCenter);
-    }
+    SetVectorChecked(MID_Atmosphere, TEXT("PlanetCenter"),
+        FLinearColor(PlanetCenter.X, PlanetCenter.Y, PlanetCenter.Z, 0.0f));
     SetScalarChecked(MID_Atmosphere, TEXT("PlanetRadius"), PlanetRadius);
 
     SetVectorChecked(MID_Atmosphere, TEXT("LightDirection"),
@@ -942,22 +957,13 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
     // -- The shell ----------------------------------------------------------------
     //
     // FROM THE BUILT MODEL'S OWN GROUP, as are the field, lighting and surface
-    // shadow groups below; only Raymarch is shared. The pin names are shared
-    // because both materials expand the same build macro; the values behind them
-    // are not.
+    // shadow groups below; only Raymarch is shared.
 
     SetScalarChecked(MID_Atmosphere, TEXT("HeightScale"), ActiveHeightScale());
 
     // -- The field's own ----------------------------------------------------------
 
-    if (BuiltType == EPlanetAtmosphereType::GasGiant)
-    {
-        ApplyGasGiantModelParams();
-    }
-    else
-    {
-        ApplyTerrestrialModelParams();
-    }
+    ApplyGasGiantModelParams();
 
     if (UVolumeTexture* Volume = ActiveStructureVolume())
     {
@@ -1009,10 +1015,8 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
     SetScalarChecked(MID_Atmosphere, TEXT("OctaveContribution"), MS.OctaveAttenuation());
     SetScalarChecked(MID_Atmosphere, TEXT("OctaveEccentricity"), MS.OctaveEccentricity());
 
-    SetScalarChecked(MID_Atmosphere, TEXT("TerminatorSoftness"),
-        bTerrestrial() ? TerrestrialTerminatorSoftness : Terminator.TerminatorSoftness);
-    SetScalarChecked(MID_Atmosphere, TEXT("LobeShadowPower"),
-        bTerrestrial() ? TerrestrialLobeShadowPower : Terminator.LobeShadowPower);
+    SetScalarChecked(MID_Atmosphere, TEXT("TerminatorSoftness"), Terminator.TerminatorSoftness);
+    SetScalarChecked(MID_Atmosphere, TEXT("LobeShadowPower"), Terminator.LobeShadowPower);
 
     // -- Pipeline -----------------------------------------------------------------
 
@@ -1028,11 +1032,10 @@ void APlanetAtmosphereActor::ApplyMarchParams(float PlanetRadius, const FVector&
 }
 
 // --------------------------------------------------------------------------
-// The field's own parameters
+// The gas giant field's own parameters
 //
-// The gas giant pushes each member under its own name; the terrestrial field
-// packs its groups into the float4 pins TR_BuildField unpacks. A pin one side
-// pushes and its material lacks is caught by the checked setters.
+// Each member under its own name. A pin pushed here that the material lacks is
+// caught by the checked setters.
 // --------------------------------------------------------------------------
 
 void APlanetAtmosphereActor::ApplyGasGiantModelParams()
@@ -1080,40 +1083,6 @@ void APlanetAtmosphereActor::ApplyGasGiantModelParams()
 
     ApplyNoiseLayer(TEXT("Structure"), StructureLayer);
     ApplyNoiseLayer(TEXT("Detail"), DetailLayer);
-}
-
-void APlanetAtmosphereActor::ApplyTerrestrialModelParams()
-{
-    SolveTerrestrialBounds(TerrestrialShape, TerrestrialLift);
-
-    const FTerrestrialFieldPins Pins = PackTerrestrialField(*this, GetFieldTime());
-
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudProfile"), Pins.CloudProfile);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudCurves"), Pins.CloudCurves);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudCoverage"), Pins.CloudCoverage);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudType"), Pins.CloudType);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudLid"), Pins.CloudLid);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudLift"), Pins.CloudLift);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudMotion"), Pins.CloudMotion);
-    SetVectorChecked(MID_Atmosphere, TEXT("NoiseLevels"), Pins.NoiseLevels);
-    SetVectorChecked(MID_Atmosphere, TEXT("StructureSampling"), Pins.StructureSampling);
-    SetVectorChecked(MID_Atmosphere, TEXT("StructureWarp"), Pins.StructureWarp);
-    SetVectorChecked(MID_Atmosphere, TEXT("DetailSampling"), Pins.DetailSampling);
-    SetVectorChecked(MID_Atmosphere, TEXT("DetailWarp"), Pins.DetailWarp);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudGenusStratus"), Pins.CloudGenusStratus);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudGenusStratocumulus"), Pins.CloudGenusStratocumulus);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudGenusCumulus"), Pins.CloudGenusCumulus);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudGenusCirrus"), Pins.CloudGenusCirrus);
-    SetVectorChecked(MID_Atmosphere, TEXT("ShadowCascades"), Pins.ShadowCascades);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudResponse"), Pins.CloudResponse);
-
-    const FTerrestrialCloudMaterialParams Material = ResolveCloudMaterial(TerrestrialCloudMaterial);
-
-    SetScalarChecked(MID_Atmosphere, TEXT("CloudOpticalDepth"), Material.CloudOpticalDepth);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudScatter"), Material.CloudScatter);
-    SetVectorChecked(MID_Atmosphere, TEXT("CloudExtinction"), Material.CloudExtinction);
-    SetVectorChecked(MID_Atmosphere, TEXT("StormScatter"), Material.StormScatter);
-    SetVectorChecked(MID_Atmosphere, TEXT("StormExtinction"), Material.StormExtinction);
 }
 
 void APlanetAtmosphereActor::ApplyNoiseLayer(const TCHAR* Prefix, const FAtmosphereNoiseLayerParams& Layer)
@@ -1640,6 +1609,199 @@ void APlanetAtmosphereActor::CommitShadowBake(
 }
 
 // --------------------------------------------------------------------------
+// Terrestrial compute march
+//
+// The march's inputs, handed to the view extension. The field comes from the
+// packer the shadow bake shares, so the bake lights the field the eye sees.
+// --------------------------------------------------------------------------
+
+bool APlanetAtmosphereActor::FillTerrestrialMarchParams(
+    FTerrestrialMarchParams& Out, float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir)
+{
+    const auto ToVector3 = [](const FLinearColor& C) { return FVector3f(C.R, C.G, C.B); };
+    const auto ToVector4 = [](const FLinearColor& C) { return FVector4f(C.R, C.G, C.B, C.A); };
+
+    // -- Planet, light, clock -------------------------------------------------
+
+    const FQuat Rotation = GetFieldFrame();
+    const FLinearColor Light = LightProduct();
+
+    Out.PlanetCenter = PlanetCenter;
+    Out.PlanetRotation = FVector4f(Rotation.X, Rotation.Y, Rotation.Z, Rotation.W);
+    Out.LightDirection = FVector3f(LightDir);
+    Out.LightColor = ToVector3(Light);
+    Out.PlanetRadius = PlanetRadius;
+    Out.HeightScale = ActiveHeightScale();
+    Out.Time = static_cast<float>(GetFieldTime());
+
+    // -- Field ----------------------------------------------------------------
+
+    SolveTerrestrialBounds(TerrestrialShape, TerrestrialLift);
+
+    const FTerrestrialFieldPins Pins = PackTerrestrialField(*this, GetFieldTime());
+
+    Out.CloudProfile = ToVector4(Pins.CloudProfile);
+    Out.CloudCurves = ToVector4(Pins.CloudCurves);
+    Out.CloudCoverage = ToVector4(Pins.CloudCoverage);
+    Out.CloudType = ToVector4(Pins.CloudType);
+    Out.CloudLid = ToVector4(Pins.CloudLid);
+    Out.CloudLift = ToVector4(Pins.CloudLift);
+    Out.CloudMotion = ToVector4(Pins.CloudMotion);
+    Out.CloudResponse = ToVector4(Pins.CloudResponse);
+    Out.NoiseLevels = ToVector4(Pins.NoiseLevels);
+    Out.StructureSampling = ToVector4(Pins.StructureSampling);
+    Out.StructureWarp = ToVector4(Pins.StructureWarp);
+    Out.DetailSampling = ToVector4(Pins.DetailSampling);
+    Out.DetailWarp = ToVector4(Pins.DetailWarp);
+    Out.CloudGenusStratus = ToVector4(Pins.CloudGenusStratus);
+    Out.CloudGenusStratocumulus = ToVector4(Pins.CloudGenusStratocumulus);
+    Out.CloudGenusCumulus = ToVector4(Pins.CloudGenusCumulus);
+    Out.CloudGenusCirrus = ToVector4(Pins.CloudGenusCirrus);
+    Out.ShadowCascades = ToVector4(Pins.ShadowCascades);
+
+    const FTerrestrialCloudMaterialParams Material = ResolveCloudMaterial(TerrestrialCloudMaterial);
+
+    Out.CloudOpticalDepth = Material.CloudOpticalDepth;
+    Out.CloudScatter = ToVector3(Material.CloudScatter);
+    Out.StormScatter = ToVector3(Material.StormScatter);
+    Out.CloudExtinction = ToVector4(Material.CloudExtinction);
+    Out.StormExtinction = ToVector4(Material.StormExtinction);
+
+    // -- Air, ambient, lighting -----------------------------------------------
+
+    const FAtmosphereAirParams& AirP = ActiveAir();
+    const FAtmosphereAmbientParams& AmbientP = ActiveAmbient();
+    const FAtmospherePhaseParams& PhaseP = ActivePhase();
+    const FAtmosphereMultipleScatteringParams& MS = ActiveMultipleScattering();
+
+    Out.RayleighBeta = ToVector3(AirP.RayleighBeta());
+    Out.RayleighScaleHeight = AirP.RayleighScaleHeight;
+    Out.MieBeta = ToVector3(AirP.MieBeta());
+    Out.MieScaleHeight = AirP.MieScaleHeight;
+    Out.MieG = AirP.MieG;
+    Out.MieLobeDecay = AirP.MieLobeDecay;
+    Out.AbsorptionBeta = ToVector3(AirP.AbsorptionBeta());
+    Out.AbsorptionAltitude = AirP.AbsorptionAltitude;
+    Out.AbsorptionFalloff = AirP.AbsorptionFalloff;
+
+    Out.AtmosphereAmbient = FVector3f(
+        AmbientP.AirAmbient.R * Light.R, AmbientP.AirAmbient.G * Light.G, AmbientP.AirAmbient.B * Light.B);
+    Out.AtmosphereAmbientFloor = AmbientP.AirAmbientFloor;
+    Out.CloudAmbient = ToVector3(AmbientP.CloudAmbient);
+    Out.CloudAmbientFloor = AmbientP.CloudAmbientFloor;
+    Out.AmbientTerminator = AmbientP.AmbientTerminator;
+
+    Out.ForwardG = PhaseP.ForwardG;
+    Out.BackwardG = PhaseP.BackwardG;
+    Out.ForwardWeight = PhaseP.ForwardWeight;
+
+    Out.LightExtinctionFraction = MS.LightExtinctionFraction();
+    Out.OctaveCount = static_cast<float>(MS.OctaveCount);
+    Out.OctaveAttenuation = MS.OctaveAttenuation();
+    Out.OctaveContribution = MS.OctaveAttenuation();
+    Out.OctaveEccentricity = MS.OctaveEccentricity();
+
+    Out.TerminatorSoftness = TerrestrialTerminatorSoftness;
+    Out.LobeShadowPower = TerrestrialLobeShadowPower;
+
+    // -- Pipeline and shadows -------------------------------------------------
+
+    Out.AtmosphereSteps = static_cast<float>(Raymarch.AtmosphereSteps);
+    Out.CloudSteps = static_cast<float>(Raymarch.CloudSteps);
+    Out.ChordSpread = Raymarch.ChordSpread;
+    Out.SurfaceShadow = ToVector4(ActiveSurfaceShadow().Pack());
+
+    Out.ShadowCamera1 = ShadowBakedCamera[1];
+    Out.ShadowCamera2 = ShadowBakedCamera[2];
+
+    // -- Sampling -------------------------------------------------------------
+
+    Out.CellSize = TerrestrialSampling.CellSize;
+    Out.FreshWeight = TerrestrialSampling.FreshWeight;
+    Out.LatticeGrowth = TerrestrialSampling.LatticeGrowth;
+    Out.LatticeGrowthFar = TerrestrialSampling.LatticeGrowthFar;
+
+    // -- Resources ------------------------------------------------------------
+
+    UTexture* Noise = BlueNoise;
+
+    if (!Noise && !bWarnedBlueNoise)
+    {
+        bWarnedBlueNoise = true;
+
+        UE_LOG(LogCloudAtmosphere, Warning,
+            TEXT("%s: no Blue Noise texture set. The terrestrial atmosphere does not draw until one is."),
+            *GetName());
+    }
+
+    bWarnedBlueNoise = bWarnedBlueNoise && !Noise;
+
+    Out.FlowResource = (Simulation.Config && Simulation.Config->FlowTarget)
+        ? Simulation.Config->FlowTarget->GameThread_GetRenderTargetResource() : nullptr;
+    Out.ShadowResource = ShadowTarget ? ShadowTarget->GameThread_GetRenderTargetResource() : nullptr;
+    Out.TransmittanceResource = TransmittanceTable ? TransmittanceTable->GameThread_GetRenderTargetResource() : nullptr;
+    Out.StructureResource = ActiveStructureVolume() ? ActiveStructureVolume()->GetResource() : nullptr;
+    Out.DetailResource = ActiveDetailVolume() ? ActiveDetailVolume()->GetResource() : nullptr;
+    Out.BlueNoiseResource = Noise ? Noise->GetResource() : nullptr;
+
+    return Out.IsUsable();
+}
+
+void APlanetAtmosphereActor::UpdateComputeMarch(
+    float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir)
+{
+    FTerrestrialMarchParams Params;
+
+    bool bWant = bTerrestrial()
+        && FillTerrestrialMarchParams(Params, PlanetRadius, PlanetCenter, LightDir);
+
+    // CREATED ON FIRST USE, so an atmosphere that never draws terrestrial
+    // registers nothing, and one released by a delete comes back on undo.
+    if (bWant && !ViewExtension && GetWorld())
+    {
+        ViewExtension = FSceneViewExtensions::NewExtension<FAtmosphereViewExtension>(GetWorld());
+    }
+
+    bWant = bWant && ViewExtension.IsValid();
+    bComputeMarch = bWant;
+
+    if (!ViewExtension)
+    {
+        return;
+    }
+
+    // The frame first, so the first enabled render has one to draw.
+    if (bWant)
+    {
+        ViewExtension->SetFrame_GameThread(Params);
+    }
+
+    // A rebuild can push while parked; the extension stays off until woken.
+    ViewExtension->SetEnabled(bWant && bAtmosphereActive);
+}
+
+void APlanetAtmosphereActor::ReleaseViewExtension()
+{
+    if (!ViewExtension)
+    {
+        return;
+    }
+
+    ViewExtension->SetEnabled(false);
+
+    // THE LAST REFERENCE GOES ON THE RENDER THREAD, with the pooled histories
+    // it holds. A view family still rendering keeps its own until it is done.
+    ENQUEUE_RENDER_COMMAND(CloudAtmosphereReleaseViewExtension)(
+        [Extension = MoveTemp(ViewExtension)](FRHICommandListImmediate&) mutable
+        {
+            Extension->ReleaseHistories_RenderThread();
+            Extension.Reset();
+        });
+
+    ViewExtension.Reset();
+}
+
+// --------------------------------------------------------------------------
 // Gas giant simulation
 // --------------------------------------------------------------------------
 
@@ -1741,11 +1903,19 @@ void APlanetAtmosphereActor::SetAtmosphereActive(bool bActive)
 
     bAtmosphereActive = bActive;
 
-    // bEnabled drops both passes out of the post-process chain; Tick stops the
-    // parameter push, the bake and the transmittance update.
+    // bEnabled drops the gas giant's passes out of the post-process chain and
+    // SetEnabled the terrestrial ones; Tick stops the parameter push, the bake
+    // and the transmittance update.
     if (PostProcessComponent)
     {
         PostProcessComponent->bEnabled = bActive;
+    }
+
+    // Woken, the next tick pushes a fresh frame and enables the extension;
+    // enabled here it would draw the frame captured before parking.
+    if (ViewExtension && !bActive)
+    {
+        ViewExtension->SetEnabled(false);
     }
 
     if (SunLightComponent)

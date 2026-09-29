@@ -20,6 +20,12 @@
 #define ATMO_NO_OCCLUDER_DISTANCE 1e30f
 #endif
 
+/** Raw device Z at a depth buffer UV. A material reads the engine's scene
+ *  textures; a global shader defines this over the depth texture it binds. */
+#ifndef ATMO_LOOKUP_DEVICE_Z
+#define ATMO_LOOKUP_DEVICE_Z(BufferUV) LookupDeviceZ(BufferUV)
+#endif
+
 /** View-axis depth from a raw device Z, inverting the projection in place.
  *  Perspective is deviceZ = A + B / z; orthographic is deviceZ = z * A + B.
  *  Reverse Z with an infinite far plane has A = 0 and clears the sky to 0, which
@@ -48,7 +54,7 @@ float Atmo_DeviceZToDepth(float deviceZ)
  *  even unused, does. */
 float Atmo_SceneDepthAt(float2 bufferUV)
 {
-    return Atmo_DeviceZToDepth(LookupDeviceZ(bufferUV));
+    return Atmo_DeviceZToDepth(ATMO_LOOKUP_DEVICE_Z(bufferUV));
 }
 
 /** Scene depth as a TRUE RAY DISTANCE through a viewport UV, the form the march

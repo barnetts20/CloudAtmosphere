@@ -1,18 +1,8 @@
 #pragma once
 
-// The march options this field runs with, ahead of AtmospherePlan.ush, whose
-// defaults are the gas giant's (see there).
-#ifndef ATMO_CAMERA_LATTICE
+// The step plan this field runs with, ahead of AtmospherePlan.ush, whose
+// default is the gas giant's (see there).
 #define ATMO_CAMERA_LATTICE 1
-#endif
-
-#ifndef ATMO_ENTRY_REFINE
-#define ATMO_ENTRY_REFINE 1
-#endif
-
-#ifndef ATMO_LATTICE_OFFSET
-#define ATMO_LATTICE_OFFSET 1
-#endif
 
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmospherePlan.ush"
@@ -73,16 +63,8 @@
 #define FIELD_TEXTURE_ARGS \
 	FlowField, FlowSampler, DetailVolume, DetailSampler, StructureVolume, StructureSampler, BlueNoise
 
-/** 1 draws the march's per-pixel jitter from the BlueNoise texture
- *  (Atmo_TextureJitter), 0 from interleaved gradient noise. The texture is a
- *  march argument either way. */
-#ifndef TR_BLUE_NOISE
-#define TR_BLUE_NOISE 1
-#endif
-
-#if TR_BLUE_NOISE
+/** The march's per-pixel draws come from the BlueNoise texture. */
 #define FIELD_STEP_JITTER(Svxy, Index) Atmo_TextureJitter(BlueNoise, Svxy, Index)
-#endif
 
 /** The clouds' material and how they are lit. Two sets, blended by the
  *  column's material coordinate: fair-weather cloud at 0 and storm cloud at 1,
@@ -166,32 +148,14 @@ bool Field_SegmentIsCloud(float3 Origin, float3 Dir, float4 Segment, PlanetParam
     return Segment.w > 0.5f;
 }
 
-/** Splits the fine segment at the cone-traced entry.
- *
- *  OFF BY DEFAULT, AND THE REASON IS THE STEP SCHEME. The split was a cost
- *  saving when a fine step was a fixed length: demoting the empty span ahead of
- *  the field meant fewer fine steps taken. Under a fixed per-class budget the
- *  cloud gets its count spread across its own chord whatever the segments say,
- *  so the split no longer removes work -- it only concentrates the samples
- *  nearer the field.
- *
- *  AND IT PAYS FOR THAT CONCENTRATION IN GEOMETRY. The trace is conservative
- *  about the column it probes, not about the columns between probes, so a
- *  feature narrower than the probe spacing can be stepped over; the split then
- *  lands past it and everything before goes coarse, which is to say invisible.
- *  It shows as a slice of a system missing from below and arriving as the camera
- *  climbs into the band, since the segment structure changes there.
- *
- *  Turning it back on costs that; leaving it off costs resolution, recoverable
- *  with CloudSteps. Resolution is the cheaper of the two to buy back.
+/** The plan as the shells leave it: this field places no segment by itself.
  *
  *  PITFALL: A PLAN THAT PLACES STEPS BY THE FIELD DRAWS THE FIELD INTO THE
  *  LATTICE. Steps that follow the occupied cells move as the weather does, and
- *  at some angles the pattern reads as sampling artifacts. */
-#ifndef TR_SPLIT_AT_ENTRY
-#define TR_SPLIT_AT_ENTRY 0
-#endif
-
+ *  at some angles the pattern reads as sampling artifacts. A split at a
+ *  cone-traced entry also steps over features narrower than the probe spacing,
+ *  and everything before the split goes coarse: a slice of a system missing
+ *  from below. */
 void Field_PlanSegments(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
@@ -203,82 +167,6 @@ void Field_PlanSegments(
 	inout float4 Segments[ATMO_MAX_SEGMENTS],
 	inout int SegmentCount)
 {
-    if (SegmentCount <= 0 || SegmentCount >= ATMO_MAX_SEGMENTS)
-    {
-        return;
-    }
-
-    int Band = -1;
-
-	[loop]
-    for (int i = 0; i < SegmentCount; i++)
-    {
-        if (Segments[i].w > 0.5f)
-        {
-            Band = i;
-            break;
-        }
-    }
-
-    if (Band < 0)
-    {
-        return;
-    }
-
-    const float SegStart = Segments[Band].x;
-    const float SegEnd = Segments[Band].y;
-    const float FineStep = Segments[Band].z;
-
-#if !TR_SPLIT_AT_ENTRY
-    return;
-#else
-    bool bMissed;
-
-    const float Entry = TR_SlabEntry(
-		FlowField, FlowSampler, LocalOrigin, LocalDir, SegStart, SegEnd, TopMax, F, bMissed);
-
-	// PROVED to miss: demote to coarse rather than dropping it, so the air along
-	// it still scatters, and spend no fine steps on a span that cannot hold
-	// cloud. Only on the proof -- a search that merely ran out of segment leaves
-	// the band fine below, and pays in steps instead of in missing cloud.
-    if (bMissed)
-    {
-        Segments[Band] = float4(SegStart, SegEnd, CoarseStep, 0.0f);
-        return;
-    }
-
-	// Nothing worth splitting off: the ray was already in the slab, or the
-	// search gave up without narrowing the span.
-    if (Entry <= SegStart + 1e-5f || Entry >= SegEnd - 1e-5f)
-    {
-        return;
-    }
-
-	// Anchored at the segment's own start, which is a shell crossing: geometry,
-	// not field. A lattice anchored at anything the field decides moves when the
-	// field does.
-    const float Split = SegStart + floor((Entry - SegStart) / max(FineStep, 1e-4f)) * FineStep;
-
-    if (Split <= SegStart + 1e-5f)
-    {
-        return;
-    }
-
-	// Open a slot after the band, walking backwards so nothing is overwritten
-	// before it has been copied.
-	[loop]
-    for (int k = SegmentCount; k > Band + 1; k--)
-    {
-        Segments[k] = Segments[k - 1];
-    }
-
-	// The cloud keeps the fine step the planner assigned; only the empty span
-	// before it drops to coarse.
-    Segments[Band] = float4(SegStart, Split, CoarseStep, 0.0f);
-    Segments[Band + 1] = float4(Split, SegEnd, FineStep, 1.0f);
-
-    SegmentCount++;
-#endif
 }
 
 /** Fills TRScatterParams from the Cloud Material, Phase, Multiple Scattering
@@ -487,36 +375,23 @@ void Field_Terminus(
     }
 }
 
-/** Density and material along one view ray, as (density, material, pressure,
- *  top), reading the sim at keyframes rather than per sample; see
- *  TR_DensityOnRay. StepHalfHeight is the sample's own half-extent along the
- *  radius, which the field integrates its height profile across. The march
- *  begins a cache per ray and passes each sample's ray parameter T with it.
+/** Density and material at a planet-local point, as (density, material,
+ *  pressure, top); see TR_Density. StepHalfHeight is the sample's own
+ *  half-extent along the radius, which the field integrates its height profile
+ *  across.
  *
  *  THE SECOND CHANNEL IS OPAQUE TO THE MARCH. It carries it from here to
  *  Field_Albedo and Field_Extinction without interpreting it; on this field it
- *  is fair-weather to storm.
- *
- *  THE CACHE IS THE ONLY PATH: this field defines no Field_Sample. */
-#define FIELD_RAY_CACHE 1
-#define FieldRayCache TRRayCache
-
-FieldRayCache Field_RayBegin(FIELD_TEXTURE_DECL, float3 LocalOrigin, float3 LocalDir, FieldParams F)
-{
-    return TR_RayCacheBegin(FlowField, LocalOrigin, LocalDir, F);
-}
-
-float4 Field_SampleOnRay(
+ *  is fair-weather to storm. */
+float4 Field_Sample(
 	FIELD_TEXTURE_DECL,
 	float3 LocalPos,
-	float T,
 	float StepHalfHeight,
-	FieldParams F,
-	inout FieldRayCache Cache)
+	FieldParams F)
 {
-    return TR_DensityOnRay(
+    return TR_Density(
 		FlowField, FlowSampler, DetailVolume, DetailSampler,
-		StructureVolume, StructureSampler, LocalPos, T, StepHalfHeight, F, Cache);
+		StructureVolume, StructureSampler, LocalPos, StepHalfHeight, F);
 }
 
 /** Single-scattering albedo at a sample's material coordinate. */

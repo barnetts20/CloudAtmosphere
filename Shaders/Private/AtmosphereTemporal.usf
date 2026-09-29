@@ -1,0 +1,385 @@
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/Common.ush"
+
+// The atmosphere's resolve and composite, after the march filled the atmosphere
+// buffer: float4(in-scattered light, transmittance).
+//
+// MODEL-INDEPENDENT. Neither pass knows what the march sampled; the resolve
+// reads only its colour and its representative depth (Atmo_MainMarchDepth).
+//
+// THE RESOLVE. Each frame marches one pixel of every CellSize square, at
+// CellOffset. Every output pixel reprojects its history by its ray at the
+// representative depth and clamps it to the moments of this frame's marched
+// neighbours, tighter the further the history moved. A marched pixel blends in
+// its own sample, at a weight that starts at 1 and falls with the samples
+// accumulated to FreshWeight; the rest blend in a share of the fill, the fresh
+// samples around them weighted by distance and scene depth, which is also what a
+// pixel without usable history takes. The share grows with motion, and a history
+// the clamp moves loses its accumulated samples.
+
+// -- Tuning -------------------------------------------------------------------
+
+/** History clamp width, in standard deviations of the fresh neighbourhood: at
+ *  rest, where only moving clouds need it, and once the history has moved
+ *  ATMO_MOTION_PIXELS output pixels. */
+#define ATMO_CLAMP_GAMMA 4.0f
+#define ATMO_CLAMP_GAMMA_MOTION 1.0f
+
+/** Share of the fill an unmarched pixel blends in each frame, at rest and in
+ *  motion. Higher settles faster and softens at the cell's scale. At rest the
+ *  share fades out once the pixel holds a sample of its own, so the history
+ *  converges to its own samples at full resolution: a fill blended in forever
+ *  settles on the fresh samples averaged over a tent two cells wide. */
+#define ATMO_FILL_WEIGHT 0.1f
+#define ATMO_FILL_WEIGHT_MOTION 0.5f
+
+#define ATMO_MOTION_PIXELS 2.0f
+
+/** How hard a relative scene depth difference cuts a fresh sample out of a
+ *  pixel's fill and clamp. */
+#define ATMO_GUIDE_SHARPNESS 100.0f
+
+// -- Shared -------------------------------------------------------------------
+
+Texture2D<float> AtmoSceneDepth;
+
+/** Clamped to the view rect: the depth buffer is larger than the view under a
+ *  screen percentage, and texels outside it hold stale depth. */
+float Atmo_LoadDeviceZ(float2 BufferUV)
+{
+    const float2 RectMin = View.ViewRectMin.xy;
+    const float2 RectMax = RectMin + View.ViewSizeAndInvSize.xy - 1.0f;
+    const int2 Texel = int2(clamp(BufferUV * View.BufferSizeAndInvSize.xy, RectMin, RectMax));
+
+    return AtmoSceneDepth.Load(int3(Texel, 0));
+}
+
+#define ATMO_LOOKUP_DEVICE_Z(BufferUV) Atmo_LoadDeviceZ(BufferUV)
+
+/** The unjittered projection: the history holds each pixel centre's ray, and
+ *  the resolve's rays and its reprojection must share it. */
+float4x4 RayViewToClip;
+
+#define ATMO_RAY_VIEW_TO_CLIP RayViewToClip
+
+#include "/Plugin/CloudAtmosphere/Private/AtmosphereSetup.ush"
+
+/** Representative depth of sky, as Atmo_MainMarchDepth writes it. */
+#define ATMO_TEMPORAL_SKY_DEPTH (-1.0f)
+
+/** The view rect's size in output pixels. */
+float2 OutputSize;
+
+/** View-axis scene depth at an output pixel position. */
+float Atmo_GuideDepth(float2 Pixel)
+{
+    return Atmo_SceneDepthAt(ViewportUVToBufferUV(Pixel / OutputSize));
+}
+
+/** How far a sample at depth B stands for a pixel at depth A: relative, as the
+ *  composite's weight, so it holds at any distance. Bounded before squaring,
+ *  since a sky depth against a mesh overflows. */
+float Atmo_GuideWeight(float A, float B, float Sharpness)
+{
+    const float Diff = min(abs(A - B) / max(min(A, B), 1.0f), 1e3f);
+
+    return exp(-Diff * Diff * Sharpness);
+}
+
+/** Radiance compressed by its brightest channel, for moments that one bright
+ *  sample cannot widen to everything; transmittance passes as is. Exposed, so
+ *  the knee sits where the image's brightness does whatever the light's units. */
+float4 Atmo_Compress(float4 C)
+{
+    const float3 Exposed = C.rgb * View.PreExposure;
+
+    return float4(Exposed / (1.0f + max(Exposed.r, max(Exposed.g, Exposed.b))), C.a);
+}
+
+float4 Atmo_Expand(float4 C)
+{
+    const float3 Exposed = C.rgb / max(1.0f - max(C.r, max(C.g, C.b)), 1e-4f);
+
+    return float4(Exposed / View.PreExposure, C.a);
+}
+
+// -- Resolve ------------------------------------------------------------------
+
+Texture2D<float4> FreshColor;
+
+/** float2(representative depth, view-axis scene depth at the sample). */
+Texture2D<float2> FreshDepth;
+uint2 FreshSize;
+uint CellSize;
+uint2 CellOffset;
+
+Texture2D<float4> HistoryColor;
+Texture2D<float2> HistoryAge;
+SamplerState HistorySampler;
+uint HistoryValid;
+
+/** Camera-relative world position at this frame's camera to the previous
+ *  frame's clip space: a direction through the previous camera's rotation, and
+ *  a point fixed to the planet through the planet's move and turn since then
+ *  and the camera's move. */
+float4x4 PrevCameraToClip;
+float4x4 PrevPlanetToClip;
+
+// PITFALL: a local named as one of these uniforms hides it without a warning,
+// and the pass reads the local.
+float FreshWeight;
+uint TemporalDebug;
+
+RWTexture2D<float4> ResolvedColor;
+
+/** Samples accumulated, fractional, the fill counting at its share; and the
+ *  pixel's own samples alone. */
+RWTexture2D<float2> ResolvedAge;
+
+/** What the composite shows under a debug view; the history keeps the real
+ *  result. Unwritten with the debug views off. */
+RWTexture2D<float4> ResolvedDisplay;
+
+#ifndef ATMO_TEMPORAL_THREADS
+#define ATMO_TEMPORAL_THREADS 8
+#endif
+
+[numthreads(ATMO_TEMPORAL_THREADS, ATMO_TEMPORAL_THREADS, 1)]
+void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint2 P = DispatchThreadId.xy;
+
+    if (any(float2(P) >= OutputSize))
+    {
+        return;
+    }
+
+    const float2 Pixel = float2(P) + 0.5f;
+    const float PixelDepth = Atmo_GuideDepth(Pixel);
+    const int2 LastCell = int2(FreshSize) - 1;
+
+	// Fresh sample K stands at output pixel K * CellSize + CellOffset. In
+	// integers, so the pixel that was marched is found exactly at any cell size.
+    const int N = int(CellSize);
+    const int2 Rel = int2(P) - int2(CellOffset);
+    const int2 Base = (Rel + N) / N - 1;
+    const int2 Remainder = Rel - Base * N;
+    const float2 Frac = float2(Remainder) / float(N);
+
+    const bool bFresh = all(Remainder == 0) && all(Base >= 0) && all(Base <= LastCell);
+
+	// THE FILL AND THE CLAMP, from the 4 x 4 fresh samples about the pixel.
+	// The fill is bilinear over the inner four; the clamp's moments take a tent
+	// two cells wide. Both weights move continuously with the pixel, so no two
+	// pixels share a box by construction. PITFALL: moments of the samples about
+	// the nearest one are constant across a cell, and in motion, where the clamp
+	// acts every frame, they stamp the cell grid into the image. Every weight is
+	// scaled by scene-depth agreement; the floor keeps a pixel no sample matches
+	// averaging.
+    float4 Fill = 0.0f;
+    float FillTotal = 0.0f;
+    float BestWeight = 0.0f;
+    float BestDepth = ATMO_TEMPORAL_SKY_DEPTH;
+    float4 Own = 0.0f;
+
+    float4 M1 = 0.0f;
+    float4 M2 = 0.0f;
+    float MomentWeight = 0.0f;
+
+    UNROLL
+
+    for (int Tap = 0; Tap < 16; Tap++)
+    {
+        const int2 Offset = int2(Tap & 3, Tap >> 2) - 1;
+        const int2 Unclamped = Base + Offset;
+        const int2 K = clamp(Unclamped, 0, LastCell);
+
+		// Distance from the pixel to the sample, in cells.
+        const float2 Distance = abs(float2(Offset) - Frac);
+
+		// The last row and column of cells can march past the view's edge, and
+		// a tap clamped at the image's edge stands at another sample's place.
+        const float2 SamplePixel = float2(K * N + int2(CellOffset)) + 0.5f;
+        const bool bUsable = all(SamplePixel < OutputSize) && all(K == Unclamped);
+
+        const float2 Depths = FreshDepth[K];
+        const float Guide = bUsable
+			? Atmo_GuideWeight(PixelDepth, Depths.y, ATMO_GUIDE_SHARPNESS) + 1e-3f : 0.0f;
+
+        const float4 C = FreshColor[K];
+
+        Own = (Tap == 5) ? C : Own;
+
+        const float2 Bilinear = saturate(1.0f - Distance);
+        const float FillW = Bilinear.x * Bilinear.y * Guide;
+
+        Fill += C * FillW;
+        FillTotal += FillW;
+
+        BestDepth = (FillW > BestWeight) ? Depths.x : BestDepth;
+        BestWeight = max(BestWeight, FillW);
+
+        const float2 Tent = saturate(1.0f - 0.5f * Distance);
+        const float MomentW = Tent.x * Tent.y * Guide;
+        const float4 Compressed = Atmo_Compress(C);
+
+        M1 += Compressed * MomentW;
+        M2 += Compressed * Compressed * MomentW;
+        MomentWeight += MomentW;
+    }
+
+    Fill /= max(FillTotal, 1e-6f);
+    M1 /= max(MomentWeight, 1e-6f);
+
+    const float4 Sigma = sqrt(max(M2 / max(MomentWeight, 1e-6f) - M1 * M1, 0.0f));
+
+	// THE REPROJECTION, by this pixel's ray at its representative depth: its
+	// own when marched, else the best-weighted neighbour's. A point at a depth
+	// moves with the planet; sky moves as a direction, with no parallax.
+    const float Depth = bFresh ? FreshDepth[Base].x : BestDepth;
+    const float3 Dir = Atmo_RayDirection(Pixel / OutputSize);
+
+    const float4 PrevClip = (Depth > 0.0f)
+		? mul(float4(Dir * Depth, 1.0f), PrevPlanetToClip)
+		: mul(float4(Dir, 0.0f), PrevCameraToClip);
+
+    const float2 PrevUV = PrevClip.xy / max(PrevClip.w, 1e-6f) * float2(0.5f, -0.5f) + 0.5f;
+
+	// THE MOTION RESPONSE. At rest the history needs no clamp beyond what moving
+	// clouds need; in motion it carries whatever it held, and only the clamp and
+	// the fill replace it.
+    const float Motion = saturate(length(PrevUV * OutputSize - Pixel) / ATMO_MOTION_PIXELS);
+    const float Gamma = lerp(ATMO_CLAMP_GAMMA, ATMO_CLAMP_GAMMA_MOTION, Motion);
+
+    const bool bValid = HistoryValid != 0u && PrevClip.w > 0.0f
+		&& all(PrevUV >= 0.0f) && all(PrevUV <= 1.0f);
+
+    float4 History = 0.0f;
+    float Age = 0.0f;
+    float OwnAge = 0.0f;
+    float Rejection = 1.0f;
+
+    if (bValid)
+    {
+        const float4 Raw = HistoryColor.SampleLevel(HistorySampler, PrevUV, 0.0f);
+        const float4 Compressed = Atmo_Compress(Raw);
+        const float4 Clamped = clamp(Compressed, M1 - Gamma * Sigma, M1 + Gamma * Sigma);
+
+		// A history the clamp moves by the box's half-width or more no longer
+		// holds what it counted: its samples go with it.
+        const float4 Shift = abs(Compressed - Clamped) / (Gamma * Sigma + 0.01f);
+        Rejection = saturate(max(max(Shift.r, Shift.g), max(Shift.b, Shift.a)));
+
+		// Unclamped, the history passes through untouched rather than through
+		// the compression's round trip.
+        History = any(Clamped != Compressed) ? Atmo_Expand(Clamped) : Raw;
+
+		// The counts of the texels the colour blends, at their least: a texel
+		// from across a disocclusion does not lend its count.
+        const float4 Totals = HistoryAge.GatherRed(HistorySampler, PrevUV);
+        const float4 Owns = HistoryAge.GatherGreen(HistorySampler, PrevUV);
+
+        Age = min(min(Totals.x, Totals.y), min(Totals.z, Totals.w)) * (1.0f - Rejection);
+        OwnAge = min(min(Owns.x, Owns.y), min(Owns.z, Owns.w)) * (1.0f - Rejection);
+    }
+
+    const float AgeCap = 1.0f / FreshWeight;
+
+    float4 Result;
+    float NewAge;
+    float NewOwnAge;
+
+    if (bFresh)
+    {
+        const float Alpha = bValid ? max(1.0f / (Age + 1.0f), FreshWeight) : 1.0f;
+
+        Result = lerp(History, Own, Alpha);
+        NewAge = min(Age + 1.0f, AgeCap);
+        NewOwnAge = min(OwnAge + 1.0f, AgeCap);
+    }
+    else if (bValid)
+    {
+		// THE FILL INTO EVERY PIXEL, each frame. A pixel's own sample comes every
+		// CellSize squared frames; its neighbours' arrive every frame, and
+		// without them a large cell leaves each pixel a sample or two since the
+		// last change. The fill counts toward the samples at its share, so a
+		// pixel's first own sample after a reset does not replace what the fill
+		// built.
+        const float Share = lerp(ATMO_FILL_WEIGHT * saturate(1.0f - OwnAge), ATMO_FILL_WEIGHT_MOTION, Motion);
+
+        Result = lerp(History, Fill, Share);
+        NewAge = min(Age + Share, AgeCap);
+        NewOwnAge = OwnAge;
+    }
+    else
+    {
+        Result = Fill;
+        NewAge = 0.0f;
+        NewOwnAge = 0.0f;
+    }
+
+	// The history is half float: an expanded clamp can pass its range.
+    ResolvedColor[P] = float4(min(Result.rgb, 60000.0f), Result.a);
+    ResolvedAge[P] = float2(NewAge, NewOwnAge);
+
+	// Debug views, opaque so the composite shows them over the scene: 1 the
+	// samples accumulated over their cap; 2 fresh blue, reprojected green,
+	// filled red; 3 this frame's samples alone; 4 motion red, clamp rejection
+	// green. All but 3 are flags, unexposed against the composite's
+	// pre-exposure.
+    BRANCH
+
+    if (TemporalDebug != 0u)
+    {
+        float4 Display = float4(float3(Motion, Rejection, 0.0f) / View.PreExposure, 0.0f);
+
+        if (TemporalDebug == 1u)
+        {
+            Display = float4((NewAge / AgeCap / View.PreExposure).xxx, 0.0f);
+        }
+        else if (TemporalDebug == 2u)
+        {
+            Display = float4((bFresh ? float3(0, 0, 1) : bValid ? float3(0, 1, 0) : float3(1, 0, 0)) / View.PreExposure, 0.0f);
+        }
+        else if (TemporalDebug == 3u)
+        {
+            Display = float4((bFresh ? Own : Fill).rgb, 0.0f);
+        }
+
+        ResolvedDisplay[P] = Display;
+    }
+}
+
+// -- Composite ----------------------------------------------------------------
+
+/** The resolved atmosphere, one texel per output pixel. */
+Texture2D<float4> AtmosphereColor;
+
+Texture2D<float4> SceneColorTexture;
+uint2 SceneColorMin;
+
+RWTexture2D<float4> CompositeOutput;
+
+/** The resolved atmosphere over the scene.
+ *
+ *  NO SPATIAL FILTER. A pixel without settled history already holds the
+ *  bilinear fill of the fresh samples about it, smooth at the cell's scale; a
+ *  blur of a cell's width over it does not show. */
+[numthreads(ATMO_TEMPORAL_THREADS, ATMO_TEMPORAL_THREADS, 1)]
+void MainCompositeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint2 P = DispatchThreadId.xy;
+
+    if (any(float2(P) >= OutputSize))
+    {
+        return;
+    }
+
+    const float4 Atmosphere = AtmosphereColor.Load(int3(P, 0));
+
+    const uint2 Target = P + SceneColorMin;
+    const float4 Scene = SceneColorTexture[Target];
+
+	// Scene colour carries the view's pre-exposure; the march's light does not.
+    CompositeOutput[Target] = float4(Atmosphere.rgb * View.PreExposure + Scene.rgb * Atmosphere.a, Scene.a);
+}

@@ -52,21 +52,30 @@ void Atmo_ChordSteps(float Length, float Count, float Spread, out float First, o
     Growth = R - 1.0f;
 }
 
-/** 1 starts each pixel's step lattice a fraction of a step into its first step,
- *  so neighbouring pixels do not share step boundaries. The sample jitter
- *  already makes each step an unbiased estimate; this breaks up the noise it
- *  leaves, whose size follows where features fall inside a step and so forms
- *  rings about the view centre wherever the lattice is shared. 0 starts every
- *  lattice at the segment. */
-#ifndef ATMO_LATTICE_OFFSET
-#define ATMO_LATTICE_OFFSET 0
-#endif
-
-/** 1 places cloud steps on a lattice anchored at the camera: step length is a
- *  function of distance alone, so every ray's steps agree wherever the rays
- *  agree, whatever their chords. 0 spreads CloudSteps over each ray's chord.
- *  A cloud segment widens to the lattice points either side of it, so no
- *  cloud step is cut short by a shell; only the terminus trims one. PITFALL:
+/** The step plan. 1, the terrestrial field's: cloud steps on a lattice
+ *  anchored at the camera, each pixel's lattice phase-shifted and each cloud
+ *  entry refined, below. 0, the gas giant's until it ports to the lattice:
+ *  CloudSteps spread over each ray's chord from the segment start.
+ *
+ *  THE LATTICE. Step length is a function of distance alone, so every ray's
+ *  steps agree wherever the rays agree, whatever their chords. A cloud segment
+ *  widens to the lattice points either side of it, so no cloud step is cut
+ *  short by a shell; only the terminus trims one.
+ *
+ *  THE PHASE. Each pixel's lattice starts a fraction of a step into its first
+ *  step, so neighbouring pixels do not share step boundaries: the noise the
+ *  sample jitter leaves follows where features fall inside a step, and forms
+ *  rings about the view centre wherever the lattice is shared.
+ *
+ *  THE ENTRY REFINE. The step in which a ray first meets cloud, and the
+ *  ATMO_ENTRY_SPAN steps after it, are re-marched at ATMO_ENTRY_SUBSTEPS
+ *  substeps each, again at every re-entry after a clear sample. A step's
+ *  single sample decides its whole transmittance, and near the cloud's surface
+ *  that decision carries a bias that follows where the surface falls in the
+ *  step: rings about the camera. Substeps divide the bias, and they lie on the
+ *  divided lattice, so the entry moves no step boundary.
+ *
+ *  PITFALL:
  *  A STEP CUT AT A SHELL IS A SAWTOOTH ACROSS THE SCREEN. Its length runs
  *  from zero to a full step each time the shell crossing passes a lattice
  *  point, every step-length bias follows it, and the lattice's spheres show
@@ -90,7 +99,7 @@ void Atmo_ChordSteps(float Length, float Count, float Spread, out float First, o
  *  geometrically between. A camera above the deck starts its rays far from it
  *  and pays little for fine steps. Equal values disable the blend. */
 #ifndef ATMO_CAMERA_LATTICE_GROWTH
-#define ATMO_CAMERA_LATTICE_GROWTH 0.1f
+#define ATMO_CAMERA_LATTICE_GROWTH 0.2f
 #endif
 
 #ifndef ATMO_CAMERA_LATTICE_GROWTH_FAR
@@ -172,18 +181,6 @@ float Atmo_LatticeStep(AtmoCameraLattice L, float T, float Phase, float RadialRa
 
     return min(End - T, L.Cap * Unit / max(RadialRate, 1e-3f));
 }
-
-/** 1 re-marches the lattice step in which a camera-lattice ray first meets
- *  cloud, and the ATMO_ENTRY_SPAN steps after it, at ATMO_ENTRY_SUBSTEPS
- *  substeps each; again at every re-entry after a clear sample. A step's
- *  single sample decides its whole transmittance, and near the cloud's
- *  surface that decision carries a bias that follows where the surface falls
- *  in the step: rings about the camera. Substeps divide the bias, and they
- *  lie on the divided lattice, so the entry moves no step boundary. Needs
- *  ATMO_CAMERA_LATTICE. */
-#ifndef ATMO_ENTRY_REFINE
-#define ATMO_ENTRY_REFINE 0
-#endif
 
 #ifndef ATMO_ENTRY_SUBSTEPS
 #define ATMO_ENTRY_SUBSTEPS 4.0f

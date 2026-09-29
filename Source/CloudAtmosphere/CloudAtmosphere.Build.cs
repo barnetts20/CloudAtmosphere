@@ -41,6 +41,7 @@ public class CloudAtmosphere : ModuleRules
 				"Slate",
 				"SlateCore",
 				"RenderCore",
+                "Renderer",
                 "Projects",
                 "RHI",
 				"DeveloperSettings",
