@@ -4,47 +4,23 @@
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTransmittance.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereDepth.ush"
 
-// Setup: everything between the material's pin values and a filled
-// CompositeParams.
-//
-// SEPARATE FROM THE MARCH BECAUSE IT IS THE PART THAT KNOWS ABOUT THE MATERIAL.
-// A march takes the struct and does not care where it came from; this file does
-// the unit conversions, the ray reconstruction and the depth blending that only
-// make sense inside a post process material. Nothing here is march-specific, so
-// both models build their params through it.
+// Setup: everything between a pass's uniforms and a filled CompositeParams --
+// the unit conversions and the ray reconstruction. Nothing here is
+// model-specific, so both fields build their params through it.
 
-// THE MARCH PIXEL'S VIEWPORT UV COMES FROM THE ENGINE: GetViewportUV(Parameters)
-// in the custom node, passed to everything below. PITFALL: it cannot be derived
-// from SvPosition or View.ViewSizeAndInvSize. A user scene texture pass renders
-// at OUTPUT resolution while View describes the INTERNAL one, and the editor
-// lowers the internal resolution on large viewports, so a UV built from either
-// is off by the screen percentage -- the planet draws scaled toward the
-// top-left corner of the screen by that factor, with its depth cut moving with
-// it, so the occlusion looks right while the whole image is misplaced.
+/** The projection rays are built from, bound by each pass: the march takes the
+ *  jittered one, so its rays land on the pixels the jittered depth buffer
+ *  holds, and the resolve the unjittered one its history is kept in. */
+float4x4 RayViewToClip;
 
-/** The projection rays are built from: the unjittered one after the upscaler.
- *  A pass composited before it defines this as the jittered projection, so its
- *  rays land on the pixels the jittered depth buffer holds. */
-#ifndef ATMO_RAY_VIEW_TO_CLIP
-#define ATMO_RAY_VIEW_TO_CLIP View.ViewToClipNoAA
-#endif
-
-/** World ray direction through a viewport UV, from ATMO_RAY_VIEW_TO_CLIP.
- *
- *  PITFALL: ClipToTranslatedWorld carries the temporal AA jitter, and these
- *  passes run after the upscaler resolves it, so a ray built from it wobbles by
- *  up to half an internal pixel every frame with nothing left to average it. Up
- *  close the cloud features span many pixels and the wobble is invisible; from
- *  a few radii out they are sub-pixel and each frame lands on different ones,
- *  so a still image shimmers, worse with distance. ViewToClipNoAA is the same
- *  projection without the jitter.
+/** World ray direction through a viewport UV, from RayViewToClip.
  *
  *  Perspective inverts in place: NDC = view.xy / view.z * (P00, P11) + (P20,
  *  P21), which also covers an off-axis frustum. An orthographic view has one
  *  direction for every pixel. */
 float3 Atmo_RayDirection(float2 viewportUV)
 {
-    const float4x4 P = ATMO_RAY_VIEW_TO_CLIP;
+    const float4x4 P = RayViewToClip;
 
     if (P[3][3] >= 1.0f)
     {
@@ -69,14 +45,12 @@ float Atmo_PixelAngle()
     return 2.0f / max(View.ViewToClipNoAA[1][1] * View.ViewSizeAndInvSize.y, 1e-4f);
 }
 
-/** Fills CompositeParams from the material's pin values.
+/** Fills CompositeParams from a field's uniforms.
  *
  *  PITFALL: sceneDepth is a TRUE RAY DISTANCE, from Atmo_SceneRayDistance. The
  *  march spends it as a bound on the ray parameter, so it has to be measured
  *  along the ray rather than along the view axis, and it has to be exact at
- *  range: the SceneDepth node is view-axis and saturates toward 1,000 km, and a
- *  depth routed through a user scene texture loses precision proportional to
- *  the distance. Both read as geometry sinking into the deck as the camera
+ *  range; either error reads as geometry sinking into the deck as the camera
  *  recedes.
  *
  *  SCALED BY ATMOSPHERE THICKNESS ON THE WAY IN. Every coefficient and scale

@@ -279,7 +279,7 @@ struct AtmoShadowCameras
     float3 Level[ATMO_SHADOW_CASCADES];
 };
 
-/** The cameras from the material's two pins. */
+/** The cameras from the march's two uniforms. */
 AtmoShadowCameras AtmoShadow_MakeCameras(float3 Camera1, float3 Camera2)
 {
     AtmoShadowCameras Cameras;

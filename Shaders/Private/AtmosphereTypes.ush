@@ -1,7 +1,7 @@
 #pragma once
 
 // Parameter structs and shared math for the atmosphere march. Compiled into
-// material Custom nodes and into AtmosphereTransmittance.usf.
+// the march, resolve and bake passes and into AtmosphereTransmittance.usf.
 //
 // Space is camera-relative: the view ray starts at the origin and planetPos is
 // the planet centre relative to the camera. Lengths are world units.
@@ -59,7 +59,7 @@ struct MainRayParams
     int atmoSteps;
     int cloudSteps;
     float chordSpread; // last step over first, within a class
-    float jitterShift; // per-frame shift of the per-pixel draws, under ATMO_JITTER_FRAME
+    float jitterShift; // per-frame shift of the per-pixel draws
 };
 
 /** Light-ray state, filled per view step by the march. */
@@ -202,27 +202,16 @@ float Atmo_HashJitter(float2 svxy, uint salt)
     return float(h >> 8) * (1.0 / 16777216.0);
 }
 
-/** View-ray jitter in [0,1): interleaved gradient noise, which a small blur
- *  resolves cleanly, with its input advanced per step.
+/** View-ray draw in [0,1) for index index, from a tiling noise texture,
+ *  typically blue noise: texel (svxy + shift) of its first channel, the shift an
+ *  R2 sequence in the index so each index reads the tile at a different,
+ *  well-spread offset.
  *
- *  Pitfall: advancing the output instead (one seed plus a golden-ratio step)
- *  gives every step the same spatial pattern shifted, and the errors sum into
- *  rings about the view centre. Pitfall: hashing a linear combination of x and y
- *  leaves lattice-line correlation that no blur radius removes. */
-float Atmo_StepJitter(float2 svxy, int stepIndex)
-{
-    const float2 p = svxy + 5.588238 * float(stepIndex);
-
-    return frac(52.9829189 * frac(0.06711056 * p.x + 0.00583715 * p.y));
-}
-
-/** Atmo_StepJitter from a tiling noise texture, typically blue noise: texel
- *  (svxy + shift) of its first channel, the shift an R2 sequence in the index so
- *  each index reads the tile at a different, well-spread offset.
- *
- *  THE LOOKUP MOVES, NOT THE VALUE, for the reason Atmo_StepJitter's input
- *  advances. The texture must be linear, uncompressed and without mips, read
- *  with Load so no filter blends texels. */
+ *  PITFALL: THE LOOKUP MOVES, NOT THE VALUE. Advancing the value instead (one
+ *  draw plus a golden-ratio step per index) gives every step the same spatial
+ *  pattern shifted, and the errors sum into rings about the view centre. The
+ *  texture must be linear, uncompressed and without mips, read with Load so no
+ *  filter blends texels. */
 float Atmo_TextureJitter(Texture2D Noise, float2 svxy, int index)
 {
     uint Width, Height;

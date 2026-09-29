@@ -1,68 +1,23 @@
 #include "/Engine/Public/Platform.ush"
 #include "/Engine/Private/Common.ush"
 
-// The terrestrial march as a compute pass, run per view by the atmosphere's
-// scene view extension (AtmosphereViewExtension.cpp).
-//
-// THE SHARED MARCH. The uniforms below carry the field's pin names, so
-// TR_BUILD_FIELD, TR_BUILD_SCATTER and TR_BUILD_ATMO expand here, and
-// Atmo_MainMarchDepth is the march the gas giant's material runs too.
+// The march as a compute pass, run per view by the atmosphere's scene view
+// extension (AtmosphereViewExtension.cpp), for both models: TR_DEEP_DECK, the
+// pass's permutation, selects the gas giant's deep deck. The uniforms carry the
+// field builders' argument names, so TR_BUILD_FIELD, TR_BUILD_SCATTER and
+// TR_BUILD_ATMO expand here. FAtmosphereMarchParameters mirrors this file.
 //
 // INTERLEAVED. One pixel of each MarchStride cell per frame, MarchOffset
-// cycling through the cell, the per-pixel draws moved every frame
-// (ATMO_JITTER_FRAME) so the resolve's history averages them. The draws are
-// seeded by cell plus an offset per rank in the cell, so each frame's marched
-// set reads one contiguous window of the blue noise and stays blue at cell
-// resolution, where the resolve filters it; seeded by output pixel, each
-// frame's set is close to white.
-
-/** Scene depth, bound from the view's scene textures. Read at the texel the
- *  engine's LookupDeviceZ would point-sample, clamped to the view rect: the
- *  last cells can march past its edge, and the buffer beyond it is stale. */
-Texture2D<float> AtmoSceneDepth;
-
-float Atmo_LoadDeviceZ(float2 BufferUV)
-{
-    const float2 RectMin = View.ViewRectMin.xy;
-    const float2 RectMax = RectMin + View.ViewSizeAndInvSize.xy - 1.0f;
-    const int2 Texel = int2(clamp(BufferUV * View.BufferSizeAndInvSize.xy, RectMin, RectMax));
-
-    return AtmoSceneDepth.Load(int3(Texel, 0));
-}
-
-#define ATMO_LOOKUP_DEVICE_Z(BufferUV) Atmo_LoadDeviceZ(BufferUV)
-
-/** The view's jittered projection: the pass runs ahead of the upscaler, and
- *  the rays land on the pixels the jittered depth holds. */
-float4x4 RayViewToClip;
-
-#define ATMO_RAY_VIEW_TO_CLIP RayViewToClip
-
-/** The camera lattice's growth, in the deck and far above it: the actor's
- *  terrestrial Sampling group. */
-float LatticeGrowth;
-float LatticeGrowthFar;
-
-#define ATMO_CAMERA_LATTICE_GROWTH LatticeGrowth
-#define ATMO_CAMERA_LATTICE_GROWTH_FAR LatticeGrowthFar
-
-#define ATMO_JITTER_FRAME 1
-#define ATMO_MARCH_DEPTH 1
+// cycling through the cell, the per-pixel draws moved every frame so the
+// resolve's history averages them. The draws are seeded by cell plus an offset
+// per rank in the cell, so each frame's marched set reads one contiguous window
+// of the blue noise and stays blue at cell resolution, where the resolve filters
+// it; seeded by output pixel, each frame's set is close to white.
 
 #include "/Plugin/CloudAtmosphere/Private/TerrestrialField.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereMarch.ush"
 
-// -- The field's pins ---------------------------------------------------------
-
-float3 PlanetOffset;
-float4 PlanetRotation;
-float3 LightDirection;
-float3 LightColor;
-
-float PlanetRadius;
-float HeightScale;
-float Time;
-
+// TR_BuildField's packed pins, as PackCloudField writes them.
 float4 CloudProfile;
 float4 CloudCurves;
 float4 CloudCoverage;
@@ -82,11 +37,27 @@ float4 CloudGenusCumulus;
 float4 CloudGenusCirrus;
 float4 ShadowCascades;
 
+// The cloud material.
 float3 CloudScatter;
 float3 StormScatter;
 float4 CloudExtinction;
 float4 StormExtinction;
 float CloudOpticalDepth;
+
+// -- Planet, light, clock -------------------------------------------------------
+
+/** The planet's centre less this view's camera, formed in double. */
+float3 PlanetOffset;
+float4 PlanetRotation;
+float3 LightDirection;
+float3 LightColor;
+
+float PlanetRadius;
+float HeightScale;
+float Time;
+
+// -- Lighting -------------------------------------------------------------------
+
 float LightExtinctionFraction;
 
 float ForwardG;
@@ -105,6 +76,8 @@ float AmbientTerminator;
 float MieLobeDecay;
 float LobeShadowPower;
 
+// -- Air ------------------------------------------------------------------------
+
 float3 RayleighBeta;
 float RayleighScaleHeight;
 float3 MieBeta;
@@ -116,11 +89,14 @@ float AbsorptionFalloff;
 float3 AtmosphereAmbient;
 float AtmosphereAmbientFloor;
 
+// -- Pipeline -------------------------------------------------------------------
+
 float AtmosphereSteps;
 float CloudSteps;
 float ChordSpread;
 float4 SurfaceShadow;
 
+/** The cameras shadow levels 1 and 2 were baked around, planet-local. */
 float3 ShadowCamera1;
 float3 ShadowCamera2;
 
@@ -136,7 +112,7 @@ SamplerState ShadowTargetSampler;
 Texture2D TransmittanceTable;
 SamplerState TransmittanceTableSampler;
 
-// -- The pass -----------------------------------------------------------------
+// -- The pass -------------------------------------------------------------------
 
 /** Threads dispatched, and the output pixels between them. */
 uint2 MarchCells;
@@ -191,11 +167,11 @@ void MainMarchCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
     const float3 RayDir = Atmo_RayDirection(UV);
 
-	// Atmo_SceneRayDistance's steps, keeping the view-axis depth for the resolve.
+	// The view-axis depth is kept for the resolve's guide.
     const float GuideDepth = Atmo_SceneDepthAt(ViewportUVToBufferUV(UV));
-    const float SceneRayDistance = GuideDepth / max(dot(RayDir, View.ViewForward), 1e-3f);
+    const float SceneRayDistance = Atmo_SceneRayDistance(GuideDepth, RayDir);
 
-    TRFieldParams F = TR_BUILD_FIELD();
+    FieldParams F = TR_BUILD_FIELD();
 
     AtmoMarchParams P;
     P.Field = F;

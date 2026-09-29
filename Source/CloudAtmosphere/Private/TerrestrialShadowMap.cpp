@@ -51,7 +51,7 @@ namespace TerrestrialShadow
 			return;
 		}
 
-		RDG_EVENT_SCOPE(GraphBuilder, "TerrestrialShadowBake");
+		RDG_EVENT_SCOPE(GraphBuilder, "CloudShadowBake");
 
 		FRDGTextureRef Map = GraphBuilder.RegisterExternalTexture(
 			CreateRenderTarget(Params.MapTexture, TEXT("Terrestrial.ShadowMap")));
@@ -69,28 +69,7 @@ namespace TerrestrialShadow
 		P->PlanetRadius = Params.PlanetRadius;
 		P->HeightScale = Params.HeightScale;
 		P->Time = Params.Time;
-		P->CloudProfile = Params.CloudProfile;
-		P->CloudCurves = Params.CloudCurves;
-		P->CloudCoverage = Params.CloudCoverage;
-		P->CloudType = Params.CloudType;
-		P->CloudLid = Params.CloudLid;
-		P->CloudLift = Params.CloudLift;
-		P->CloudMotion = Params.CloudMotion;
-		P->NoiseLevels = Params.NoiseLevels;
-		P->StructureSampling = Params.StructureSampling;
-		P->StructureWarp = Params.StructureWarp;
-		P->DetailSampling = Params.DetailSampling;
-		P->DetailWarp = Params.DetailWarp;
-		P->CloudGenusStratus = Params.CloudGenusStratus;
-		P->CloudGenusStratocumulus = Params.CloudGenusStratocumulus;
-		P->CloudGenusCumulus = Params.CloudGenusCumulus;
-		P->CloudGenusCirrus = Params.CloudGenusCirrus;
-		P->ShadowCascades = Params.ShadowCascades;
-		P->CloudResponse = Params.CloudResponse;
-
-		P->CloudExtinction = Params.CloudExtinction;
-		P->StormExtinction = Params.StormExtinction;
-		P->CloudOpticalDepth = Params.CloudOpticalDepth;
+		P->Field = Params.Field;
 		P->LightExtinctionFraction = Params.LightExtinctionFraction;
 
 		P->ShadowMapUAV = GraphBuilder.CreateUAV(Map);
@@ -110,7 +89,7 @@ namespace TerrestrialShadow
 			? Params.StructureTexture
 			: GBlackVolumeTexture->TextureRHI;
 
-		// Wrap on all three axes, matching the material. Clamped, a tiling bake
+		// Wrap on all three axes, matching the march. Clamped, a tiling bake
 		// reads a stretched band of constant value along each face.
 		P->DetailVolumeSampler =
 			TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
@@ -126,7 +105,10 @@ namespace TerrestrialShadow
 			FMath::DivideAndRoundUp(Params.MapSize.Y, AtmoShadowBake::ThreadGroupSize),
 			1);
 
-		TShaderMapRef<FTerrestrialShadowBakeCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		FTerrestrialShadowBakeCS::FPermutationDomain Permutation;
+		Permutation.Set<FTerrestrialShadowBakeCS::FDeepDeck>(Params.bDeepDeck);
+
+		TShaderMapRef<FTerrestrialShadowBakeCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel), Permutation);
 
 		for (int32 Level = 0; Level < AtmoShadowBake::CascadeCount; ++Level)
 		{

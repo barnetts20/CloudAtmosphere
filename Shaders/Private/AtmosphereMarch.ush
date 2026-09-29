@@ -5,50 +5,20 @@
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereSetup.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTransmittance.ush"
 
-// THE FIELD, WHICHEVER IT IS. A model header defines ATMO_FIELD_INCLUDED, so a
-// caller that included one already keeps it and this default is skipped. It is a
-// guard rather than a macro-valued include path, which not every shader
-// preprocessor accepts.
+// THE FIELD: TerrestrialField.ush, included first, defines ATMO_FIELD_INCLUDED
+// and the interface below.
 #ifndef ATMO_FIELD_INCLUDED
-#include "/Plugin/CloudAtmosphere/Private/GasGiantField.ush"
+#error Include TerrestrialField.ush before AtmosphereMarch.ush.
 #endif
 
-/** Set by a field whose Field_Sample material coordinate is what its light tint
- *  reads, which then provides Field_SampleLightTint. */
-#ifndef FIELD_SAMPLE_TINT
-#define FIELD_SAMPLE_TINT 0
-#endif
-
-/** The per-pixel draws in [0, 1] for index Index: the samples' jitter and the
- *  lattice phase. A field can point it at a texture in its FIELD_TEXTURE_DECL,
- *  which is in scope wherever the march calls it. */
-#ifndef FIELD_STEP_JITTER
-#define FIELD_STEP_JITTER(Svxy, Index) Atmo_StepJitter(Svxy, Index)
-#endif
-
-/** 1 moves the per-pixel draws every frame, for a pass that accumulates
- *  frames: mainRayParams.jitterShift is added to the step jitter and the
- *  lattice phase, mod 1. 0 keeps the static dither a single frame needs. */
-#ifndef ATMO_JITTER_FRAME
-#define ATMO_JITTER_FRAME 0
-#endif
-
-#if ATMO_JITTER_FRAME
-#define ATMO_DRAW(Svxy, Index, Shift) frac(FIELD_STEP_JITTER(Svxy, Index) + (Shift))
-#else
-#define ATMO_DRAW(Svxy, Index, Shift) FIELD_STEP_JITTER(Svxy, Index)
-#endif
+/** The per-pixel draw in [0, 1) for index Index: the samples' jitter and the
+ *  lattice phase, from the blue noise, moved each frame by
+ *  mainRayParams.jitterShift so the resolve's history averages the draws. */
+#define ATMO_DRAW(Svxy, Index, Shift) frac(Atmo_TextureJitter(BlueNoise, Svxy, Index) + (Shift))
 
 /** Representative depth of a ray that met neither cloud nor a surface: a
  *  reprojection treats it as a direction. */
 #define ATMO_SKY_DEPTH (-1.0f)
-
-/** 1 tracks the cloud's representative depth for Atmo_MainMarchDepth; 0
- *  returns the surface's alone. PITFALL: a pass that discards the depth still
- *  pays for part of the tracking, which the compiler does not always remove. */
-#ifndef ATMO_MARCH_DEPTH
-#define ATMO_MARCH_DEPTH 0
-#endif
 
 /** Mean cloud opacity below which the cloud does not set a ray's
  *  representative depth. */
@@ -105,12 +75,11 @@
 
 /** Isolates one lighting term so a stray glow can be attributed rather than
  *  guessed at. Every mode returns that term alone with transmittance untouched,
- *  so the composite still shapes it as it shapes the real image -- the blur
- *  being itself a candidate.
+ *  so the resolve and the composite shape it as they shape the real image.
  *
  *    0  off, normal output
  *    1  air Rayleigh only
- *    2  air Mie only          <- the forward lobe, before the blur sees it
+ *    2  air Mie only          <- the forward lobe
  *    3  deck direct + multiple scattering only
  *    4  deck ambient only
  *    5  sun transmittance at the first deck sample, as greyscale
@@ -127,8 +96,8 @@
  *
  *  1 to 4 PARTITION THE LIT IMAGE, air against deck and direct against ambient,
  *  so a glow present in 2 and absent in 3 and 4 is air Mie in front of the deck.
- *  Absent from all four but present with the mode off puts it in the stage 3
- *  composite rather than in anything this file produced. 5 and 6 read a scalar
+ *  Absent from all four but present with the mode off puts it in the resolve
+ *  or the composite rather than in anything this file produced. 5 and 6 read a scalar
  *  instead of a term and between them cover the two shadow paths, which is where
  *  a terminator that looks wrong usually comes from.
  *
@@ -228,11 +197,12 @@ AtmoLightConstants Atmo_LightConstants(Texture2DArray ShadowMap, AtmoShadowCamer
 	// THE CEILING IS SET ON THE MOST TRANSMISSIVE TERM. The caller exponentiates
 	// the depth per channel at the receiving band's tint over the largest tint,
 	// and each octave at Attenuation^i of that, so saturated deck is only dark
-	// if the smallest of those products is. See ATMO_SHADOW_SATURATION.
+	// if the smallest of those products is. See ATMO_SHADOW_SATURATION; the
+	// field sets the depth.
     const float DeepestOctave =
 		pow(max(P.Scatter.OctaveAttenuation, 1e-4f), P.Scatter.OctaveCount - 1.0f);
 
-    C.Ceiling = ATMO_SHADOW_SATURATION / max(C.Fold.y * DeepestOctave, ATMO_SHADOW_MIN_TAU_SCALE);
+    C.Ceiling = Field_ShadowSaturation() / max(C.Fold.y * DeepestOctave, ATMO_SHADOW_MIN_TAU_SCALE);
 
     C.Thickness = AtmoT_Thickness(P.Atmo.planetParams.planetRadius, P.Atmo.planetParams.atmoRadius);
     C.Radii = AtmoT_Radii(P.Atmo.planetParams.planetRadius, P.Atmo.planetParams.atmoRadius);
@@ -330,13 +300,10 @@ float3 Atmo_LightMarch(
 	// along one ray nor neighbouring pixels read the map in phase. Both axes
 	// matter: the ray's samples are what average the texel neighbourhood, and
 	// the pixel term is what stops that average being identical next door.
-	// Under ATMO_JITTER_FRAME also by the pixel's sample, so the offsets move
-	// between the frames a history averages.
+	// Also by the pixel's sample, so the offsets move between the frames a
+	// history averages.
     uint ShadowSalt = uint(P.Atmo.lightRayParams.parentStepIndex) * 2749u;
-
-#if ATMO_JITTER_FRAME
     ShadowSalt += uint(P.Atmo.mainRayParams.jitterShift * 16777216.0f) * 0x27D4EB2Du;
-#endif
 
     const float2 ShadowJitter = float2(
 		Atmo_HashJitter(P.Atmo.mainRayParams.svxy, ShadowSalt + 11u) - 0.5f,
@@ -370,17 +337,18 @@ float3 Atmo_LightMarch(
 
 /** Marches the atmosphere and the cloud deck toward the camera.
  *
- *  Returns float4(accumulated light, transmittance). ShadowCameras is
- *  AtmoShadow_MakeCameras of the ShadowCamera1 and ShadowCamera2 pins.
+ *  Returns float4(accumulated light, transmittance). BlueNoise is the tile
+ *  ATMO_DRAW reads; ShadowCameras is AtmoShadow_MakeCameras of the
+ *  ShadowCamera1 and ShadowCamera2 uniforms.
  *
- *  OutDepth is the ray distance a reprojection moves the result by, under
- *  ATMO_MARCH_DEPTH: where the cloud's own transmittance crosses 0.5, else the
- *  cloud's opacity-weighted mean distance, else the surface the ray stops on,
- *  else ATMO_SKY_DEPTH; without it the surface or sky alone. Air
- *  is left out: along the limb it alone can fall below half ahead of the cloud,
- *  and the first wisp would take the depth. */
+ *  OutDepth is the ray distance a reprojection moves the result by: where the
+ *  cloud's own transmittance crosses 0.5, else the cloud's opacity-weighted mean
+ *  distance, else the surface the ray stops on, else ATMO_SKY_DEPTH. Air is
+ *  left out: along the limb it alone can fall below half ahead of the cloud, and
+ *  the first wisp would take the depth. */
 float4 Atmo_MainMarchDepth(
 	FIELD_TEXTURE_DECL,
+	Texture2D BlueNoise,
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
 	AtmoShadowCameras ShadowCameras,
@@ -573,47 +541,33 @@ float4 Atmo_MainMarchDepth(
     }
 
 
-	// The chord each class actually holds, summed before anything is marched:
-	// the distribution has to know the whole length to place its first step.
-    float CloudChord = 0.0f;
+	// The air's chord, summed before anything is marched: the distribution has
+	// to know the whole length to place its first step. Cloud steps sit on the
+	// camera lattice instead.
     float AirChord = 0.0f;
 
     for (int c = 0; c < SegmentCount; c++)
     {
-        const float ChordLen = max(Segments[c].y - Segments[c].x, 0.0f);
-
-        if (Field_SegmentIsCloud(RayOrigin, RayDir, Segments[c], P.Atmo.planetParams))
+        if (!Field_SegmentIsCloud(RayOrigin, RayDir, Segments[c], P.Atmo.planetParams))
         {
-            CloudChord += ChordLen;
-        }
-        else
-        {
-            AirChord += ChordLen;
+            AirChord += max(Segments[c].y - Segments[c].x, 0.0f);
         }
     }
 
-    float CloudFirst, CloudGrow, AirFirst, AirGrow;
-
-    Atmo_ChordSteps(CloudChord, float(P.Atmo.mainRayParams.cloudSteps),
-		P.Atmo.mainRayParams.chordSpread, CloudFirst, CloudGrow);
+    float AirFirst, AirGrow;
 
     Atmo_ChordSteps(AirChord, float(P.Atmo.mainRayParams.atmoSteps),
 		P.Atmo.mainRayParams.chordSpread, AirFirst, AirGrow);
 
-    float CloudUsed = 0.0f;
     float AirUsed = 0.0f;
 
-#if ATMO_CAMERA_LATTICE
 	// Hashed at a step index the march does not reach, so it is uncorrelated
 	// with the samples' own jitter.
     const float LatticePhase = 1.0f - ATMO_DRAW(P.Atmo.mainRayParams.svxy, 7919, P.Atmo.mainRayParams.jitterShift);
-    const float CloudLead = Atmo_LeadStep(CloudFirst, CloudGrow, LatticePhase);
     const float AirLead = Atmo_LeadStep(AirFirst, AirGrow, LatticePhase);
-#endif
 
     int StepIndex = 0;
 
-#if ATMO_CAMERA_LATTICE
     const float ShellDepth = max(
 		P.Atmo.planetParams.cloudOuterRadius - P.Atmo.planetParams.cloudInnerRadius, 1e-4f);
 
@@ -625,14 +579,11 @@ float4 Atmo_MainMarchDepth(
 		Atmo_LatticeGrowth(CameraAltitude));
 
     const float CloudPhase = LatticePhase;
-#endif
 
     const AtmoLightConstants LightConstants = Atmo_LightConstants(ShadowMap, ShadowCameras, P);
 
-#if ATMO_CAMERA_LATTICE
 	// Where the previous segment's last step ended, which may be past its end.
     float CarryPos = 0.0f;
-#endif
 
     for (int s = 0; s < SegmentCount; s++)
     {
@@ -642,7 +593,6 @@ float4 Atmo_MainMarchDepth(
         const bool IsCloud = Field_SegmentIsCloud(
 			RayOrigin, RayDir, Segments[s], P.Atmo.planetParams);
 
-#if ATMO_CAMERA_LATTICE
 		// Cloud starts at the lattice point before its shell crossing, and air
 		// ahead of cloud stops there. The widened part holds no cloud, so the
 		// full step's sample is unbiased.
@@ -657,13 +607,10 @@ float4 Atmo_MainMarchDepth(
         }
 
         SegStart = max(SegStart, CarryPos);
-#endif
 
-#if ATMO_CAMERA_LATTICE
 		// Substeps run to RefineUntil; a clear coarse sample arms the next entry.
         float RefineUntil = -1.0f;
         bool RefineArmed = true;
-#endif
 
         float Pos = SegStart;
 
@@ -672,25 +619,8 @@ float4 Atmo_MainMarchDepth(
         {
             Iter++;
 
-			// AFFINE IN CONSUMED CHORD: first step plus growth times how much of
-			// this class the ray has already spent. Nothing else sizes the step --
-			// no obliquity correction, no footprint floor, no feature cap, because
-			// the budget is already a length along the ray rather than a radial
-			// depth being spent as one.
-            float CurrentStep = max(IsCloud
-				? CloudFirst + CloudGrow * CloudUsed
-				: AirFirst + AirGrow * AirUsed, 1e-4f);
+            float CurrentStep;
 
-#if ATMO_CAMERA_LATTICE
-			// A class's first step is its lead; the sizes after it follow from
-			// the chord consumed, so the whole lattice shifts by the phase.
-            if ((IsCloud ? CloudUsed : AirUsed) <= 0.0f)
-            {
-                CurrentStep = max(IsCloud ? CloudLead : AirLead, 1e-4f);
-            }
-#endif
-
-#if ATMO_CAMERA_LATTICE
             if (IsCloud)
             {
                 const float3 StepUp = normalize(RayOrigin + RayDir * Pos - P.Atmo.planetParams.planetPos);
@@ -701,26 +631,17 @@ float4 Atmo_MainMarchDepth(
 					CloudLattice, Pos, CloudPhase, abs(dot(RayDir, StepUp)), Division), 1e-4f), MaxDist - Pos);
             }
             else
-#endif
             {
+				// AFFINE IN CONSUMED CHORD: first step plus growth times how much
+				// air the ray has already spent, the first step being the lead so
+				// the whole distribution shifts by the phase.
+                CurrentStep = max((AirUsed <= 0.0f) ? AirLead : AirFirst + AirGrow * AirUsed, 1e-4f);
                 CurrentStep = min(CurrentStep, SegEnd - Pos);
-            }
 
-			// THE TRIMMED SIZE, NOT THE ONE ASKED FOR. A step clipped at a
-			// segment boundary covers less chord than the distribution planned,
-			// and crediting the full size runs the progression ahead so the ray
-			// spends fewer steps than its count names.
-			//
-			// The pair of partial steps a boundary produces is one step more
-			// than an uninterrupted run would have taken, which is left alone:
-			// paying it back would shorten the next step to recover an exact
-			// integer, and the smooth progression is what the eye reads.
-            if (IsCloud)
-            {
-                CloudUsed += CurrentStep;
-            }
-            else
-            {
+				// THE TRIMMED SIZE, NOT THE ONE ASKED FOR. A step clipped at a
+				// segment boundary covers less chord than the distribution
+				// planned, and crediting the full size runs the progression ahead
+				// so the ray spends fewer steps than its count names.
                 AirUsed += CurrentStep;
             }
 
@@ -746,9 +667,8 @@ float4 Atmo_MainMarchDepth(
 			// coordinate origin and the field saturates below it, so a sample under
 			// it is inside opaque deck rather than inside a body the ray cannot
 			// enter -- gating the whole step on it leaves the interior transparent,
-			// and a camera descending through the deck comes out into vacuum. The
-			// air is bounded by it, though: Atmo_Density is exp(-h/H), so a
-			// negative height grows without bound instead of falling off.
+			// and a camera descending through the deck comes out into vacuum.
+			// What air lies below it is the field's (Field_AirDensity).
             if (Height > 0.0f || IsCloud)
             {
 				// Local sun elevation, for the ambient terms. Sampled from the
@@ -769,7 +689,7 @@ float4 Atmo_MainMarchDepth(
                 P.Atmo.lightRayParams.samplePos = SamplePos;
                 P.Atmo.lightRayParams.parentStepIndex = StepIndex;
 
-				// THE FADES BELONG TO THE SAMPLE, NOT TO THE PATH. GG_BuildField
+				// THE FADES BELONG TO THE SAMPLE, NOT TO THE PATH. The field's build
 				// leaves both at 1 and the march sets them per sample; the light
 				// march does not read them, since the bake applies the same fades at
 				// its own positions. Measured to THIS SAMPLE, so a grazing ray's
@@ -806,7 +726,6 @@ float4 Atmo_MainMarchDepth(
 
                     Sample = Field_Sample(FIELD_TEXTURE_ARGS, LocalPos, StepHalfHeight, P.Field);
 
-#if ATMO_CAMERA_LATTICE
 					// The first cloud on a coarse step: nothing is accumulated,
 					// and the step is taken again as substeps.
                     if (Pos >= RefineUntil)
@@ -822,7 +741,6 @@ float4 Atmo_MainMarchDepth(
 
                         RefineArmed = RefineArmed || Sample.x <= 0.0f;
                     }
-#endif
                 }
 
                 float LobeShadow;
@@ -834,26 +752,22 @@ float4 Atmo_MainMarchDepth(
 					ShadowMap, ShadowSampler, LightConstants,
 					TransmittanceTable, TransmittanceSampler, P, LocalPos, LobeShadow, CloudOptDepth);
 
-				// THE RECEIVER'S BAND COLOURS THE DECK IT WAS SHADOWED BY. The
-				// map holds one depth, not the colours of the bands the light
-				// crossed, and bands are far wider than the deck is deep so the
-				// path mostly stays in the receiver's band. Off near band edges
-				// at low sun. Only where the deck shadows at all, and from the
-				// sample when the field allows it -- a second column read
-				// otherwise.
+				// THE RECEIVER'S MATERIAL COLOURS THE DECK IT WAS SHADOWED BY.
+				// The map holds one depth, not the materials the light crossed;
+				// off where the material changes along the light path at low
+				// sun. Only where the deck shadows at all, and from the sample
+				// inside cloud -- a second column read outside it.
                 LightTint = Field_NeutralTint(P.Scatter);
 
                 BRANCH
 
                 if (CloudOptDepth > 0.0f)
                 {
-#if FIELD_SAMPLE_TINT
                     if (IsCloud)
                     {
                         LightTint = Field_SampleLightTint(Sample, P.Scatter);
                     }
                     else
-#endif
                     {
                         LightTint = Field_LightTint(FlowField, FlowSampler, LocalPos, P.Field, P.Scatter);
                     }
@@ -863,11 +777,12 @@ float4 Atmo_MainMarchDepth(
 
                 const float3 SunTransmittance = AirTransmittance * exp(-LightBeta * CloudOptDepth);
 
-                const float3 AtmoDens = (Height > 0.0f)
-					? Atmo_Density(Height,
-						P.Atmo.scatteringParams.rayScaleH, P.Atmo.scatteringParams.mieScaleH,
-						P.Atmo.scatteringParams.absHeight, P.Atmo.scatteringParams.absFalloff)
-					: float3(0.0f, 0.0f, 0.0f);
+                const float3 AtmoDens = Field_AirDensity(Height, P.Atmo);
+
+				// The sky's diffuse light reaching this depth, for the air's
+				// ambient and the cloud's alike.
+                const float3 AmbientShare = Field_AmbientShare(
+					Sample, Field_Albedo(Sample.y, P.Scatter), P.Atmo, P.Field, P.Scatter);
 
                 const float3 RayleighScatter =
 					P.Atmo.scatteringParams.rayBeta * P.Atmo.scatteringParams.phaseR * AtmoDens.x;
@@ -884,7 +799,7 @@ float4 Atmo_MainMarchDepth(
 					(RayleighScatter + MieScatter) * SunTransmittance * P.Atmo.mainRayParams.lightCol;
 
                 const float3 AmbientScatter = P.Atmo.scatteringParams.rayBeta * AtmoDens.x
-					* P.Atmo.scatteringParams.atmoAmbient.rgb * AirAmbientFactor;
+					* P.Atmo.scatteringParams.atmoAmbient.rgb * AirAmbientFactor * AmbientShare;
 
                 const float3 Extinction = (P.Atmo.scatteringParams.rayBeta * AtmoDens.x
 					+ P.Atmo.scatteringParams.mieBeta * AtmoDens.y
@@ -954,7 +869,7 @@ float4 Atmo_MainMarchDepth(
 
                         const float3 CloudLight = P.Atmo.mainRayParams.lightCol * OctaveLight
 							+ P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb.rgb
-								* CloudAmbientFactor;
+								* CloudAmbientFactor * AmbientShare;
 
 						// Band scales the shared base rather than replacing it,
 						// so the deck stays on the same thickness-relative
@@ -977,7 +892,7 @@ float4 Atmo_MainMarchDepth(
 #elif ATMO_DEBUG_TERM == 4
 						DebugAccum += Transmittance
 							* (P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb.rgb
-								* CloudAmbientFactor)
+								* CloudAmbientFactor * AmbientShare)
 							* Albedo * (1.0f - CloudStepTransmittance);
 #elif ATMO_DEBUG_TERM == 5
 						if (bDebugFirstCloud)
@@ -1007,7 +922,6 @@ float4 Atmo_MainMarchDepth(
 
                         const float CloudMeanAfter = CloudMean * dot(CloudStepTransmittance, (1.0f / 3.0f).xxx);
 
-#if ATMO_MARCH_DEPTH
                         DepthSum += (CloudMean - CloudMeanAfter) * SampleT;
                         DepthWeight += CloudMean - CloudMeanAfter;
 
@@ -1021,7 +935,6 @@ float4 Atmo_MainMarchDepth(
 
                             HalfDepth = Pos + CurrentStep * saturate(Crossing);
                         }
-#endif
 
                         CloudMean = CloudMeanAfter;
 
@@ -1044,9 +957,7 @@ float4 Atmo_MainMarchDepth(
             StepIndex++;
         }
 
-#if ATMO_CAMERA_LATTICE
         CarryPos = Pos;
-#endif
 
         if (max(Transmittance.x, max(Transmittance.y, Transmittance.z))
 			< ATMO_OPAQUE_TRANSMITTANCE)
@@ -1065,7 +976,6 @@ float4 Atmo_MainMarchDepth(
         Transmittance = float3(0.0f, 0.0f, 0.0f);
     }
 
-#if ATMO_MARCH_DEPTH
 	// A clipped ray is opaque at its terminus: thin cloud ahead of it does not
 	// set its depth.
     HalfDepth = (bClippedOpaque && HalfDepth < 0.0f) ? MaxDist : HalfDepth;
@@ -1073,7 +983,6 @@ float4 Atmo_MainMarchDepth(
     OutDepth = (HalfDepth >= 0.0f) ? HalfDepth
 		: (DepthWeight > ATMO_DEPTH_MIN_OPACITY) ? DepthSum / DepthWeight
 		: SurfaceDepth;
-#endif
 
 #if ATMO_DEBUG_TERM == 7
 	DebugAccum = (float(StepIndex) / float(ATMO_MAX_ITER) * ATMO_DEBUG_SCALE).xxx;
@@ -1170,21 +1079,4 @@ float4 Atmo_MainMarchDepth(
 #else
     return float4(AccumLight, MinTrans);
 #endif
-}
-
-/** Atmo_MainMarchDepth without the representative depth: what a single-frame
- *  pass composites. */
-float4 Atmo_MainMarch(
-	FIELD_TEXTURE_DECL,
-	Texture2DArray ShadowMap,
-	SamplerState ShadowSampler,
-	AtmoShadowCameras ShadowCameras,
-	Texture2D TransmittanceTable,
-	SamplerState TransmittanceSampler,
-	AtmoMarchParams P)
-{
-    float Depth;
-
-    return Atmo_MainMarchDepth(FIELD_TEXTURE_ARGS, ShadowMap, ShadowSampler, ShadowCameras,
-		TransmittanceTable, TransmittanceSampler, P, Depth);
 }

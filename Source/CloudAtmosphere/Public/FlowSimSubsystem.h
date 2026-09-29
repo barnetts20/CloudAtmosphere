@@ -3,7 +3,6 @@
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "Engine/EngineBaseTypes.h"
-#include "GasGiantShadowMap.h"
 #include "TerrestrialShadowMap.h"
 #include "FlowSimTypes.h"
 #include "FlowSimSubsystem.generated.h"
@@ -50,7 +49,7 @@ public:
 
 	// -- Shadow bake --------------------------------------------------------
 
-	/** Queue one deck shadow map for this frame. Called by each planet every
+	/** Queue one cloud shadow map for this frame. Called by each planet every
 	 *  tick; the request is consumed by the next Tick and not retained. False
 	 *  when it is unusable and dropped.
 	 *
@@ -59,14 +58,8 @@ public:
 	 *  write before the read. It holds no state across frames, has no substeps,
 	 *  and runs whether or not the sim is running.
 	 *
-	 *  ONE MAP PER PLANET, NOT PER VIEW: the map reaches the march as a material
-	 *  parameter, which has no view dimension, so a second viewport shares the
-	 *  first's camera-derived layer fades. */
-	bool RequestShadowBake(const FGasGiantShadowParams& InParams);
-
-	/** The terrestrial field's bake. A SEPARATE QUEUE, not an overload sharing
-	 *  one: the two params structs are separate types bound to separate shaders,
-	 *  and they diverge as the fields do. */
+	 *  ONE MAP PER PLANET, NOT PER VIEW: it is baked once a frame, so a second
+	 *  viewport shares the first's camera-derived layer fades. */
 	bool RequestShadowBake(const FTerrestrialShadowParams& InParams);
 
 	// -- Control ------------------------------------------------------------
@@ -170,9 +163,7 @@ private:
 	/** This frame's bakes, one per planet. Cleared on consumption rather than keyed
 	 *  by requester: each request names its own destination, so there is nothing to
 	 *  match up and nothing to leave stale. */
-	TArray<FGasGiantShadowParams> ShadowRequests;
-
-	TArray<FTerrestrialShadowParams> TerrestrialShadowRequests;
+	TArray<FTerrestrialShadowParams> ShadowRequests;
 
 	/** Builds the flat render-thread snapshot at a step. Returns false if the config is unusable, having
 	 *  already logged why. */

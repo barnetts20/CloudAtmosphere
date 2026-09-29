@@ -5,13 +5,9 @@
 #include "FlowSimTypes.h"
 #include "FlowSimSettings.generated.h"
 
-/** Project Settings -> Plugins -> Flow Sim.
- *
- *  An editor entry point, so the sim runs in the viewport from the moment the
- *  project opens, with nothing authored and no PIE round trip before the debug
- *  view shows anything. UFlowSimSubsystem's StartSimulation and friends are
- *  BlueprintCallable for shipping, where each planet owns its own sim; hence
- *  the auto-start defaults: on in the editor, off in game. */
+/** Project Settings -> Plugins -> Flow Sim: starts a sim in editor worlds with
+ *  nothing authored, so the debug view runs without a PIE round trip. In game
+ *  an atmosphere actor starts its own (bStartOnBeginPlay). */
 UCLASS(config = Game, defaultconfig, meta = (DisplayName = "Flow Sim"))
 class CLOUDATMOSPHERE_API UFlowSimSettings : public UDeveloperSettings
 {
@@ -23,24 +19,18 @@ public:
 	virtual FName GetSectionName() const override { return TEXT("Flow Sim"); }
 
 	/** Config started automatically, and the one the console commands act on
-	 *  when given no argument.
-	 *
-	 *  Soft, so setting it does not drag the config and both render targets
-	 *  into memory for every cook that never touches the sim. */
+	 *  when given no argument. Soft, so cooks that never touch the sim do not
+	 *  load it and its targets. */
 	UPROPERTY(config, EditAnywhere, Category = "Flow Sim", meta = (AllowedClasses = "/Script/CloudAtmosphere.FlowSimConfig"))
 	TSoftObjectPtr<UFlowSimConfig> DefaultConfig;
 
-	/** Start automatically in editor worlds. On by default: this is the whole
-	 *  reason the setting exists. */
+	/** Start DefaultConfig automatically in editor worlds. */
 	UPROPERTY(config, EditAnywhere, Category = "Flow Sim")
 	bool bAutoStartInEditor = true;
 
-	/** Start automatically in PIE and game worlds.
-	 *
-	 *  OFF by default, deliberately. A global auto-started sim is convenient
-	 *  for bring-up and wrong for shipping, where each planet should drive its
-	 *  own. Leaving this off means the shipping path has to be written
-	 *  explicitly rather than inherited by accident from a debug setting. */
+	/** Start DefaultConfig automatically in PIE and game worlds. Off, so a
+	 *  shipping world's sim comes from its atmospheres rather than from a
+	 *  bring-up setting. */
 	UPROPERTY(config, EditAnywhere, Category = "Flow Sim")
 	bool bAutoStartInGame = false;
 };

@@ -1,17 +1,14 @@
 #pragma once
 
-// The step plan this field runs with, ahead of AtmospherePlan.ush, whose
-// default is the gas giant's (see there).
-#define ATMO_CAMERA_LATTICE 1
-
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmospherePlan.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereSetup.ush"
 #include "/Plugin/CloudAtmosphere/Private/TerrestrialDeck.ush"
 #include "/Plugin/CloudAtmosphere/Private/TerrestrialShadow.ush"
 
-// The terrestrial clouds' side of the march: what this field is, and what the
-// march is allowed to ask it.
+// The cloud field's side of the march, both models': what this field is, and
+// what the march is allowed to ask it. A terrestrial planet's is the slab, a
+// gas giant's the deep deck (TR_DEEP_DECK).
 //
 // THE MARCH KNOWS NOTHING BELOW THIS LINE. It calls the Field_ functions, the
 // FieldParams and FieldMaterialParams names, and the two texture macros; every
@@ -28,9 +25,53 @@
 // and the planet is opaque, so Field_Terminus clips on the planet and the
 // marched band ends at the lowest the base can fall rather than at an optical
 // depth. Inside the slab, coverage erodes the shape noise.
+//
+// THE DEEP DECK HAS NO SURFACE. The deck fills in below the bases and the core
+// is deck at full density, so the ray is not clipped on the planet: it
+// saturates, and Field_Terminus stops it where it provably has. The marched
+// band ends where the fill completes.
+
+/** Optical depths below the deep deck's full height at which the view ray is
+ *  clipped as opaque: past ATMO_OPAQUE_TRANSMITTANCE's 6.9, with a margin.
+ *  Erring shallow blacks out deck that should still show, at a fixed radius. */
+#ifndef TR_DEEP_OPAQUE_DEPTH
+#define TR_DEEP_OPAQUE_DEPTH 8.0f
+#endif
+
+/** The deep deck absorbs what reaches into it (1): the sky's ambient decays
+ *  below each column's base, and the shadow read saturates at
+ *  TR_DEEP_SHADOW_SATURATION. At 0, both as the slab. Under comparison. */
+#ifndef TR_DEEP_DARKNESS
+#define TR_DEEP_DARKNESS 1
+#endif
+
+/** The deep deck's air continues below the surface at the surface's density
+ *  (1), its ambient buried with the deck's; at 0 it ends at the surface.
+ *  Under comparison. */
+#ifndef TR_DEEP_AIR
+#define TR_DEEP_AIR 1
+#endif
+
+/** Optical depth at which the deep deck's shadow read stops growing, on its
+ *  most transmissive term (see ATMO_SHADOW_SATURATION): about 1e-7. The slab's 5
+ *  leaves the octaves a percent of the sun at any depth. */
+#ifndef TR_DEEP_SHADOW_SATURATION
+#define TR_DEEP_SHADOW_SATURATION 16.0f
+#endif
+
+/** The diffuse light's decay per optical depth of deck above it is
+ *  sqrt(3 (1 - albedo)(1 - g)). This is g, the effective anisotropy; the
+ *  absorption is floored so a white deck still darkens. */
+#ifndef TR_DEEP_DIFFUSE_G
+#define TR_DEEP_DIFFUSE_G 0.5f
+#endif
+
+#ifndef TR_DEEP_MIN_ABSORPTION
+#define TR_DEEP_MIN_ABSORPTION 0.01f
+#endif
 
 /** Claims the march's one model slot. A second field defines this too, so
- *  whichever header the material included is the one that answers. */
+ *  whichever header the pass included is the one that answers. */
 #define ATMO_FIELD_INCLUDED 1
 
 /** The concrete types the march refers to by these names: the field's shape and
@@ -57,14 +98,10 @@
 	Texture3D DetailVolume, \
 	SamplerState DetailSampler, \
 	Texture3D StructureVolume, \
-	SamplerState StructureSampler, \
-	Texture2D BlueNoise
+	SamplerState StructureSampler
 
 #define FIELD_TEXTURE_ARGS \
-	FlowField, FlowSampler, DetailVolume, DetailSampler, StructureVolume, StructureSampler, BlueNoise
-
-/** The march's per-pixel draws come from the BlueNoise texture. */
-#define FIELD_STEP_JITTER(Svxy, Index) Atmo_TextureJitter(BlueNoise, Svxy, Index)
+	FlowField, FlowSampler, DetailVolume, DetailSampler, StructureVolume, StructureSampler
 
 /** The clouds' material and how they are lit. Two sets, blended by the
  *  column's material coordinate: fair-weather cloud at 0 and storm cloud at 1,
@@ -145,7 +182,14 @@ float3 TR_TypeTint(float Type, TRScatterParams S)
  *  the ray never reached the slab is not cloud either. */
 bool Field_SegmentIsCloud(float3 Origin, float3 Dir, float4 Segment, PlanetParams Planet)
 {
+#if TR_DEEP_DECK
+	// Under the band the deep deck is full and still owes extinction.
+    const float3 Mid = Origin + Dir * ((Segment.x + Segment.y) * 0.5f);
+
+    return Segment.w > 0.5f || length(Mid - Planet.planetPos) < Planet.cloudInnerRadius;
+#else
     return Segment.w > 0.5f;
+#endif
 }
 
 /** The plan as the shells leave it: this field places no segment by itself.
@@ -217,7 +261,7 @@ TRScatterParams TR_BuildScatter(
     return S;
 }
 
-/** TR_BuildScatter from the material's pins, which carry exactly these names. */
+/** TR_BuildScatter from the pass's uniforms, which carry exactly these names. */
 #define TR_BUILD_SCATTER() TR_BuildScatter( \
 	CloudScatter, CloudExtinction, StormScatter, StormExtinction, \
 	ForwardG, BackwardG, ForwardWeight, \
@@ -287,9 +331,16 @@ CompositeParams TR_BuildAtmo(
 	// HELD AT THE SURFACE, since a base pushed below ground is cloud the planet
 	// has already cut off and a shell inside the planet plans segments the
 	// terminus then discards.
+#if TR_DEEP_DECK
+	// The deep deck's band ends where every column is full: below it nothing
+	// varies, and coarse steps saturate. Held off the centre, which the band may
+	// reach on a deep fill.
+    const float CloudInner = max(F.PlanetRadius + F.Thickness * TR_DeckFull(F), 0.1f * F.PlanetRadius);
+#else
     const float CloudInner = max(
 		F.PlanetRadius + F.Thickness * TR_BaseMin(F),
 		F.PlanetRadius);
+#endif
 
 	// Grey: the material's tint and amount are applied per sample from
 	// TRScatterParams, on the view ray and at the light ray's receiver.
@@ -319,10 +370,10 @@ CompositeParams TR_BuildAtmo(
     return Params;
 }
 
-/** TR_BuildAtmo from the material's pins, which carry exactly these names. The
+/** TR_BuildAtmo from the pass's uniforms, which carry exactly these names. The
  *  per-pixel terms, and the field, arrive as arguments. PlanetOffset is the
- *  PlanetCenter double vector parameter less the Camera Position node,
- *  subtracted in the graph, where both are double. */
+ *  planet's centre less the view's camera, formed in double before it is
+ *  bound. */
 #define TR_BUILD_ATMO(SvPosition, RayDir, SceneRayDistance, F) TR_BuildAtmo( \
 	SvPosition, RayDir, PlanetOffset, SceneRayDistance, \
 	LightDirection, LightColor, \
@@ -352,7 +403,14 @@ CompositeParams TR_BuildAtmo(
  *  THE SPHERE, NOT THE DEPTH BUFFER, is what makes this a bound: terrain occupies
  *  only the pixels it is drawn into, and the ray needs stopping at the horizon
  *  whether or not anything was rasterised there. Scene depth still wins where it
- *  is nearer, which is what keeps cloud out of geometry standing above ground. */
+ *  is nearer, which is what keeps cloud out of geometry standing above ground.
+ *
+ *  THE DEEP DECK STOPS WHERE IT IS PROVABLY OPAQUE: TR_DEEP_OPAQUE_DEPTH optical
+ *  depths below the height where every column is full. A RADIUS, NOT A STEP:
+ *  one long step through saturated deck spawns a single light read at its
+ *  midpoint, fully shadowed, so the in-scattering of the first optical depths
+ *  vanishes at a fixed radius -- a ring. Every ray reaching the radius is
+ *  already opaque, so the segment structure changing there cannot show. */
 void Field_Terminus(
 	float3 Origin,
 	float3 Dir,
@@ -365,18 +423,36 @@ void Field_Terminus(
     OutMaxDist = Atmo.mainRayParams.sceneDepth;
     OutOpaque = false;
 
-    const float2 PlanetHit = Atmo_RaySphere(
-		Origin, Dir, Atmo.planetParams.planetPos, F.PlanetRadius);
+#if TR_DEEP_DECK
+	// Counted down from where the deck is full, against the least extinction
+	// either material has, in atmosphere thicknesses.
+    const float3 Low = min(S.CloudExtinction.rgb * S.CloudExtinction.a,
+		S.StormExtinction.rgb * S.StormExtinction.a);
 
-    if (PlanetHit.x > 0.0f && PlanetHit.x < OutMaxDist)
+    const float BetaMin = Atmo.cloudParams.cloudScatBeta.x * min(Low.x, min(Low.y, Low.z)) * F.Thickness;
+
+    const float Radius = F.PlanetRadius
+		+ F.Thickness * (TR_DeckFull(F) - TR_DEEP_OPAQUE_DEPTH / max(BetaMin, 1e-6f));
+
+    if (Radius <= 0.0f)
     {
-        OutMaxDist = PlanetHit.x;
+        return;
+    }
+#else
+    const float Radius = F.PlanetRadius;
+#endif
+
+    const float2 Hit = Atmo_RaySphere(Origin, Dir, Atmo.planetParams.planetPos, Radius);
+
+    if (Hit.x > 0.0f && Hit.x < OutMaxDist)
+    {
+        OutMaxDist = Hit.x;
         OutOpaque = true;
     }
 }
 
 /** Density and material at a planet-local point, as (density, material,
- *  pressure, top); see TR_Density. StepHalfHeight is the sample's own
+ *  pressure or buried depth, top); see TR_Density. StepHalfHeight is the sample's own
  *  half-extent along the radius, which the field integrates its height profile
  *  across.
  *
@@ -406,6 +482,64 @@ float3 Field_Extinction(float Material, FieldMaterialParams S)
     return TR_TypeExtinction(Material, S);
 }
 
+/** Share of the sky's ambient light that reaches a sample, per channel: 1
+ *  outside cloud, where Sample is zero.
+ *
+ *  THE DEEP DECK BURIES IT. Diffuse light decays through thick scattering
+ *  cloud as exp(-sqrt(3 (1 - albedo)(1 - g)) tau), tau the deck above the
+ *  sample (TR_DeepBuried); the channels the material absorbs most go dark
+ *  first. The air's ambient takes the same share. The cloud above the base
+ *  lets it all through, as the slab does. */
+float3 Field_AmbientShare(float4 Sample, float3 Albedo, CompositeParams Atmo, FieldParams F,
+	FieldMaterialParams S)
+{
+#if TR_DEEP_DECK && TR_DEEP_DARKNESS
+    const float3 Tau = Atmo.cloudParams.cloudScatBeta * Field_Extinction(Sample.y, S)
+		* (F.Thickness * Sample.z);
+
+    const float3 Decay = sqrt(3.0f * max(1.0f - Albedo, TR_DEEP_MIN_ABSORPTION)
+		* (1.0f - TR_DEEP_DIFFUSE_G));
+
+    return exp(-Decay * Tau);
+#else
+    return float3(1.0f, 1.0f, 1.0f);
+#endif
+}
+
+/** Air densities at Height above the surface, as (rayleigh, mie, absorber).
+ *
+ *  THE SLAB'S AIR ENDS AT THE SURFACE; the deep deck's goes on below it, held
+ *  at the surface's density, since the surface there is only the coordinate
+ *  origin. PITFALL: cut off at the surface under the deep deck, the air's
+ *  in-scatter and extinction step from their maximum to zero across a sphere,
+ *  which a camera near it sees as a hard line. Not extrapolated: the profile
+ *  grows without bound below zero. */
+float3 Field_AirDensity(float Height, CompositeParams Atmo)
+{
+#if TR_DEEP_DECK && TR_DEEP_AIR
+    return Atmo_Density(max(Height, 0.0f),
+		Atmo.scatteringParams.rayScaleH, Atmo.scatteringParams.mieScaleH,
+		Atmo.scatteringParams.absHeight, Atmo.scatteringParams.absFalloff);
+#else
+    return (Height > 0.0f)
+		? Atmo_Density(Height,
+			Atmo.scatteringParams.rayScaleH, Atmo.scatteringParams.mieScaleH,
+			Atmo.scatteringParams.absHeight, Atmo.scatteringParams.absFalloff)
+		: float3(0.0f, 0.0f, 0.0f);
+#endif
+}
+
+/** Optical depth at which the shadow read stops growing, on its most
+ *  transmissive term. */
+float Field_ShadowSaturation()
+{
+#if TR_DEEP_DECK && TR_DEEP_DARKNESS
+    return TR_DEEP_SHADOW_SATURATION;
+#else
+    return ATMO_SHADOW_SATURATION;
+#endif
+}
+
 /** Extinction TINT at a receiver, the light ray's amounts already being in the
  *  shadow map. One coarse column read, paid only where the map shadows at all.
  *
@@ -425,8 +559,6 @@ float3 Field_LightTint(
 
 /** Field_LightTint from a sample already taken at the receiver: its second
  *  channel is the material TR_TypeCoarse would read, so no second column. */
-#define FIELD_SAMPLE_TINT 1
-
 float3 Field_SampleLightTint(float4 Sample, FieldMaterialParams S)
 {
     return TR_TypeTint(Sample.y, S);

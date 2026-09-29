@@ -27,9 +27,9 @@ namespace AtmoShadowBake
 	 *  count, one slice per cascade. The shader decides what each level covers.
 	 *
 	 *  PITFALL: MUST MATCH ATMO_SHADOW_CASCADES in AtmosphereShadowMap.ush, and is NOT
-	 *  pushed as a define. The material reads that header too and never passes
-	 *  through ModifyCompilationEnvironment, so a define set here would move the
-	 *  bake without moving the march that reads it. Edit the pair together. */
+	 *  pushed as a define. The march reads that header too, through its own
+	 *  shader class, so a define pushed by the bake alone would move the bake
+	 *  without moving the march that reads it. Edit the pair together. */
 	static constexpr int32 CascadeCount = 3;
 
 	/** Ceiling on the share of a level's previous bake a rebake keeps. At 1 the

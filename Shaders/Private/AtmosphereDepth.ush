@@ -1,18 +1,13 @@
 #pragma once
 
-// Scene depth for the atmosphere passes, read from the depth buffer directly.
+// Scene depth for the atmosphere passes, read from the view's depth buffer.
 //
-// NOT THE SceneDepth NODE, AND NOT CalcSceneDepth. The engine's device-Z to
-// depth conversion carries an epsilon that keeps a cleared sky from dividing by
-// zero, and that epsilon is a saturation term: it returns z / (1 + 1e-8 z), so
-// depth reads 1% short at 10 km, 50% short at 1,000 km, and never exceeds
-// 1,000 km however far the geometry is. Reconstructing from the raw device Z
-// and the projection has no such term and is exact to float32.
-//
-// NOT A HALF-FLOAT ROUND TRIP EITHER. A depth written to a user scene texture
-// survives with eleven mantissa bits, an absolute error of a quarter of a
-// percent of the distance, which at planetary range is kilometres -- enough to
-// bury a mesh's exposed top under the deck by moving its terminus below it.
+// PITFALL: NOT CalcSceneDepth. The engine's device-Z to depth conversion
+// carries an epsilon that keeps a cleared sky from dividing by zero, and that
+// epsilon is a saturation term: it returns z / (1 + 1e-8 z), so depth reads 1%
+// short at 10 km, 50% short at 1,000 km, and never exceeds 1,000 km however far
+// the geometry is. Reconstructing from the raw device Z and the projection has
+// no such term and is exact to float32.
 
 /** Ray distance returned where the depth buffer holds no geometry. Finite so it
  *  survives the segment math, which only takes minima against it. */
@@ -20,11 +15,21 @@
 #define ATMO_NO_OCCLUDER_DISTANCE 1e30f
 #endif
 
-/** Raw device Z at a depth buffer UV. A material reads the engine's scene
- *  textures; a global shader defines this over the depth texture it binds. */
-#ifndef ATMO_LOOKUP_DEVICE_Z
-#define ATMO_LOOKUP_DEVICE_Z(BufferUV) LookupDeviceZ(BufferUV)
-#endif
+/** The view's scene depth, bound by each pass that reads it. */
+Texture2D<float> AtmoSceneDepth;
+
+/** Raw device Z at a depth buffer UV, at the texel a point sample would read,
+ *  clamped to the view rect: the buffer is larger than the view under a screen
+ *  percentage, texels outside it hold stale depth, and the last march cells
+ *  can fall past its edge. */
+float Atmo_LoadDeviceZ(float2 BufferUV)
+{
+    const float2 RectMin = View.ViewRectMin.xy;
+    const float2 RectMax = RectMin + View.ViewSizeAndInvSize.xy - 1.0f;
+    const int2 Texel = int2(clamp(BufferUV * View.BufferSizeAndInvSize.xy, RectMin, RectMax));
+
+    return AtmoSceneDepth.Load(int3(Texel, 0));
+}
 
 /** View-axis depth from a raw device Z, inverting the projection in place.
  *  Perspective is deviceZ = A + B / z; orthographic is deviceZ = z * A + B.
@@ -45,25 +50,17 @@ float Atmo_DeviceZToDepth(float deviceZ)
     return denom > 0.0f ? B / denom : ATMO_NO_OCCLUDER_DISTANCE;
 }
 
-/** Exact view-axis scene depth at a buffer UV.
- *
- *  PITFALL: LookupDeviceZ returns 0 when the material has not bound the scene
- *  textures, which reads here as no occluder everywhere -- a plausible image
- *  with no occlusion in it. A material that only reads user scene textures may
- *  not bind them; a SceneTexture:SceneDepth node wired into the custom node,
- *  even unused, does. */
+/** Exact view-axis scene depth at a buffer UV. */
 float Atmo_SceneDepthAt(float2 bufferUV)
 {
-    return Atmo_DeviceZToDepth(ATMO_LOOKUP_DEVICE_Z(bufferUV));
+    return Atmo_DeviceZToDepth(Atmo_LoadDeviceZ(bufferUV));
 }
 
-/** Scene depth as a TRUE RAY DISTANCE through a viewport UV, the form the march
- *  spends as a bound on its ray parameter. View-axis depth divided by the ray's
- *  cosine to the view axis; rayDir is the world direction through the same UV,
+/** A view-axis scene depth as a TRUE RAY DISTANCE, the form the march spends
+ *  as a bound on its ray parameter: the depth over the ray's cosine to the view
+ *  axis. rayDir is the world direction through the pixel the depth was read at,
  *  so the depth and the ray it bounds come from one pixel by construction. */
-float Atmo_SceneRayDistance(float2 viewportUV, float3 rayDir)
+float Atmo_SceneRayDistance(float depth, float3 rayDir)
 {
-    const float depth = Atmo_SceneDepthAt(ViewportUVToBufferUV(viewportUV));
-
     return depth / max(dot(rayDir, View.ViewForward), 1e-3f);
 }

@@ -3,8 +3,8 @@
 #include "/Plugin/CloudAtmosphere/Private/TerrestrialDeck.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereShadowMap.ush"
 
-// The terrestrial band's side of the shadow map: what the field contributes to a
-// frame, and nothing else.
+// The cloud field's side of the shadow map, both models': what the field
+// contributes to a frame, and nothing else.
 //
 // THE FORMAT IS NOT HERE. Encoding, reconstruction and the cascade walk live
 // in AtmosphereShadowMap.ush and know nothing about this model. What remains

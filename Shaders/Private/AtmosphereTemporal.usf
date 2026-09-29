@@ -40,27 +40,9 @@
 #define ATMO_GUIDE_SHARPNESS 100.0f
 
 // -- Shared -------------------------------------------------------------------
-
-Texture2D<float> AtmoSceneDepth;
-
-/** Clamped to the view rect: the depth buffer is larger than the view under a
- *  screen percentage, and texels outside it hold stale depth. */
-float Atmo_LoadDeviceZ(float2 BufferUV)
-{
-    const float2 RectMin = View.ViewRectMin.xy;
-    const float2 RectMax = RectMin + View.ViewSizeAndInvSize.xy - 1.0f;
-    const int2 Texel = int2(clamp(BufferUV * View.BufferSizeAndInvSize.xy, RectMin, RectMax));
-
-    return AtmoSceneDepth.Load(int3(Texel, 0));
-}
-
-#define ATMO_LOOKUP_DEVICE_Z(BufferUV) Atmo_LoadDeviceZ(BufferUV)
-
-/** The unjittered projection: the history holds each pixel centre's ray, and
- *  the resolve's rays and its reprojection must share it. */
-float4x4 RayViewToClip;
-
-#define ATMO_RAY_VIEW_TO_CLIP RayViewToClip
+//
+// RayViewToClip is the unjittered projection here: the history holds each pixel
+// centre's ray, and the resolve's rays and its reprojection must share it.
 
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereSetup.ush"
 

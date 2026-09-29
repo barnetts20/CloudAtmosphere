@@ -7,16 +7,11 @@
 // When owned by APlanetActor the scale is set externally to
 // max(OceanRadius, PlanetRadius), the visible surface floor.
 //
-// TWO CLOUD MODELS SHARE ONE MARCH. A terrestrial cloud band runs it as compute
-// passes with a temporal resolve (FAtmosphereViewExtension); a gas giant deck
-// driven by the flow sim runs it as the march and composite materials. Each
-// model owns its own parameter groups, with only the composite and the sim
-// shared between them; see AtmosphereParams.h.
-//
-// PITFALL: THE MARCH READS SCENE DEPTH ITSELF, with no pass ahead of it. A
-// depth routed through a user scene texture is quantised by distance, and a
-// target size taken from a pass reports the internal resolution rather than
-// the pixel's viewport fraction.
+// TWO CLOUD MODELS SHARE ONE FIELD AND ONE MARCH, run as compute passes with a
+// temporal resolve (FAtmosphereViewExtension), the sim as their weather map: a
+// terrestrial slab over a surface, or a gas giant's deep deck over a saturated
+// core. Each model has its own instance of every parameter group, with only the
+// pipeline and the sim shared between them; see AtmosphereParams.h.
 
 #pragma once
 
@@ -25,9 +20,7 @@
 #include "Engine/PostProcessVolume.h"
 #include "Engine/DirectionalLight.h"
 #include "Components/DirectionalLightComponent.h"
-#include "Components/PostProcessComponent.h"
 #include "Engine/VolumeTexture.h"
-#include "Materials/MaterialInstanceDynamic.h"
 #include "AtmosphereParams.h"
 #include "AtmosphereTransmittance.h"
 #include "AtmosphereShadowBake.h"
@@ -37,25 +30,15 @@ class UTexture2D;
 class UTextureRenderTarget2D;
 class UTextureRenderTarget2DArray;
 class FAtmosphereViewExtension;
-struct FTerrestrialMarchParams;
+struct FAtmosphereMarchParams;
+struct FTerrestrialShadowParams;
 
-/** Renders a volumetric atmosphere and cloud layer. Owns a directional light
- *  component and an unbound post-process component. Every parameter is pushed
- *  each tick by UpdateMaterialParameters, and the light's rotation and colour
- *  are synced from the actor's rotation and LightColor. When planet-owned,
- *  location and scale are locked and rotation stays editable.
- *
- *  TERRESTRIAL: a scene view extension runs the march, its temporal resolve and
- *  the composite as compute passes, fed a params snapshot every tick. GAS GIANT:
- *  two transient dynamic material instances, the march and the composite, are
- *  the post-process component's blendables.
- *
- *  ONE FUNCTION PICKS THE MATERIAL AND ONE PICKS THE PARAMETERS, BOTH FROM
- *  PlanetType. PITFALL: setting a parameter a material does not declare does
- *  nothing and logs nothing, so a march material and a parameter sweep that
- *  disagree render something plausible with none of the model-specific inputs
- *  bound -- which reads as a simulation or texture bug rather than a wiring one.
- */
+/** Renders a volumetric atmosphere and cloud layer. A scene view extension runs
+ *  the march, its temporal resolve and the composite as compute passes, fed a
+ *  params snapshot of the active model's groups every tick by UpdateAtmosphere,
+ *  with the shadow bake and the transmittance table. Owns a directional light
+ *  component, synced from the actor's rotation and LightColor. When
+ *  planet-owned, location and scale are locked and rotation stays editable. */
 UCLASS()
 class CLOUDATMOSPHERE_API APlanetAtmosphereActor : public AActor
 {
@@ -69,42 +52,13 @@ public:
     // The assets and passes the actor drives, rather than anything the march
     // reads. First in the panel because none of the parameters below mean
     // anything until these are right.
-    //
-    // Soft material references rather than hardcoded paths: a stale path logs a
-    // warning and otherwise just looks like a broken material.
 
-    /** Slot 0 for PlanetType::GasGiant. */
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Materials")
-    TSoftObjectPtr<UMaterialInterface> GasGiantMarchMaterial;
-
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Materials")
-    TSoftObjectPtr<UMaterialInterface> PostprocessMaterial;
-
-    /** Tiling single-channel blue noise for the terrestrial march's per-pixel
-     *  draws: sRGB off, uncompressed grayscale, no mips, nearest filtering.
-     *  Defaults to the engine's. Cleared, the terrestrial atmosphere does not
-     *  draw, and says so once in the log. */
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Materials")
+    /** Tiling single-channel blue noise for the march's per-pixel draws: sRGB
+     *  off, uncompressed grayscale, no mips, nearest filtering. Defaults to the
+     *  engine's. Cleared, the atmosphere does not draw, and says so once in the
+     *  log. */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
     TObjectPtr<UTexture2D> BlueNoise;
-
-    /** Recreates the gas giant's material instances, or drops them for the
-     *  terrestrial compute path, against the current PlanetType, and pushes every
-     *  parameter. Call after changing PlanetType or a material.
-     *
-     *  ALSO THE PARAMETER-CHECK RETRIGGER: every push is verified against the
-     *  material and warns once per name, and this clears that filter. Only the
-     *  ACTIVE model is pushed, so covering both means pressing it, flipping
-     *  PlanetType, and pressing it again.
-     *
-     *  PITFALL: a CallInEditor function's category must be top-level. The
-     *  details panel does not nest it -- a path with '|' becomes one flat
-     *  category of that literal name, and every property sharing the exact path
-     *  is pulled out of its nested group into it. */
-    UFUNCTION(BlueprintCallable, CallInEditor, Category = "CloudAtmosphere")
-    void RebuildMaterialInstances();
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline")
-    FAtmosphereCompositeParams Composite;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline")
     FAtmosphereSimulationParams Simulation;
@@ -121,7 +75,8 @@ public:
      *  CREATED, matching FlowTarget, so an asset can be opened beside the planet
      *  and watched while the light moves. ONE PER ATMOSPHERE: a target another
      *  atmosphere already bakes into is refused with a warning. Size, format,
-     *  clear colour and UAV support are forced on assignment. */
+     *  clear colour and UAV support are forced on assignment. Unset, the
+     *  atmosphere does not draw. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
     TObjectPtr<UTextureRenderTarget2DArray> ShadowTarget;
 
@@ -161,12 +116,13 @@ public:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Atmosphere")
     bool bIsPlanetOwned = false;
 
-    /** Which cloud model renders. Changing this at runtime requires
-     *  RebuildMaterialInstances -- the path is chosen once, at creation.
+    /** Which cloud model renders. A change takes effect on the next tick, and
+     *  rebakes the shadow map and restarts the view histories.
      *
-     *  BOTH CASES ARE LIVE, through separate shaders, bakes, materials and
-     *  parameter groups. Everything a model's look depends on is twinned, so a
-     *  type change swaps the whole authored set rather than reinterpreting one. */
+     *  BOTH CASES ARE LIVE: one cloud field, the gas giant's a deep deck with no
+     *  base (a shader permutation), each with its own parameter groups.
+     *  Everything a model's look depends on is twinned, so a type change swaps
+     *  the whole authored set rather than reinterpreting one. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Atmosphere")
     EPlanetAtmosphereType PlanetType = EPlanetAtmosphereType::GasGiant;
 
@@ -195,12 +151,13 @@ public:
         return FLinearColor(LightColor.R * Scale, LightColor.G * Scale, LightColor.B * Scale, 1.0f);
     }
 
-    /** Parks or wakes the atmosphere: both passes, the light and the per-tick
+    /** Parks or wakes the atmosphere: its passes, the light and the per-tick
      *  push, bake and transmittance update. THE ONLY RELIABLE OFF-SWITCH for the
-     *  march: an unbound post-process component is not a primitive, so hiding
-     *  the actor or stopping its tick does not stop it. Parked planets must call
-     *  this with false, or every pooled atmosphere keeps tinting the screen and
-     *  lighting the scene. Waking rebakes every shadow level. */
+     *  march: a view extension is not a primitive, so hiding the actor does not
+     *  stop it, and a stopped tick leaves it drawing its last frame. Parked
+     *  planets must call this with false, or every pooled atmosphere keeps
+     *  tinting the screen and lighting the scene. Waking rebakes every shadow
+     *  level. */
     void SetAtmosphereActive(bool bActive);
 
     /** Aim the light and the march at the star: sets the actor's relative
@@ -220,14 +177,12 @@ public:
     // lives on the property row and there is no row left, so both models' groups
     // are visible at once, distinguished only by their parent category.
 
-    // Terrestrial. The air, ambient and cloud lighting groups are twinned with
-    // the gas giant's -- shared STRUCTS, separate INSTANCES, since the terrestrial shell is a fifth
-    // the gas giant's and every scale authored against it means something else.
-    // The cloud groups are the terrestrial field's own: it reads the sim as a
-    // weather map rather than as bands.
-    //
-    // A group's default lives with its struct when the struct is one model's
-    // own, and on the CDO in the constructor when the struct is shared.
+    // ONE INSTANCE OF EVERY GROUP PER MODEL: shared STRUCTS, separate INSTANCES,
+    // so a type change swaps the whole authored set. Both models run the one
+    // cloud field; the gas giant adds its deep deck. A group's default lives
+    // with its struct, and the constructor sets the terrestrial air, ambient,
+    // multiple scattering and surface shadows on the CDO, which the gas giant
+    // copies.
 
     // THE MASTER SCALE, first under Terrestrial: every cloud height is a
     // fraction of the shell it sets.
@@ -274,45 +229,20 @@ public:
     FAtmosphereSurfaceShadowParams TerrestrialSurfaceShadow;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Sampling", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialSamplingParams TerrestrialSampling;
+    FAtmosphereSamplingParams TerrestrialSampling;
 
     /** Bound on either cloud surface's slope, in cloud depths per radian: the
-     *  cone angle for the entry search. Under-declaring it is the one way that
-     *  search steps over cloud, and the symptom is cloud missing on grazing
-     *  rays. Raise it first. */
+     *  cone angle for the shadow bake's entry search. Under-declaring it is the
+     *  one way that search steps over cloud, and the symptom is shadow missing
+     *  under steep cloud walls, such as a small storm's eyewall. Raise it
+     *  first. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Advanced", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ClampMin = "0.1"))
     float TerrestrialCloudSlope = 60.0f;
 
-    // Gas giant: its own deck groups, with its own instances of the shared air,
-    // ambient and cloud lighting groups. ApplyMarchParams pushes them under
-    // their members' own names.
+    // Gas giant: the terrestrial groups' twins, and the deep deck.
 
-    // THE MASTER SCALE, first under Gas Giant: every deck height is a fraction
-    // of the shell it sets. The geometry struct, whose one member is the height
-    // scale, inlined so the member sits directly under the category.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereGeometryParams Geometry;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Deck|Profile", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FGasGiantProfileParams GasGiantProfile;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Deck|Flow", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereFlowParams Flow;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Deck|Bands", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FGasGiantBandShapeParams GasGiantBandShape;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Deck|Motion", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereMotionParams Motion;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Deck|Surface", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereCarveParams Carve;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Deck|Structure Layer", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereNoiseLayerParams StructureLayer;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Deck|Detail Layer", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereNoiseLayerParams DetailLayer;
+    FTerrestrialPlanetParams GasGiantPlanet;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Air", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
     FAtmosphereAirParams Air;
@@ -320,8 +250,32 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Ambient", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
     FAtmosphereAmbientParams Ambient;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Cloud Lighting|Bands", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FGasGiantBandParams GasGiantBands;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Shape", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
+    FTerrestrialShapeParams GasGiantShape;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Deep Deck", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
+    FGasGiantDeepParams GasGiantDeep;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Coverage", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
+    FTerrestrialCoverageParams GasGiantCoverage;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Type", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
+    FTerrestrialTypeParams GasGiantType;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Lift", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
+    FTerrestrialLiftParams GasGiantLift;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Warp", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
+    FTerrestrialWarpParams GasGiantWarp;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Structure Layer", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
+    FTerrestrialStructureLayerParams GasGiantStructureLayer;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Detail Layer", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
+    FTerrestrialDetailLayerParams GasGiantDetailLayer;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Cloud Lighting|Material", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
+    FTerrestrialCloudMaterialParams GasGiantCloudMaterial;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Cloud Lighting|Phase", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
     FAtmospherePhaseParams Phase;
@@ -329,37 +283,82 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Cloud Lighting|Multiple Scattering", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
     FAtmosphereMultipleScatteringParams MultipleScattering;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Cloud Lighting|Terminator", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereTerminatorParams Terminator;
-
-    /** WHERE THE MAP LANDS, not what it costs. The target and its resolution are
-     *  one planet's pipeline and a type change reuses them; how hard a cloud
-     *  shadow reads on the ground is look, and a band over terrain wants a
-     *  different answer from a deck with nothing under it. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Cloud Lighting|Surface Shadows", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
     FAtmosphereSurfaceShadowParams GasGiantSurfaceShadow;
 
-    // --- The built model's groups ---
-    //
-    // ON BuiltType, NOT PlanetType: the material is chosen once and the sweep has
-    // to feed the one that exists. A type change needs RebuildMaterialInstances
-    // either way, and reading the panel's value here would push a terrestrial
-    // shell into a gas giant march for one frame.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Sampling", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
+    FAtmosphereSamplingParams GasGiantSampling;
+
+    /** TerrestrialCloudSlope's twin. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Advanced", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ClampMin = "0.1"))
+    float GasGiantCloudSlope = 60.0f;
+
+    // --- The active model's groups ---
+
+    const FTerrestrialPlanetParams& ActivePlanet() const
+    {
+        return bTerrestrial() ? TerrestrialPlanet : GasGiantPlanet;
+    }
 
     float ActiveHeightScale() const
     {
-        return bTerrestrial() ? TerrestrialPlanet.HeightScale : Geometry.HeightScale;
+        return ActivePlanet().HeightScale;
+    }
+
+    const FTerrestrialStructureLayerParams& ActiveStructureLayer() const
+    {
+        return bTerrestrial() ? TerrestrialStructureLayer : GasGiantStructureLayer;
+    }
+
+    const FTerrestrialDetailLayerParams& ActiveDetailLayer() const
+    {
+        return bTerrestrial() ? TerrestrialDetailLayer : GasGiantDetailLayer;
     }
 
     /** The noise volumes, which both models bind under the same names. */
     UVolumeTexture* ActiveStructureVolume() const
     {
-        return bTerrestrial() ? TerrestrialStructureLayer.Volume.Get() : StructureLayer.Volume.Get();
+        return ActiveStructureLayer().Volume.Get();
     }
 
     UVolumeTexture* ActiveDetailVolume() const
     {
-        return bTerrestrial() ? TerrestrialDetailLayer.Volume.Get() : DetailLayer.Volume.Get();
+        return ActiveDetailLayer().Volume.Get();
+    }
+
+    const FTerrestrialShapeParams& ActiveShape() const
+    {
+        return bTerrestrial() ? TerrestrialShape : GasGiantShape;
+    }
+
+    const FTerrestrialCoverageParams& ActiveCoverage() const
+    {
+        return bTerrestrial() ? TerrestrialCoverage : GasGiantCoverage;
+    }
+
+    const FTerrestrialTypeParams& ActiveType() const
+    {
+        return bTerrestrial() ? TerrestrialType : GasGiantType;
+    }
+
+    const FTerrestrialLiftParams& ActiveLift() const
+    {
+        return bTerrestrial() ? TerrestrialLift : GasGiantLift;
+    }
+
+    const FTerrestrialWarpParams& ActiveWarp() const
+    {
+        return bTerrestrial() ? TerrestrialWarp : GasGiantWarp;
+    }
+
+    const FTerrestrialCloudMaterialParams& ActiveCloudMaterial() const
+    {
+        return bTerrestrial() ? TerrestrialCloudMaterial : GasGiantCloudMaterial;
+    }
+
+    float ActiveCloudSlope() const
+    {
+        return bTerrestrial() ? TerrestrialCloudSlope : GasGiantCloudSlope;
     }
 
     const FAtmosphereAirParams& ActiveAir() const
@@ -387,6 +386,11 @@ public:
         return bTerrestrial() ? TerrestrialSurfaceShadow : GasGiantSurfaceShadow;
     }
 
+    const FAtmosphereSamplingParams& ActiveSampling() const
+    {
+        return bTerrestrial() ? TerrestrialSampling : GasGiantSampling;
+    }
+
     // --- Lifecycle ---
 
     virtual void OnConstruction(const FTransform& Transform) override;
@@ -401,7 +405,6 @@ public:
 
 #if WITH_EDITOR
     virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
-    virtual void PostEditUndo() override;
     virtual void PostEditMove(bool bFinished) override;
     virtual void EditorApplyTranslation(const FVector& DeltaTranslation, bool bAltDown, bool bShiftDown, bool bCtrlDown) override;
     virtual void EditorApplyScale(const FVector& DeltaScale, const FVector* PivotLocation, bool bAltDown, bool bShiftDown, bool bCtrlDown) override;
@@ -418,13 +421,10 @@ private:
     UPROPERTY()
     TObjectPtr<USceneComponent> AtmosphereRoot;
 
-    /** Unbound, carrying the gas giant's two blendables. COMPONENTS, NOT CHILD
-     *  ACTORS: a duplicate or a deletion takes its own and never another's. */
-    UPROPERTY(VisibleAnywhere, Category = "CloudAtmosphere|Pipeline")
-    TObjectPtr<UPostProcessComponent> PostProcessComponent;
-
     /** Synced from the actor's rotation and LightColor; absolute rotation and
-     *  scale, so the planet's frame and the root's radius never reach it. */
+     *  scale, so the planet's frame and the root's radius never reach it. A
+     *  COMPONENT, NOT A CHILD ACTOR: a duplicate or a deletion takes its own and
+     *  never another's. */
     UPROPERTY(VisibleAnywhere, Category = "CloudAtmosphere|Pipeline")
     TObjectPtr<UDirectionalLightComponent> SunLightComponent;
 
@@ -436,20 +436,6 @@ private:
     UPROPERTY()
     TObjectPtr<ADirectionalLight> SunLight_DEPRECATED = nullptr;
 
-    // --- Dynamic Material Instances (created from plugin base materials) ---
-    //
-    // TRANSIENT, object and pointer: the post-process component's saved
-    // blendables would otherwise write them into the level.
-
-    /** Gas giant pass 0: atmosphere + cloud ray marching. Null for the
-     *  terrestrial compute path. */
-    UPROPERTY(Transient, DuplicateTransient)
-    TObjectPtr<UMaterialInstanceDynamic> MID_Atmosphere = nullptr;
-
-    /** Gas giant pass 1: distance-based blur compositing. */
-    UPROPERTY(Transient, DuplicateTransient)
-    TObjectPtr<UMaterialInstanceDynamic> MID_Postprocess = nullptr;
-
     /** Air transmittance table, created on first use. Visible for inspection,
      *  though it depends only on the radii and the air profile so there is
      *  nothing to watch it do. */
@@ -459,14 +445,12 @@ private:
     /** Inputs of the last enqueued bake; reset when the table is recreated. */
     FAtmosphereTransmittanceParams TransmittanceBaked;
 
-    /** Which model the pipeline was built for. Guards a PlanetType change
-     *  reaching the parameter sweep before the rebuild, which would push a whole
-     *  model's parameters at a path declaring none of them and silently render
-     *  the other model. */
-    EPlanetAtmosphereType BuiltType = EPlanetAtmosphereType::Terrestrial;
-
     /** What every Active* accessor asks. */
-    bool bTerrestrial() const { return BuiltType == EPlanetAtmosphereType::Terrestrial; }
+    bool bTerrestrial() const { return PlanetType == EPlanetAtmosphereType::Terrestrial; }
+
+    /** The model the shadow map was last baked for: a change rebakes every
+     *  level. */
+    EPlanetAtmosphereType ShadowType = EPlanetAtmosphereType::Terrestrial;
 
     bool bInitialized = false;
 
@@ -492,91 +476,56 @@ private:
      *  and scale back to planet-driven values, leaving rotation alone. */
     void OnTransformUpdated(USceneComponent* Component, EUpdateTransformFlags Flags, ETeleportType Teleport);
 
-    /** Destroys legacy child actors, creates the material instances, pushes
-     *  every parameter and syncs the light. */
+    /** Destroys legacy objects, pushes every parameter and syncs the light. */
     void Initialize();
 
-    /** Destroys the legacy child actors a saved level can still hold. */
+    /** Destroys the legacy child actors and components a saved level can still
+     *  hold. */
     void DestroyLegacyChildActors();
 
     /** Stops the sim if this actor started it. */
     void StopFlowSimulation();
 
-    /** Runs the terrestrial march, its temporal resolve and the composite as
-     *  compute passes for this world's views. Created on first use, released on
-     *  the render thread. */
+    /** Runs the march, its temporal resolve and the composite as compute
+     *  passes for this world's views. Created on first use, released on the
+     *  render thread. */
     TSharedPtr<FAtmosphereViewExtension, ESPMode::ThreadSafe> ViewExtension;
-
-    /** True while the view extension draws the atmosphere. */
-    bool bComputeMarch = false;
 
     /** Suppresses the per-tick repeat of the missing blue noise warning. */
     bool bWarnedBlueNoise = false;
 
-    /** Hands the view extension this frame's march while the terrestrial model
-     *  is built and its resources are set, and enables it to match. */
+    /** Hands the view extension this frame's march while its resources are
+     *  set, and enables it to match. */
     void UpdateComputeMarch(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir);
 
-    /** The terrestrial march's inputs, from the packers the shadow bake
+    /** The active model's march inputs, from the packers the shadow bake
      *  shares. False when a resource the march needs is missing. */
-    bool FillTerrestrialMarchParams(FTerrestrialMarchParams& Out, float PlanetRadius,
+    bool FillMarchParams(FAtmosphereMarchParams& Out, float PlanetRadius,
         const FVector& PlanetCenter, const FVector& LightDir);
-
-    /** The gas giant's march and composite materials as the post-process
-     *  chain; empty for the terrestrial compute path. */
-    void ApplyBlendables();
 
     /** Disables the view extension and drops it on the render thread, with its
      *  histories. */
     void ReleaseViewExtension();
 
-    /** Records PlanetType in BuiltType and, for the gas giant, creates the two
-     *  dynamic material instances and assigns them as blendables. */
-    void CreateMaterialInstances();
+    /** The shadow bake, the transmittance table and the march, for the active
+     *  model. Called every tick. */
+    void UpdateAtmosphere();
 
-    /** Pushes every parameter to the built model -- the gas giant's instances or
-     *  the terrestrial view extension -- with the shadow bake and transmittance
-     *  table both share. Called every tick and on property changes. Dispatches on
-     *  BuiltType, not PlanetType. */
-    void UpdateMaterialParameters();
-
-    /** The gas giant march material's parameters: every group under its
-     *  members' own names, plus the planet, the light, the clock and the local
-     *  frame. AUTHORED VALUES ONLY: everything derived is computed in the shader,
-     *  once, from these, and a value derived here would be a second source that
-     *  can disagree with the bake's.
-     *
-     *  Pushes the shared groups, then the deck's own. */
-    void ApplyMarchParams(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir);
-
-    /** The gas giant groups whose members are the model's own, each under its
-     *  own name. */
-    void ApplyGasGiantModelParams();
-
-    /** One gas giant noise layer's members, each under Prefix + member name. */
-    void ApplyNoiseLayer(const TCHAR* Prefix, const FAtmosphereNoiseLayerParams& Layer);
-
-    /** Queues this frame's deck shadow bake with the sim subsystem. SEPARATE FROM
-     *  ApplyMarchParams because its destination is a compute pass rather than
-     *  a MID: it sends the same authored values under the same names, and the
-     *  bake derives from them with the same shader functions, which keeps the
-     *  deck the light sees identical to the deck the eye sees. */
+    /** Queues this frame's deck shadow bake with the sim subsystem. The field
+     *  comes from the packer the march shares, and the bake derives from it with
+     *  the same shader functions, which keeps the deck the light sees identical
+     *  to the deck the eye sees. */
     void RequestShadowBake(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir);
 
-    /** Fills the half of a bake request that does not depend on which field is
-     *  baked: the map, the frame, the light, the camera and the shared groups.
-     *  Returns false when the request could not be made usable. Records
-     *  nothing; CommitShadowBake does once the subsystem takes the request.
-     *
-     *  A TEMPLATE BECAUSE THE TWO PARAMS STRUCTS ARE SEPARATE TYPES, deliberately
-     *  -- they diverge as the fields do. Both instantiations live in the one
-     *  translation unit that uses them. */
-    template<typename TShadowParams>
-    bool FillSharedShadowParams(TShadowParams& Params, float PlanetRadius,
+    /** Fills the half of a bake request that is not the field: the map, the
+     *  frame, the light, the camera, the history and the volumes. Returns false
+     *  when the request could not be made usable. Records nothing;
+     *  CommitShadowBake does once the subsystem takes the request. */
+    bool FillShadowRequest(FTerrestrialShadowParams& Params, float PlanetRadius,
         const FVector& PlanetCenter, const FVector& LightDir);
 
-    /** Records an accepted bake and pushes the cameras the march reads the
-     *  fine levels against. */
+    /** Records an accepted bake: the cameras the march reads the fine levels
+     *  against, and the light and time the next bake reprojects from. */
     void CommitShadowBake(uint32 LevelMask, const FVector3f& LightDir, const FVector3f& CameraLocal);
 
     /** Forces the assigned shadow target to RGBA16F with UAV support, cleared
@@ -593,7 +542,7 @@ private:
     bool bWarnedSharedShadowTarget = false;
 
     /** The next cascade in the bake rotation, and the camera each level was
-     *  last baked around -- what the material reads that level against. */
+     *  last baked around -- what the march reads that level against. */
     int32 ShadowLevelCursor = 0;
     FVector3f ShadowBakedCamera[AtmoShadowBake::CascadeCount];
 
@@ -604,27 +553,26 @@ private:
     double ShadowBakeTime[AtmoShadowBake::CascadeCount] = {};
 
     /** False until every level has been baked into the current target. Cleared
-     *  when the target is reinitialised or the model changes, so the first
-     *  request after either bakes all of them. */
+     *  when the target is reinitialised, the model changes or the atmosphere
+     *  wakes, so the first request after any of them bakes all of them. */
     bool bShadowPrimed = false;
 
-    /** Creates the transmittance table if needed, rebakes it when its inputs or
-     *  its resource change, and pushes it to the gas giant's march material. */
+    /** Creates the transmittance table if needed, and rebakes it when its
+     *  inputs or its resource change. */
     void UpdateTransmittanceTable(float PlanetRadius);
 
     /** Creates the table if absent and forces its fixed size, float format,
      *  clamp addressing and UAV support. */
     void PrepareTransmittanceTable();
 
-    /** Starts the sim subsystem against the deck's config. */
+    /** Starts the sim subsystem against the configured sim. */
     void StartFlowSimulation();
 
     /** Sim time of the state the field shows, or 0 when the sim is not running. NOT
      *  WORLD TIME: the field is coherent against the sim's own clock, and the two
      *  diverge the moment the sim pauses, is stepped by hand or is restored from
      *  a snapshot -- after which the warp would advect a field that has not
-     *  moved. Double; the terrestrial clocks reduce from it before narrowing,
-     *  while the gas giant's Time pin is still a raw float (GG-04). */
+     *  moved. Double; the field's clocks reduce from it before narrowing. */
     double GetFieldTime() const;
 
     /** Syncs the directional light's rotation, colour and intensity from the
@@ -635,7 +583,4 @@ private:
      *  atmosphere is attached to, or the world's when it stands alone. The
      *  actor's own rotation is the light direction and never turns the field. */
     FQuat GetFieldFrame() const;
-
-    /** Resolves a soft material reference, logging which one failed. */
-    static UMaterialInterface* LoadMaterialAsset(const TSoftObjectPtr<UMaterialInterface>& Ref, const TCHAR* Label);
 };

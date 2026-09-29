@@ -12,6 +12,7 @@
 #include "ScreenPass.h"
 #include "ShaderCompilerCore.h"
 #include "ShaderParameterStruct.h"
+#include "ShaderPermutation.h"
 #include "TextureResource.h"
 
 // ---------------------------------------------------------------------------
@@ -37,12 +38,17 @@ namespace
 // ---------------------------------------------------------------------------
 // Shaders
 //
-// Parameter names must match the .usf declarations exactly. The march's are
-// the field's pin names, which TR_BUILD_FIELD, TR_BUILD_SCATTER and
-// TR_BUILD_ATMO expand to.
+// Parameter names must match the .usf declarations exactly. The march's are the
+// field builders' argument names, which TR_BUILD_FIELD, TR_BUILD_SCATTER and
+// TR_BUILD_ATMO expand to; the field's own come from FTerrestrialFieldParameters,
+// which the bake includes too.
 // ---------------------------------------------------------------------------
 
-BEGIN_SHADER_PARAMETER_STRUCT(FTerrestrialMarchParameters, )
+BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereMarchParameters, )
+	SHADER_PARAMETER_STRUCT_INCLUDE(FTerrestrialFieldParameters, Field)
+	SHADER_PARAMETER(FVector3f, CloudScatter)
+	SHADER_PARAMETER(FVector3f, StormScatter)
+
 	SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, AtmoSceneDepth)
 	SHADER_PARAMETER(FMatrix44f, RayViewToClip)
@@ -57,30 +63,6 @@ BEGIN_SHADER_PARAMETER_STRUCT(FTerrestrialMarchParameters, )
 	SHADER_PARAMETER(float, HeightScale)
 	SHADER_PARAMETER(float, Time)
 
-	SHADER_PARAMETER(FVector4f, CloudProfile)
-	SHADER_PARAMETER(FVector4f, CloudCurves)
-	SHADER_PARAMETER(FVector4f, CloudCoverage)
-	SHADER_PARAMETER(FVector4f, CloudType)
-	SHADER_PARAMETER(FVector4f, CloudLid)
-	SHADER_PARAMETER(FVector4f, CloudLift)
-	SHADER_PARAMETER(FVector4f, CloudMotion)
-	SHADER_PARAMETER(FVector4f, CloudResponse)
-	SHADER_PARAMETER(FVector4f, NoiseLevels)
-	SHADER_PARAMETER(FVector4f, StructureSampling)
-	SHADER_PARAMETER(FVector4f, StructureWarp)
-	SHADER_PARAMETER(FVector4f, DetailSampling)
-	SHADER_PARAMETER(FVector4f, DetailWarp)
-	SHADER_PARAMETER(FVector4f, CloudGenusStratus)
-	SHADER_PARAMETER(FVector4f, CloudGenusStratocumulus)
-	SHADER_PARAMETER(FVector4f, CloudGenusCumulus)
-	SHADER_PARAMETER(FVector4f, CloudGenusCirrus)
-	SHADER_PARAMETER(FVector4f, ShadowCascades)
-
-	SHADER_PARAMETER(FVector3f, CloudScatter)
-	SHADER_PARAMETER(FVector3f, StormScatter)
-	SHADER_PARAMETER(FVector4f, CloudExtinction)
-	SHADER_PARAMETER(FVector4f, StormExtinction)
-	SHADER_PARAMETER(float, CloudOpticalDepth)
 	SHADER_PARAMETER(float, LightExtinctionFraction)
 
 	SHADER_PARAMETER(float, ForwardG)
@@ -141,13 +123,17 @@ BEGIN_SHADER_PARAMETER_STRUCT(FTerrestrialMarchParameters, )
 	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, MarchDepth)
 END_SHADER_PARAMETER_STRUCT()
 
-class FTerrestrialMarchCS : public FGlobalShader
+/** Both models' march: TR_DEEP_DECK selects the gas giant's deep deck. */
+class FAtmosphereMarchCS : public FGlobalShader
 {
 public:
-	DECLARE_GLOBAL_SHADER(FTerrestrialMarchCS);
+	DECLARE_GLOBAL_SHADER(FAtmosphereMarchCS);
 
-	using FParameters = FTerrestrialMarchParameters;
-	SHADER_USE_PARAMETER_STRUCT(FTerrestrialMarchCS, FGlobalShader);
+	using FParameters = FAtmosphereMarchParameters;
+	SHADER_USE_PARAMETER_STRUCT(FAtmosphereMarchCS, FGlobalShader);
+
+	class FDeepDeck : SHADER_PERMUTATION_BOOL("TR_DEEP_DECK");
+	using FPermutationDomain = TShaderPermutationDomain<FDeepDeck>;
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
@@ -162,8 +148,8 @@ public:
 	}
 };
 
-IMPLEMENT_GLOBAL_SHADER(FTerrestrialMarchCS,
-	"/Plugin/CloudAtmosphere/Private/TerrestrialMarch.usf", "MainMarchCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FAtmosphereMarchCS,
+	"/Plugin/CloudAtmosphere/Private/AtmosphereMarchPass.usf", "MainMarchCS", SF_Compute);
 
 BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereResolveParameters, )
 	SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
@@ -255,7 +241,7 @@ IMPLEMENT_GLOBAL_SHADER(FAtmosphereCompositeCS,
 // Params
 // ---------------------------------------------------------------------------
 
-void FTerrestrialMarchParams::ResolveTextures_RenderThread()
+void FAtmosphereMarchParams::ResolveTextures_RenderThread()
 {
 	check(IsInRenderingThread());
 
@@ -286,7 +272,7 @@ FAtmosphereViewExtension::FAtmosphereViewExtension(const FAutoRegister& AutoRegi
 {
 }
 
-void FAtmosphereViewExtension::SetFrame_GameThread(const FTerrestrialMarchParams& InMarch)
+void FAtmosphereViewExtension::SetFrame_GameThread(const FAtmosphereMarchParams& InMarch)
 {
 	check(IsInGameThread());
 
@@ -429,7 +415,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 	//
 	// Only a view with a state keeps one; a view without, such as a scene
 	// capture, resolves every frame from that frame's samples alone. A cut, a
-	// gap in rendering or a new cell size starts it over. PITFALL: NOT
+	// gap in rendering, a model change or a new cell size starts it over. PITFALL: NOT
 	// A RESIZE. The view rect is the internal resolution, which the editor and
 	// dynamic resolution change from frame to frame; the resolve reads the
 	// history by UV at its own size.
@@ -478,6 +464,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 	const bool bHistoryValid = History
 		&& History->Color.IsValid() && History->Age.IsValid()
 		&& History->LastRendered + 2 >= GFrameCounterRenderThread
+		&& History->bGasGiant == March.bGasGiant
 		&& History->CellSize == CellSize
 		&& !View.bCameraCut;
 
@@ -523,7 +510,15 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 	FRDGTextureRef MarchDepth = CreateTarget(GraphBuilder, MarchCells, PF_G32R32F, TEXT("CloudAtmosphere.MarchDepth"));
 
 	{
-		FTerrestrialMarchParameters* P = GraphBuilder.AllocParameters<FTerrestrialMarchParameters>();
+		// This frame's pixel of each cell, its draws moved by the golden ratio per
+		// sample the pixel has taken.
+		const uint32 Samples = Frame / CellPixels;
+
+		FAtmosphereMarchParameters* P = GraphBuilder.AllocParameters<FAtmosphereMarchParameters>();
+
+		P->Field = March.Field;
+		P->CloudScatter = March.CloudScatter;
+		P->StormScatter = March.StormScatter;
 
 		P->View = View.ViewUniformBuffer;
 		P->AtmoSceneDepth = SceneDepth;
@@ -540,30 +535,6 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		P->HeightScale = March.HeightScale;
 		P->Time = March.Time;
 
-		P->CloudProfile = March.CloudProfile;
-		P->CloudCurves = March.CloudCurves;
-		P->CloudCoverage = March.CloudCoverage;
-		P->CloudType = March.CloudType;
-		P->CloudLid = March.CloudLid;
-		P->CloudLift = March.CloudLift;
-		P->CloudMotion = March.CloudMotion;
-		P->CloudResponse = March.CloudResponse;
-		P->NoiseLevels = March.NoiseLevels;
-		P->StructureSampling = March.StructureSampling;
-		P->StructureWarp = March.StructureWarp;
-		P->DetailSampling = March.DetailSampling;
-		P->DetailWarp = March.DetailWarp;
-		P->CloudGenusStratus = March.CloudGenusStratus;
-		P->CloudGenusStratocumulus = March.CloudGenusStratocumulus;
-		P->CloudGenusCumulus = March.CloudGenusCumulus;
-		P->CloudGenusCirrus = March.CloudGenusCirrus;
-		P->ShadowCascades = March.ShadowCascades;
-
-		P->CloudScatter = March.CloudScatter;
-		P->StormScatter = March.StormScatter;
-		P->CloudExtinction = March.CloudExtinction;
-		P->StormExtinction = March.StormExtinction;
-		P->CloudOpticalDepth = March.CloudOpticalDepth;
 		P->LightExtinctionFraction = March.LightExtinctionFraction;
 
 		P->ForwardG = March.ForwardG;
@@ -615,10 +586,6 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		P->TransmittanceTable = March.TransmittanceTexture;
 		P->TransmittanceTableSampler = BilinearClamp;
 
-		// This frame's pixel of each cell, its draws moved by the golden ratio per
-		// sample the pixel has taken.
-		const uint32 Samples = Frame / CellPixels;
-
 		P->MarchCells = FUintVector2((uint32)MarchCells.X, (uint32)MarchCells.Y);
 		P->MarchStride = MarchN;
 		P->MarchOffset = FVector2f(Offset.X + 0.5f, Offset.Y + 0.5f);
@@ -631,9 +598,13 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		P->MarchColor = GraphBuilder.CreateUAV(MarchColor);
 		P->MarchDepth = GraphBuilder.CreateUAV(MarchDepth);
 
-		TShaderMapRef<FTerrestrialMarchCS> Shader(ShaderMap);
+		FAtmosphereMarchCS::FPermutationDomain Permutation;
+		Permutation.Set<FAtmosphereMarchCS::FDeepDeck>(March.bGasGiant);
 
-		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("TerrestrialMarch %dx%d", MarchCells.X, MarchCells.Y),
+		TShaderMapRef<FAtmosphereMarchCS> Shader(ShaderMap, Permutation);
+
+		FComputeShaderUtils::AddPass(GraphBuilder,
+			RDG_EVENT_NAME("AtmosphereMarch %dx%d", MarchCells.X, MarchCells.Y),
 			Shader, P, FComputeShaderUtils::GetGroupCount(MarchCells, ThreadGroupSize));
 	}
 
@@ -708,6 +679,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 			GraphBuilder.QueueTextureExtraction(ResolvedColor, &History->Color);
 			GraphBuilder.QueueTextureExtraction(ResolvedAge, &History->Age);
 
+			History->bGasGiant = March.bGasGiant;
 			History->CellSize = CellSize;
 			History->CameraToClip = CameraToClip;
 			History->ViewOrigin = ViewOrigin;

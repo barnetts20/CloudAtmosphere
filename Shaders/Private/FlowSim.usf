@@ -734,6 +734,12 @@ float SimInterfaceFlux(int2 C, uint Interface)
 /** Intensity below which a cell's slot frees. */
 #define SIM_CELL_FREE 0.05f
 
+/** 1 joins the cells' pressure drop to the sim's before the output's soft
+ *  saturation; 0 subtracts it after and clamps at -1. Under comparison. */
+#ifndef SIM_CELL_PRESSURE_SOFT
+#define SIM_CELL_PRESSURE_SOFT 1
+#endif
+
 /** Share of a cell's radius over which its presence fades at the rim. */
 #define SIM_EYE_PRESENCE_RIM 0.2f
 
@@ -3495,7 +3501,16 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
         Weather.w = SimSmoothMax(Weather.w, Stamp.Storm, SIM_CELL_STORM_BLEND);
         Weather.yzw = saturate(Weather.yzw);
 
+#if SIM_CELL_PRESSURE_SOFT
+		// The output's pressure is SimSoftSat of the sim's: undone, the drop
+		// taken, saturated again, so a deep drop rounds off toward -1.
+		// PITFALL: clamped after the drop instead, the core pins at -1 through
+		// the eyewall and out, a flat plateau the deck draws as a shelf.
+        const float Stored = clamp(Flow.z, -0.999f, 0.999f);
+        Flow.z = SimSoftSat(Stored * rsqrt(1.0f - Stored * Stored) - SimCellDraft.w * Stamp.Low);
+#else
         Flow.z = clamp(Flow.z - SimCellDraft.w * Stamp.Low, -1.0f, 1.0f);
+#endif
 
         // -- Write ---------------------------------------------------------------------
 

@@ -13,11 +13,11 @@ DEFINE_LOG_CATEGORY(LogCloudAtmosphere);
 void FCloudAtmosphereModule::StartupModule()
 {
 	// Maps /Plugin/CloudAtmosphere to this plugin's Shaders folder, so the
-	// material Custom nodes can #include the .ush files by virtual path.
+	// global shaders resolve their virtual paths.
 	//
 	// WITHOUT THIS THE INCLUDES FAIL AT SHADER COMPILE, not at load, and the
 	// error names the including file rather than the missing mapping -- so it
-	// reads as a broken material. The plugin folder name has to match the
+	// reads as a broken shader. The plugin folder name has to match the
 	// .uplugin exactly for FindPlugin to resolve.
 	const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("CloudAtmosphere"));
 	if (!Plugin.IsValid())

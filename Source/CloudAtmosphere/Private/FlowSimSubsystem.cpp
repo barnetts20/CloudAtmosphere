@@ -1,6 +1,6 @@
 #include "FlowSimSubsystem.h"
 
-#include "GasGiantShadowMap.h"
+#include "TerrestrialShadowMap.h"
 #include "FlowSimulation.h"
 #include "FlowSimShaders.h"
 #include "FlowSimSettings.h"
@@ -597,6 +597,32 @@ void UFlowSimSubsystem::ReportInertSettings() const
 				TEXT("ShearSpeed is %.3f but LayerCount is 1: a single layer has no ")
 				TEXT("vertical shear, so it does nothing."),
 				Config->ShearSpeed);
+		}
+
+		UE_LOG(LogFlowSim, Log,
+			TEXT("LayerCount is 1: Stratification, UpperSaturation, GenesisShearRatio, StormCellTopShare, ")
+			TEXT("StormCellInflow and the layers' DepthScale do nothing."));
+	}
+
+	if (Config->MaxStormCells <= 0)
+	{
+		UE_LOG(LogFlowSim, Log, TEXT("MaxStormCells is 0: the storm cell and hurricane look settings do nothing."));
+	}
+	else
+	{
+		if (Config->StormCellPersistence >= 1.0f)
+		{
+			UE_LOG(LogFlowSim, Warning,
+				TEXT("StormCellPersistence is 1: a cell never decays once its conditions fail or its ")
+				TEXT("lifetime passes, and once every slot holds one no cell can spawn."));
+		}
+
+		if (Config->StormCellSustainRatio < 1.0f)
+		{
+			UE_LOG(LogFlowSim, Log,
+				TEXT("StormCellSustainRatio %.2f holds a cell's storm below GenesisStorm, so a cell ")
+				TEXT("lives only as long as the storm under it does."),
+				Config->StormCellSustainRatio);
 		}
 	}
 
@@ -1570,6 +1596,9 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 	{
 		UE_LOG(LogFlowSim, Display, TEXT("Grid changed to %dx%dx%d; resetting."), Grid.X, Grid.Y, Grid.Z);
 
+		// The step's Courant numbers and the balance checks follow the grid.
+		ReportCourant();
+		ReportStack();
 		ResetSimulation();
 	}
 
@@ -1677,7 +1706,7 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 		});
 }
 
-bool UFlowSimSubsystem::RequestShadowBake(const FGasGiantShadowParams& InParams)
+bool UFlowSimSubsystem::RequestShadowBake(const FTerrestrialShadowParams& InParams)
 {
 	if (!InParams.IsUsable())
 	{
@@ -1688,56 +1717,22 @@ bool UFlowSimSubsystem::RequestShadowBake(const FGasGiantShadowParams& InParams)
 	return true;
 }
 
-bool UFlowSimSubsystem::RequestShadowBake(const FTerrestrialShadowParams& InParams)
-{
-	if (!InParams.IsUsable())
-	{
-		return false;
-	}
-
-	TerrestrialShadowRequests.Add(InParams);
-	return true;
-}
-
 void UFlowSimSubsystem::BakeShadowMap()
 {
 	// CONSUMED, NOT HELD. A planet that stops asking stops baking on the next
 	// tick, rather than leaving a map frozen at its last light direction.
-	TArray<FGasGiantShadowParams> Requests = MoveTemp(ShadowRequests);
+	TArray<FTerrestrialShadowParams> Requests = MoveTemp(ShadowRequests);
 	ShadowRequests.Reset();
 
 	// Non-const, so the render command's copy can resolve its handles.
-	for (FGasGiantShadowParams& Params : Requests)
+	for (FTerrestrialShadowParams& Params : Requests)
 	{
 		if (!Params.IsUsable())
 		{
 			continue;
 		}
 
-		ENQUEUE_RENDER_COMMAND(GasGiantShadowBake)(
-			[Params](FRHICommandListImmediate& RHICmdList) mutable
-			{
-				Params.ResolveTextures_RenderThread();
-
-				FRDGBuilder GraphBuilder(RHICmdList);
-
-				GasGiantShadow::AddBakePass_RenderThread(GraphBuilder, Params);
-
-				GraphBuilder.Execute();
-			});
-	}
-
-	TArray<FTerrestrialShadowParams> TerrestrialRequests = MoveTemp(TerrestrialShadowRequests);
-	TerrestrialShadowRequests.Reset();
-
-	for (FTerrestrialShadowParams& Params : TerrestrialRequests)
-	{
-		if (!Params.IsUsable())
-		{
-			continue;
-		}
-
-		ENQUEUE_RENDER_COMMAND(TerrestrialShadowBake)(
+		ENQUEUE_RENDER_COMMAND(CloudShadowBake)(
 			[Params](FRHICommandListImmediate& RHICmdList) mutable
 			{
 				Params.ResolveTextures_RenderThread();

@@ -456,8 +456,7 @@ namespace AtmosphereLoad
 	const TSet<FName>& ActorPipeline()
 	{
 		static const TSet<FName> Names = {
-			TEXT("TerrestrialMarchMaterial"), TEXT("GasGiantMarchMaterial"), TEXT("PostprocessMaterial"),
-			TEXT("Simulation"), TEXT("ShadowTarget") };
+			TEXT("BlueNoise"), TEXT("Simulation"), TEXT("ShadowTarget") };
 		return Names;
 	}
 
@@ -661,6 +660,32 @@ namespace AtmosphereLoad
 			// SurfaceSoftness and WarpShift divide by CeilingDepth, and
 			// CloudOpticalDepth re-solves.
 			{ TEXT("TerrestrialLift.CeilingDepth"), TEXT("") },
+
+			// Both models draw through the compute passes: the materials, the gas
+			// giant's composite blur and the terrestrial young-pixel blur retire.
+			{ TEXT("TerrestrialMarchMaterial"), TEXT("") },
+			{ TEXT("GasGiantMarchMaterial"), TEXT("") },
+			{ TEXT("PostprocessMaterial"), TEXT("") },
+			{ TEXT("Composite"), TEXT("") },
+			{ TEXT("TerrestrialSampling.YoungBlur"), TEXT("") },
+
+			// The gas giant runs the cloud field: its shell height and spin carry
+			// over, its own deck's groups retire, and it takes GasGiant twins of the
+			// terrestrial groups at their defaults.
+			{ TEXT("Geometry.HeightScale"), TEXT("GasGiantPlanet.HeightScale") },
+			{ TEXT("Flow.RotationWeight"), TEXT("GasGiantPlanet.SpinRate") },
+			{ TEXT("Geometry"), TEXT("") },
+			{ TEXT("GasGiantProfile"), TEXT("") },
+			{ TEXT("Flow"), TEXT("") },
+			{ TEXT("GasGiantBandShape"), TEXT("") },
+			{ TEXT("Motion"), TEXT("") },
+			{ TEXT("Carve"), TEXT("") },
+			{ TEXT("StructureLayer"), TEXT("") },
+			{ TEXT("DetailLayer"), TEXT("") },
+			{ TEXT("GasGiantBands"), TEXT("") },
+			{ TEXT("Terminator"), TEXT("") },
+			// The fill's relief became the floor's, a different meaning.
+			{ TEXT("GasGiantDeep.FillRelief"), TEXT("") },
 		};
 		return Rows;
 	}

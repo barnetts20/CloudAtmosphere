@@ -4,6 +4,7 @@
 #include "Containers/StaticArray.h"
 #include "GlobalShader.h"
 #include "ShaderParameterStruct.h"
+#include "ShaderPermutation.h"
 #include "RenderGraphResources.h"
 #include "AtmosphereShadowBake.h"
 
@@ -11,12 +12,50 @@ class FRDGBuilder;
 class FTextureResource;
 class FTextureRenderTargetResource;
 
-/** Everything the terrestrial bake reads, flattened for the render thread.
+/** The cloud field's authored values, both models': TR_BuildField's packed
+ *  pins, in its order, and the cloud material's extinction. The planet, clock and light
+ *  extinction arrive beside them, as each pass shares them with its other
+ *  uniforms.
+ *
+ *  ONE STRUCT FOR THE MARCH AND THE BAKE, filled by one packer and included in
+ *  both passes' parameters, so the band the light sees is the band the eye
+ *  sees. Names must match AtmosphereMarchPass.usf and TerrestrialShadowMap.usf;
+ *  an addition to TR_BuildField's signature has to appear in all three. */
+BEGIN_SHADER_PARAMETER_STRUCT(FTerrestrialFieldParameters, )
+
+SHADER_PARAMETER(FVector4f, CloudProfile)
+SHADER_PARAMETER(FVector4f, CloudCurves)
+SHADER_PARAMETER(FVector4f, CloudCoverage)
+SHADER_PARAMETER(FVector4f, CloudType)
+SHADER_PARAMETER(FVector4f, CloudLid)
+SHADER_PARAMETER(FVector4f, CloudLift)
+SHADER_PARAMETER(FVector4f, CloudMotion)
+SHADER_PARAMETER(FVector4f, NoiseLevels)
+SHADER_PARAMETER(FVector4f, StructureSampling)
+SHADER_PARAMETER(FVector4f, StructureWarp)
+SHADER_PARAMETER(FVector4f, DetailSampling)
+SHADER_PARAMETER(FVector4f, DetailWarp)
+SHADER_PARAMETER(FVector4f, CloudGenusStratus)
+SHADER_PARAMETER(FVector4f, CloudGenusStratocumulus)
+SHADER_PARAMETER(FVector4f, CloudGenusCumulus)
+SHADER_PARAMETER(FVector4f, CloudGenusCirrus)
+SHADER_PARAMETER(FVector4f, ShadowCascades)
+SHADER_PARAMETER(FVector4f, CloudResponse)
+
+// Both material sets' rgb tint and amount in a, and what TR_CloudBeta solves
+// the cloud's coefficient from.
+SHADER_PARAMETER(FVector4f, CloudExtinction)
+SHADER_PARAMETER(FVector4f, StormExtinction)
+SHADER_PARAMETER(float, CloudOpticalDepth)
+
+END_SHADER_PARAMETER_STRUCT()
+
+/** Everything the cloud bake reads, flattened for the render thread.
  *
  *  Copied into a render command, so it holds no UObject -- the same split
- *  FFlowSimParams draws. Filled from the same field groups and derivations
- *  ApplyMarchParams pushes to the material, which is what keeps the band
- *  the light sees identical to the band the eye sees.
+ *  FFlowSimParams draws. The field comes from the packer the march shares,
+ *  which is what keeps the band the light sees identical to the band the eye
+ *  sees.
  *
  *  NOT PART OF FFlowSimParams. That struct is the fluid solver's state and
  *  changes when the solver does; this changes when the deck or the light does.
@@ -52,45 +91,20 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	 *  next one keeps. Read only for levels in LevelMask. */
 	TStaticArray<FAtmoShadowHistory, AtmoShadowBake::CascadeCount> History;
 
-	// -- Deck ---------------------------------------------------------------
-	//
-	// TR_BuildField's arguments, in its order and under its names -- the same
-	// names the material parameters carry. An addition there has to appear here
-	// and in TerrestrialShadowMap.usf.
+	// -- Field --------------------------------------------------------------
+
+	/** The gas giant's deep deck (TR_DEEP_DECK), or the terrestrial slab. */
+	bool bDeepDeck = false;
 
 	float PlanetRadius = 0.0f;
 	float HeightScale = 0.0f;
 	float Time = 0.0f;
 
-	// Packed as TR_BuildField documents.
-	FVector4f CloudProfile = FVector4f::Zero();
-	FVector4f CloudCurves = FVector4f::Zero();
-	FVector4f CloudCoverage = FVector4f::Zero();
-	FVector4f CloudType = FVector4f::Zero();
-	FVector4f CloudLid = FVector4f::Zero();
-	FVector4f CloudLift = FVector4f::Zero();
-	FVector4f CloudMotion = FVector4f::Zero();
-	FVector4f NoiseLevels = FVector4f::Zero();
-	FVector4f StructureSampling = FVector4f::Zero();
-	FVector4f StructureWarp = FVector4f::Zero();
-	FVector4f DetailSampling = FVector4f::Zero();
-	FVector4f DetailWarp = FVector4f::Zero();
-	FVector4f CloudGenusStratus = FVector4f::Zero();
-	FVector4f CloudGenusStratocumulus = FVector4f::Zero();
-	FVector4f CloudGenusCumulus = FVector4f::Zero();
-	FVector4f CloudGenusCirrus = FVector4f::Zero();
-	FVector4f ShadowCascades = FVector4f::Zero();
-	FVector4f CloudResponse = FVector4f::Zero();
+	FTerrestrialFieldParameters Field{};
 
-	// -- Extinction ---------------------------------------------------------
-	//
-	// Both material sets' rgb tint and amount in a, plus what TR_CloudBeta
-	// solves the light ray's coefficient from. The albedo is a property of the
-	// scattering site, not of the medium the light crossed, and stays per-pixel.
-
-	FVector4f CloudExtinction = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
-	FVector4f StormExtinction = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
-	float CloudOpticalDepth = 0.0f;
+	/** The light ray's share of the solved coefficient. The albedo is a
+	 *  property of the scattering site, not of the medium the light crossed,
+	 *  and stays with the march. */
 	float LightExtinctionFraction = 0.0f;
 
 	// -- Resources ----------------------------------------------------------
@@ -135,9 +149,8 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 };
 
 /** Names must match the .usf's declarations exactly -- this file's own, and
- *  the format half that AtmosphereShadowBake.ush declares. An
- *  unbound one is a warning that is easy to scroll past, which is the same
- *  silent-edit failure mode the checked material setters exist for. */
+ *  the format half that AtmosphereShadowBake.ush declares. An unbound one is a
+ *  warning that is easy to scroll past. */
 BEGIN_SHADER_PARAMETER_STRUCT(FTerrestrialShadowParameters, )
 
 SHADER_PARAMETER(FIntPoint, ShadowMapSize)
@@ -154,28 +167,7 @@ SHADER_PARAMETER_RDG_TEXTURE(Texture2DArray<float4>, ShadowHistory)
 SHADER_PARAMETER(float, PlanetRadius)
 SHADER_PARAMETER(float, HeightScale)
 SHADER_PARAMETER(float, Time)
-SHADER_PARAMETER(FVector4f, CloudProfile)
-SHADER_PARAMETER(FVector4f, CloudCurves)
-SHADER_PARAMETER(FVector4f, CloudCoverage)
-SHADER_PARAMETER(FVector4f, CloudType)
-SHADER_PARAMETER(FVector4f, CloudLid)
-SHADER_PARAMETER(FVector4f, CloudLift)
-SHADER_PARAMETER(FVector4f, CloudMotion)
-SHADER_PARAMETER(FVector4f, NoiseLevels)
-SHADER_PARAMETER(FVector4f, StructureSampling)
-SHADER_PARAMETER(FVector4f, StructureWarp)
-SHADER_PARAMETER(FVector4f, DetailSampling)
-SHADER_PARAMETER(FVector4f, DetailWarp)
-SHADER_PARAMETER(FVector4f, CloudGenusStratus)
-SHADER_PARAMETER(FVector4f, CloudGenusStratocumulus)
-SHADER_PARAMETER(FVector4f, CloudGenusCumulus)
-SHADER_PARAMETER(FVector4f, CloudGenusCirrus)
-SHADER_PARAMETER(FVector4f, ShadowCascades)
-SHADER_PARAMETER(FVector4f, CloudResponse)
-
-SHADER_PARAMETER(FVector4f, CloudExtinction)
-SHADER_PARAMETER(FVector4f, StormExtinction)
-SHADER_PARAMETER(float, CloudOpticalDepth)
+SHADER_PARAMETER_STRUCT_INCLUDE(FTerrestrialFieldParameters, Field)
 SHADER_PARAMETER(float, LightExtinctionFraction)
 
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, ShadowMapUAV)
@@ -198,6 +190,10 @@ class FTerrestrialShadowBakeCS : public FGlobalShader
 public:
 	using FParameters = FTerrestrialShadowParameters;
 	SHADER_USE_PARAMETER_STRUCT(FTerrestrialShadowBakeCS, FGlobalShader);
+
+	/** The gas giant's deep deck. */
+	class FDeepDeck : SHADER_PERMUTATION_BOOL("TR_DEEP_DECK");
+	using FPermutationDomain = TShaderPermutationDomain<FDeepDeck>;
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
 	static void ModifyCompilationEnvironment(

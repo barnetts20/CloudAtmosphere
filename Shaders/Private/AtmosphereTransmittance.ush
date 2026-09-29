@@ -15,7 +15,7 @@
 // that represented it too would darken those samples twice.
 
 /** Table size. Must match AtmosphereTransmittance::Width and Height: the bake
- *  is defined from C++, the material's lookup reads these. */
+ *  is sized from C++, the march's lookup reads these. */
 #ifndef ATMO_TRANSMITTANCE_WIDTH
 #define ATMO_TRANSMITTANCE_WIDTH 256
 #endif

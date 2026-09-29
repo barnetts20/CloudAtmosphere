@@ -19,8 +19,9 @@ enum class EFlowZonalProfile : uint8
 	Banded      UMETA(DisplayName = "Banded"),
 
 	/** Earth's three cells: easterly trades to about 25 degrees, a westerly jet
-	 *  peaking at 45, polar easterlies past about 65. BandCount, EquatorialBoost,
-	 *  Asymmetry and WidthBias are unused. */
+	 *  peaking at JetLatitude, polar easterlies past about 65. BandCount,
+	 *  EquatorialBoost, Asymmetry, WidthBias and the layers' BoostScale are
+	 *  unused. */
 	ThreeCell   UMETA(DisplayName = "Three cell (terrestrial)"),
 };
 
@@ -119,7 +120,7 @@ struct FFlowLayerProfile
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer")
 	float JetScale = 1.0f;
 
-	/** Scales EquatorialBoost. */
+	/** Scales EquatorialBoost. Banded profile only. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer")
 	float BoostScale = 1.0f;
 
@@ -127,16 +128,34 @@ struct FFlowLayerProfile
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer", meta = (ClampMin = "0.0"))
 	float EddyScale = 1.0f;
 
-	/** Scales the drag. The bottom layer carries the surface drag; layers above
-	 *  it want little. */
+	/** Scales the drag, and the eddy forcing with it, so EddyScale still sets
+	 *  the layer's eddy speed. The bottom layer carries the surface drag; layers
+	 *  above it want little. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer")
 	float DragScale = 1.0f;
 
-	/** Relative depth of the layer in the stack. A thicker top layer leaves the
-	 *  interface more room to rise toward the poles before it reaches the top. */
+	/** Relative depth of the layer in the stack, normalised over the layers, so
+	 *  only the ratios matter. A thicker top layer leaves the interface more
+	 *  room to rise toward the poles before it reaches the top. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layer", meta = (ClampMin = "0.1"))
 	float DepthScale = 1.0f;
 };
+
+/** The layer profiles a new config starts with: a light top layer with the
+ *  stronger eddies and a deeper, draggier bottom layer at the surface. */
+inline TArray<FFlowLayerProfile> FlowSimDefaultLayers()
+{
+	FFlowLayerProfile Top;
+	Top.EddyScale = 1.5f;
+	Top.DragScale = 0.5f;
+	Top.DepthScale = 1.5f;
+
+	FFlowLayerProfile Bottom;
+	Bottom.EddyScale = 0.05f;
+	Bottom.DragScale = 1.5f;
+
+	return { Top, Bottom };
+}
 
 namespace FlowSimStep
 {
@@ -244,6 +263,8 @@ public:
 	// relaxation holds the interfaces at the heights in balance with it, which
 	// is the temperature contrast storms draw on.
 
+	/** The zonal winds the nudge holds: a gas giant's alternating bands, or a
+	 *  terrestrial planet's three cells. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Winds")
 	EFlowZonalProfile ZonalProfile = EFlowZonalProfile::Banded;
 
@@ -281,10 +302,15 @@ public:
 
 	/** Equilibrium eddy speed the stochastic stirring sustains against the drag,
 	 *  as a fraction of the speed root per unit slope of the forcing noise; each
-	 *  layer scales it by its EddyScale. Divergence-free. */
+	 *  layer scales it by its EddyScale. Divergence-free. The speed reached also
+	 *  scales with the forcing volume's gradient, so a volume with finer
+	 *  features stirs harder. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Winds", meta = (ClampMin = "0.0"))
 	float EddySpeed = 0.15f;
 
+	/** How many times the band pattern repeats over sin(latitude) from pole
+	 *  to pole: each repeat is a prograde and a retrograde jet. Fractional
+	 *  values are allowed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Winds", meta = (EditCondition = "ZonalProfile == EFlowZonalProfile::Banded", EditConditionHides, ClampMin = "1.0"))
 	float BandCount = 3.0f;
 
@@ -297,9 +323,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Winds", meta = (EditCondition = "ThermalShape == EFlowThermalShape::Midlatitude", EditConditionHides, ClampMin = "1.0", ClampMax = "90.0"))
 	float BaroclinicWidth = 24.0f;
 
+	/** Extra prograde wind in the equatorial jet, super-rotation, as a share of
+	 *  the jets' strength; each layer scales it by its BoostScale. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Winds", meta = (EditCondition = "ZonalProfile == EFlowZonalProfile::Banded", EditConditionHides))
 	float EquatorialBoost = 0.5f;
 
+	/** Weight of an odd term that shifts the bands differently in each
+	 *  hemisphere: 0 mirrors them about the equator. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Winds", meta = (EditCondition = "ZonalProfile == EFlowZonalProfile::Banded", EditConditionHides))
 	float Asymmetry = 0.5f;
 
@@ -307,13 +337,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Winds", meta = (EditCondition = "ZonalProfile == EFlowZonalProfile::Banded", EditConditionHides))
 	float WidthBias = 0.0f;
 
+	/** Where ShearSpeed sits in latitude: a midlatitude zone about
+	 *  BaroclinicLatitude, or the jets' own profile. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Winds")
 	EFlowThermalShape ThermalShape = EFlowThermalShape::Midlatitude;
 
-	/** 2 * Omega. Sets the beta effect that arrests the inverse cascade into
-	 *  jets, and with DeformationRadius the wave speed the speed root scales.
-	 *  Every rate and lifetime is in turnovers, which shorten as it rises, so
-	 *  beyond the Coriolis step it sets the tempo alone, as SimSpeed does.
+	/** 2 * Omega. With DeformationRadius it sets the wave speed the speed root
+	 *  scales. Every wind is a fraction of the root and every rate and
+	 *  lifetime is in turnovers, so the jets' spacing, the eddies' size and the
+	 *  Rossby number hold as it changes: beyond the Coriolis step it sets the
+	 *  tempo alone, as SimSpeed does.
 	 *
 	 *  PITFALL: also the explicit Coriolis step. Above about 0.5 radians of
 	 *  rotation per step the split between explicit rotation and implicit
@@ -370,7 +403,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Moisture", meta = (ClampMin = "0.0"))
 	float CondensationRate = 0.5f;
 
-	/** How fast sinking air evaporates cloud back into vapour, per turnover. */
+	/** How fast sinking air evaporates cloud back into vapour, per turnover.
+	 *  Also decays the storm tracer in sinking air, and with a negative
+	 *  StormCellEyeDraft clears the storm cells' eyes. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Moisture", meta = (ClampMin = "0.0"))
 	float EvaporationRate = 0.3f;
 
@@ -380,8 +415,9 @@ public:
 	 *  move through it, average out instead of condensing cloud along their
 	 *  crests and drawing travelling lines into the cloud field. Longer is
 	 *  cleaner and makes cloud respond more slowly to new ascent; condensation
-	 *  from passing waves goes too, so cloud amount falls (about half at 1.5)
-	 *  and the deck's cover wants raising to match. 0 reads it raw. */
+	 *  from passing waves goes too, so cloud amount falls as it lengthens and
+	 *  the deck's cover wants raising to match. The storm tracer is the most
+	 *  sensitive to it. 0 reads it raw. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Moisture", meta = (ClampMin = "0.0", ClampMax = "25.0"))
 	float AscentSmoothing = 3.0f;
 
@@ -432,14 +468,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0"))
 	float StormCellSpawnRate = 0.4f;
 
-	/** Latitudes, degrees, between which cells form. */
+	/** Equatorward edge of the band cells form in, degrees. Keep it a few
+	 *  degrees off the equator, where the cells' rotation sense turns over. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "90.0"))
 	float GenesisLatitudeMin = 8.0f;
 
+	/** Poleward edge of the band cells form in, degrees. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "90.0"))
 	float GenesisLatitudeMax = 22.0f;
 
-	/** Turnovers after which a cell decays whatever the conditions. */
+	/** Turnovers after which a cell decays whatever the conditions. It then
+	 *  fades at its decay rate, StormCellGrowth times one less
+	 *  StormCellPersistence, so it lives about ln(20) over that rate longer. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.05"))
 	float StormCellLifetime = 30.0f;
 
@@ -450,7 +490,7 @@ public:
 	 *  about 1.25 the cell keeps its own parent alive, and it ends when the
 	 *  genesis window or humidity fails, or at StormCellLifetime. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0"))
-	float StormCellSustainRatio = 0.0f;
+	float StormCellSustainRatio = 3.0f;
 
 	/** Outer radius, in deformation radii, where every effect reaches zero;
 	 *  the start log reports it in degrees. Held to 0.5 to 45 degrees. */
@@ -489,7 +529,9 @@ public:
 	float GenesisShearRatio = 2.5f;
 
 	/** Bottom layer's relative humidity a cell needs to form, over
-	 *  CondensationOnset; it weakens below 0.15 under that. */
+	 *  CondensationOnset. A live cell's favour ramps from 0.15 under that
+	 *  humidity to full at saturation, so it weakens anywhere short of
+	 *  saturation and fails at the ramp's foot. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "-1.0", ClampMax = "1.0"))
 	float GenesisHumidityMargin = 0.15f;
 
@@ -576,8 +618,9 @@ public:
 	/** Vertical motion in the eye, in W's units, carried with the eye tracer.
 	 *  Negative sinks: in the sim the cloud the flow carries through the eye
 	 *  evaporates and none condenses there, at a rate EvaporationRate times
-	 *  this sets, so the eye clears and the flow winds what it clears; on the
-	 *  output it adds to W. */
+	 *  this sets, so the eye clears and the flow winds what it clears. Positive
+	 *  rises and condenses cloud in the eye, which StormCellEyeDepth still
+	 *  thins on the deck. On the output it adds to W either way. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Planet|Hurricanes", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "-1.0", ClampMax = "1.0"))
 	float StormCellEyeDraft = -0.5f;
 
@@ -602,7 +645,9 @@ public:
 
 	/** Pressure drop full through the eyewall and easing to none at the
 	 *  radius, in the output's normalised units: the whole storm is a low. The
-	 *  deck raises the lid and lowers the base under lows. */
+	 *  deck raises the lid and lowers the base under lows. Joined to the sim's
+	 *  pressure before the output's soft saturation, so a deep drop rounds off
+	 *  toward -1 rather than flattening into a plateau. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Look", meta = (EditCondition = "MaxStormCells > 0", EditConditionHides, ClampMin = "0.0", ClampMax = "2.0"))
 	float StormCellPressure = 0.5f;
 
@@ -682,8 +727,11 @@ public:
 
 	// -- Layers -------------------------------------------------------------
 
+	/** Per-layer scales on the shared winds, eddies, drag and depth, top layer
+	 *  first. Layers past the array take a profile's defaults; entries past
+	 *  LayerCount are ignored. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Layers")
-	TArray<FFlowLayerProfile> LayerProfiles;
+	TArray<FFlowLayerProfile> LayerProfiles = FlowSimDefaultLayers();
 
 	/** Relaxation of each layer's velocity toward its neighbours', per
 	 *  turnover: interfacial friction. Strong coupling erodes the shear storms
@@ -713,7 +761,9 @@ public:
 
 	/** Linear drag on the eddy part of the eastward velocity and all of the
 	 *  northward, per turnover, scaled per layer. The energy sink that arrests
-	 *  the cascade, and what turns flow into lows and out of highs. */
+	 *  the cascade, and what turns flow into lows and out of highs. The
+	 *  forcing scales with it, so it sets how long eddies stay correlated and
+	 *  not how fast they run; 0 turns the forcing off too. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "Rates")
 	float DragRate = 0.15f;
 
@@ -767,10 +817,12 @@ public:
 	 *  pulls the two noise phases apart until their crossfade reads as density
 	 *  sliding under the clouds. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Numerics")
-	bool bSharpCentreVelocity = false;
+	bool bSharpCentreVelocity = true;
 
-	/** cos(latitude) below which the longitudinal filter engages. Its width
-	 *  follows from the grid: FilterLatitude / cos(latitude) texels. */
+	/** Polar longitudinal smoothing: each row is box-filtered over
+	 *  FilterLatitude / cos(latitude) columns, so the filter first acts where
+	 *  cos(latitude) falls below half of this (63 degrees at 0.9). Higher
+	 *  filters wider and further from the poles. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Numerics", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float FilterLatitude = 0.9f;
 
@@ -784,7 +836,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline")
 	TObjectPtr<UVolumeTexture> ForcingVolume;
 
-	/** The channel read, decoded from [0, 1] to [-1, 1]. */
+	/** The channel read, decoded from [0, 1] to [-1, 1]. Each channel is a
+	 *  different noise octave, so the choice changes the eddies' scale. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline", meta = (ClampMin = "0", ClampMax = "3"))
 	int32 ForcingChannel = 1;
 
@@ -814,6 +867,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
 	TObjectPtr<UTextureRenderTarget2D> DebugTarget;
 
+	/** Field the debug view shows; r.FlowSim.DebugMode overrides it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
 	EFlowDebugMode DebugMode = EFlowDebugMode::Vorticity;
 

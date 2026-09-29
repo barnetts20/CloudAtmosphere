@@ -4,6 +4,7 @@
 #include "RHIFwd.h"
 #include "RenderGraphResources.h"
 #include "SceneViewExtension.h"
+#include "TerrestrialShadowMap.h"
 #include <atomic>
 
 class FTextureResource;
@@ -11,12 +12,14 @@ class FTextureRenderTargetResource;
 struct FPostProcessMaterialInputs;
 struct FScreenPassTexture;
 
-/** The terrestrial march's inputs, flattened for the render thread: the field's
- *  packed pins under the names TR_BUILD_FIELD, TR_BUILD_SCATTER and
- *  TR_BUILD_ATMO expand to, filled from the packers the shadow bake shares, and
- *  the sampling and composite settings. */
-struct CLOUDATMOSPHERE_API FTerrestrialMarchParams
+/** The march's inputs, flattened for the render thread: the active model's
+ *  field, from the packer the shadow bake shares, and its lighting, air,
+ *  pipeline and sampling groups. */
+struct CLOUDATMOSPHERE_API FAtmosphereMarchParams
 {
+	/** The gas giant: the deep deck (TR_DEEP_DECK) rather than the slab. */
+	bool bGasGiant = false;
+
 	/** World position, double: the pass subtracts each view's own camera. */
 	FVector PlanetCenter = FVector::ZeroVector;
 
@@ -28,31 +31,11 @@ struct CLOUDATMOSPHERE_API FTerrestrialMarchParams
 	float HeightScale = 0.0f;
 	float Time = 0.0f;
 
-	// TR_BuildField's packed pins, as PackTerrestrialField writes them.
-	FVector4f CloudProfile = FVector4f::Zero();
-	FVector4f CloudCurves = FVector4f::Zero();
-	FVector4f CloudCoverage = FVector4f::Zero();
-	FVector4f CloudType = FVector4f::Zero();
-	FVector4f CloudLid = FVector4f::Zero();
-	FVector4f CloudLift = FVector4f::Zero();
-	FVector4f CloudMotion = FVector4f::Zero();
-	FVector4f CloudResponse = FVector4f::Zero();
-	FVector4f NoiseLevels = FVector4f::Zero();
-	FVector4f StructureSampling = FVector4f::Zero();
-	FVector4f StructureWarp = FVector4f::Zero();
-	FVector4f DetailSampling = FVector4f::Zero();
-	FVector4f DetailWarp = FVector4f::Zero();
-	FVector4f CloudGenusStratus = FVector4f::Zero();
-	FVector4f CloudGenusStratocumulus = FVector4f::Zero();
-	FVector4f CloudGenusCumulus = FVector4f::Zero();
-	FVector4f CloudGenusCirrus = FVector4f::Zero();
-	FVector4f ShadowCascades = FVector4f::Zero();
-
+	// The field and its cloud material's albedo.
+	FTerrestrialFieldParameters Field{};
 	FVector3f CloudScatter = FVector3f::OneVector;
 	FVector3f StormScatter = FVector3f::OneVector;
-	FVector4f CloudExtinction = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
-	FVector4f StormExtinction = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
-	float CloudOpticalDepth = 0.0f;
+
 	float LightExtinctionFraction = 0.0f;
 
 	float ForwardG = 0.0f;
@@ -91,7 +74,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialMarchParams
 	FVector3f ShadowCamera1 = FVector3f::ZeroVector;
 	FVector3f ShadowCamera2 = FVector3f::ZeroVector;
 
-	// FTerrestrialSamplingParams.
+	// FAtmosphereSamplingParams.
 	int32 CellSize = 4;
 	float FreshWeight = 0.15f;
 	float LatticeGrowth = 0.2f;
@@ -125,9 +108,9 @@ struct CLOUDATMOSPHERE_API FTerrestrialMarchParams
 	}
 };
 
-/** Runs the terrestrial march, its temporal resolve and the composite for every
- *  view of one world, ahead of depth of field and the upscaler: TSR resolves
- *  what the march leaves, and bloom and eye adaptation see the atmosphere.
+/** Runs the march, its temporal resolve and the composite for every view of one
+ *  world, ahead of depth of field and the upscaler: TSR resolves what the march
+ *  leaves, and bloom and eye adaptation see the atmosphere.
  *
  *  A VIEW EXTENSION BECAUSE THE RESOLVE KEEPS HISTORY: one per view state,
  *  keyed by its view key, dropped when unused for a few seconds. A view without
@@ -141,7 +124,7 @@ public:
 	FAtmosphereViewExtension(const FAutoRegister& AutoRegister, UWorld* InWorld);
 
 	/** Hands the render thread this frame's march. Game thread. */
-	void SetFrame_GameThread(const FTerrestrialMarchParams& March);
+	void SetFrame_GameThread(const FAtmosphereMarchParams& March);
 
 	/** Off skips every view and frees the histories, which a gap in rendering
 	 *  invalidates anyway. Game thread. */
@@ -167,11 +150,12 @@ private:
 		const FPostProcessMaterialInputs& Inputs);
 
 	/** One view state's history: the resolved atmosphere and its sample counts,
-	 *  and the camera, planet and cell size it was resolved with. */
+	 *  and the model, camera, planet and cell size it was resolved with. */
 	struct FViewHistory
 	{
 		TRefCountPtr<IPooledRenderTarget> Color;
 		TRefCountPtr<IPooledRenderTarget> Age;
+		bool bGasGiant = false;
 		uint32 CellSize = 0;
 		FMatrix44f CameraToClip = FMatrix44f::Identity;
 		FVector ViewOrigin = FVector::ZeroVector;
@@ -184,7 +168,7 @@ private:
 	std::atomic<bool> bEnabled { false };
 
 	// Render thread only.
-	FTerrestrialMarchParams March;
+	FAtmosphereMarchParams March;
 	bool bHasFrame = false;
 	TMap<uint32, TUniquePtr<FViewHistory>> Histories;
 };

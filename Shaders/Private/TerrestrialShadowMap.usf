@@ -3,7 +3,8 @@
 #include "/Plugin/CloudAtmosphere/Private/TerrestrialShadow.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereShadowBake.ush"
 
-// Terrestrial cloud shadow map: this field's side of the bake.
+// The cloud field's shadow map, both models' (TR_DEEP_DECK, the pass's
+// permutation, selects the gas giant's deep deck): this field's side of the bake.
 //
 // THE MARCH IS NOT HERE. The ray setup, the step lattice and the crossing
 // accumulation live in AtmosphereShadowBake.ush and
@@ -14,7 +15,7 @@
 //
 // THE FIELD THE LIGHT SEES MUST BE THE FIELD THE EYE SEES. Every derived
 // quantity here comes from TR_BuildField, TR_Density and TR_CloudBeta, the same
-// functions the material calls from the same authored values. A second
+// functions the march calls from the same authored values. A second
 // derivation on either side fails silently: the shadows stay smooth and
 // plausible and land in the wrong place.
 
@@ -35,12 +36,12 @@ SamplerState StructureVolumeSampler;
 float4 CloudExtinction;
 float4 StormExtinction;
 
-/** Solved into the light ray's coefficient by TR_CloudBeta, as the material
+/** Solved into the light ray's coefficient by TR_CloudBeta, as the march
  *  solves it. */
 float CloudOpticalDepth;
 float LightExtinctionFraction;
 
-// -- TR_BuildField's arguments, under the material's pin names --------------
+// -- TR_BuildField's arguments, under the march's uniform names -------------
 
 float PlanetRadius;
 float HeightScale;
