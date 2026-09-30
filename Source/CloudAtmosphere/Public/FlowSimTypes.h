@@ -8,8 +8,6 @@ class FTextureResource;
 class FTextureRenderTargetResource;
 class UVolumeTexture;
 class UFlowSnapshot;
-class UTextureRenderTarget2D;
-class UTextureRenderTarget2DArray;
 
 /** The zonal flow the nudge maintains. Mirrors SIM_PROFILE_* in FlowSim.usf. */
 UENUM(BlueprintType)
@@ -828,8 +826,8 @@ public:
 
 	// -- Pipeline -----------------------------------------------------------
 	//
-	// Assets, targets and start state: what a machine or a session owns rather
-	// than what a tune is.
+	// Assets and start state: what a machine or a session owns rather than what
+	// a tune is. The render targets are the subsystem's, created at run time.
 
 	/** Band-limited tiling noise, read as a forcing streamfunction. Optional:
 	 *  with none bound the forcing is exactly zero. */
@@ -841,21 +839,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline", meta = (ClampMin = "0", ClampMax = "3"))
 	int32 ForcingChannel = 1;
 
-	/** A captured state to start from. Empty means seed and spin up. A grid or
-	 *  layout mismatch is refused and falls back to seeding. */
+	/** A captured state to start from, restored whenever this config starts
+	 *  or an atmosphere swaps to it. Empty means seed and spin up. A grid or
+	 *  layout mismatch is refused and falls back to seeding. FlowSim.Save with
+	 *  no argument captures into it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline")
 	TObjectPtr<UFlowSnapshot> InitialState;
-
-	/** RGBA16F 2D array, the cube atlas with 4 * LayerCount slices; see
-	 *  FlowField.ush. This is what the material samples. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline")
-	TObjectPtr<UTextureRenderTarget2DArray> FlowTarget;
-
-	/** Reconfigure the targets to match the grid if they do not already. A
-	 *  mismatched target is refused, and a refused sim looks exactly like one
-	 *  that runs and produces nothing. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline")
-	bool bAutoResizeTargets = true;
 
 	/** Spin-up substeps per frame. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline", meta = (ClampMin = "1", ClampMax = "64"))
@@ -863,9 +852,10 @@ public:
 
 	// -- Debug --------------------------------------------------------------
 
-	/** Any 2D render target. Sized to the grid it is one texel per cell. */
+	/** Draw the debug view, one texel per cell, into the subsystem's debug
+	 *  target, which the atmosphere driving the sim shows as SimDebugView. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
-	TObjectPtr<UTextureRenderTarget2D> DebugTarget;
+	bool bDebugView = false;
 
 	/** Field the debug view shows; r.FlowSim.DebugMode overrides it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")

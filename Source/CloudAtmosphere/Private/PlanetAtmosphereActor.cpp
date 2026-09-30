@@ -14,6 +14,7 @@
 #include "RenderingThread.h"
 #include "SceneViewExtension.h"
 #include "TerrestrialShadowMap.h"
+#include "FlowSimShaders.h"
 #include "FlowSimSubsystem.h"
 #include "FlowSimTypes.h"
 
@@ -118,7 +119,8 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
         TEXT("/CloudAtmosphere/NoiseRecipes/GasGiantSimScratch"));
     if (DefaultSimConfig.Succeeded())
     {
-        Simulation.Config = DefaultSimConfig.Object;
+        Simulation.TerrestrialConfig = DefaultSimConfig.Object;
+        Simulation.GasGiantConfig = DefaultSimConfig.Object;
     }
     else
     {
@@ -139,17 +141,11 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
 void APlanetAtmosphereActor::BeginPlay()
 {
     Super::BeginPlay();
-
-    // The cloud field reads the sim as its weather map.
-    if (Simulation.bStartOnBeginPlay)
-    {
-        StartFlowSimulation();
-    }
 }
 
 void APlanetAtmosphereActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-    StopFlowSimulation();
+    ReleaseSimulation(false);
     ReleaseViewExtension();
     Super::EndPlay(EndPlayReason);
 }
@@ -157,7 +153,7 @@ void APlanetAtmosphereActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 // An editor deletion routes no EndPlay. The components go with the actor.
 void APlanetAtmosphereActor::Destroyed()
 {
-    StopFlowSimulation();
+    ReleaseSimulation(false);
     ReleaseViewExtension();
     Super::Destroyed();
 }
@@ -337,22 +333,22 @@ void APlanetAtmosphereActor::DestroyLegacyChildActors()
     }
 }
 
-void APlanetAtmosphereActor::StopFlowSimulation()
+void APlanetAtmosphereActor::ReleaseSimulation(bool bKeepField)
 {
     // Released before the actor goes, or a pooled planet leaves the sim
     // stepping with nothing sampling it.
-    if (!bStartedSimulation)
+    if (!bClaimedSimulation)
     {
         return;
     }
 
-    bStartedSimulation = false;
+    bClaimedSimulation = false;
 
     if (UWorld* World = GetWorld())
     {
         if (UFlowSimSubsystem* Sim = World->GetSubsystem<UFlowSimSubsystem>())
         {
-            Sim->StopSimulation();
+            Sim->ReleaseClaim(this, bKeepField);
         }
     }
 }
@@ -370,6 +366,7 @@ void APlanetAtmosphereActor::UpdateAtmosphere()
     // regardless of parent rotation. The user/gizmo sets relative rotation directly.
     const FVector LightDir = GetRootComponent()->GetRelativeRotation().Vector();
 
+    ClaimSimulation(PlanetCenter, PlanetRadius);
     RequestShadowBake(PlanetRadius, PlanetCenter, LightDir);
     UpdateTransmittanceTable(PlanetRadius);
     UpdateComputeMarch(PlanetRadius, PlanetCenter, LightDir);
@@ -446,8 +443,10 @@ static FTerrestrialCloudMaterialParams ResolveCloudMaterial(const FTerrestrialCl
  *  its extinction. ONE PACKER FOR THE MARCH AND THE BAKE, so the two cannot
  *  pack differently. The pins are grouped by the shader's needs, not the
  *  panel's, so most draw on several groups. */
-static FTerrestrialFieldParameters PackCloudField(const APlanetAtmosphereActor& A, double Time)
+static FTerrestrialFieldParameters PackCloudField(const APlanetAtmosphereActor& A)
 {
+    const FAtmosphereFieldClock& Clock = A.GetFieldClock();
+
     const auto ToVector4 = [](const FLinearColor& C) { return FVector4f(C.R, C.G, C.B, C.A); };
 
     const FTerrestrialShapeParams& Shape = A.ActiveShape();
@@ -463,11 +462,11 @@ static FTerrestrialFieldParameters PackCloudField(const APlanetAtmosphereActor& 
     FTerrestrialFieldParameters Out{};
 
     float DriftAngle, NoisePhase;
-    NoiseClock(A.Simulation.Config, Time, DriftAngle, NoisePhase);
+    NoiseClock(Clock.Config.Get(), Clock.Time, DriftAngle, NoisePhase);
 
     // The planet's own spin, wrapped in double like the drift. Negated: turning
     // the sample point back carries the field forward.
-    const float SpinAngle = (float)FMath::Fmod(-(double)A.ActivePlanet().SpinRate * Time, 2.0 * UE_DOUBLE_PI);
+    const float SpinAngle = (float)FMath::Fmod(-(double)A.ActivePlanet().SpinRate * Clock.SpinTime, 2.0 * UE_DOUBLE_PI);
 
     // Free slots stay zero.
     Out.CloudProfile = FVector4f(Shape.CloudBase, Shape.CloudThickness, Shape.SurfaceSoftness, Shape.CeilingFalloff);
@@ -495,12 +494,9 @@ static FTerrestrialFieldParameters PackCloudField(const APlanetAtmosphereActor& 
     Out.StructureWarp = FVector4f(Structure.FlowInherit, Type.Subsidence, FloorRelief, 0.0f);
 
     Out.DetailSampling = FVector4f(Detail.Scale, Detail.Aspect, Detail.Erosion, Detail.FadeMean);
-    // The fade in planet radii: its authored feature count over the layer's
-    // features per radian.
-    const float FeatureRadii = 1.0f / FMath::Max(Detail.Scale, 0.01f);
-
+    // The fade as a start and a length, in planet radii.
     Out.DetailWarp = FVector4f(
-        Detail.FlowInherit, 0.0f, Detail.FadeStart * FeatureRadii, Detail.FadeLength * FeatureRadii);
+        Detail.FlowInherit, 0.0f, Detail.FadeNear, FMath::Max(Detail.FadeFar - Detail.FadeNear, 0.0f));
 
     Out.CloudGenusStratus = ToVector4(Type.Stratus);
     Out.CloudGenusStratocumulus = ToVector4(Type.Stratocumulus);
@@ -527,63 +523,14 @@ static FTerrestrialFieldParameters PackCloudField(const APlanetAtmosphereActor& 
  *  chord, so an unbaked texel reads as fully lit. */
 static constexpr float ShadowNoDeck = 1000.0f;
 
-/** Which actor bakes into each shadow target, and on which frame it last did. */
-struct FShadowTargetClaim
+void APlanetAtmosphereActor::PrepareShadowTarget()
 {
-    TWeakObjectPtr<const APlanetAtmosphereActor> Actor;
-    uint64 Frame = 0;
-};
+    if (!ShadowTarget)
+    {
+        ShadowTarget = NewObject<UTextureRenderTarget2DArray>(this, TEXT("ShadowTarget"), RF_Transient);
+    }
 
-static TMap<TWeakObjectPtr<const UTextureRenderTarget2DArray>, FShadowTargetClaim> GShadowTargetClaims;
-
-bool APlanetAtmosphereActor::PrepareShadowTarget()
-{
     UTextureRenderTarget2DArray* Target = ShadowTarget;
-
-    if (!Target)
-    {
-        if (!bWarnedShadowTarget)
-        {
-            bWarnedShadowTarget = true;
-
-            UE_LOG(LogCloudAtmosphere, Warning,
-                TEXT("%s: no Shadow Target set. Create a Texture Render Target 2D ")
-                TEXT("Array asset and assign it; the atmosphere does not draw until then."),
-                *GetName());
-        }
-
-        return false;
-    }
-
-    // ONE ACTOR PER TARGET. Two baking into one asset re-init it against each
-    // other's settings and overwrite each other's slices. The first to claim it
-    // keeps it while it keeps baking; a play world's actor takes it from an
-    // editor world's, so a PIE session shadows even while the editor ticks.
-    FShadowTargetClaim& Claim = GShadowTargetClaims.FindOrAdd(Target);
-    const APlanetAtmosphereActor* Holder = Claim.Actor.Get();
-
-    const bool bHeld = Holder && Holder != this && Claim.Frame + 1 >= GFrameCounter;
-    const bool bOutranks = GetWorld() && GetWorld()->IsGameWorld()
-        && !(Holder && Holder->GetWorld() && Holder->GetWorld()->IsGameWorld());
-
-    if (bHeld && !bOutranks)
-    {
-        if (!bWarnedSharedShadowTarget)
-        {
-            bWarnedSharedShadowTarget = true;
-
-            UE_LOG(LogCloudAtmosphere, Warning,
-                TEXT("%s: Shadow Target '%s' is already baked by '%s'. Assign each ")
-                TEXT("atmosphere its own target; this one bakes no shadows until then."),
-                *GetName(), *Target->GetName(), *Holder->GetName());
-        }
-
-        return false;
-    }
-
-    Claim.Actor = this;
-    Claim.Frame = GFrameCounter;
-    bWarnedSharedShadowTarget = false;
 
     // The property's own range, which a Blueprint or a loaded file can bypass.
     const int32 Edge = FMath::Clamp(ShadowResolution, 128, 4096);
@@ -622,10 +569,6 @@ bool APlanetAtmosphereActor::PrepareShadowTarget()
         UE_LOG(LogCloudAtmosphere, Log, TEXT("%s: Shadow Target set to %dx%d x %d RGBA16F."),
             *GetName(), Edge, Edge, DesiredSlices);
     }
-
-    bWarnedShadowTarget = false;
-
-    return true;
 }
 
 void APlanetAtmosphereActor::PrepareTransmittanceTable()
@@ -703,17 +646,14 @@ bool APlanetAtmosphereActor::FillShadowRequest(
 {
     UWorld* World = GetWorld();
 
-    if (!World || !PrepareShadowTarget())
+    if (!World || !FlowTarget)
     {
         return false;
     }
 
-    if (!Simulation.Config || !Simulation.Config->FlowTarget)
-    {
-        return false;
-    }
+    PrepareShadowTarget();
 
-    Params.FlowResource = Simulation.Config->FlowTarget->GameThread_GetRenderTargetResource();
+    Params.FlowResource = FlowTarget->GameThread_GetRenderTargetResource();
     Params.MapResource = ShadowTarget->GameThread_GetRenderTargetResource();
 
     if (!Params.FlowResource || !Params.MapResource)
@@ -829,7 +769,7 @@ bool APlanetAtmosphereActor::FillShadowRequest(
 
     Params.PlanetRadius = PlanetRadius;
     Params.HeightScale = ActiveHeightScale();
-    Params.Time = static_cast<float>(GetFieldTime());
+    Params.Time = static_cast<float>(FieldClock.Time);
 
     // -- Extinction ---------------------------------------------------------
 
@@ -880,7 +820,7 @@ void APlanetAtmosphereActor::RequestShadowBake(
     }
 
     Params.bDeepDeck = !bTerrestrial();
-    Params.Field = PackCloudField(*this, GetFieldTime());
+    Params.Field = PackCloudField(*this);
 
     if (Sim->RequestShadowBake(Params))
     {
@@ -936,7 +876,7 @@ bool APlanetAtmosphereActor::FillMarchParams(
     Out.LightColor = ToVector3(Light);
     Out.PlanetRadius = PlanetRadius;
     Out.HeightScale = ActiveHeightScale();
-    Out.Time = static_cast<float>(GetFieldTime());
+    Out.Time = static_cast<float>(FieldClock.Time);
 
     // -- Field ----------------------------------------------------------------
 
@@ -944,7 +884,7 @@ bool APlanetAtmosphereActor::FillMarchParams(
         bTerrestrial() ? TerrestrialShape : GasGiantShape,
         bTerrestrial() ? TerrestrialLift : GasGiantLift);
 
-    Out.Field = PackCloudField(*this, GetFieldTime());
+    Out.Field = PackCloudField(*this);
 
     const FTerrestrialCloudMaterialParams Material = ResolveCloudMaterial(ActiveCloudMaterial());
 
@@ -1028,8 +968,7 @@ bool APlanetAtmosphereActor::FillMarchParams(
 
     bWarnedBlueNoise = bWarnedBlueNoise && !Noise;
 
-    Out.FlowResource = (Simulation.Config && Simulation.Config->FlowTarget)
-        ? Simulation.Config->FlowTarget->GameThread_GetRenderTargetResource() : nullptr;
+    Out.FlowResource = FlowTarget ? FlowTarget->GameThread_GetRenderTargetResource() : nullptr;
     Out.ShadowResource = ShadowTarget ? ShadowTarget->GameThread_GetRenderTargetResource() : nullptr;
     Out.TransmittanceResource = TransmittanceTable ? TransmittanceTable->GameThread_GetRenderTargetResource() : nullptr;
     Out.StructureResource = ActiveStructureVolume() ? ActiveStructureVolume()->GetResource() : nullptr;
@@ -1095,36 +1034,116 @@ void APlanetAtmosphereActor::ReleaseViewExtension()
 // Flow simulation
 // --------------------------------------------------------------------------
 
-void APlanetAtmosphereActor::StartFlowSimulation()
+UFlowSimConfig* APlanetAtmosphereActor::ActiveSimConfig() const
 {
-    if (!Simulation.Config)
+    return bTerrestrial() ? Simulation.TerrestrialConfig.Get() : Simulation.GasGiantConfig.Get();
+}
+
+void APlanetAtmosphereActor::ClaimSimulation(const FVector& PlanetCenter, float PlanetRadius)
+{
+    UWorld* World = GetWorld();
+    UFlowSimSubsystem* Sim = World ? World->GetSubsystem<UFlowSimSubsystem>() : nullptr;
+
+    if (!Sim)
     {
-        UE_LOG(LogCloudAtmosphere, Warning,
-            TEXT("PlanetAtmosphereActor: no SimConfig. The clouds will render against an "
-                "unbound flow field."));
         return;
     }
 
-    UWorld* World = GetWorld();
-    if (!World) return;
+    UFlowSimConfig* Config = ActiveSimConfig();
 
-    UFlowSimSubsystem* Sim = World->GetSubsystem<UFlowSimSubsystem>();
-    if (!Sim) return;
-
-    Sim->StartSimulation(Simulation.Config);
-    bStartedSimulation = true;
-}
-
-double APlanetAtmosphereActor::GetFieldTime() const
-{
-    if (const UWorld* World = GetWorld())
+    if (!Config && Simulation.bClaimSimulation && !bWarnedSimConfig)
     {
-        if (const UFlowSimSubsystem* Sim = World->GetSubsystem<UFlowSimSubsystem>())
+        bWarnedSimConfig = true;
+
+        UE_LOG(LogCloudAtmosphere, Warning,
+            TEXT("%s: no sim config for the %s model. The clouds draw the kept field, or none."),
+            *GetName(), bTerrestrial() ? TEXT("terrestrial") : TEXT("gas giant"));
+    }
+
+    bWarnedSimConfig = bWarnedSimConfig && !Config;
+
+    if (!KeptFlow)
+    {
+        KeptFlow = NewObject<UTextureRenderTarget2DArray>(this, TEXT("KeptFlow"), RF_Transient);
+    }
+
+    if (Simulation.bClaimSimulation && Config)
+    {
+        // NEAREST BY THE CAMERA'S HEIGHT ABOVE THE PLANET, from the view rendered
+        // last frame, which covers editor viewports too. No bid without a view:
+        // every planet would tie, and the first frame would hand the sim to an
+        // arbitrary one.
+        if (World->ViewLocationsRenderedLastFrame.Num() > 0)
         {
-            return Sim->GetDisplayTime();
+            const FVector Camera = World->ViewLocationsRenderedLastFrame[0];
+            const double Height = FMath::Max(FVector::Dist(Camera, PlanetCenter) - PlanetRadius, 0.0);
+
+            Sim->ClaimSimulation(this, Config, Height, KeptFlow);
+            bClaimedSimulation = true;
         }
     }
-    return 0.0;
+    else
+    {
+        ReleaseSimulation(true);
+    }
+
+    // -- What this frame draws ------------------------------------------------
+    //
+    // Ownership was settled as the frame started, before any actor ticked, so
+    // this frame's march and bake read one field whichever it is.
+
+    const double Now = World->GetTimeSeconds();
+
+    if (Sim->IsOwner(this) && Sim->GetFlowTarget())
+    {
+        FlowTarget = Sim->GetFlowTarget();
+        SimDebugView = Sim->GetDebugTarget();
+
+        FieldClock.Time = Sim->GetDisplayTime();
+        FieldClock.SpinTime = FieldClock.Time;
+        FieldClock.Config = Sim->GetConfig();
+        return;
+    }
+
+    // A KEPT FIELD HOLDS STILL AND TURNS WITH ITS PLANET: its noise clocks stay
+    // where it was copied, and its spin runs on at the sim's rate. The clock
+    // comes from the subsystem, recorded with the copy.
+    double KeptTime = 0.0;
+    UFlowSimConfig* KeptConfig = nullptr;
+
+    if (Sim->TakeKeptClock(this, KeptTime, KeptConfig))
+    {
+        KeptClock.Time = KeptTime;
+        KeptClock.SpinTime = KeptTime;
+        KeptClock.Config = KeptConfig;
+        KeptAt = Now;
+    }
+    else if (KeptFlow->Slices < 4)
+    {
+        // Never driven: a cleared atlas at the active config's size, which
+        // reads as no weather.
+        const int32 Resolution = Config ? Config->GridResolution : 64;
+        const int32 KeptLayers = Config ? FMath::Clamp(Config->LayerCount, 1, 8) : 2;
+        const FIntPoint Atlas = FlowSimShader::AtlasSize(FlowSimShader::GridResolution(Resolution));
+
+        KeptFlow->OverrideFormat = PF_FloatRGBA;
+        KeptFlow->ClearColor = FLinearColor::Black;
+        KeptFlow->Init(Atlas.X, Atlas.Y, 4 * KeptLayers, PF_FloatRGBA);
+        KeptFlow->UpdateResourceImmediate(true);
+
+        KeptClock = FAtmosphereFieldClock();
+        KeptClock.Config = Config;
+        KeptAt = Now;
+    }
+
+    const UFlowSimConfig* SpinConfig = KeptClock.Config.Get();
+    const double SpinRate = SpinConfig ? (double)FMath::Max(SpinConfig->SimSpeed, 0.0f) : 0.0;
+
+    FlowTarget = KeptFlow;
+    SimDebugView = nullptr;
+
+    FieldClock = KeptClock;
+    FieldClock.SpinTime = KeptClock.Time + (Now - KeptAt) * SpinRate;
 }
 
 // --------------------------------------------------------------------------
@@ -1199,6 +1218,13 @@ void APlanetAtmosphereActor::SetAtmosphereActive(bool bActive)
     if (ViewExtension && !bActive)
     {
         ViewExtension->SetEnabled(false);
+    }
+
+    // A parked planet gives up the sim, keeping its field; waking restarts the
+    // sim from its config's snapshot.
+    if (!bActive)
+    {
+        ReleaseSimulation(true);
     }
 
     if (SunLightComponent)

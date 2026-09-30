@@ -5,7 +5,8 @@
 // share every group's member list, but an actor carries one instance of each
 // group per model: a type change swaps the whole authored set rather than
 // reinterpreting one, and a terrestrial tune and a gas giant tune sit side by
-// side. Only the pipeline groups (Simulation, Raymarch) are one instance.
+// side. Only the pipeline groups (Simulation, Raymarch) are one instance, and
+// Simulation holds a config per model.
 //
 // RATIOS, NOT ABSOLUTES, WHEREVER ONE VALUE IS BOUNDED BY ANOTHER. A parameter
 // expressed against the thing that constrains it stays valid when that thing is
@@ -32,23 +33,28 @@ enum class EPlanetAtmosphereType : uint8
 	GasGiant
 };
 
-/** The flow simulation the cloud field reads as its weather map. ONE SIM PER
- *  WORLD, so it sits on the environment rather than on either model -- a
- *  per-model copy would be a second config the one subsystem cannot honour. */
+/** The flow simulation the cloud field reads as its weather map, a config per
+ *  model. ONE SIM PER WORLD: the claiming planet nearest the camera drives it
+ *  with its active model's config, restored from that config's InitialState,
+ *  and the others draw the field they kept when they last drove it. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FAtmosphereSimulationParams
 {
 	GENERATED_BODY()
 
-	/** Owns the flow render target the march and the bakes sample and the settings the sim
-	 *  subsystem steps against. */
+	/** The terrestrial model's sim: its settings and, as InitialState, the
+	 *  snapshot a swap to the model restores. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	TObjectPtr<UFlowSimConfig> Config = nullptr;
+	TObjectPtr<UFlowSimConfig> TerrestrialConfig = nullptr;
 
-	/** Start the sim on BeginPlay. Off when another actor already drives it: the
-	 *  subsystem is per-world, so two planets starting it fight. */
+	/** The gas giant's. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	bool bStartOnBeginPlay = true;
+	TObjectPtr<UFlowSimConfig> GasGiantConfig = nullptr;
+
+	/** Bid for the sim every tick. Off, the planet never drives it and draws
+	 *  the field it last kept, or none. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	bool bClaimSimulation = true;
 };
 
 /** Cloud and deck shadows falling on whatever opaque geometry the depth buffer
@@ -95,7 +101,8 @@ struct CLOUDATMOSPHERE_API FAtmosphereSurfaceShadowParams
 	 *  held inside the one outside it. They size the map the clouds are lit
 	 *  through as well as the one surfaces read. Narrower is sharper near the
 	 *  camera and hands over to the coarser level sooner; wider spans lose
-	 *  resolution. Zero collapses a level. */
+	 *  resolution. Zero collapses a level. Only the near field carries the
+	 *  detail layer's grain; match Y to the detail layer's FadeFar. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	FVector2D CascadeRadii = FVector2D(0.6, 0.3);
 
@@ -435,16 +442,16 @@ struct CLOUDATMOSPHERE_API FTerrestrialDetailLayerParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-2.0", ClampMax = "4.0"))
 	float MipBias = 1.0f;
 
-	/** Where the grain starts fading to the mean, and over how far, in noise
-	 *  features from the camera: multiples of 1 / Scale planet radii, since the
-	 *  distance a layer starts aliasing at goes as its feature size. The fetch is
-	 *  skipped beyond. */
+	/** Where the grain starts fading to the mean, and where it reaches it, in
+	 *  planet radii from the camera: the unit of the shadow cascades'
+	 *  CascadeRadii. The fetch is skipped beyond FadeFar. Only the near shadow
+	 *  cascade carries the grain, so keep CascadeRadii.Y at or past FadeFar for
+	 *  the shadows to show it wherever the clouds do. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float FadeStart = 0.0f;
+	float FadeNear = 0.0f;
 
-	/** Noise features past FadeStart over which the grain reaches its mean. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float FadeLength = 9.0f;
+	float FadeFar = 0.3f;
 
 	/** The noise's mean, what the layer settles to as it fades. 0.5 for an
 	 *  equalized volume. PITFALL: cloud thickening or thinning across the fade

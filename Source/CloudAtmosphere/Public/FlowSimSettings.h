@@ -5,9 +5,9 @@
 #include "FlowSimTypes.h"
 #include "FlowSimSettings.generated.h"
 
-/** Project Settings -> Plugins -> Flow Sim: starts a sim in editor worlds with
- *  nothing authored, so the debug view runs without a PIE round trip. In game
- *  an atmosphere actor starts its own (bStartOnBeginPlay). */
+/** Project Settings -> Plugins -> Flow Sim: starts a sim in worlds no
+ *  atmosphere claims it in, so the debug view runs without one. An atmosphere
+ *  that claims the sim replaces this config with its own. */
 UCLASS(config = Game, defaultconfig, meta = (DisplayName = "Flow Sim"))
 class CLOUDATMOSPHERE_API UFlowSimSettings : public UDeveloperSettings
 {
@@ -20,7 +20,7 @@ public:
 
 	/** Config started automatically, and the one the console commands act on
 	 *  when given no argument. Soft, so cooks that never touch the sim do not
-	 *  load it and its targets. */
+	 *  load it and its snapshot. */
 	UPROPERTY(config, EditAnywhere, Category = "Flow Sim", meta = (AllowedClasses = "/Script/CloudAtmosphere.FlowSimConfig"))
 	TSoftObjectPtr<UFlowSimConfig> DefaultConfig;
 

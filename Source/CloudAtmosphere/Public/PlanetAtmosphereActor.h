@@ -10,8 +10,10 @@
 // TWO CLOUD MODELS SHARE ONE FIELD AND ONE MARCH, run as compute passes with a
 // temporal resolve (FAtmosphereViewExtension), the sim as their weather map: a
 // terrestrial slab over a surface, or a gas giant's deep deck over a saturated
-// core. Each model has its own instance of every parameter group, with only the
-// pipeline and the sim shared between them; see AtmosphereParams.h.
+// core. Each model has its own instance of every parameter group and its own
+// sim config, with only the pipeline shared between them; see
+// AtmosphereParams.h. The world's one sim is driven by the nearest claiming
+// planet; the others draw the field they kept (UFlowSimSubsystem).
 
 #pragma once
 
@@ -30,8 +32,27 @@ class UTexture2D;
 class UTextureRenderTarget2D;
 class UTextureRenderTarget2DArray;
 class FAtmosphereViewExtension;
+class UFlowSimConfig;
 struct FAtmosphereMarchParams;
 struct FTerrestrialShadowParams;
+
+/** The clocks a planet's field is drawn at: the sim's while the planet drives
+ *  it, the kept field's otherwise. SIM TIME, NOT WORLD TIME: the field is
+ *  coherent against the sim's own clock, which pauses, steps by hand and
+ *  restores from snapshots. Double; the field's clocks reduce from it before
+ *  narrowing. */
+struct FAtmosphereFieldClock
+{
+    /** Sim time of the field shown, which the noise's drift and phases follow. */
+    double Time = 0.0;
+
+    /** Sim time the planet's spin turns the field by. Runs on while the field
+     *  is kept, so a kept field still turns with its planet. */
+    double SpinTime = 0.0;
+
+    /** The config the field was simulated under, whose noise clocks it reads. */
+    TWeakObjectPtr<const UFlowSimConfig> Config;
+};
 
 /** Renders a volumetric atmosphere and cloud layer. A scene view extension runs
  *  the march, its temporal resolve and the composite as compute passes, fed a
@@ -70,18 +91,29 @@ public:
     // the march reads. Set once for a performance tier, not tuned for looks. The
     // terrestrial cascade extents are look, and live with its surface shadows.
 
-    /** Destination for the deck shadow bake, in the light's frame: a cascade of
-     *  slices, all one resolution, each covering a smaller radius. ASSIGNED, NOT
-     *  CREATED, matching FlowTarget, so an asset can be opened beside the planet
-     *  and watched while the light moves. ONE PER ATMOSPHERE: a target another
-     *  atmosphere already bakes into is refused with a warning. Size, format,
-     *  clear colour and UAV support are forced on assignment. Unset, the
-     *  atmosphere does not draw. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
+    /** The deck shadow bake, in the light's frame: a cascade of slices, all one
+     *  resolution, each covering a smaller radius. Created on first use, one per
+     *  atmosphere, and sized by ShadowResolution. Open it to watch the bake. */
+    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
     TObjectPtr<UTextureRenderTarget2DArray> ShadowTarget;
 
-    /** Edge of each cascade slice, in texels. The target is resized to match, so
-     *  this rather than the asset's own size is the handle. EVERY LEVEL SHARES
+    /** The flow atlas this planet draws: the sim's while it drives the sim,
+     *  KeptFlow while another planet does. */
+    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
+    TObjectPtr<UTextureRenderTarget2DArray> FlowTarget;
+
+    /** The field as this planet last drove it, copied when another planet took
+     *  the sim; clear until it first drives it. */
+    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
+    TObjectPtr<UTextureRenderTarget2DArray> KeptFlow;
+
+    /** The sim's debug view while this planet drives the sim and the config's
+     *  bDebugView is on. */
+    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
+    TObjectPtr<UTextureRenderTarget2D> SimDebugView;
+
+    /** Edge of each cascade slice, in texels; the shadow target is sized to
+     *  it. EVERY LEVEL SHARES
      *  IT and the world scale falls out of the extents, so one number moves the
      *  coarse disc slice and the fine detail slice together. Square, because the
      *  map has one extent for both axes.
@@ -156,8 +188,8 @@ public:
      *  march: a view extension is not a primitive, so hiding the actor does not
      *  stop it, and a stopped tick leaves it drawing its last frame. Parked
      *  planets must call this with false, or every pooled atmosphere keeps
-     *  tinting the screen and lighting the scene. Waking rebakes every shadow
-     *  level. */
+     *  tinting the screen and lighting the scene. Parking gives up the sim,
+     *  keeping the field; waking rebakes every shadow level. */
     void SetAtmosphereActive(bool bActive);
 
     /** Aim the light and the march at the star: sets the actor's relative
@@ -294,6 +326,15 @@ public:
     float GasGiantCloudSlope = 60.0f;
 
     // --- The active model's groups ---
+
+    /** The sim config the active model bids with. */
+    UFlowSimConfig* ActiveSimConfig() const;
+
+    /** The clocks this frame's field is drawn at. */
+    const FAtmosphereFieldClock& GetFieldClock() const
+    {
+        return FieldClock;
+    }
 
     const FTerrestrialPlanetParams& ActivePlanet() const
     {
@@ -461,9 +502,16 @@ private:
     /** False while parked by SetAtmosphereActive. */
     bool bAtmosphereActive = true;
 
-    /** True once this actor has asked the subsystem to start. Cleared on
-     *  teardown so a pooled planet does not leave the sim running. */
-    bool bStartedSimulation = false;
+    /** True while this actor bids for the sim, so it releases the sim when it
+     *  stops or goes. */
+    bool bClaimedSimulation = false;
+
+    FAtmosphereFieldClock FieldClock;
+
+    /** The clock KeptFlow was copied at, and the world time then: what a kept
+     *  field is drawn at. */
+    FAtmosphereFieldClock KeptClock;
+    double KeptAt = 0.0;
 
     /** The frame the last shadow bake was requested on: one request per frame
      *  however many paths push parameters. */
@@ -483,8 +531,14 @@ private:
      *  hold. */
     void DestroyLegacyChildActors();
 
-    /** Stops the sim if this actor started it. */
-    void StopFlowSimulation();
+    /** Withdraws this actor's bid, stopping the sim if it drives it;
+     *  bKeepField keeps its field first. */
+    void ReleaseSimulation(bool bKeepField);
+
+    /** Bids for the sim with the active model's config, and picks what this
+     *  frame draws: the sim's flow and clock while this planet drives it, the
+     *  kept ones otherwise. */
+    void ClaimSimulation(const FVector& PlanetCenter, float PlanetRadius);
 
     /** Runs the march, its temporal resolve and the composite as compute
      *  passes for this world's views. Created on first use, released on the
@@ -528,18 +582,10 @@ private:
      *  against, and the light and time the next bake reprojects from. */
     void CommitShadowBake(uint32 LevelMask, const FVector3f& LightDir, const FVector3f& CameraLocal);
 
-    /** Forces the assigned shadow target to RGBA16F with UAV support, cleared
-     *  to the no-deck sentinel, reinitialising only on a mismatch. Returns false
-     *  when nothing is usable or another atmosphere is baking into the target,
-     *  having logged the reason at most once per state. */
-    bool PrepareShadowTarget();
-
-    /** Suppresses the per-tick repeat of the shadow target complaint. Cleared
-     *  when a usable target appears, so a fixed asset logs its recovery. */
-    bool bWarnedShadowTarget = false;
-
-    /** The same, for a target another atmosphere is baking into. */
-    bool bWarnedSharedShadowTarget = false;
+    /** Creates the shadow target if absent and forces it to RGBA16F with UAV
+     *  support at ShadowResolution, cleared to the no-deck sentinel,
+     *  reinitialising only on a mismatch. */
+    void PrepareShadowTarget();
 
     /** The next cascade in the bake rotation, and the camera each level was
      *  last baked around -- what the march reads that level against. */
@@ -565,15 +611,8 @@ private:
      *  clamp addressing and UAV support. */
     void PrepareTransmittanceTable();
 
-    /** Starts the sim subsystem against the configured sim. */
-    void StartFlowSimulation();
-
-    /** Sim time of the state the field shows, or 0 when the sim is not running. NOT
-     *  WORLD TIME: the field is coherent against the sim's own clock, and the two
-     *  diverge the moment the sim pauses, is stepped by hand or is restored from
-     *  a snapshot -- after which the warp would advect a field that has not
-     *  moved. Double; the field's clocks reduce from it before narrowing. */
-    double GetFieldTime() const;
+    /** Warns once when the active model has no sim config. */
+    bool bWarnedSimConfig = false;
 
     /** Syncs the directional light's rotation, colour and intensity from the
      *  actor's rotation and the LightColor property. */

@@ -9,6 +9,8 @@
 
 class FFlowSimulation;
 class UFlowSnapshot;
+class UTextureRenderTarget2D;
+class UTextureRenderTarget2DArray;
 class UWorld;
 
 /** Game-thread driver for the flow sim.
@@ -24,6 +26,14 @@ class UWorld;
  *  THE CONFIG IS RE-READ EVERY TICK, so every value takes effect on the next
  *  frame and the asset can be tuned live beside the debug target. Only the grid
  *  dimensions are latched; changing those reallocates and re-seeds.
+ *
+ *  ONE SIM, MANY PLANETS. Atmospheres claim the sim every tick with their
+ *  active config; the nearest drives it, and the others draw the copy of the
+ *  field they kept when they last did. Planets are assumed far enough apart
+ *  that only one on screen needs live weather.
+ *
+ *  THE RENDER TARGETS ARE THIS SUBSYSTEM'S, created at run time and sized to
+ *  the running config's grid, so no asset has to match the sim.
  *
  *  PITFALL: BlueprintType is load-bearing. K2Node_GetSubsystem only offers
  *  classes marked with it, so without it the "Get Flow Sim Subsystem" node
@@ -61,6 +71,39 @@ public:
 	 *  ONE MAP PER PLANET, NOT PER VIEW: it is baked once a frame, so a second
 	 *  viewport shares the first's camera-derived layer fades. */
 	bool RequestShadowBake(const FTerrestrialShadowParams& InParams);
+
+	// -- Ownership ----------------------------------------------------------
+
+	/** Bids for the sim this frame with the claimant's active config. Called by
+	 *  each claiming atmosphere every tick; the bids are resolved as the next
+	 *  frame starts. The nearest claimant drives the sim, and keeps it until
+	 *  another is nearer by a margin. A new owner, or the owner's config
+	 *  changing, restarts the sim from that config's InitialState, after the
+	 *  outgoing owner's field is copied into the Keep target it bid with.
+	 *
+	 *  AN OWNER'S CONFIG WINS: FlowSim.Start is overridden on the next frame
+	 *  while an atmosphere claims the sim. */
+	void ClaimSimulation(const UObject* Claimant, UFlowSimConfig* InConfig, double Distance,
+		UTextureRenderTarget2DArray* Keep);
+
+	/** Gives up the sim if Claimant drives it, stopping the sim until the next
+	 *  bid; bKeepField copies its field into its Keep target first. */
+	void ReleaseClaim(const UObject* Claimant, bool bKeepField);
+
+	bool IsOwner(const UObject* Claimant) const { return Claimant && Owner.Get() == Claimant; }
+
+	/** The atlas the sim writes and the field reads; null before the first
+	 *  frame the sim steps. */
+	UTextureRenderTarget2DArray* GetFlowTarget() const { return FlowTarget; }
+
+	/** The debug view, one texel per cell, while the config's bDebugView is on;
+	 *  null otherwise. */
+	UTextureRenderTarget2D* GetDebugTarget() const;
+
+	/** The clock a claimant's field was kept at, once, after the copy: the
+	 *  display time and the config it was simulated under. False when nothing
+	 *  was kept for it since the last call. */
+	bool TakeKeptClock(const UObject* Claimant, double& OutTime, UFlowSimConfig*& OutConfig);
 
 	// -- Control ------------------------------------------------------------
 
@@ -145,8 +188,50 @@ private:
 	 *  that has no actor ticks. */
 	void OnPreActorTick(UWorld* InWorld, ELevelTick TickType, float DeltaTime);
 
-	/** Auto-start on first use, then StepSimulation. Once per frame. */
+	/** Resolves the claims, auto-starts if nobody claims, then StepSimulation.
+	 *  Once per frame. */
 	void Advance(float DeltaTime);
+
+	/** One atmosphere's bid; see ClaimSimulation. */
+	struct FSimClaim
+	{
+		TWeakObjectPtr<const UObject> Claimant;
+		TWeakObjectPtr<UFlowSimConfig> Config;
+		double Distance = 0.0;
+		TWeakObjectPtr<UTextureRenderTarget2DArray> Keep;
+	};
+
+	/** The bids made since the last frame started. */
+	TArray<FSimClaim> Claims;
+
+	/** The atmosphere driving the sim, and where its field is kept when it
+	 *  stops. */
+	TWeakObjectPtr<const UObject> Owner;
+	TWeakObjectPtr<UTextureRenderTarget2DArray> OwnerKeep;
+
+	/** True once any atmosphere has claimed the sim: the auto-start is for
+	 *  worlds with none. */
+	bool bEverClaimed = false;
+
+	/** Frames advanced, so the auto-start waits a frame for the first bids. */
+	int32 FramesAdvanced = 0;
+
+	/** Picks this frame's owner from the last frame's bids, keeps the outgoing
+	 *  owner's field and restarts the sim on a change of owner or config. */
+	void ResolveClaims();
+
+	/** Copies the flow atlas into Keep, sizing Keep to match, and records the
+	 *  clock the copy holds for KeptFor. */
+	void KeepFlow(UTextureRenderTarget2DArray* Keep, const UObject* KeptFor);
+
+	/** Kept clocks not yet taken: the display time and the config. */
+	struct FKeptClock
+	{
+		double Time = 0.0;
+		TWeakObjectPtr<UFlowSimConfig> Config;
+	};
+
+	TMap<TWeakObjectPtr<const UObject>, FKeptClock> KeptClocks;
 
 	/** The sim's half of the frame. Every early-out here is a reason the field
 	 *  should not advance, which is why the bake is not inside it. */
@@ -169,12 +254,20 @@ private:
 	 *  already logged why. */
 	bool BuildParams(FFlowSimParams& OutParams, float Step) const;
 
-	/** Checks the render targets against the grid, reconfiguring them when
-	 *  bAutoResizeTargets is set. Returns false if they remain unusable. */
-	bool PrepareTargets() const;
+	/** Creates the render targets on first use and sizes them to the grid.
+	 *  Returns false without a config. */
+	bool PrepareTargets();
 
 	UPROPERTY(Transient)
 	TObjectPtr<UFlowSimConfig> Config;
+
+	/** The cube atlas the sim resamples its output onto, RGBA16F with
+	 *  4 * LayerCount slices; see FlowField.ush. */
+	UPROPERTY(Transient)
+	TObjectPtr<UTextureRenderTarget2DArray> FlowTarget;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UTextureRenderTarget2D> DebugTarget;
 
 	FFlowSimulation* Simulation = nullptr;
 
@@ -184,8 +277,9 @@ private:
 	bool QueueInitialState();
 
 	/** Consults UFlowSimSettings and starts if this world type wants it. Run
-	 *  from the first Tick rather than Initialize: the world is not reliably ready
-	 *  to resolve a soft object reference that early. */
+	 *  from the second frame rather than Initialize: the world is not reliably
+	 *  ready to resolve a soft object reference that early, and the first
+	 *  frame's atmospheres have bid by then. */
 	void TryAutoStart();
 
 	/** Logs any setting that is authored but currently has no effect. An inert

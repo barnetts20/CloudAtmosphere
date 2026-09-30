@@ -7,6 +7,8 @@
 #include "FlowSnapshot.h"
 #include "RHIGPUReadback.h"
 #include "RenderGraphBuilder.h"
+#include "RenderGraphUtils.h"
+#include "TextureResource.h"
 #include "Engine/VolumeTexture.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/TextureRenderTarget2DArray.h"
@@ -153,17 +155,11 @@ static FAutoConsoleCommandWithWorldAndArgs GFlowSimStepCmd(
 
 static FAutoConsoleCommandWithWorldAndArgs GFlowSimSaveCmd(
 	TEXT("FlowSim.Save"),
-	TEXT("Capture the live state into a FlowSnapshot asset. Argument is the ")
-	TEXT("asset path. Blocks on the GPU; an authoring operation."),
+	TEXT("Capture the live state into a FlowSnapshot asset: the asset path given, ")
+	TEXT("or the running config's InitialState. Blocks on the GPU; an authoring operation."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
 		[](const TArray<FString>& Args, UWorld* World)
 		{
-			if (Args.Num() == 0)
-			{
-				UE_LOG(LogFlowSim, Error, TEXT("FlowSim.Save needs a snapshot asset path."));
-				return;
-			}
-
 			UFlowSimSubsystem* Sub = FindSubsystem(World);
 
 			if (!Sub)
@@ -171,14 +167,32 @@ static FAutoConsoleCommandWithWorldAndArgs GFlowSimSaveCmd(
 				return;
 			}
 
-			UFlowSnapshot* Target = LoadObject<UFlowSnapshot>(nullptr, *Args[0]);
+			UFlowSnapshot* Target = nullptr;
 
-			if (!Target)
+			if (Args.Num() > 0)
 			{
-				UE_LOG(LogFlowSim, Error,
-					TEXT("No FlowSnapshot at '%s'. Create the asset first, then save into it."),
-					*Args[0]);
-				return;
+				Target = LoadObject<UFlowSnapshot>(nullptr, *Args[0]);
+
+				if (!Target)
+				{
+					UE_LOG(LogFlowSim, Error,
+						TEXT("No FlowSnapshot at '%s'. Create the asset first, then save into it."),
+						*Args[0]);
+					return;
+				}
+			}
+			else
+			{
+				const UFlowSimConfig* Running = Sub->GetConfig();
+				Target = Running ? Running->InitialState.Get() : nullptr;
+
+				if (!Target)
+				{
+					UE_LOG(LogFlowSim, Error,
+						TEXT("The running config has no InitialState. Create a FlowSnapshot asset, ")
+						TEXT("bind it as the config's InitialState, then save into it."));
+					return;
+				}
 			}
 
 			Sub->SaveSnapshot(Target);
@@ -1137,7 +1151,7 @@ void UFlowSimSubsystem::StepOnce(int32 NumSteps)
 	PendingManualSteps += FMath::Max(NumSteps, 1);
 }
 
-bool UFlowSimSubsystem::PrepareTargets() const
+bool UFlowSimSubsystem::PrepareTargets()
 {
 	if (!Config)
 	{
@@ -1150,73 +1164,50 @@ bool UFlowSimSubsystem::PrepareTargets() const
 	// The cube atlas the sim resamples its output onto; see FlowField.ush.
 	const FIntPoint Atlas = FlowSimShader::AtlasSize(FlowSimShader::GridResolution(Config->GridResolution));
 
-	const int32 W = Atlas.X;
-	const int32 H = Atlas.Y;
-
 	// Flow, weather, noise phase A and noise phase B slices, one of each per
 	// layer.
 	const int32 Slices = 4 * LayerCountOf(*Config);
 
-	// -- Flow target --------------------------------------------------------
-
-	UTextureRenderTarget2DArray* Flow = Config->FlowTarget;
-
-	if (!Flow)
+	if (!FlowTarget)
 	{
-		UE_LOG(LogFlowSim, Error,
-			TEXT("No FlowTarget set. Create a Texture Render Target 2D Array asset, ")
-			TEXT("set it here, and the sim will size it automatically."));
-		return false;
+		FlowTarget = NewObject<UTextureRenderTarget2DArray>(this, TEXT("FlowTarget"), RF_Transient);
 	}
 
-	const bool bFlowMismatch =
-		Flow->SizeX != W ||
-		Flow->SizeY != H ||
-		Flow->Slices != Slices ||
-		Flow->OverrideFormat != PF_FloatRGBA ||
-		!Flow->bCanCreateUAV;
+	UTextureRenderTarget2DArray* Flow = FlowTarget;
 
-	if (bFlowMismatch)
+	if (Flow->SizeX != Atlas.X || Flow->SizeY != Atlas.Y || Flow->Slices != Slices
+		|| Flow->OverrideFormat != PF_FloatRGBA || !Flow->bCanCreateUAV)
 	{
-		if (!Config->bAutoResizeTargets)
-		{
-			UE_LOG(LogFlowSim, Error,
-				TEXT("FlowTarget is %dx%dx%d, needs %dx%dx%d RGBA16F with bCanCreateUAV. ")
-				TEXT("Enable bAutoResizeTargets or fix the asset."),
-				Flow->SizeX, Flow->SizeY, Flow->Slices, W, H, Slices);
-			return false;
-		}
-
 		// bCanCreateUAV must be set BEFORE the resource is created, or the
 		// texture comes back without UAV support and every dispatch that writes
 		// it silently does nothing.
 		Flow->bCanCreateUAV = true;
 		Flow->OverrideFormat = PF_FloatRGBA;
 		Flow->ClearColor = FLinearColor::Black;
-		Flow->Init(W, H, Slices, PF_FloatRGBA);
+		Flow->Init(Atlas.X, Atlas.Y, Slices, PF_FloatRGBA);
 		Flow->UpdateResourceImmediate(true);
 
-		UE_LOG(LogFlowSim, Log, TEXT("Resized FlowTarget to %dx%d x %d slices."), W, H, Slices);
+		UE_LOG(LogFlowSim, Log, TEXT("Flow target set to %dx%d x %d slices."), Atlas.X, Atlas.Y, Slices);
 	}
 
-	// -- Debug target -------------------------------------------------------
-
-	if (UTextureRenderTarget2D* Debug = Config->DebugTarget)
+	if (!Config->bDebugView)
 	{
-		const bool bDebugMismatch =
-			Debug->SizeX != GridW ||
-			Debug->SizeY != GridH ||
-			!Debug->bCanCreateUAV;
+		return true;
+	}
 
-		if (bDebugMismatch && Config->bAutoResizeTargets)
-		{
-			Debug->bCanCreateUAV = true;
-			Debug->ClearColor = FLinearColor::Black;
-			Debug->InitCustomFormat(GridW, GridH, PF_FloatRGBA, /*bForceLinearGamma*/ true);
-			Debug->UpdateResourceImmediate(true);
+	if (!DebugTarget)
+	{
+		DebugTarget = NewObject<UTextureRenderTarget2D>(this, TEXT("DebugTarget"), RF_Transient);
+	}
 
-			UE_LOG(LogFlowSim, Log, TEXT("Resized DebugTarget to %dx%d."), GridW, GridH);
-		}
+	UTextureRenderTarget2D* Debug = DebugTarget;
+
+	if (Debug->SizeX != GridW || Debug->SizeY != GridH || !Debug->bCanCreateUAV)
+	{
+		Debug->bCanCreateUAV = true;
+		Debug->ClearColor = FLinearColor::Black;
+		Debug->InitCustomFormat(GridW, GridH, PF_FloatRGBA, /*bForceLinearGamma*/ true);
+		Debug->UpdateResourceImmediate(true);
 	}
 
 	return true;
@@ -1484,19 +1475,17 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		Out.ForcingResource = Config->ForcingVolume->GetResource();
 	}
 
-	if (Config->FlowTarget)
+	if (FlowTarget)
 	{
-		Out.FlowResource = Config->FlowTarget->GameThread_GetRenderTargetResource();
+		Out.FlowResource = FlowTarget->GameThread_GetRenderTargetResource();
 	}
 
-	// Only with UAV support, which the debug pass writes through;
-	// bAutoResizeTargets is what sets it.
-	if (Config->DebugTarget && Config->DebugTarget->bCanCreateUAV)
+	if (Config->bDebugView && DebugTarget)
 	{
-		if (FTextureRenderTargetResource* Res = Config->DebugTarget->GameThread_GetRenderTargetResource())
+		if (FTextureRenderTargetResource* Res = DebugTarget->GameThread_GetRenderTargetResource())
 		{
 			Out.DebugResource = Res;
-			Out.DebugSize = FIntPoint(Config->DebugTarget->SizeX, Config->DebugTarget->SizeY);
+			Out.DebugSize = FIntPoint(DebugTarget->SizeX, DebugTarget->SizeY);
 		}
 	}
 
@@ -1565,15 +1554,204 @@ void UFlowSimSubsystem::OnPreActorTick(UWorld* InWorld, ELevelTick TickType, flo
 
 void UFlowSimSubsystem::Advance(float DeltaTime)
 {
-	// On the first tick rather than in Initialize: resolving a soft reference
-	// during subsystem construction can run before the asset registry is usable.
-	if (!bTriedAutoStart)
+	ResolveClaims();
+
+	// On the second frame rather than in Initialize: resolving a soft reference
+	// during subsystem construction can run before the asset registry is
+	// usable, and the first frame's atmospheres have bid by then.
+	if (!bTriedAutoStart && ++FramesAdvanced > 1)
 	{
 		bTriedAutoStart = true;
-		TryAutoStart();
+
+		if (!bEverClaimed)
+		{
+			TryAutoStart();
+		}
 	}
 
 	StepSimulation(DeltaTime);
+}
+
+void UFlowSimSubsystem::ClaimSimulation(const UObject* Claimant, UFlowSimConfig* InConfig, double Distance,
+	UTextureRenderTarget2DArray* Keep)
+{
+	if (!Claimant || !InConfig)
+	{
+		return;
+	}
+
+	bEverClaimed = true;
+
+	FSimClaim& Bid = Claims.AddDefaulted_GetRef();
+	Bid.Claimant = Claimant;
+	Bid.Config = InConfig;
+	Bid.Distance = Distance;
+	Bid.Keep = Keep;
+}
+
+void UFlowSimSubsystem::ReleaseClaim(const UObject* Claimant, bool bKeepField)
+{
+	Claims.RemoveAll([Claimant](const FSimClaim& Bid) { return Bid.Claimant.Get() == Claimant; });
+
+	if (!IsOwner(Claimant))
+	{
+		return;
+	}
+
+	if (bKeepField)
+	{
+		KeepFlow(OwnerKeep.Get(), Claimant);
+	}
+
+	Owner.Reset();
+	OwnerKeep.Reset();
+	StopSimulation();
+}
+
+/** A challenger must be this much nearer than the owner to take the sim, so two
+ *  planets at about the same distance do not trade it every frame. */
+static constexpr double OwnerHandoverRatio = 0.8;
+
+void UFlowSimSubsystem::ResolveClaims()
+{
+	TArray<FSimClaim> Bids = MoveTemp(Claims);
+	Claims.Reset();
+
+	Bids.RemoveAll([](const FSimClaim& Bid) { return !Bid.Claimant.IsValid() || !Bid.Config.IsValid(); });
+
+	// NOBODY BID: the sim runs on as it is. An owner that went away is
+	// forgotten, and the next bid takes over.
+	if (Bids.Num() == 0)
+	{
+		if (!Owner.IsValid())
+		{
+			Owner.Reset();
+		}
+
+		return;
+	}
+
+	const FSimClaim* Current = Bids.FindByPredicate(
+		[this](const FSimClaim& Bid) { return Owner.IsValid() && Bid.Claimant == Owner; });
+
+	const FSimClaim* Nearest = &Bids[0];
+
+	for (const FSimClaim& Bid : Bids)
+	{
+		if (Bid.Distance < Nearest->Distance)
+		{
+			Nearest = &Bid;
+		}
+	}
+
+	const FSimClaim* Winner = (Current && Nearest->Distance >= Current->Distance * OwnerHandoverRatio)
+		? Current : Nearest;
+
+	const bool bNewOwner = !(Owner.IsValid() && Winner->Claimant == Owner);
+
+	// THE OUTGOING OWNER KEEPS ITS FIELD, copied before the restart below
+	// writes the next one. Render commands run in order, so the copy reads the
+	// frame it last drew.
+	if (bNewOwner && Owner.IsValid())
+	{
+		KeepFlow(OwnerKeep.Get(), Owner.Get());
+	}
+
+	Owner = Winner->Claimant;
+	OwnerKeep = Winner->Keep;
+
+	// A new owner starts from its config's snapshot, as does an owner whose
+	// config changed: a planet type swap.
+	if (bNewOwner || Config != Winner->Config.Get())
+	{
+		StartSimulation(Winner->Config.Get());
+	}
+}
+
+UTextureRenderTarget2D* UFlowSimSubsystem::GetDebugTarget() const
+{
+	return (Config && Config->bDebugView) ? DebugTarget.Get() : nullptr;
+}
+
+bool UFlowSimSubsystem::TakeKeptClock(const UObject* Claimant, double& OutTime, UFlowSimConfig*& OutConfig)
+{
+	FKeptClock Kept;
+
+	if (!KeptClocks.RemoveAndCopyValue(Claimant, Kept))
+	{
+		return false;
+	}
+
+	OutTime = Kept.Time;
+	OutConfig = Kept.Config.Get();
+	return true;
+}
+
+void UFlowSimSubsystem::KeepFlow(UTextureRenderTarget2DArray* Keep, const UObject* KeptFor)
+{
+	if (!Keep || !FlowTarget || !KeptFor)
+	{
+		return;
+	}
+
+	// THE CLOCK OF THE STATE COPIED, recorded here rather than by the planet:
+	// an owner that stopped bidding without releasing kept its own clock at
+	// its last tick, while the sim ran on.
+	for (auto It = KeptClocks.CreateIterator(); It; ++It)
+	{
+		if (!It.Key().IsValid())
+		{
+			It.RemoveCurrent();
+		}
+	}
+
+	FKeptClock& Kept = KeptClocks.FindOrAdd(TWeakObjectPtr<const UObject>(KeptFor));
+	Kept.Time = GetDisplayTime();
+	Kept.Config = Config;
+
+	const UTextureRenderTarget2DArray* Flow = FlowTarget;
+
+	if (Keep->SizeX != Flow->SizeX || Keep->SizeY != Flow->SizeY || Keep->Slices != Flow->Slices
+		|| Keep->OverrideFormat != PF_FloatRGBA)
+	{
+		Keep->OverrideFormat = PF_FloatRGBA;
+		Keep->ClearColor = FLinearColor::Black;
+		Keep->Init(Flow->SizeX, Flow->SizeY, Flow->Slices, PF_FloatRGBA);
+		Keep->UpdateResourceImmediate(true);
+	}
+
+	FTextureRenderTargetResource* Source = FlowTarget->GameThread_GetRenderTargetResource();
+	FTextureRenderTargetResource* Dest = Keep->GameThread_GetRenderTargetResource();
+	const int32 Slices = Flow->Slices;
+
+	if (!Source || !Dest)
+	{
+		return;
+	}
+
+	ENQUEUE_RENDER_COMMAND(FlowSimKeep)(
+		[Source, Dest, Slices](FRHICommandListImmediate& RHICmdList)
+		{
+			FTextureRHIRef SourceTexture = Source->GetRenderTargetTexture();
+			FTextureRHIRef DestTexture = Dest->GetRenderTargetTexture();
+
+			if (!SourceTexture.IsValid() || !DestTexture.IsValid())
+			{
+				return;
+			}
+
+			FRDGBuilder GraphBuilder(RHICmdList);
+
+			FRDGTextureRef From = GraphBuilder.RegisterExternalTexture(CreateRenderTarget(SourceTexture, TEXT("FlowSim.Flow")));
+			FRDGTextureRef To = GraphBuilder.RegisterExternalTexture(CreateRenderTarget(DestTexture, TEXT("FlowSim.Kept")));
+
+			FRHICopyTextureInfo CopyInfo;
+			CopyInfo.NumSlices = Slices;
+
+			AddCopyTexturePass(GraphBuilder, From, To, CopyInfo);
+
+			GraphBuilder.Execute();
+		});
 }
 
 void UFlowSimSubsystem::StepSimulation(float DeltaTime)

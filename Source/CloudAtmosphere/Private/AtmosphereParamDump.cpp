@@ -24,15 +24,17 @@
 // CloudAtmosphere.DumpParams [FileName]
 //
 // Writes the running sim config, the sim settings and every atmosphere actor
-// in the world to Saved/CloudAtmosphere as JSON. Each object carries its full
+// in the world to Saved/CloudAtmosphere as JSON; each actor records its active
+// model's sim config. Each object carries its full
 // Values and its Overrides: every member that differs from the C++ defaults,
 // with both values, so the tuned assets can be told apart from the class
 // defaults and read back as the source of new defaults and presets.
 //
 // CloudAtmosphere.LoadParams FileName [Sim|Atmospheres] [Pipeline]
 //
-// Reads a file in the same layout back into the running sim config and the
-// world's atmosphere actors. See AtmosphereLoad.
+// Reads a file in the same layout back into the world's atmosphere actors and
+// the active model's sim config of the one that ran the sim when dumped (else
+// the first), or into the running config when no atmosphere is loaded.
 
 DEFINE_LOG_CATEGORY_STATIC(LogAtmosphereDump, Log, All);
 
@@ -204,18 +206,21 @@ namespace AtmosphereDump
 		return Out;
 	}
 
-	TSharedRef<FJsonObject> DescribeActor(const APlanetAtmosphereActor& Actor, const UFlowSimConfig* Running)
+	TSharedRef<FJsonObject> DescribeActor(const APlanetAtmosphereActor& Actor, const UFlowSimSubsystem& Sub)
 	{
+		const UFlowSimConfig* Running = Sub.GetConfig();
+
 		// Against the native class defaults, the values the audit's class-default
 		// calls were made at, whatever Blueprint subclass the actor is.
 		const UClass* Native = APlanetAtmosphereActor::StaticClass();
-		const UFlowSimConfig* Own = Actor.Simulation.Config.Get();
+		const UFlowSimConfig* Own = Actor.ActiveSimConfig();
 
 		TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
 		Out->SetStringField(TEXT("Actor"), Actor.GetActorNameOrLabel());
 		Out->SetStringField(TEXT("Class"), Actor.GetClass()->GetPathName());
 		Out->SetStringField(TEXT("SimConfig"), PathOf(Own));
 		Out->SetBoolField(TEXT("SimConfigIsRunning"), Running && Own == Running);
+		Out->SetBoolField(TEXT("DrivesSim"), Sub.IsOwner(&Actor));
 
 		Describe(Native, &Actor, Native->GetDefaultObject(), Authored, *Out);
 		return Out;
@@ -395,7 +400,7 @@ namespace AtmosphereDump
 
 		for (TActorIterator<APlanetAtmosphereActor> It(World); It; ++It)
 		{
-			Actors.Add(MakeShared<FJsonValueObject>(DescribeActor(**It, Sub->GetConfig())));
+			Actors.Add(MakeShared<FJsonValueObject>(DescribeActor(**It, *Sub)));
 		}
 
 		Root->SetArrayField(TEXT("Atmospheres"), Actors);
@@ -448,7 +453,7 @@ namespace AtmosphereLoad
 	const TSet<FName>& SimPipeline()
 	{
 		static const TSet<FName> Names = {
-			TEXT("InitialState"), TEXT("FlowTarget"), TEXT("DebugTarget"), TEXT("bAutoResizeTargets"),
+			TEXT("InitialState"), TEXT("bDebugView"),
 			TEXT("DebugMode"), TEXT("DebugLayer"), TEXT("DebugScale"), TEXT("bPaused") };
 		return Names;
 	}
@@ -456,7 +461,7 @@ namespace AtmosphereLoad
 	const TSet<FName>& ActorPipeline()
 	{
 		static const TSet<FName> Names = {
-			TEXT("BlueNoise"), TEXT("Simulation"), TEXT("ShadowTarget") };
+			TEXT("BlueNoise"), TEXT("Simulation") };
 		return Names;
 	}
 
@@ -492,6 +497,11 @@ namespace AtmosphereLoad
 			{ TEXT("bForcingBipolar"), TEXT("") },
 			{ TEXT("SaturationEquator"), TEXT("") },
 			{ TEXT("FilterMaxHalfWidth"), TEXT("") },
+
+			// The render targets are the subsystem's, created at run time.
+			{ TEXT("FlowTarget"), TEXT("") },
+			{ TEXT("DebugTarget"), TEXT("") },
+			{ TEXT("bAutoResizeTargets"), TEXT("") },
 
 			// New meanings, retired for the defaults: the eye comes from the low
 			// alone and its ramp is a ratio of the eyewall; genesis humidity is a
@@ -686,6 +696,19 @@ namespace AtmosphereLoad
 			{ TEXT("Terminator"), TEXT("") },
 			// The fill's relief became the floor's, a different meaning.
 			{ TEXT("GasGiantDeep.FillRelief"), TEXT("") },
+
+			// A sim config per model; the one config was the gas giant's. The
+			// shadow target is created at run time.
+			{ TEXT("Simulation.Config"), TEXT("Simulation.GasGiantConfig") },
+			{ TEXT("Simulation.bStartOnBeginPlay"), TEXT("Simulation.bClaimSimulation") },
+			{ TEXT("ShadowTarget"), TEXT("") },
+
+			// The detail fade is in planet radii, as a near and a far distance,
+			// where it was in noise features as a start and a length.
+			{ TEXT("TerrestrialDetailLayer.FadeStart"), TEXT("") },
+			{ TEXT("TerrestrialDetailLayer.FadeLength"), TEXT("") },
+			{ TEXT("GasGiantDetailLayer.FadeStart"), TEXT("") },
+			{ TEXT("GasGiantDetailLayer.FadeLength"), TEXT("") },
 		};
 		return Rows;
 	}
@@ -1149,9 +1172,15 @@ namespace AtmosphereLoad
 	}
 
 	/** Each atmosphere in the file onto the world's actor of the same name, or
-	 *  onto the only actor when both hold exactly one. */
-	void ApplyAtmospheres(const TArray<TSharedPtr<FJsonValue>>& Entries, UWorld& World, const TSet<FName>* Excluded)
+	 *  onto the only actor when both hold exactly one. Returns the actor whose
+	 *  entry was dumped driving the sim (DrivesSim, else SimConfigIsRunning),
+	 *  else the first written, or null: the Sim section is that one's config. */
+	APlanetAtmosphereActor* ApplyAtmospheres(const TArray<TSharedPtr<FJsonValue>>& Entries, UWorld& World, const TSet<FName>* Excluded)
 	{
+		APlanetAtmosphereActor* First = nullptr;
+		APlanetAtmosphereActor* SimActor = nullptr;
+		APlanetAtmosphereActor* Driver = nullptr;
+
 		TArray<APlanetAtmosphereActor*> Actors;
 
 		for (TActorIterator<APlanetAtmosphereActor> It(&World); It; ++It)
@@ -1186,7 +1215,18 @@ namespace AtmosphereLoad
 
 			ApplyRenames(**Section, AtmosphereRenames(), Label);
 			ApplySection(*Target, APlanetAtmosphereActor::StaticClass(), **Section, Label, Excluded);
+
+			bool bDrove = false;
+			bool bRanSim = false;
+			(*Section)->TryGetBoolField(TEXT("DrivesSim"), bDrove);
+			(*Section)->TryGetBoolField(TEXT("SimConfigIsRunning"), bRanSim);
+
+			Driver = (bDrove && !Driver) ? Target : Driver;
+			SimActor = (bRanSim && !SimActor) ? Target : SimActor;
+			First = First ? First : Target;
 		}
+
+		return Driver ? Driver : SimActor ? SimActor : First;
 	}
 
 	void Load(const TArray<FString>& Args, UWorld* World)
@@ -1227,12 +1267,23 @@ namespace AtmosphereLoad
 			return;
 		}
 
+		// THE ATMOSPHERES FIRST: the Sim section belongs to the config of the
+		// model the file sets, which its PlanetType has to select before the
+		// section is applied.
+		const TArray<TSharedPtr<FJsonValue>>* Atmospheres = nullptr;
+		APlanetAtmosphereActor* SimOwner = nullptr;
+
+		if (bAtmospheres && Root->TryGetArrayField(TEXT("Atmospheres"), Atmospheres))
+		{
+			SimOwner = ApplyAtmospheres(*Atmospheres, *World, bPipeline ? nullptr : &ActorPipeline());
+		}
+
 		const TSharedPtr<FJsonObject>* Sim = nullptr;
 
 		if (bSim && Root->TryGetObjectField(TEXT("Sim"), Sim))
 		{
 			const UFlowSimSubsystem* Sub = World->GetSubsystem<UFlowSimSubsystem>();
-			UFlowSimConfig* Config = Sub ? Sub->GetConfig() : nullptr;
+			UFlowSimConfig* Config = SimOwner ? SimOwner->ActiveSimConfig() : (Sub ? Sub->GetConfig() : nullptr);
 
 			// NO CONVERSION ON LOAD. A file from an older config version applies its
 			// values under today's meanings; renamed members are read under their
@@ -1261,15 +1312,8 @@ namespace AtmosphereLoad
 			}
 			else
 			{
-				UE_LOG(LogAtmosphereDump, Warning, TEXT("No sim config is running, so the Sim section is not applied."));
+				UE_LOG(LogAtmosphereDump, Warning, TEXT("No sim config for the file's atmosphere and none running, so the Sim section is not applied."));
 			}
-		}
-
-		const TArray<TSharedPtr<FJsonValue>>* Atmospheres = nullptr;
-
-		if (bAtmospheres && Root->TryGetArrayField(TEXT("Atmospheres"), Atmospheres))
-		{
-			ApplyAtmospheres(*Atmospheres, *World, bPipeline ? nullptr : &ActorPipeline());
 		}
 
 		UE_LOG(LogAtmosphereDump, Display, TEXT("Loaded %s. Save the changed assets to keep the values."), *Path);
