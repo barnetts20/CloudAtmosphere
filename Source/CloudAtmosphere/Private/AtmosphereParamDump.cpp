@@ -1529,8 +1529,8 @@ void UAtmosphereTuneLibrary::ApplyPreset(APlanetAtmosphereActor* Actor, const UA
 
 	if (Preset->SimConfig)
 	{
-		TObjectPtr<UFlowSimConfig>& Slot = (InModel == EPlanetAtmosphereType::Terrestrial)
-			? Actor->Simulation.TerrestrialConfig : Actor->Simulation.GasGiantConfig;
+		TObjectPtr<UFlowSimConfig>& Slot = (InModel == EPlanetAtmosphereType::GasGiant)
+			? Actor->Simulation.GasGiantConfig : Actor->Simulation.TerrestrialConfig;
 		Slot = Preset->SimConfig;
 	}
 }

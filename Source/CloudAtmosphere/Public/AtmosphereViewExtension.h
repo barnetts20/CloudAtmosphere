@@ -12,13 +12,22 @@ class FTextureRenderTargetResource;
 struct FPostProcessMaterialInputs;
 struct FScreenPassTexture;
 
+/** ATMO_MODEL, the march's permutation: the field it compiles. */
+namespace AtmosphereMarchModel
+{
+	constexpr int32 Slab = 0;
+	constexpr int32 DeepDeck = 1;
+	constexpr int32 AirOnly = 2;
+	constexpr int32 Count = 3;
+}
+
 /** The march's inputs, flattened for the render thread: the active model's
  *  field, from the packer the shadow bake shares, and its lighting, air,
  *  pipeline and sampling groups. */
 struct CLOUDATMOSPHERE_API FAtmosphereMarchParams
 {
-	/** The gas giant: the deep deck (TR_DEEP_DECK) rather than the slab. */
-	bool bGasGiant = false;
+	/** AtmosphereMarchModel: the slab, the gas giant's deep deck, or air alone. */
+	int32 Model = AtmosphereMarchModel::Slab;
 
 	/** World position, double: the pass subtracts each view's own camera. */
 	FVector PlanetCenter = FVector::ZeroVector;
@@ -98,11 +107,14 @@ struct CLOUDATMOSPHERE_API FAtmosphereMarchParams
 	void ResolveTextures_RenderThread();
 
 	/** Whether the resources the march cannot run without are set. A missing
-	 *  noise volume binds black and is left out by its amount, as in the bake. */
+	 *  noise volume binds black and is left out by its amount, as in the bake;
+	 *  air alone reads none of the cloud's, which bind black. */
 	bool IsUsable() const
 	{
-		return FlowResource && ShadowResource && TransmittanceResource && CoverageResource && BlueNoiseResource
-			&& PlanetRadius > 0.0f;
+		const bool bClouds = Model != AtmosphereMarchModel::AirOnly;
+
+		return TransmittanceResource && BlueNoiseResource && PlanetRadius > 0.0f
+			&& (!bClouds || (FlowResource && ShadowResource && CoverageResource));
 	}
 };
 
@@ -155,7 +167,7 @@ private:
 		TRefCountPtr<IPooledRenderTarget> Color;
 		TRefCountPtr<IPooledRenderTarget> Tint;
 		TRefCountPtr<IPooledRenderTarget> Age;
-		bool bGasGiant = false;
+		int32 Model = -1;
 		uint32 CellSize = 0;
 		FMatrix44f CameraToClip = FMatrix44f::Identity;
 		FVector ViewOrigin = FVector::ZeroVector;

@@ -6,9 +6,11 @@
 #include "/Plugin/CloudAtmosphere/Private/TerrestrialDeck.ush"
 #include "/Plugin/CloudAtmosphere/Private/TerrestrialShadow.ush"
 
-// The cloud field's side of the march, both models': what this field is, and
+// The cloud field's side of the march, every model's: what this field is, and
 // what the march is allowed to ask it. A terrestrial planet's is the slab, a
-// gas giant's the deep deck (TR_DEEP_DECK).
+// gas giant's the deep deck (TR_DEEP_DECK), and air alone (ATMO_FIELD_CLOUDS 0)
+// the slab's air with no cloud band: no segment is cloud and the march reads
+// no cloud resource.
 //
 // THE MARCH KNOWS NOTHING BELOW THIS LINE. It calls the Field_ functions, the
 // FieldParams and FieldMaterialParams names, and the two texture macros, all
@@ -42,6 +44,11 @@
  *  absorption is floored at DeepDarkening so a white deck still darkens. */
 #ifndef TR_DEEP_DIFFUSE_G
 #define TR_DEEP_DIFFUSE_G 0.5f
+#endif
+
+/** 0 for air alone: the march compiles no cloud path. */
+#ifndef ATMO_FIELD_CLOUDS
+#define ATMO_FIELD_CLOUDS 1
 #endif
 
 /** Claims the march's field slot; the march fails to compile without it. */
@@ -146,7 +153,9 @@ float3 TR_TypeTint(float Type, TRScatterParams S)
  *  the longest span on the ray. */
 bool Field_SegmentIsCloud(float3 Origin, float3 Dir, float3 Segment, PlanetParams Planet)
 {
-#if TR_DEEP_DECK
+#if !ATMO_FIELD_CLOUDS
+    return false;
+#elif TR_DEEP_DECK
 	// Under the band the deep deck is full and still owes extinction.
     const float3 Mid = Origin + Dir * ((Segment.x + Segment.y) * 0.5f);
 
@@ -253,8 +262,12 @@ CompositeParams TR_BuildAtmo(
 	// THE FIELD-WIDE REACH, NOT THIS CAMERA'S. The outer shell decides where the
 	// cloud class begins on every ray, so it takes no input from the view: a
 	// bound that moved with the camera would move the step lattice with it.
+#if ATMO_FIELD_CLOUDS
     const float CloudOuter =
 		F.PlanetRadius + F.Thickness * TR_TopMax(F);
+#else
+    const float CloudOuter = F.PlanetRadius;
+#endif
 
 	// -- The band is the slab -----------------------------------------------
 	//
@@ -267,7 +280,10 @@ CompositeParams TR_BuildAtmo(
 	// HELD AT THE SURFACE, since a base pushed below ground is cloud the planet
 	// has already cut off and a shell inside the planet plans segments the
 	// terminus then discards.
-#if TR_DEEP_DECK
+#if !ATMO_FIELD_CLOUDS
+	// No band: both radii at the surface, where the ray stops anyway.
+    const float CloudInner = F.PlanetRadius;
+#elif TR_DEEP_DECK
 	// The deep deck's band ends where every column is full: below it nothing
 	// varies, and coarse steps saturate. Held off the centre, which the band may
 	// reach on a deep fill.
@@ -280,7 +296,11 @@ CompositeParams TR_BuildAtmo(
 
 	// Grey: the material's tint and amount are applied per sample from
 	// TRScatterParams, on the view ray and at the light ray's receiver.
+#if ATMO_FIELD_CLOUDS
     const float3 CloudScatterBeta = TR_CloudBeta(F, CloudOpticalDepth).xxx;
+#else
+    const float3 CloudScatterBeta = float3(0.0f, 0.0f, 0.0f);
+#endif
 
     CompositeParams Params = Atmo_BuildParams(
 		SvPosition, RayDir, PlanetOffset,

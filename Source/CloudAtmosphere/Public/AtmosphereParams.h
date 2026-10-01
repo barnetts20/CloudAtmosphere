@@ -23,14 +23,16 @@ class UFlowSimConfig;
 
 class UVolumeTexture;
 
-/** Which cloud field the march samples. An enum rather than a bool: adding a
- *  case fails loudly at every switch, where a bool silently takes the false
- *  branch. */
+/** Which model the march draws. An enum rather than a bool: adding a case
+ *  fails loudly at every switch, where a bool silently takes the false branch.
+ *  Air only is the terrestrial model without its clouds, for moons and thin-air
+ *  planets: no sim, no shadow bake, no cloud march. */
 UENUM(BlueprintType)
 enum class EPlanetAtmosphereType : uint8
 {
 	Terrestrial,
-	GasGiant
+	GasGiant,
+	AirOnly UMETA(DisplayName = "Air Only")
 };
 
 /** The flow simulation the cloud field reads as its weather map, a config per
@@ -883,44 +885,48 @@ struct CLOUDATMOSPHERE_API FAtmosphereModelParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	FAtmosphereAmbientParams Ambient;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bClouds", EditConditionHides, HideEditConditionToggle))
 	FCloudShapeParams Shape;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bClouds", EditConditionHides, HideEditConditionToggle))
 	FCloudCoverageParams Coverage;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bClouds", EditConditionHides, HideEditConditionToggle))
 	FCloudTypeParams Type;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bClouds", EditConditionHides, HideEditConditionToggle))
 	FCloudLiftParams Lift;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bClouds", EditConditionHides, HideEditConditionToggle))
 	FCloudWarpParams Warp;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bClouds", EditConditionHides, HideEditConditionToggle))
 	FCloudStructureLayerParams StructureLayer;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bClouds", EditConditionHides, HideEditConditionToggle))
 	FCloudDetailLayerParams DetailLayer;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bDeepDeck", EditConditionHides, HideEditConditionToggle))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bClouds && bDeepDeck", EditConditionHides, HideEditConditionToggle))
 	FCloudDeepParams Deep;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bClouds", EditConditionHides, HideEditConditionToggle))
 	FCloudMaterialParams Material;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bClouds", EditConditionHides, HideEditConditionToggle))
 	FAtmospherePhaseParams Phase;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bClouds", EditConditionHides, HideEditConditionToggle))
 	FAtmosphereMultipleScatteringParams MultipleScattering;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	FAtmosphereSurfaceShadowParams SurfaceShadow;
 
-	/** The model draws a deep deck, so Deep is shown. Set per model by the
-	 *  actor's constructor; transient, so neither saves nor tunes carry it. */
+	/** What the model draws, which decides the groups shown: clouds, and a
+	 *  deep deck under them. Set by the actor from the model; transient, so
+	 *  neither saves nor tunes carry them. */
+	UPROPERTY(Transient)
+	bool bClouds = true;
+
 	UPROPERTY(Transient)
 	bool bDeepDeck = false;
 };

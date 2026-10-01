@@ -46,83 +46,83 @@ namespace
 // ---------------------------------------------------------------------------
 
 BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereMarchParameters, )
-	SHADER_PARAMETER_STRUCT_INCLUDE(FTerrestrialFieldParameters, Field)
-	SHADER_PARAMETER(FVector3f, CloudScatter)
-	SHADER_PARAMETER(FVector3f, StormScatter)
+SHADER_PARAMETER_STRUCT_INCLUDE(FTerrestrialFieldParameters, Field)
+SHADER_PARAMETER(FVector3f, CloudScatter)
+SHADER_PARAMETER(FVector3f, StormScatter)
 
-	SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, AtmoSceneDepth)
-	SHADER_PARAMETER(FMatrix44f, RayViewToClip)
-	SHADER_PARAMETER(float, LatticeGrowth)
-	SHADER_PARAMETER(float, LatticeGrowthFar)
+SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, AtmoSceneDepth)
+SHADER_PARAMETER(FMatrix44f, RayViewToClip)
+SHADER_PARAMETER(float, LatticeGrowth)
+SHADER_PARAMETER(float, LatticeGrowthFar)
 
-	SHADER_PARAMETER(FVector3f, PlanetOffset)
-	SHADER_PARAMETER(FVector4f, PlanetRotation)
-	SHADER_PARAMETER(FVector3f, LightDirection)
-	SHADER_PARAMETER(FVector3f, LightColor)
-	SHADER_PARAMETER(float, PlanetRadius)
-	SHADER_PARAMETER(float, HeightScale)
+SHADER_PARAMETER(FVector3f, PlanetOffset)
+SHADER_PARAMETER(FVector4f, PlanetRotation)
+SHADER_PARAMETER(FVector3f, LightDirection)
+SHADER_PARAMETER(FVector3f, LightColor)
+SHADER_PARAMETER(float, PlanetRadius)
+SHADER_PARAMETER(float, HeightScale)
 
-	SHADER_PARAMETER(float, LightExtinctionFraction)
+SHADER_PARAMETER(float, LightExtinctionFraction)
 
-	SHADER_PARAMETER(float, ForwardG)
-	SHADER_PARAMETER(float, BackwardG)
-	SHADER_PARAMETER(float, ForwardWeight)
-	SHADER_PARAMETER(FVector3f, CloudAmbient)
-	SHADER_PARAMETER(float, CloudAmbientFloor)
+SHADER_PARAMETER(float, ForwardG)
+SHADER_PARAMETER(float, BackwardG)
+SHADER_PARAMETER(float, ForwardWeight)
+SHADER_PARAMETER(FVector3f, CloudAmbient)
+SHADER_PARAMETER(float, CloudAmbientFloor)
 
-	SHADER_PARAMETER(float, OctaveCount)
-	SHADER_PARAMETER(float, OctaveAttenuation)
-	SHADER_PARAMETER(float, OctaveEccentricity)
+SHADER_PARAMETER(float, OctaveCount)
+SHADER_PARAMETER(float, OctaveAttenuation)
+SHADER_PARAMETER(float, OctaveEccentricity)
 
-	SHADER_PARAMETER(float, AmbientTerminator)
-	SHADER_PARAMETER(float, MieLobeDecay)
+SHADER_PARAMETER(float, AmbientTerminator)
+SHADER_PARAMETER(float, MieLobeDecay)
 
-	SHADER_PARAMETER(FVector3f, RayleighBeta)
-	SHADER_PARAMETER(float, RayleighScaleHeight)
-	SHADER_PARAMETER(FVector3f, MieBeta)
-	SHADER_PARAMETER(float, MieScaleHeight)
-	SHADER_PARAMETER(float, MieG)
-	SHADER_PARAMETER(FVector3f, AbsorptionBeta)
-	SHADER_PARAMETER(float, AbsorptionAltitude)
-	SHADER_PARAMETER(float, AbsorptionFalloff)
-	SHADER_PARAMETER(FVector3f, AtmosphereAmbient)
-	SHADER_PARAMETER(float, AtmosphereAmbientFloor)
+SHADER_PARAMETER(FVector3f, RayleighBeta)
+SHADER_PARAMETER(float, RayleighScaleHeight)
+SHADER_PARAMETER(FVector3f, MieBeta)
+SHADER_PARAMETER(float, MieScaleHeight)
+SHADER_PARAMETER(float, MieG)
+SHADER_PARAMETER(FVector3f, AbsorptionBeta)
+SHADER_PARAMETER(float, AbsorptionAltitude)
+SHADER_PARAMETER(float, AbsorptionFalloff)
+SHADER_PARAMETER(FVector3f, AtmosphereAmbient)
+SHADER_PARAMETER(float, AtmosphereAmbientFloor)
 
-	SHADER_PARAMETER(float, AtmosphereSteps)
-	SHADER_PARAMETER(float, CloudSteps)
-	SHADER_PARAMETER(float, ChordSpread)
-	SHADER_PARAMETER(FVector4f, SurfaceShadow)
+SHADER_PARAMETER(float, AtmosphereSteps)
+SHADER_PARAMETER(float, CloudSteps)
+SHADER_PARAMETER(float, ChordSpread)
+SHADER_PARAMETER(FVector4f, SurfaceShadow)
 
-	SHADER_PARAMETER(FVector3f, ShadowCamera1)
-	SHADER_PARAMETER(FVector3f, ShadowCamera2)
+SHADER_PARAMETER(FVector3f, ShadowCamera1)
+SHADER_PARAMETER(FVector3f, ShadowCamera2)
 
-	SHADER_PARAMETER_TEXTURE(Texture2DArray, FlowTarget)
-	SHADER_PARAMETER_SAMPLER(SamplerState, FlowTargetSampler)
-	SHADER_PARAMETER_TEXTURE(Texture3D, StructureVolume)
-	SHADER_PARAMETER_SAMPLER(SamplerState, StructureVolumeSampler)
-	SHADER_PARAMETER_TEXTURE(Texture3D, DetailVolume)
-	SHADER_PARAMETER_SAMPLER(SamplerState, DetailVolumeSampler)
-	SHADER_PARAMETER_TEXTURE(Texture2D, BlueNoiseTexture)
-	SHADER_PARAMETER_TEXTURE(Texture2DArray, ShadowTarget)
-	SHADER_PARAMETER_SAMPLER(SamplerState, ShadowTargetSampler)
-	SHADER_PARAMETER_TEXTURE(Texture2D, TransmittanceTable)
-	SHADER_PARAMETER_SAMPLER(SamplerState, TransmittanceTableSampler)
-	SHADER_PARAMETER_TEXTURE(Texture2D<float>, CoverageThreshold)
+SHADER_PARAMETER_TEXTURE(Texture2DArray, FlowTarget)
+SHADER_PARAMETER_SAMPLER(SamplerState, FlowTargetSampler)
+SHADER_PARAMETER_TEXTURE(Texture3D, StructureVolume)
+SHADER_PARAMETER_SAMPLER(SamplerState, StructureVolumeSampler)
+SHADER_PARAMETER_TEXTURE(Texture3D, DetailVolume)
+SHADER_PARAMETER_SAMPLER(SamplerState, DetailVolumeSampler)
+SHADER_PARAMETER_TEXTURE(Texture2D, BlueNoiseTexture)
+SHADER_PARAMETER_TEXTURE(Texture2DArray, ShadowTarget)
+SHADER_PARAMETER_SAMPLER(SamplerState, ShadowTargetSampler)
+SHADER_PARAMETER_TEXTURE(Texture2D, TransmittanceTable)
+SHADER_PARAMETER_SAMPLER(SamplerState, TransmittanceTableSampler)
+SHADER_PARAMETER_TEXTURE(Texture2D<float>, CoverageThreshold)
 
-	SHADER_PARAMETER(FUintVector2, MarchCells)
-	SHADER_PARAMETER(uint32, MarchStride)
-	SHADER_PARAMETER(FVector2f, MarchOffset)
-	SHADER_PARAMETER(FVector2f, OutputSize)
-	SHADER_PARAMETER(float, JitterShift)
-	SHADER_PARAMETER(FUintVector2, NoiseOffset)
+SHADER_PARAMETER(FUintVector2, MarchCells)
+SHADER_PARAMETER(uint32, MarchStride)
+SHADER_PARAMETER(FVector2f, MarchOffset)
+SHADER_PARAMETER(FVector2f, OutputSize)
+SHADER_PARAMETER(float, JitterShift)
+SHADER_PARAMETER(FUintVector2, NoiseOffset)
 
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, MarchColor)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, MarchTint)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, MarchDepth)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, MarchColor)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, MarchTint)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, MarchDepth)
 END_SHADER_PARAMETER_STRUCT()
 
-/** Both models' march: TR_DEEP_DECK selects the gas giant's deep deck. */
+/** Every model's march: ATMO_MODEL selects the slab, the deep deck or air alone. */
 class FAtmosphereMarchCS : public FGlobalShader
 {
 public:
@@ -131,8 +131,8 @@ public:
 	using FParameters = FAtmosphereMarchParameters;
 	SHADER_USE_PARAMETER_STRUCT(FAtmosphereMarchCS, FGlobalShader);
 
-	class FDeepDeck : SHADER_PERMUTATION_BOOL("TR_DEEP_DECK");
-	using FPermutationDomain = TShaderPermutationDomain<FDeepDeck>;
+	class FModel : SHADER_PERMUTATION_INT("ATMO_MODEL", AtmosphereMarchModel::Count);
+	using FPermutationDomain = TShaderPermutationDomain<FModel>;
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
@@ -153,47 +153,47 @@ IMPLEMENT_GLOBAL_SHADER(FAtmosphereMarchCS,
 	"/Plugin/CloudAtmosphere/Private/AtmosphereMarchPass.usf", "MainMarchCS", SF_Compute);
 
 BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereResolveParameters, )
-	SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, AtmoSceneDepth)
-	SHADER_PARAMETER(FMatrix44f, RayViewToClip)
-	SHADER_PARAMETER(FVector2f, OutputSize)
+SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, AtmoSceneDepth)
+SHADER_PARAMETER(FMatrix44f, RayViewToClip)
+SHADER_PARAMETER(FVector2f, OutputSize)
 
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, FreshColor)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, FreshTint)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, FreshDepth)
-	SHADER_PARAMETER(FUintVector2, FreshSize)
-	SHADER_PARAMETER(uint32, CellSize)
-	SHADER_PARAMETER(FUintVector2, CellOffset)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, FreshColor)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, FreshTint)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, FreshDepth)
+SHADER_PARAMETER(FUintVector2, FreshSize)
+SHADER_PARAMETER(uint32, CellSize)
+SHADER_PARAMETER(FUintVector2, CellOffset)
 
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, HistoryColor)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, HistoryTint)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, HistoryAge)
-	SHADER_PARAMETER_SAMPLER(SamplerState, HistorySampler)
-	SHADER_PARAMETER(uint32, HistoryValid)
-	SHADER_PARAMETER(FMatrix44f, PrevCameraToClip)
-	SHADER_PARAMETER(FMatrix44f, PrevPlanetToClip)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, HistoryColor)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, HistoryTint)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, HistoryAge)
+SHADER_PARAMETER_SAMPLER(SamplerState, HistorySampler)
+SHADER_PARAMETER(uint32, HistoryValid)
+SHADER_PARAMETER(FMatrix44f, PrevCameraToClip)
+SHADER_PARAMETER(FMatrix44f, PrevPlanetToClip)
 
-	SHADER_PARAMETER(float, FreshWeight)
-	SHADER_PARAMETER(uint32, TemporalDebug)
+SHADER_PARAMETER(float, FreshWeight)
+SHADER_PARAMETER(uint32, TemporalDebug)
 
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, ResolvedColor)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, ResolvedTint)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, ResolvedAge)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, ResolvedDisplay)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, ResolvedColor)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, ResolvedTint)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, ResolvedAge)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, ResolvedDisplay)
 END_SHADER_PARAMETER_STRUCT()
 
 BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereCompositeParameters, )
-	SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
-	SHADER_PARAMETER(FVector2f, OutputSize)
+SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+SHADER_PARAMETER(FVector2f, OutputSize)
 
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, AtmosphereColor)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, AtmosphereTint)
-	SHADER_PARAMETER(uint32, TintActive)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, AtmosphereColor)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, AtmosphereTint)
+SHADER_PARAMETER(uint32, TintActive)
 
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, SceneColorTexture)
-	SHADER_PARAMETER(FUintVector2, SceneColorMin)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, SceneColorTexture)
+SHADER_PARAMETER(FUintVector2, SceneColorMin)
 
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, CompositeOutput)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, CompositeOutput)
 END_SHADER_PARAMETER_STRUCT()
 
 /** The resolve and the composite share AtmosphereTemporal.usf. */
@@ -391,11 +391,13 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		? Inputs.SceneTextures.SceneTextures->GetContents()
 		: nullptr;
 
+	// Air alone reads none of the cloud's resources and binds black in their slots.
+	const bool bCloudResources = March.Model == AtmosphereMarchModel::AirOnly
+		|| (March.FlowTexture.IsValid() && March.ShadowTexture.IsValid() && March.CoverageTexture.IsValid());
+
 	if (!bHasFrame || !March.IsUsable() || !SceneColorSlice.IsValid()
-		|| !SceneTextures || !SceneTextures->SceneDepthTexture
-		|| !March.FlowTexture.IsValid() || !March.ShadowTexture.IsValid()
+		|| !SceneTextures || !SceneTextures->SceneDepthTexture || !bCloudResources
 		|| !March.TransmittanceTexture.IsValid() || !March.BlueNoiseTexture.IsValid()
-		|| !March.CoverageTexture.IsValid()
 		|| View.bIsReflectionCapture || View.bIsPlanarReflection
 		|| !View.IsPerspectiveProjection()
 		|| View.GetFeatureLevel() < ERHIFeatureLevel::SM5)
@@ -472,7 +474,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 	const bool bHistoryValid = History
 		&& History->Color.IsValid() && History->Tint.IsValid() && History->Age.IsValid()
 		&& History->LastRendered + 2 >= GFrameCounterRenderThread
-		&& History->bGasGiant == March.bGasGiant
+		&& History->Model == March.Model
 		&& History->CellSize == CellSize
 		&& !View.bCameraCut;
 
@@ -581,18 +583,19 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 
 		// Samplers as the bake binds them: the flow atlas carries its own
 		// gutters, the volumes tile, and the shadow map and the table clamp.
-		P->FlowTarget = March.FlowTexture;
+		// Air alone binds black where the cloud's resources go.
+		P->FlowTarget = March.FlowTexture.IsValid() ? March.FlowTexture : GBlackArrayTexture->TextureRHI;
 		P->FlowTargetSampler = TStaticSamplerState<SF_Bilinear, AM_Wrap, AM_Clamp, AM_Clamp>::GetRHI();
 		P->StructureVolume = March.StructureTexture.IsValid() ? March.StructureTexture : GBlackVolumeTexture->TextureRHI;
 		P->StructureVolumeSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
 		P->DetailVolume = March.DetailTexture.IsValid() ? March.DetailTexture : GBlackVolumeTexture->TextureRHI;
 		P->DetailVolumeSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
 		P->BlueNoiseTexture = March.BlueNoiseTexture;
-		P->ShadowTarget = March.ShadowTexture;
+		P->ShadowTarget = March.ShadowTexture.IsValid() ? March.ShadowTexture : GBlackArrayTexture->TextureRHI;
 		P->ShadowTargetSampler = BilinearClamp;
 		P->TransmittanceTable = March.TransmittanceTexture;
 		P->TransmittanceTableSampler = BilinearClamp;
-		P->CoverageThreshold = March.CoverageTexture;
+		P->CoverageThreshold = March.CoverageTexture.IsValid() ? March.CoverageTexture : GBlackTexture->TextureRHI;
 
 		P->MarchCells = FUintVector2((uint32)MarchCells.X, (uint32)MarchCells.Y);
 		P->MarchStride = MarchN;
@@ -608,7 +611,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		P->MarchDepth = GraphBuilder.CreateUAV(MarchDepth);
 
 		FAtmosphereMarchCS::FPermutationDomain Permutation;
-		Permutation.Set<FAtmosphereMarchCS::FDeepDeck>(March.bGasGiant);
+		Permutation.Set<FAtmosphereMarchCS::FModel>(March.Model);
 
 		TShaderMapRef<FAtmosphereMarchCS> Shader(ShaderMap, Permutation);
 
@@ -697,7 +700,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 			GraphBuilder.QueueTextureExtraction(ResolvedTint, &History->Tint);
 			GraphBuilder.QueueTextureExtraction(ResolvedAge, &History->Age);
 
-			History->bGasGiant = March.bGasGiant;
+			History->Model = March.Model;
 			History->CellSize = CellSize;
 			History->CameraToClip = CameraToClip;
 			History->ViewOrigin = ViewOrigin;

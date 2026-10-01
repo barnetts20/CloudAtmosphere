@@ -5,8 +5,9 @@
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereSetup.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTransmittance.ush"
 
-// THE FIELD: TerrestrialField.ush, included first, defines ATMO_FIELD_INCLUDED
-// and the interface below.
+// THE FIELD: TerrestrialField.ush, included first, defines ATMO_FIELD_INCLUDED,
+// ATMO_FIELD_CLOUDS and the interface below. With ATMO_FIELD_CLOUDS 0 no
+// segment is cloud and nothing reads the shadow map.
 #ifndef ATMO_FIELD_INCLUDED
 #error Include TerrestrialField.ush before AtmosphereMarch.ush.
 #endif
@@ -184,6 +185,7 @@ AtmoLightConstants Atmo_LightConstants(Texture2DArray ShadowMap, AtmoShadowCamer
 {
     AtmoLightConstants C;
 
+#if ATMO_FIELD_CLOUDS
     C.Shadow = AtmoShadow_MakeReader(ShadowMap,
 		mul(P.WorldToLocal, P.Atmo.lightRayParams.lightDir), ShadowCameras, Field_ShadowFrame(P.Field));
 
@@ -203,6 +205,11 @@ AtmoLightConstants Atmo_LightConstants(Texture2DArray ShadowMap, AtmoShadowCamer
 		pow(max(P.Scatter.OctaveAttenuation, 1e-4f), P.Scatter.OctaveCount - 1.0f);
 
     C.Ceiling = Field_ShadowSaturation() / max(C.Fold.y * DeepestOctave, ATMO_SHADOW_MIN_TAU_SCALE);
+#else
+    C.Shadow = (AtmoShadowReader)0;
+    C.Fold = float2(0.0f, 0.0f);
+    C.Ceiling = 0.0f;
+#endif
 
     C.Thickness = AtmoT_Thickness(P.Atmo.planetParams.planetRadius, P.Atmo.planetParams.atmoRadius);
     C.Radii = AtmoT_Radii(P.Atmo.planetParams.planetRadius, P.Atmo.planetParams.atmoRadius);
@@ -327,6 +334,8 @@ float3 Atmo_LightMarch(
 	// crushed, so no new endpoint appears at either end.
     OutLobeShadow = pow(PlanetShadow, ATMO_LOBE_SHADOW_POWER);
 
+#if ATMO_FIELD_CLOUDS
+
 	// THE DECK, AS ONE TEXTURE READ. Looked up rather than estimated, and the
 	// difference is not just cost: a per-ray estimator's error is additive in
 	// OPTICAL DEPTH and so multiplicative in brightness, where half a unit of
@@ -355,6 +364,7 @@ float3 Atmo_LightMarch(
 	// that contour lands on the map's lattice as an axis-aligned staircase along
 	// the shadow edge. The deep end is handled by AtmoShadow_Tau's ceiling.
     OutCloudOptDepth = ShadowTau / max(C.Fold.x, 1e-8f);
+#endif
 
     return PlanetShadow * Atmo_SunAir(TransmittanceTable, TransmittanceSampler, C, P, Start, LightDir);
 }
@@ -998,6 +1008,10 @@ float4 Atmo_MainMarchDepth(
 		&& P.Atmo.mainRayParams.sceneDepth < ATMO_NO_OCCLUDER_DISTANCE
 		&& max(Transmittance.x, max(Transmittance.y, Transmittance.z)) > 0.0f)
     {
+		// Air alone leaves the air's dimming.
+        float3 CloudSun = float3(1.0f, 1.0f, 1.0f);
+
+#if ATMO_FIELD_CLOUDS
 		// sceneDepth is a TRUE RAY DISTANCE and LocalDir is a rotation of a unit
 		// direction, so it spends the same along either. Rederiving the surface
 		// from the depth buffer here would be a second derivation of the value
@@ -1043,7 +1057,8 @@ float4 Atmo_MainMarchDepth(
 		// Scaling the optical depth instead still runs every channel to black
 		// under a thick deck, which is the hole in the world this dial exists to
 		// prevent -- it only takes more cloud to get there.
-        const float3 CloudSun = exp(-P.Atmo.cloudParams.cloudAbsBeta * LightTint * SurfaceOptDepth);
+        CloudSun = exp(-P.Atmo.cloudParams.cloudAbsBeta * LightTint * SurfaceOptDepth);
+#endif
 
 		// THE AIR DIMS THE SUN TOO, reddening it toward the terminator, and only
 		// where the sun is up: on the night side there is no direct share to

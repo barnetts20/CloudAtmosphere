@@ -135,13 +135,13 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     GasGiant.DetailLayer.Scale = 24.0f;
     GasGiant.DetailLayer.Aspect = 8.0f;
 
-    GasGiant.bDeepDeck = true;
-
     // The gas giant starts from the terrestrial tune.
     GasGiant.Air = Terrestrial.Air;
     GasGiant.Ambient = Terrestrial.Ambient;
     GasGiant.MultipleScattering = Terrestrial.MultipleScattering;
     GasGiant.SurfaceShadow = Terrestrial.SurfaceShadow;
+
+    SyncModelFlags();
 }
 
 // --------------------------------------------------------------------------
@@ -179,6 +179,8 @@ void APlanetAtmosphereActor::OnConstruction(const FTransform& Transform)
 {
     Super::OnConstruction(Transform);
 
+    SyncModelFlags();
+
     if (!bInitialized)
     {
         bPendingInitialize = true;
@@ -208,6 +210,8 @@ void APlanetAtmosphereActor::Tick(float DeltaTime)
 void APlanetAtmosphereActor::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
     Super::PostEditChangeProperty(PropertyChangedEvent);
+
+    SyncModelFlags();
 
     // Every parameter reaches the passes on the next Tick; the light syncs now.
     if (bInitialized)
@@ -376,8 +380,16 @@ void APlanetAtmosphereActor::UpdateAtmosphere()
     // regardless of parent rotation. The user/gizmo sets relative rotation directly.
     const FVector LightDir = GetRootComponent()->GetRelativeRotation().Vector();
 
-    ClaimSimulation(PlanetCenter, PlanetRadius);
-    RequestShadowBake(PlanetRadius, PlanetCenter, LightDir);
+    if (HasClouds())
+    {
+        ClaimSimulation(PlanetCenter, PlanetRadius);
+        RequestShadowBake(PlanetRadius, PlanetCenter, LightDir);
+    }
+    else
+    {
+        ReleaseCloudResources();
+    }
+
     UpdateTransmittanceTable(PlanetRadius);
     UpdateComputeMarch(PlanetRadius, PlanetCenter, LightDir);
 }
@@ -878,7 +890,7 @@ void APlanetAtmosphereActor::RequestShadowBake(
         return;
     }
 
-    Params.bDeepDeck = !bTerrestrial();
+    Params.bDeepDeck = IsDeepDeck();
     Params.Field = Field;
 
     if (Sim->RequestShadowBake(Params))
@@ -928,7 +940,8 @@ bool APlanetAtmosphereActor::FillMarchParams(
     const FQuat Rotation = GetFieldFrame();
     const FLinearColor Light = LightProduct();
 
-    Out.bGasGiant = !bTerrestrial();
+    Out.Model = IsDeepDeck() ? AtmosphereMarchModel::DeepDeck
+        : HasClouds() ? AtmosphereMarchModel::Slab : AtmosphereMarchModel::AirOnly;
     Out.PlanetCenter = PlanetCenter;
     Out.PlanetRotation = FVector4f(Rotation.X, Rotation.Y, Rotation.Z, Rotation.W);
     Out.LightDirection = FVector3f(LightDir);
@@ -938,10 +951,13 @@ bool APlanetAtmosphereActor::FillMarchParams(
 
     // -- Field ----------------------------------------------------------------
 
-    FAtmosphereModelParams& Model = bTerrestrial() ? Terrestrial : GasGiant;
-    SolveFieldBounds(Model.Shape, Model.Lift);
+    FAtmosphereModelParams& Model = ModelOf(PlanetType);
 
-    Out.Field = PackCloudField(*this);
+    if (HasClouds())
+    {
+        SolveFieldBounds(Model.Shape, Model.Lift);
+        Out.Field = PackCloudField(*this);
+    }
 
     const FCloudMaterialParams Material = ResolveCloudMaterial(Model.Material);
 
@@ -1089,29 +1105,68 @@ void APlanetAtmosphereActor::ReleaseViewExtension()
 // Flow simulation
 // --------------------------------------------------------------------------
 
+const FAtmosphereModelParams& APlanetAtmosphereActor::ModelOf(EPlanetAtmosphereType InModel) const
+{
+    switch (InModel)
+    {
+    case EPlanetAtmosphereType::Terrestrial:
+    case EPlanetAtmosphereType::AirOnly:
+        return Terrestrial;
+    case EPlanetAtmosphereType::GasGiant:
+        return GasGiant;
+    }
+
+    checkNoEntry();
+    return Terrestrial;
+}
+
+FAtmosphereModelParams& APlanetAtmosphereActor::ModelOf(EPlanetAtmosphereType InModel)
+{
+    return const_cast<FAtmosphereModelParams&>(static_cast<const APlanetAtmosphereActor*>(this)->ModelOf(InModel));
+}
+
+TObjectPtr<UFlowSimConfig>& APlanetAtmosphereActor::SimConfigSlot(EPlanetAtmosphereType InModel)
+{
+    return (&ModelOf(InModel) == &GasGiant) ? Simulation.GasGiantConfig : Simulation.TerrestrialConfig;
+}
+
+void APlanetAtmosphereActor::SyncModelFlags()
+{
+    Terrestrial.bClouds = HasClouds();
+    Terrestrial.bDeepDeck = false;
+    GasGiant.bClouds = true;
+    GasGiant.bDeepDeck = true;
+}
+
+void APlanetAtmosphereActor::ReleaseCloudResources()
+{
+    ReleaseSimulation(true);
+
+    ShadowTarget = nullptr;
+    CoverageTarget = nullptr;
+    bShadowPrimed = false;
+}
+
 void APlanetAtmosphereActor::SetPlanetType(EPlanetAtmosphereType InType)
 {
     PlanetType = InType;
+    SyncModelFlags();
 }
 
 FAtmosphereModelParams APlanetAtmosphereActor::GetModelParams(EPlanetAtmosphereType InModel) const
 {
-    return (InModel == EPlanetAtmosphereType::Terrestrial) ? Terrestrial : GasGiant;
+    return ModelOf(InModel);
 }
 
 void APlanetAtmosphereActor::SetModelParams(EPlanetAtmosphereType InModel, const FAtmosphereModelParams& InParams)
 {
-    FAtmosphereModelParams& Target = (InModel == EPlanetAtmosphereType::Terrestrial) ? Terrestrial : GasGiant;
-    const bool bDeep = Target.bDeepDeck;
-
-    Target = InParams;
-    Target.bDeepDeck = bDeep;
+    ModelOf(InModel) = InParams;
+    SyncModelFlags();
 }
 
 UFlowSimConfig* APlanetAtmosphereActor::GetWritableSimConfig(EPlanetAtmosphereType InModel)
 {
-    TObjectPtr<UFlowSimConfig>& Slot = (InModel == EPlanetAtmosphereType::Terrestrial)
-        ? Simulation.TerrestrialConfig : Simulation.GasGiantConfig;
+    TObjectPtr<UFlowSimConfig>& Slot = SimConfigSlot(InModel);
 
     UFlowSimConfig* Shared = Slot.Get();
     UWorld* World = GetWorld();
@@ -1137,7 +1192,7 @@ UFlowSimConfig* APlanetAtmosphereActor::GetWritableSimConfig(EPlanetAtmosphereTy
 
 UFlowSimConfig* APlanetAtmosphereActor::ActiveSimConfig() const
 {
-    return bTerrestrial() ? Simulation.TerrestrialConfig.Get() : Simulation.GasGiantConfig.Get();
+    return (&ActiveModel() == &GasGiant) ? Simulation.GasGiantConfig.Get() : Simulation.TerrestrialConfig.Get();
 }
 
 void APlanetAtmosphereActor::ClaimSimulation(const FVector& PlanetCenter, float PlanetRadius)
@@ -1158,7 +1213,7 @@ void APlanetAtmosphereActor::ClaimSimulation(const FVector& PlanetCenter, float 
 
         UE_LOG(LogCloudAtmosphere, Warning,
             TEXT("%s: no sim config for the %s model. The clouds draw the kept field, or none."),
-            *GetName(), bTerrestrial() ? TEXT("terrestrial") : TEXT("gas giant"));
+            *GetName(), IsDeepDeck() ? TEXT("gas giant") : TEXT("terrestrial"));
     }
 
     bWarnedSimConfig = bWarnedSimConfig && !Config;

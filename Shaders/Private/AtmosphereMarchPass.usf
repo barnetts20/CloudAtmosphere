@@ -2,8 +2,9 @@
 #include "/Engine/Private/Common.ush"
 
 // The march as a compute pass, run per view by the atmosphere's scene view
-// extension (AtmosphereViewExtension.cpp), for both models: TR_DEEP_DECK, the
-// pass's permutation, selects the gas giant's deep deck. The uniforms carry the
+// extension (AtmosphereViewExtension.cpp), for every model: ATMO_MODEL, the
+// pass's permutation, selects the terrestrial slab (0), the gas giant's deep
+// deck (1) or air alone (2), whose cloud uniforms go unread. The uniforms carry the
 // field builders' argument names, so TR_BUILD_FIELD, TR_BUILD_SCATTER and
 // TR_BUILD_ATMO expand here. FAtmosphereMarchParameters mirrors this file.
 //
@@ -13,6 +14,13 @@
 // per rank in the cell, so each frame's marched set reads one contiguous window
 // of the blue noise and stays blue at cell resolution, where the resolve filters
 // it; seeded by output pixel, each frame's set is close to white.
+
+#ifndef ATMO_MODEL
+#define ATMO_MODEL 0
+#endif
+
+#define TR_DEEP_DECK (ATMO_MODEL == 1)
+#define ATMO_FIELD_CLOUDS (ATMO_MODEL != 2)
 
 #include "/Plugin/CloudAtmosphere/Private/TerrestrialField.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereMarch.ush"

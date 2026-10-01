@@ -194,7 +194,8 @@ public:
     // terrestrial air, ambient, multiple scattering and surface shadows on the
     // CDO, which the gas giant copies.
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Model", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides))
+    /** The terrestrial model's, which air only draws without its clouds. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Model", meta = (EditCondition = "PlanetType != EPlanetAtmosphereType::GasGiant", EditConditionHides))
     FAtmosphereModelParams Terrestrial;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Model", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides))
@@ -230,8 +231,14 @@ public:
 
     const FAtmosphereModelParams& ActiveModel() const
     {
-        return bTerrestrial() ? Terrestrial : GasGiant;
+        return ModelOf(PlanetType);
     }
+
+    /** The model draws clouds, and so runs the sim and the shadow bake. */
+    bool HasClouds() const { return PlanetType != EPlanetAtmosphereType::AirOnly; }
+
+    /** The clouds are the gas giant's deep deck rather than the slab. */
+    bool IsDeepDeck() const { return PlanetType == EPlanetAtmosphereType::GasGiant; }
 
     /** Above zero: the atmosphere's thickness divides every height. */
     float ActiveHeightScale() const
@@ -301,8 +308,19 @@ private:
     /** Inputs of the last enqueued bake; reset when the table is recreated. */
     FAtmosphereTransmittanceParams TransmittanceBaked;
 
-    /** What ActiveModel asks. */
-    bool bTerrestrial() const { return PlanetType == EPlanetAtmosphereType::Terrestrial; }
+    /** A model's bundle and sim config slot: air only shares the
+     *  terrestrial model's. */
+    const FAtmosphereModelParams& ModelOf(EPlanetAtmosphereType InModel) const;
+    FAtmosphereModelParams& ModelOf(EPlanetAtmosphereType InModel);
+    TObjectPtr<UFlowSimConfig>& SimConfigSlot(EPlanetAtmosphereType InModel);
+
+    /** Sets each bundle's transient flags from the model: which groups the
+     *  panel shows. */
+    void SyncModelFlags();
+
+    /** Frees what only the clouds use: the shadow and coverage targets, and
+     *  the sim claim. */
+    void ReleaseCloudResources();
 
     /** The model the shadow map was last baked for: a change rebakes every
      *  level. */
