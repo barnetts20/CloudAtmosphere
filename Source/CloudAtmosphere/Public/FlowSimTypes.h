@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "Templates/Function.h"
 #include "FlowSimTypes.generated.h"
 
 class FTextureResource;
@@ -1117,6 +1118,10 @@ namespace FlowSimProfile
 
 	/** SimThermalShape: the thermal shear's latitude shape, peaking at 1. */
 	float ThermalShape(const UFlowSimConfig& Config, float Mu);
+
+	/** Largest |rate(mu) cos(latitude)| over the sphere: the peak eastward wind
+	 *  of an angular-rate profile, sampled at row centres in mu. */
+	float PeakWind(TFunctionRef<float(float)> Rate);
 
 	/** Wave speed of the first internal mode, from the deformation radius at
 	 *  45 degrees. */

@@ -31,6 +31,9 @@ static_assert(UFlowSnapshot::FloatsPerCell == FFlowSimulation::StateFloatsPerCel
 	&& UFlowSnapshot::LegacyFloatsPerCell == FFlowSimulation::LegacyStateFloatsPerCell,
 	"Snapshot layout and solver state disagree about floats per cell.");
 
+static_assert(FFlowSimulation::StateFloatsPerCell == FlowSimShader::SnapshotPlanes,
+	"The snapshot planes the shader transfers and the solver state disagree.");
+
 static_assert(UFlowSnapshot::TrailingFloats == FFlowSimulation::StateTrailingFloats
 	&& FFlowSimulation::StateTrailingFloats == 8 * FlowSimShader::MaxStormCells,
 	"Snapshot layout and solver state disagree about the storm cells.");
@@ -459,7 +462,7 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 	// slot (rewritten each step). Perpetual storms take the first slots. Must
 	// match SIM_CELL_BUFFER_SIZE.
 	PooledCells = AllocatePooledBuffer(
-		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), 8 * FlowSimShader::MaxStormCells),
+		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), FlowSimShader::CellBufferSize),
 		TEXT("FlowSim.Cells"));
 
 	// Streamfunction at the corners and potential at the centres, one row past

@@ -1,12 +1,8 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
-
 #include "CloudAtmosphere.h"
 
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 #include "ShaderCore.h"
-
-#define LOCTEXT_NAMESPACE "FCloudAtmosphereModule"
 
 DEFINE_LOG_CATEGORY(LogCloudAtmosphere);
 
@@ -17,14 +13,14 @@ void FCloudAtmosphereModule::StartupModule()
 	//
 	// WITHOUT THIS THE INCLUDES FAIL AT SHADER COMPILE, not at load, and the
 	// error names the including file rather than the missing mapping -- so it
-	// reads as a broken shader. The plugin folder name has to match the
-	// .uplugin exactly for FindPlugin to resolve.
+	// reads as a broken shader. FindPlugin matches the plugin's name, the
+	// .uplugin's file name.
 	const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("CloudAtmosphere"));
 	if (!Plugin.IsValid())
 	{
 		UE_LOG(LogCloudAtmosphere, Error,
 			TEXT("CloudAtmosphere plugin not found by IPluginManager; shader directory was not mapped. ")
-			TEXT("The plugin folder name must be 'CloudAtmosphere' to match the .uplugin."));
+			TEXT("The plugin must be named 'CloudAtmosphere', as its .uplugin file is."));
 		return;
 	}
 
@@ -37,7 +33,5 @@ void FCloudAtmosphereModule::StartupModule()
 void FCloudAtmosphereModule::ShutdownModule()
 {
 }
-
-#undef LOCTEXT_NAMESPACE
 
 IMPLEMENT_MODULE(FCloudAtmosphereModule, CloudAtmosphere)

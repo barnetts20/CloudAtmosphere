@@ -27,33 +27,16 @@ namespace
 	FCustomVersionRegistration GRegisterFlowSimConfigVersion(
 		FFlowSimConfigVersion::Guid, FFlowSimConfigVersion::Latest, TEXT("FlowSimConfig"));
 
-	/** Largest |rate(mu) cos(latitude)| over the sphere: the peak eastward wind
-	 *  of an angular-rate profile, sampled at row centres in mu. */
-	template<typename TRate>
-	float PeakWind(TRate&& Rate)
-	{
-		constexpr int32 Samples = 512;
-
-		float Peak = 0.0f;
-
-		for (int32 i = 0; i < Samples; ++i)
-		{
-			const float Mu = -1.0f + (i + 0.5f) * (2.0f / Samples);
-
-			Peak = FMath::Max(Peak, FMath::Abs(Rate(Mu)) * FMath::Sqrt(1.0f - Mu * Mu));
-		}
-
-		return FMath::Max(Peak, 1e-3f);
-	}
+	static_assert(FlowSimShader::MaxStormCells == 32, "MaxStormCells' ClampMax in FlowSimTypes.h names the slot count.");
 
 	float JetPeak(const UFlowSimConfig& Config)
 	{
-		return PeakWind([&Config](float Mu) { return FlowSimProfile::JetRate(Config, Mu, 1.0f, Config.EquatorialBoost); });
+		return FMath::Max(FlowSimProfile::PeakWind([&Config](float Mu) { return FlowSimProfile::JetRate(Config, Mu, 1.0f, Config.EquatorialBoost); }), 1e-3f);
 	}
 
 	float ShapePeak(const UFlowSimConfig& Config)
 	{
-		return PeakWind([&Config](float Mu) { return FlowSimProfile::ThermalShape(Config, Mu); });
+		return FMath::Max(FlowSimProfile::PeakWind([&Config](float Mu) { return FlowSimProfile::ThermalShape(Config, Mu); }), 1e-3f);
 	}
 
 	/** SimRowStiffness at the equator: the Laplacian's diagonal there, the
@@ -67,8 +50,8 @@ namespace
 		return 2.0f / (DLon * DLon) + 2.0f / (DMu * DMu);
 	}
 
-	/** Most of the grid-scale divergence one step may remove: SIM_DAMPING_MAX. */
-	constexpr float MaxDampingFraction = 0.45f;
+	/** Most of the grid-scale divergence one step may remove. */
+	constexpr float MaxDampingFraction = FlowSimShader::DampingMax;
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +119,22 @@ FVector4f FlowSimProfile::JetForm(const UFlowSimConfig& Config)
 float FlowSimProfile::JetLatitudeScale(const UFlowSimConfig& Config)
 {
 	return 45.0f / FMath::Clamp(Config.JetLatitude, 15.0f, 75.0f);
+}
+
+float FlowSimProfile::PeakWind(TFunctionRef<float(float)> Rate)
+{
+	constexpr int32 Samples = 512;
+
+	float Peak = 0.0f;
+
+	for (int32 i = 0; i < Samples; ++i)
+	{
+		const float Mu = -1.0f + (i + 0.5f) * (2.0f / Samples);
+
+		Peak = FMath::Max(Peak, FMath::Abs(Rate(Mu)) * FMath::Sqrt(1.0f - Mu * Mu));
+	}
+
+	return Peak;
 }
 
 float FlowSimProfile::ThermalShape(const UFlowSimConfig& Config, float Mu)

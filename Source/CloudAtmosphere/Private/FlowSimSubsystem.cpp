@@ -598,10 +598,10 @@ namespace
 	}
 }
 
-/** Peak angular rate the profile can reach in the fastest layer, shear
- *  included. PITFALL: reading the shared profile alone under-reports a layer
- *  with JetScale above 1 or the top of a sheared stack, and the Froude check
- *  then passes a regime the sim cannot balance. */
+/** Upper bound on the angular rate in the fastest layer, shear included: what
+ *  the Courant numbers and the debug scales read. PITFALL: reading the shared
+ *  profile alone under-reports a layer with JetScale above 1 or the top of a
+ *  sheared stack. */
 static float PeakRate(const UFlowSimConfig& Config, const FFlowSimScales& Speeds)
 {
 	const int32 Layers = LayerCountOf(Config);
@@ -617,6 +617,25 @@ static float PeakRate(const UFlowSimConfig& Config, const FFlowSimScales& Speeds
 
 		Peak = FMath::Max(Peak, FMath::Abs(Speeds.JetStrength * P.JetScale) * (1.0f + Boost)
 			+ ShearShare(i, Layers) * FMath::Abs(Speeds.ThermalShear));
+	}
+
+	return FMath::Max(Peak, 1e-6f);
+}
+
+/** A layer's fastest eastward wind: what the Froude number and the budget
+ *  compare. */
+static float LayerPeakWind(const UFlowSimConfig& Config, const FFlowSimScales& Speeds, int32 Layer)
+{
+	return FlowSimProfile::PeakWind([&](float Mu) { return LayerZonalRate(Config, Speeds, Mu, Layer); });
+}
+
+static float StackPeakWind(const UFlowSimConfig& Config, const FFlowSimScales& Speeds)
+{
+	float Peak = 0.0f;
+
+	for (int32 i = 0; i < LayerCountOf(Config); ++i)
+	{
+		Peak = FMath::Max(Peak, LayerPeakWind(Config, Speeds, i));
 	}
 
 	return FMath::Max(Peak, 1e-6f);
@@ -838,7 +857,7 @@ void UFlowSimSubsystem::ReportCourant() const
 
 	const float Advective = PeakRate(*Config, Speeds) * Step * W / (2.0f * UE_PI);
 	const float Gravity = C * Step * W / (2.0f * UE_PI);
-	const float Froude = PeakRate(*Config, Speeds) / C;
+	const float Froude = StackPeakWind(*Config, Speeds) / C;
 	const float RotationPerStep = Config->PlanetaryVorticity * Step;
 
 	UE_LOG(LogFlowSim, Log,
@@ -866,7 +885,7 @@ void UFlowSimSubsystem::ReportCourant() const
 			Implicit, Config->GridDamping);
 	}
 
-	if (Fraction >= 0.449f)
+	if (Fraction >= FlowSimShader::DampingMax - 1e-3f)
 	{
 		UE_LOG(LogFlowSim, Warning,
 			TEXT("GridDamping %.2f needs more divergence damping per step than the explicit ")
@@ -911,21 +930,22 @@ void UFlowSimSubsystem::ReportCourant() const
 			RotationPerStep);
 	}
 
-	// THE BUDGET, as fractions of the speed root. The top layer's jet and shear
-	// are summed though they peak at different latitudes, an upper bound; eddies
-	// are their nominal equilibrium speed against the drag, and the storm cells
-	// their target eyewall wind. Past the ceiling's knee the clip acts as a drag
-	// on the zonal mean and clips eddy peaks.
+	// THE BUDGET, as fractions of the speed root: the top layer's fastest zonal
+	// wind, jets, boost and shear together; eddies at their nominal equilibrium
+	// speed against the drag; the storm cells at their target eyewall wind. Past
+	// the ceiling's knee the clip acts as a drag on the zonal mean and clips eddy
+	// peaks.
 	const FFlowLayerProfile Top = LayerOf(*Config, 0);
+	const float Knee = FlowSimShader::FroudeKnee;
 
-	const float TopWind = FMath::Abs(Config->JetSpeed * Top.JetScale) + (LayerCountOf(*Config) > 1 ? FMath::Abs(Config->ShearSpeed) : 0.0f);
+	const float TopWind = LayerPeakWind(*Config, Speeds, 0) / FMath::Max(Speeds.Root, 1e-6f);
 	const float TopEddies = Config->EddySpeed * Top.EddyScale;
 	const float Cells = Config->StormCellWind;
 
 	UE_LOG(LogFlowSim, Log,
 		TEXT("Speed root %.3f, turnover %.4f. Of the root: top layer's jets and shear %.2f, ")
-		TEXT("its eddies %.2f, storm cells %.2f; the ceiling eases in from 0.7."),
-		Speeds.Root, Speeds.Turnover, TopWind, TopEddies, Config->MaxStormCells > 0 ? Cells : 0.0f);
+		TEXT("its eddies %.2f, storm cells %.2f; the ceiling eases in from %.2f."),
+		Speeds.Root, Speeds.Turnover, TopWind, TopEddies, Config->MaxStormCells > 0 ? Cells : 0.0f, Knee);
 
 	// The turnover-authored lifetimes in days, 2 pi / PlanetaryVorticity, to
 	// check against real weather.
@@ -945,12 +965,12 @@ void UFlowSimSubsystem::ReportCourant() const
 		PerpetualWind = FMath::Max(PerpetualWind, Config->PerpetualStorms[i].Wind);
 	}
 
-	if (TopWind + TopEddies > 0.7f || (Config->MaxStormCells > 0 && Cells > 0.7f) || PerpetualWind > 0.7f)
+	if (TopWind + TopEddies > Knee || (Config->MaxStormCells > 0 && Cells > Knee) || PerpetualWind > Knee)
 	{
 		UE_LOG(LogFlowSim, Warning,
-			TEXT("Winds past 0.7 of the speed root reach the ceiling, which then drags the ")
+			TEXT("Winds past %.2f of the speed root reach the ceiling, which then drags the ")
 			TEXT("zonal mean and clips eddies and vortices instead of the flow settling. ")
-			TEXT("Lower JetSpeed, ShearSpeed, EddySpeed, StormCellWind or a perpetual storm's Wind."));
+			TEXT("Lower JetSpeed, ShearSpeed, EddySpeed, StormCellWind or a perpetual storm's Wind."), Knee);
 	}
 }
 
@@ -1281,6 +1301,10 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 		return false;
 	}
 
+#if WITH_EDITOR
+	Target->Modify();
+#endif
+
 	Target->Grid = Grid;
 	Target->State = MoveTemp(Result);
 
@@ -1473,11 +1497,14 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 
 	const float Wall = FMath::Clamp(Config->StormCellEyewall, 0.01f, 0.95f);
 
-	Out.CellShape = FVector4f(
-		Scales.CellRadius,
-		FMath::Clamp(Config->StormCellEyeRatio, 0.0f, 0.9f) * Wall,
-		Wall,
-		FMath::Clamp(Config->StormCellEyeStrength, 0.0f, 1.0f));
+	// The inner ramp held to a grid cell, scaled by the eye's strength: under
+	// a cell a nonzero strength puts a cone in the streamfunction and a point
+	// sink in the potential at the centre.
+	const float EyeStrength = FMath::Clamp(Config->StormCellEyeStrength, 0.0f, 1.0f);
+	const float GridCell = 2.0f * UE_PI / (float)FMath::Max(Out.GridSize.X, 1) / FMath::Max(Scales.CellRadius, 1e-4f);
+	const float Inner = FMath::Max(FMath::Clamp(Config->StormCellEyeRatio, 0.0f, 0.9f) * Wall, EyeStrength * GridCell);
+
+	Out.CellShape = FVector4f(Scales.CellRadius, FMath::Min(Inner, 0.9f * Wall), Wall, EyeStrength);
 
 	Out.CellVortex = FVector4f(
 		FMath::Max(Config->StormCellFalloff, 0.1f),

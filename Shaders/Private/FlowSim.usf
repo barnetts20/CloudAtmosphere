@@ -324,7 +324,8 @@ Texture2DArray<float4> SimTracerSRV;
 RWTexture2DArray<float4> SimTracerUAV;
 
 /** Noise displacement at centres, xyz; ping-pong with the tracers. Phase A in
- *  slices [0, L), phase B in [L, 2L). */
+ *  slices [0, L), its w the low-passed ascent; phase B in [L, 2L), its w the
+ *  eye tracer. */
 Texture2DArray<float4> SimNoiseSRV;
 RWTexture2DArray<float4> SimNoiseUAV;
 
@@ -347,7 +348,9 @@ Texture2D<float> SimGlobalMeanSRV;
 RWTexture2D<float> SimGlobalMeanUAV;
 
 /** The output on the sim's own grid. Slices [0, L) are flow, [L, 2L)
- *  weather, [2L, 3L) noise phase A and [3L, 4L) noise phase B. */
+ *  weather, [2L, 3L) noise phase A with the eye tracer in w, which the
+ *  resample blends between states as it does the rest, and [3L, 4L) noise
+ *  phase B with the humidity in w. */
 Texture2DArray<float4> SimLatLonSRV;
 RWTexture2DArray<float4> SimLatLonUAV;
 
@@ -397,7 +400,7 @@ StructuredBuffer<float> SimRestoreBuffer;
 RWStructuredBuffer<float> SimCaptureBuffer;
 uint SimRestoreFloatsPerCell;
 
-#define SIM_SNAPSHOT_PLANES 15
+#define SIM_SNAPSHOT_PLANES FLOWSIM_SNAPSHOT_PLANES
 
 // -- Stack ------------------------------------------------------------------
 
@@ -886,14 +889,26 @@ float2 SimCellConditions(float3 P, float Ring)
     float3 Bottom = 0.0f;
     float Humidity = 0.0f;
 
-	[unroll]
-    for (int K = 0; K < 6; K++)
+	// A ring of zero radius is the point, read once.
+    if (Ring <= 0.0f)
     {
-        const float2 Grid = SimDirectionToGrid(SimCellRingPoint(P, Ring, K));
+        const float2 Grid = SimDirectionToGrid(P);
 
-        Top += SimSampleBilinear4(SimCentreSRV, Grid, 0u).xyz / 6.0f;
-        Bottom += SimSampleBilinear4(SimCentreSRV, Grid, L - 1u).xyz / 6.0f;
-        Humidity += SimSampleBilinear4(SimLatLonSRV, Grid, (L - 1u) + 3u * L).w / 6.0f;
+        Top = SimSampleBilinear4(SimCentreSRV, Grid, 0u).xyz;
+        Bottom = SimSampleBilinear4(SimCentreSRV, Grid, L - 1u).xyz;
+        Humidity = SimSampleBilinear4(SimLatLonSRV, Grid, (L - 1u) + 3u * L).w;
+    }
+    else
+    {
+		[unroll]
+        for (int K = 0; K < 6; K++)
+        {
+            const float2 Grid = SimDirectionToGrid(SimCellRingPoint(P, Ring, K));
+
+            Top += SimSampleBilinear4(SimCentreSRV, Grid, 0u).xyz / 6.0f;
+            Bottom += SimSampleBilinear4(SimCentreSRV, Grid, L - 1u).xyz / 6.0f;
+            Humidity += SimSampleBilinear4(SimLatLonSRV, Grid, (L - 1u) + 3u * L).w / 6.0f;
+        }
     }
 
 	// Each ring point's wind is tangent at that point; the mean is not tangent at P.
@@ -1004,7 +1019,7 @@ float SimCellSeedScore(float3 P)
  *  at the eyewall, its least, the ring it was measured on and its eased
  *  rotation sense (SIM_CELL_CORE). */
 #define SIM_CELL_CONTROL_BASE (2 * FLOWSIM_MAX_CELLS)
-#define SIM_CELL_CONTROL_STRIDE 6
+#define SIM_CELL_CONTROL_STRIDE FLOWSIM_CELL_CONTROL_STRIDE
 #define SIM_CELL_HEALTH 4u
 #define SIM_CELL_CORE 5u
 
@@ -1452,24 +1467,24 @@ float SimCellStream(float3 P, uint Layer)
  *  the polar faces. */
 float SimCellCornerPsi(int I, int J, uint Layer)
 {
-    if (J <= 0 || J >= SimGridSize.y)
-    {
-        return 0.0f;
-    }
-
-    return SimCellStream(SimDirection(SimColumnToLon((float) I - 0.5f), SimFaceToMu((float) J)), Layer);
+	// A polar corner is the pole for every column, so one value.
+    return SimCellStream(SimDirection(SimColumnToLon((float) I - 0.5f), SimFaceToMu((float) clamp(J, 0, SimGridSize.y))), Layer);
 }
 
 /** Whether any live slot is within its reach and two grid cells of P: the
- *  gate on the cells' reads. */
+ *  gate on the cells' reads. The cells are two rows tall where the rows,
+ *  even in mu, stretch toward the poles. */
 bool SimCellNear(float3 P)
 {
+    const float RowMu = 2.0f / (float) SimGridSize.y;
+    const float Margin = 2.0f * max(SimDLon(), min(RowMu * rsqrt(max(1.0f - P.z * P.z, 1e-6f)), sqrt(2.0f * RowMu)));
+
 	[loop]
     for (int Slot = 0; Slot < SimCellCount; Slot++)
     {
         const float4 Cell = SimCellSRV[2 * Slot];
 
-        if (Cell.w > 0.0f && dot(Cell.xyz, P) > cos(min(SimCellReachOf((uint) Slot) + 2.0f * SimDLon(), PI)))
+        if (Cell.w > 0.0f && dot(Cell.xyz, P) > cos(min(SimCellReachOf((uint) Slot) + Margin, PI)))
         {
             return true;
         }
@@ -1771,10 +1786,10 @@ float SimRowStiffness(int Row)
 // SimFroudeCeiling and SimShockDamping.
 
 /** Share of the ceiling below which the flow is untouched. */
-#define SIM_FROUDE_KNEE 0.7f
+#define SIM_FROUDE_KNEE FLOWSIM_FROUDE_KNEE
 
 /** Cap on the total damping fraction: the explicit scheme's stability bound. */
-#define SIM_DAMPING_MAX 0.45f
+#define SIM_DAMPING_MAX FLOWSIM_DAMPING_MAX
 
 /** Factor on a face velocity of the given speed: 1 below the knee, then a
  *  tanh approach to SimFroudeCeiling times the first internal mode's wave
@@ -2196,12 +2211,12 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
 
     const float Humidity = SimTracerSRV.Load(int4(C, Layer, 0)).z / max(SimSaturation(Mu, Layer), 1e-6f);
 
-    SimLatLonUAV[int3(C, Layer + 2u * L)] = float4(
-		SimNoiseSRV.Load(int4(C.x, C.y, Layer, 0)).xyz, 0.0f);
+    const float4 NoiseB = SimNoiseSRV.Load(int4(C.x, C.y, Layer + L, 0));
 
-    SimLatLonUAV[int3(C, Layer + 3u * L)] = float4(
-		SimNoiseSRV.Load(int4(C.x, C.y, Layer + L, 0)).xyz,
-		Humidity);
+    SimLatLonUAV[int3(C, Layer + 2u * L)] = float4(
+		SimNoiseSRV.Load(int4(C.x, C.y, Layer, 0)).xyz, saturate(NoiseB.w));
+
+    SimLatLonUAV[int3(C, Layer + 3u * L)] = float4(NoiseB.xyz, Humidity);
 }
 
 
@@ -2541,6 +2556,14 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 
         SimCellUAV[2 * Slot] = float4(P, 0.1f);
         SimCellUAV[2 * Slot + 1] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+		// Its health as a live cell reads it, so the health view shows it from
+		// the step it spawns.
+        const float3 Health = float3(Conditions.x, SimCellHumidityFavour(Conditions.y),
+			saturate(max(SimCellParent(P).x / max(SimCellGenesis.z, 1e-3f), SimCellMoistureParent(Conditions.y))));
+
+        SimCellUAV[SIM_CELL_CONTROL_BASE + SIM_CELL_CONTROL_STRIDE * Slot + SIM_CELL_HEALTH] =
+			float4(Health, Health.x * Health.y * Health.z);
 
         return;
     }
@@ -3753,11 +3776,12 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 
         // -- Storm cells --------------------------------------------------------------
 
-		// The eye tracer, from the latest state, as far as a live cell claims it.
-		// PITFALL: UNWEIGHTED, A FREED CELL'S EYE LINGERS in the atlas while the
-		// tracer decays at SimCellEyeDecay with nothing in the sim working it.
-        const float Eye = saturate(SimSampleMeridianTaps(SimNoiseSRV, Taps, Layer + L).w)
-			* Stamp.Presence;
+		// The eye tracer, between the last two states as the output is, as far
+		// as a live cell claims it. PITFALL: UNWEIGHTED, A FREED CELL'S EYE
+		// LINGERS in the atlas while the tracer decays at SimCellEyeDecay with
+		// nothing in the sim working it.
+        const float4 NoiseA = SimResampleOutput(Taps, Layer + 2u * L);
+        const float Eye = saturate(NoiseA.w) * Stamp.Presence;
 
 		// THE BAND INTENSIFIES, IT DOES NOT ADD. Storm deepens and darkens cloud
 		// the column already has; the cloud itself is the sim's, which carries the
@@ -3781,7 +3805,7 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 
         SimOutputUAV[int3(Id.xy, Layer)] = float4(dot(Velocity, T1), dot(Velocity, T2), Flow.zw);
         SimOutputUAV[int3(Id.xy, Layer + L)] = Weather;
-        SimOutputUAV[int3(Id.xy, Layer + 2u * L)] = SimResampleOutput(Taps, Layer + 2u * L);
+        SimOutputUAV[int3(Id.xy, Layer + 2u * L)] = float4(NoiseA.xyz, 0.0f);
         SimOutputUAV[int3(Id.xy, Layer + 3u * L)] = NoiseB;
     }
 }

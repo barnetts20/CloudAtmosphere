@@ -231,6 +231,20 @@ namespace FlowSimShader
 
 	static_assert(MaxPerpetualStorms <= MaxStormCells, "MainCellsCS updates the perpetual storms on its cell threads.");
 
+	/** A slot's float4 entries in the cell buffer, two of state (the shader
+	 *  indexes them as 2 * Slot) and six of control, and the buffer's length. */
+	static constexpr int32 CellStateStride = 2;
+	static constexpr int32 CellControlStride = 6;
+	static constexpr int32 CellBufferSize = (CellStateStride + CellControlStride) * MaxStormCells;
+
+	/** Planes a snapshot holds per cell: FFlowSimulation::StateFloatsPerCell. */
+	static constexpr int32 SnapshotPlanes = 15;
+
+	/** Share of the Froude ceiling below which the flow is untouched, and the
+	 *  explicit scheme's stability cap on the damping fraction. */
+	static constexpr float FroudeKnee = 0.7f;
+	static constexpr float DampingMax = 0.45f;
+
 	/** Gutter texels around each atlas face. PITFALL: must equal
 	 *  FLOW_ATLAS_GUTTER in FlowField.ush, which the materials read without
 	 *  this define, or every face reads its neighbour's tile. */
