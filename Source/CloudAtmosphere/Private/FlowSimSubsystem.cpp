@@ -887,7 +887,7 @@ void UFlowSimSubsystem::ReportCourant() const
 		{
 			UE_LOG(LogFlowSim, Warning,
 				TEXT("Storm cell inflow target %.3f is cut to %.3f in a full-strength cell: its vortex ")
-				TEXT("target %.3f leaves that much under the ceiling %.3f. Lower StormCellSpeed or raise SpeedRoot."),
+				TEXT("target %.3f leaves that much under the ceiling %.3f. Lower StormCellWind or raise SpeedRoot."),
 				Inflow, Left, Wind, Room);
 		}
 	}
@@ -920,7 +920,7 @@ void UFlowSimSubsystem::ReportCourant() const
 
 	const float TopWind = FMath::Abs(Config->JetSpeed * Top.JetScale) + (LayerCountOf(*Config) > 1 ? FMath::Abs(Config->ShearSpeed) : 0.0f);
 	const float TopEddies = Config->EddySpeed * Top.EddyScale;
-	const float Cells = Config->StormCellSpeed;
+	const float Cells = Config->StormCellWind;
 
 	UE_LOG(LogFlowSim, Log,
 		TEXT("Speed root %.3f, turnover %.4f. Of the root: top layer's jets and shear %.2f, ")
@@ -950,7 +950,7 @@ void UFlowSimSubsystem::ReportCourant() const
 		UE_LOG(LogFlowSim, Warning,
 			TEXT("Winds past 0.7 of the speed root reach the ceiling, which then drags the ")
 			TEXT("zonal mean and clips eddies and vortices instead of the flow settling. ")
-			TEXT("Lower JetSpeed, ShearSpeed, EddySpeed, StormCellSpeed or a perpetual storm's Wind."));
+			TEXT("Lower JetSpeed, ShearSpeed, EddySpeed, StormCellWind or a perpetual storm's Wind."));
 	}
 }
 
@@ -1397,6 +1397,8 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.WidthBias = Config->WidthBias;
 	Out.ZonalProfile = (int32)Config->ZonalProfile;
 	Out.JetLatitudeScale = FlowSimProfile::JetLatitudeScale(*Config);
+	Out.JetShape = FlowSimProfile::JetShape(*Config);
+	Out.JetForm = FlowSimProfile::JetForm(*Config);
 
 	for (int32 i = 0; i < 8; ++i)
 	{
@@ -1522,6 +1524,13 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.CellEyeDepth = FMath::Clamp(Config->StormCellEyeDepth, 0.0f, 1.0f);
 	Out.CellCoreFollow = Scales.CellCoreFollow;
 	Out.CellEyeSoftness = FMath::Clamp(Config->StormCellEyeSoftness, 0.05f, 1.0f);
+	Out.CellBandFloor = FMath::Clamp(Config->StormCellBandFloor, 0.0f, 0.99f);
+	Out.CellStormBlend = FMath::Max(Config->StormCellStormBlend, 0.0f);
+	Out.CellEyeRate = FMath::Max(Config->StormCellEyeRate, 0.0f);
+	Out.CellEyeDecay = 1.0f / FMath::Max(Config->StormCellEyeTrail, 0.01f);
+	Out.CellMaturity = FMath::Max(Config->StormCellMaturity, 0.001f);
+	Out.CellSpacing = FMath::Max(Config->StormCellSpacing, 0.0f);
+	Out.CellDryTolerance = Config->StormCellDryTolerance;
 
 
 	// -- Perpetual storms -------------------------------------------------------
@@ -1538,6 +1547,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 
 	Out.PerpetualCount = FMath::Min(Config->PerpetualStorms.Num(), FlowSimShader::MaxPerpetualStorms);
 	Out.PerpetualForcing = FMath::Max(Config->PerpetualStormForcing, 0.0f) / Scales.Turnover;
+	Out.PerpetualClearance = FMath::Max(Config->PerpetualStormClearance, 0.0f);
 
 	for (int32 i = 0; i < Out.PerpetualCount; ++i)
 	{

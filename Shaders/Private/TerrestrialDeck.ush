@@ -60,12 +60,6 @@
 #define TR_DETAIL_EROSION_SCALE 0.35f
 #endif
 
-/** Height fraction over which detail erosion turns from wispy (base) to
- *  billowy (top). */
-#ifndef TR_BILLOW_HEIGHT
-#define TR_BILLOW_HEIGHT 0.25f
-#endif
-
 /** How many mips below the top of its chain the detail volume stops being
  *  fetched and reads as its mean. At that mip a tile is a few texels and the
  *  detail's cells average out, so the fetch returns the mean anyway; the last
@@ -75,32 +69,12 @@
 #define TR_DETAIL_MEAN_MIPS 3
 #endif
 
-/** Share of the noise's range full structure erosion cuts away at full
- *  coverage: the hole fraction a thick system breaks up into. Half leaves
- *  about half of it clear, the survivors ramping from their edges to full. */
-#define TR_EROSION_CUT 0.5f
-
 /** The least StratusDepth the stretch measures depth against. */
 #ifndef TR_STRETCH_MIN_STRATUS
 #define TR_STRETCH_MIN_STRATUS 0.1f
 #endif
 
-/** Coverage over which a column grows from no slab to its full depth. Sparse
- *  cloud is shallow cloud, and clear sky has no slab for the entry search to
- *  stop on. PITFALL: narrower makes the top a cliff at every coverage edge,
- *  steeper than CloudSlope bounds, and the entry search steps over cloud. */
-#ifndef TR_COVERAGE_DEPTH_RAMP
-#define TR_COVERAGE_DEPTH_RAMP 0.25f
-#endif
-
-/** CloudCover as the share of the planet covered, the threshold the priority's
- *  quantile from MainCoverageCS (1), or as a sweep of the threshold through
- *  priority (0). A look change under comparison (FlagAudit). */
-#ifndef TR_COVER_FRACTION
-#define TR_COVER_FRACTION 1
-#endif
-
-/** Fraction of the cone-trace advance actually taken. Under 1 because CloudSlope
+/** Fraction of the cone-trace advance actually taken. Under 1 because the slope
  *  is authored, and an under-declared slope is the one way the entry search
  *  steps over a surface. */
 #ifndef TR_CONE_RELAXATION
@@ -112,13 +86,6 @@
  *  from. */
 #ifndef TR_SLAB_ENTRY_PROBES
 #define TR_SLAB_ENTRY_PROBES 24
-#endif
-
-/** Power on the sim's depth factor that a column's density scales by (see
- *  TR_DensityInColumn): above 1 keeps more of an eyewall and clears the floor
- *  sooner. */
-#ifndef TR_EYE_OPEN_POWER
-#define TR_EYE_OPEN_POWER 1.0f
 #endif
 
 /** 1 for the deep deck, a gas giant's; 0 for the slab. Set per pass by the
@@ -183,11 +150,25 @@ struct TRFieldParams
     float CloudFull;
     float CoverThreshold;
 
+	/** Coverage over which a column grows from no slab to its full depth, so
+	 *  sparse cloud is shallow and clear sky has no slab for the entry search
+	 *  to stop on. PITFALL: narrow makes the top a cliff at every coverage edge,
+	 *  steeper than the slope bound, and the entry search steps over cloud. */
+    float CoverageDepthRamp;
+
+	/** Power on the sim's depth factor a column's density scales by: above 1
+	 *  keeps more of an eyewall and clears the floor sooner. */
+    float EyeOpenPower;
+
 	/** The deep deck's fill: how far below a column's base, in atmosphere
 	 *  fractions, it reaches full density; and how many fills the floor's
 	 *  mounds rise above that. */
     float DeepFill;
     float FloorRelief;
+
+	/** Floor on the deep deck's absorption, so a white deck still darkens with
+	 *  depth. */
+    float DeepDarkening;
 
 	/** The exponent type builds with: above 1 only the densest and stormiest
 	 *  columns approach full towering storm cloud. */
@@ -254,11 +235,19 @@ struct TRFieldParams
     float StructureErosion;
     float StructureFlowInherit;
 
+	/** Share of the noise's range full structure erosion cuts away: the hole
+	 *  fraction a thick system breaks up into. */
+    float StructureBreakup;
+
     float DetailMipBias;
     bool DetailActive;
     float DetailScale;
     float DetailErosion;
     float DetailFlowInherit;
+
+	/** Height fraction over which detail erosion turns from wispy at the base
+	 *  to billowy toward the top. */
+    float DetailBillowHeight;
 
 	/** The detail noise's mean value, which it settles to as it fades. */
     float DetailFadeMean;
@@ -318,20 +307,20 @@ struct TRFieldParams
  *    CloudProfile      CloudBase, CloudThickness, SurfaceSoftness, CeilingFalloff
  *    CloudCurves       TopCurve, BottomCurve, CloudSlope, WarpStretch
  *    CloudCoverage     CloudCover, StormPriority, CoverageSoftness, DeepFill
- *    CloudType         TypeBias, CloudFull, TypeTropical, (unused)
- *    CloudLid          PressureScale, (unused), CeilingPressure, StratusDepth
+ *    CloudType         TypeBias, CloudFull, TypeTropical, CoverageDepthRamp
+ *    CloudLid          PressureScale, EyeOpenPower, CeilingPressure, StratusDepth
  *    CloudLift         BaseTropical, BasePressure, AltitudeGain, AltitudeLift
  *    CloudMotion       DriftAngle, NoisePhase, WarpShift, SpinAngle
  *    NoiseLevels       StructureMipBias, structure volume bound, DetailMipBias,
  *                      detail volume bound
  *    StructureSampling Scale, Aspect, Erosion, TypeStorm
- *    StructureWarp     FlowInherit, GenusSubsidence, FloorRelief, (unused)
+ *    StructureWarp     FlowInherit, GenusSubsidence, FloorRelief, Breakup
  *    DetailSampling    Scale, Aspect, Erosion, FadeMean
- *    DetailWarp        FlowInherit, (unused), FadeNear, FadeSpan
+ *    DetailWarp        FlowInherit, BillowHeight, FadeNear, FadeSpan
  *    ShadowCascades    Cascade 1 half-width, cascade 2 half-width, CloudLayer,
  *                      CoverageFray
  *    CloudGenus<Name>  structure channel weights for that genus
- *    CloudResponse     (unused), TypeCurve, StormBalance, StormBlend
+ *    CloudResponse     DeepDarkening, TypeCurve, StormBalance, StormBlend
  *
  *  CoverThreshold arrives apart, read from the coverage pass's texel.
  *
@@ -384,8 +373,10 @@ TRFieldParams TR_BuildField(
     F.CloudFull = max(CloudType.y, 1e-6f);
     F.CoverThreshold = CoverThreshold;
     F.TypeTropical = CloudType.z;
+    F.CoverageDepthRamp = max(CloudType.w, 1e-3f);
 
     F.PressureScale = max(CloudLid.x, 1e-6f);
+    F.EyeOpenPower = max(CloudLid.y, 0.0f);
     F.CeilingPressure = clamp(CloudLid.z, -0.99f, 0.99f);
     F.StratusDepth = saturate(CloudLid.w);
 
@@ -407,6 +398,7 @@ TRFieldParams TR_BuildField(
     F.StructureFlowInherit = StructureWarp.x;
     F.GenusSubsidence = max(StructureWarp.y, 0.0f);
     F.FloorRelief = saturate(StructureWarp.z);
+    F.StructureBreakup = saturate(StructureWarp.w);
 
     F.GenusStratus = CloudGenusStratus;
     F.GenusStratocumulus = CloudGenusStratocumulus;
@@ -419,6 +411,7 @@ TRFieldParams TR_BuildField(
     F.DetailActive = NoiseLevels.w > 0.5f && F.DetailErosion > 0.0f;
     F.DetailFadeMean = saturate(DetailSampling.w);
     F.DetailFlowInherit = DetailWarp.x;
+    F.DetailBillowHeight = max(DetailWarp.y, 1e-3f);
 
     F.Thickness = max(PlanetRadius * HeightScale, 1e-4f);
 
@@ -441,6 +434,7 @@ TRFieldParams TR_BuildField(
     F.CloudLayer = ShadowCascades.z;
     F.CoverageFray = saturate(ShadowCascades.w);
 
+    F.DeepDarkening = saturate(CloudResponse.x);
     F.TypeCurve = max(CloudResponse.y, 0.1f);
     F.StormBalance = saturate(CloudResponse.z);
     F.StormBlend = max(CloudResponse.w, 1e-3f);
@@ -730,9 +724,9 @@ float TR_Priority(float4 Weather, TRFieldParams F)
  *  DEPTH is the type's, StratusDepth to full, under the lid. Relief comes from
  *  type, coverage's depth ramp and the sim's depth factor. PITFALL: relief
  *  steepens the top wherever those do; if cloud goes missing on grazing rays,
- *  raise CloudSlope.
+ *  raise SlopePerTexel.
  *
- *  SPARSE COLUMNS ARE SHALLOW. Depth ramps in over TR_COVERAGE_DEPTH_RAMP of
+ *  SPARSE COLUMNS ARE SHALLOW. Depth ramps in over CoverageDepthRamp of
  *  coverage, so clear sky has no slab for the entry search to stop on.
  *
  *  THE SIM'S DEPTH FACTOR SCALES THE REST, so a storm cell's eye is a bowl
@@ -756,13 +750,7 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
     const float Priority = TR_Priority(Weather, F);
     const float Soft = F.CoverageSoftness;
 
-#if TR_COVER_FRACTION
     const float Threshold = F.CoverThreshold;
-#else
-	// From above the highest priority at CloudCover 0 to just above none at 1,
-	// so both ends are exact: nothing, then every column holding cloud.
-    const float Threshold = lerp(1.0f + Soft, Soft, saturate(F.CloudCover));
-#endif
 
     Col.Coverage = smoothstep(Threshold - Soft, Threshold + Soft, Priority);
 
@@ -791,7 +779,7 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
     const float Lid = 1.0f + F.CeilingPressure * Col.Pressure;
 
     const float Depth = D * lerp(F.StratusDepth, 1.0f, Col.Type) * Lid
-		* smoothstep(0.0f, TR_COVERAGE_DEPTH_RAMP, Col.Coverage)
+		* smoothstep(0.0f, F.CoverageDepthRamp, Col.Coverage)
 		* In.Depth;
 
 	// Capped at the shell, where the ceiling fade has already taken density to
@@ -1280,7 +1268,7 @@ float4 TR_DensityInColumn(
 	// since thick cloud stays opaque at a fraction of its density, erosion then
 	// reads as erasing thin cloud and leaving thick cloud untouched.
     const float Coverage = Col.Coverage;
-    const float Cut = TR_EROSION_CUT * saturate(Col.Erosion);
+    const float Cut = F.StructureBreakup * saturate(Col.Erosion);
     const float Threshold = Cut + (1.0f - Cut) * (1.0f - Coverage) * F.CoverageFray;
 
     float Density = saturate((Shape - Threshold) / max(1.0f - Threshold, 1e-3f)) * Coverage;
@@ -1316,7 +1304,7 @@ float4 TR_DensityInColumn(
         if (Strength > 0.0f)
         {
 			// Wispy at the base, billowy toward the top, fibrous in cirrus.
-            const float Billow = saturate(HeightFraction / TR_BILLOW_HEIGHT);
+            const float Billow = saturate(HeightFraction / F.DetailBillowHeight);
 
             const float4 Weights =
 				float4(1.0f - Billow, Billow, 0.0f, 0.0f) * (1.0f - Col.Cirrus)
@@ -1366,7 +1354,7 @@ float4 TR_DensityInColumn(
 	// at a high CloudOpticalDepth a thinned floor left at full density holds
 	// as an opaque sheet; scaled before erosion, the threshold cuts it away
 	// abruptly instead.
-    Density *= pow(saturate(Col.Thinning), TR_EYE_OPEN_POWER);
+    Density *= pow(saturate(Col.Thinning), F.EyeOpenPower);
 
 #if TR_DEEP_DECK
     Density = max(Density, TR_DeepFloor(Height, HalfStep, Col, StructureNoise, F));

@@ -5,35 +5,36 @@
 // area and do not crowd the poles; an angular rate on a unit sphere, so the
 // eastward speed is R(S) * cos(latitude).
 
-/** The raw shape, about [-1.45, 1.45] plus Asymmetry's small odd term. The
- *  cosines are even in S and incommensurate, so the jets mirror across the
- *  equator at irregular spacing. PITFALL: a phase offset or an abs() on them
+/** x JetIrregularity, y JetHarmonic, z 1 / (1 + JetIrregularity), w the
+ *  equatorial boost's Gaussian coefficient. */
+#define SimJetShape FlowSimUB.JetShape
+
+/** x the saturation's knee, y its width, z the trades' and w the polar
+ *  easterlies' strength. */
+#define SimJetForm FlowSimUB.JetForm
+
+/** The raw shape, about +-(1 + JetIrregularity) plus Asymmetry's small odd
+ *  term. The cosines are even in S and incommensurate, so the jets mirror
+ *  across the equator at irregular spacing. PITFALL: a phase offset or an abs() on them
  *  puts a kink and a shear seam at S = 0. */
 float SimJetRaw(float S, float BandCount, float Asymmetry)
 {
     const float K = BandCount * PI;
 
     float Shape = cos(K * S);
-    Shape += 0.45f * cos(K * 1.7f * S);
+    Shape += SimJetShape.x * cos(K * SimJetShape.y * S);
     Shape += Asymmetry * sin(K * 0.6f * S);
 
     return Shape;
 }
 
-/** 1/1.45: the symmetric shape to about [-1, 1], the range WidthBias offsets. */
-#define SIM_JET_NORM 0.6897f
-
-/** The normalized shape, offset so zones and belts can differ in width. */
+/** The shape normalised to about [-1, 1], the range WidthBias offsets. */
 float SimJetScaled(float S, float BandCount, float Asymmetry, float WidthBias)
 {
-    return SimJetRaw(S, BandCount, Asymmetry) * SIM_JET_NORM - WidthBias;
+    return SimJetRaw(S, BandCount, Asymmetry) * SimJetShape.z - WidthBias;
 }
 
-/** Knee of the rate saturation, and the width of the transition above it. */
-#define SIM_JET_SAT_KNEE  0.5f
-#define SIM_JET_SAT_WIDTH 1.0f
-
-/** The identity below the knee, then a quintic approach to Knee + Width/2,
+/** The identity below the knee, then a quintic approach to Knee + Width/2 = 1,
  *  continuous in value, slope and curvature. PITFALL: since
  *  zeta = 2 S R - (1 - S^2) R', a corner in R is a vortex sheet, unstable at
  *  every wavenumber, and Rayleigh-Kuo reads R'': bands roll up at the jet
@@ -42,12 +43,12 @@ float SimJetSaturate(float X)
 {
     const float A = abs(X);
 
-    if (A <= SIM_JET_SAT_KNEE)
+    if (A <= SimJetForm.x)
     {
         return X;
     }
 
-    const float U = saturate((A - SIM_JET_SAT_KNEE) / SIM_JET_SAT_WIDTH);
+    const float U = saturate((A - SimJetForm.x) / SimJetForm.y);
 
     const float U2 = U * U;
     const float U3 = U2 * U;
@@ -56,7 +57,7 @@ float SimJetSaturate(float X)
     const float U6 = U5 * U;
 
 	// Integral of the quintic smoothstep: the slope ramps from 1 to 0.
-    const float S = SIM_JET_SAT_KNEE + SIM_JET_SAT_WIDTH * (U - (U6 - 3.0f * U5 + 2.5f * U4));
+    const float S = SimJetForm.x + SimJetForm.y * (U - (U6 - 3.0f * U5 + 2.5f * U4));
 
     return (X < 0.0f) ? -S : S;
 }
@@ -64,7 +65,7 @@ float SimJetSaturate(float X)
 /** Sharpens the prograde jet at S = 0; added after the saturation. */
 float SimEquatorialBoost(float S, float EquatorialBoost)
 {
-    return EquatorialBoost * exp(-S * S * 12.0f);
+    return EquatorialBoost * exp(-S * S * SimJetShape.w);
 }
 
 /** Angular rate, positive prograde. */

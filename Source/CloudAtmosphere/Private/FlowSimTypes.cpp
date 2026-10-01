@@ -14,7 +14,7 @@ namespace
 		{
 			/** PITFALL: never lower this number. The engine refuses a package
 			 *  saved at a version above Latest. */
-			Current = 9,
+			Current = 10,
 
 			Latest = Current
 		};
@@ -86,29 +86,51 @@ float FlowSimProfile::JetRate(const UFlowSimConfig& Config, float Mu, float Stre
 			Mu = FMath::Sin(FMath::Clamp(FMath::Asin(FMath::Clamp(Mu, -1.0f, 1.0f)) * Scale, -0.5f * UE_PI, 0.5f * UE_PI));
 		}
 
+		const FVector4f Form = JetForm(Config);
 		const float A = FMath::Abs(Mu);
 		const float Jet = (A - 0.71f) / 0.17f;
 		const float Trades = Mu / 0.33f;
 		const float Polar = (A - 0.97f) / 0.09f;
 
-		return Strength * (FMath::Exp(-Jet * Jet) - 0.35f * FMath::Exp(-Trades * Trades) - 0.5f * FMath::Exp(-Polar * Polar));
+		return Strength * (FMath::Exp(-Jet * Jet) - Form.Z * FMath::Exp(-Trades * Trades) - Form.W * FMath::Exp(-Polar * Polar));
 	}
 
+	const FVector4f Shape = JetShape(Config);
+	const FVector4f Form = JetForm(Config);
 	const float K = Config.BandCount * UE_PI;
-	const float Raw = (FMath::Cos(K * Mu) + 0.45f * FMath::Cos(K * 1.7f * Mu) + Config.Asymmetry * FMath::Sin(K * 0.6f * Mu))
-		* 0.6897f - Config.WidthBias;
+	const float Raw = (FMath::Cos(K * Mu) + Shape.X * FMath::Cos(K * Shape.Y * Mu) + Config.Asymmetry * FMath::Sin(K * 0.6f * Mu))
+		* Shape.Z - Config.WidthBias;
 
 	float Saturated = Raw;
 	const float Abs = FMath::Abs(Raw);
 
-	if (Abs > 0.5f)
+	if (Abs > Form.X)
 	{
-		const float U = FMath::Clamp(Abs - 0.5f, 0.0f, 1.0f);
+		const float U = FMath::Clamp((Abs - Form.X) / Form.Y, 0.0f, 1.0f);
 		const float U4 = U * U * U * U;
-		Saturated = FMath::Sign(Raw) * (0.5f + U - (U4 * U * U - 3.0f * U4 * U + 2.5f * U4));
+		Saturated = FMath::Sign(Raw) * (Form.X + Form.Y * (U - (U4 * U * U - 3.0f * U4 * U + 2.5f * U4)));
 	}
 
-	return Strength * (Saturated + Boost * FMath::Exp(-Mu * Mu * 12.0f));
+	return Strength * (Saturated + Boost * FMath::Exp(-Mu * Mu * Shape.W));
+}
+
+FVector4f FlowSimProfile::JetShape(const UFlowSimConfig& Config)
+{
+	const float Irregularity = FMath::Max(Config.JetIrregularity, 0.0f);
+	const float Half = FMath::Sin(FMath::DegreesToRadians(FMath::Clamp(Config.EquatorialJetWidth, 0.5f, 89.0f)));
+
+	// The boost is exp(-W S^2), half at S = sin(EquatorialJetWidth).
+	constexpr float Ln2 = 0.693147181f;
+
+	return FVector4f(Irregularity, Config.JetHarmonic, 1.0f / (1.0f + Irregularity), Ln2 / (Half * Half));
+}
+
+FVector4f FlowSimProfile::JetForm(const UFlowSimConfig& Config)
+{
+	const float Flatness = FMath::Clamp(Config.JetFlatness, 0.05f, 0.95f);
+
+	// The quintic tops out at Knee + Width / 2, which is 1 for any flatness.
+	return FVector4f(1.0f - Flatness, 2.0f * Flatness, Config.TradeWindStrength, Config.PolarEasterlyStrength);
 }
 
 float FlowSimProfile::JetLatitudeScale(const UFlowSimConfig& Config)
@@ -208,7 +230,7 @@ FFlowSimScales UFlowSimConfig::ResolveScales() const
 	S.ThermalShear = ShearSpeed * S.Root / ShapePeak(*this);
 
 	S.EddySpeed = FMath::Max(EddySpeed, 0.0f) * S.Root;
-	S.CellWind = FMath::Max(StormCellSpeed, 0.0f) * S.Root;
+	S.CellWind = FMath::Max(StormCellWind, 0.0f) * S.Root;
 	S.CellDrift = FMath::Max(StormCellDriftSpeed, 0.0f) * S.Root;
 	S.GenesisShear = FMath::Max(GenesisShearRatio * FMath::Max(FMath::Abs(ShearSpeed), 0.1f) * S.Root, 0.01f);
 

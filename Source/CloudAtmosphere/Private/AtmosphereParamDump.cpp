@@ -70,10 +70,18 @@ namespace AtmosphereDump
 			&& !Property->HasAnyPropertyFlags(CPF_Transient | CPF_EditConst);
 	}
 
+	/** Members of a group a dump carries: neither kept only for old data nor
+	 *  transient, which leaves out readouts and per-model state. */
+	bool Stored(const FProperty* Property)
+	{
+		return !Property->HasAnyPropertyFlags(CPF_Deprecated | CPF_Transient);
+	}
+
+	/** Transient members of nested groups are left out, as Stored. */
 	TSharedPtr<FJsonValue> ValueOf(FProperty* Property, const void* Value)
 	{
 		return FJsonObjectConverter::UPropertyToJsonValue(
-			Property, Value, 0, 0, nullptr, nullptr, EJsonObjectConversionFlags::SkipStandardizeCase);
+			Property, Value, 0, CPF_Transient, nullptr, nullptr, EJsonObjectConversionFlags::SkipStandardizeCase);
 	}
 
 	/** Structs declared in this module are parameter groups and are diffed per
@@ -118,7 +126,7 @@ namespace AtmosphereDump
 
 			if (IsGroup(Property))
 			{
-				Overrides(CastFieldChecked<FStructProperty>(Property)->Struct, Value, Base, Name + TEXT("."), Current, Out);
+				Overrides(CastFieldChecked<FStructProperty>(Property)->Struct, Value, Base, Name + TEXT("."), Stored, Out);
 				continue;
 			}
 
@@ -573,6 +581,8 @@ namespace AtmosphereLoad
 			{ TEXT("ShockDamping"), TEXT("") },
 			{ TEXT("AscentSmoothing"), TEXT("") },
 			{ TEXT("bSharpCentreVelocity"), TEXT("") },
+
+			{ TEXT("StormCellSpeed"), TEXT("StormCellWind") },
 		};
 		return Rows;
 	}
@@ -749,6 +759,51 @@ namespace AtmosphereLoad
 			// was per radian: 60 per radian is 1.5 per texel at GridResolution 64.
 			{ TEXT("TerrestrialCloudSlope"), TEXT("") },
 			{ TEXT("GasGiantCloudSlope"), TEXT("") },
+
+			// One bundle per model: every group moves under Terrestrial or
+			// GasGiant, the cloud material drops its prefix, the slope joins
+			// Shape and the genus weights form Type's Genus.
+			{ TEXT("TerrestrialPlanet"), TEXT("Terrestrial.Planet") },
+			{ TEXT("TerrestrialAir"), TEXT("Terrestrial.Air") },
+			{ TEXT("TerrestrialAmbient"), TEXT("Terrestrial.Ambient") },
+			{ TEXT("TerrestrialShape"), TEXT("Terrestrial.Shape") },
+			{ TEXT("TerrestrialCoverage"), TEXT("Terrestrial.Coverage") },
+			{ TEXT("TerrestrialType"), TEXT("Terrestrial.Type") },
+			{ TEXT("TerrestrialLift"), TEXT("Terrestrial.Lift") },
+			{ TEXT("TerrestrialWarp"), TEXT("Terrestrial.Warp") },
+			{ TEXT("TerrestrialStructureLayer"), TEXT("Terrestrial.StructureLayer") },
+			{ TEXT("TerrestrialDetailLayer"), TEXT("Terrestrial.DetailLayer") },
+			{ TEXT("TerrestrialCloudMaterial"), TEXT("Terrestrial.Material") },
+			{ TEXT("TerrestrialPhase"), TEXT("Terrestrial.Phase") },
+			{ TEXT("TerrestrialMultipleScattering"), TEXT("Terrestrial.MultipleScattering") },
+			{ TEXT("TerrestrialSurfaceShadow"), TEXT("Terrestrial.SurfaceShadow") },
+			{ TEXT("TerrestrialSampling"), TEXT("Terrestrial.Sampling") },
+			{ TEXT("TerrestrialSlopePerTexel"), TEXT("Terrestrial.Shape.SlopePerTexel") },
+			{ TEXT("GasGiantPlanet"), TEXT("GasGiant.Planet") },
+			{ TEXT("Air"), TEXT("GasGiant.Air") },
+			{ TEXT("Ambient"), TEXT("GasGiant.Ambient") },
+			{ TEXT("GasGiantShape"), TEXT("GasGiant.Shape") },
+			{ TEXT("GasGiantDeep"), TEXT("GasGiant.Deep") },
+			{ TEXT("GasGiantCoverage"), TEXT("GasGiant.Coverage") },
+			{ TEXT("GasGiantType"), TEXT("GasGiant.Type") },
+			{ TEXT("GasGiantLift"), TEXT("GasGiant.Lift") },
+			{ TEXT("GasGiantWarp"), TEXT("GasGiant.Warp") },
+			{ TEXT("GasGiantStructureLayer"), TEXT("GasGiant.StructureLayer") },
+			{ TEXT("GasGiantDetailLayer"), TEXT("GasGiant.DetailLayer") },
+			{ TEXT("GasGiantCloudMaterial"), TEXT("GasGiant.Material") },
+			{ TEXT("Phase"), TEXT("GasGiant.Phase") },
+			{ TEXT("MultipleScattering"), TEXT("GasGiant.MultipleScattering") },
+			{ TEXT("GasGiantSurfaceShadow"), TEXT("GasGiant.SurfaceShadow") },
+			{ TEXT("GasGiantSampling"), TEXT("GasGiant.Sampling") },
+			{ TEXT("GasGiantSlopePerTexel"), TEXT("GasGiant.Shape.SlopePerTexel") },
+			{ TEXT("Terrestrial.Type.Stratus"), TEXT("Terrestrial.Type.Genus.Stratus") },
+			{ TEXT("Terrestrial.Type.Stratocumulus"), TEXT("Terrestrial.Type.Genus.Stratocumulus") },
+			{ TEXT("Terrestrial.Type.Cumulus"), TEXT("Terrestrial.Type.Genus.Cumulus") },
+			{ TEXT("Terrestrial.Type.Cirrus"), TEXT("Terrestrial.Type.Genus.Cirrus") },
+			{ TEXT("GasGiant.Type.Stratus"), TEXT("GasGiant.Type.Genus.Stratus") },
+			{ TEXT("GasGiant.Type.Stratocumulus"), TEXT("GasGiant.Type.Genus.Stratocumulus") },
+			{ TEXT("GasGiant.Type.Cumulus"), TEXT("GasGiant.Type.Genus.Cumulus") },
+			{ TEXT("GasGiant.Type.Cirrus"), TEXT("GasGiant.Type.Genus.Cirrus") },
 		};
 		return Rows;
 	}
@@ -1077,6 +1132,17 @@ namespace AtmosphereLoad
 		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Json.Values)
 		{
 			const FString Name = Prefix + Field.Key;
+
+			// A group's transient members, such as its readouts, are not authored;
+			// older files carry them.
+			if (!bTop)
+			{
+				if (const FProperty* Member = FindFProperty<FProperty>(Type, *Field.Key); Member && Member->HasAnyPropertyFlags(CPF_Transient))
+				{
+					continue;
+				}
+			}
+
 			FProperty* Property = Find(Type, Field.Key, bTop, Name, Report);
 
 			if (!Property)

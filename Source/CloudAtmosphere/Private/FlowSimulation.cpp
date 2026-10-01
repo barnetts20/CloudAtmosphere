@@ -122,6 +122,8 @@ namespace
 		P.WidthBias = Params.WidthBias;
 		P.ZonalProfile = Params.ZonalProfile;
 		P.JetLatitudeScale = Params.JetLatitudeScale;
+		P.JetShape = Params.JetShape;
+		P.JetForm = Params.JetForm;
 
 		for (int32 i = 0; i < 8; ++i)
 		{
@@ -191,6 +193,13 @@ namespace
 		P.CellEyeDepth = Params.CellEyeDepth;
 		P.CellCoreFollow = Params.CellCoreFollow;
 		P.CellEyeSoftness = Params.CellEyeSoftness;
+		P.CellBandFloor = Params.CellBandFloor;
+		P.CellStormBlend = Params.CellStormBlend;
+		P.CellEyeRate = Params.CellEyeRate;
+		P.CellEyeDecay = Params.CellEyeDecay;
+		P.CellMaturity = Params.CellMaturity;
+		P.CellSpacing = Params.CellSpacing;
+		P.CellDryTolerance = Params.CellDryTolerance;
 		P.CellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
 		P.StepIndex = Params.StepIndex;
 
@@ -198,6 +207,7 @@ namespace
 		// wrapped, so it holds its precision however long the sim has run.
 		P.PerpetualCount = FMath::Clamp(Params.PerpetualCount, 0, FlowSimShader::MaxPerpetualStorms);
 		P.PerpetualForcing = Params.PerpetualForcing;
+		P.PerpetualClearance = Params.PerpetualClearance;
 
 		for (int32 i = 0; i < FlowSimShader::MaxPerpetualStorms; ++i)
 		{
@@ -273,11 +283,13 @@ namespace
 	TArray<float> BalanceKeyOf(const FFlowSimParams& Params)
 	{
 		TArray<float> Key;
-		Key.Reserve(48);
+		Key.Reserve(56);
 
 		Key.Append({ (float)Params.GridSize.X, (float)Params.GridSize.Y, (float)Params.GridSize.Z });
 		Key.Append({ Params.JetParams.X, Params.JetParams.Y, Params.JetParams.Z, Params.JetParams.W });
 		Key.Append({ Params.WidthBias, (float)Params.ZonalProfile, Params.JetLatitudeScale, Params.PlanetaryVorticity });
+		Key.Append({ Params.JetShape.X, Params.JetShape.Y, Params.JetShape.Z, Params.JetShape.W });
+		Key.Append({ Params.JetForm.X, Params.JetForm.Y, Params.JetForm.Z, Params.JetForm.W });
 		Key.Append({ Params.ThermalParams.X, Params.ThermalParams.Y, Params.ThermalParams.Z, Params.ThermalParams.W });
 
 		for (int32 i = 0; i < 8; ++i)
@@ -942,4 +954,4 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	// three times per substep and the tracers once, so both genuinely alternate.
 	CurrentFace = R.Current;
 	CurrentTracer = R.TracerCurrent;
-}
+}

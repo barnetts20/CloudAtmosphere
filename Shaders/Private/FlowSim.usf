@@ -218,6 +218,27 @@
 /** Share of the low's eye its rim ramps over; see SimCellEyeSource. */
 #define SimCellEyeSoftness FlowSimUB.CellEyeSoftness
 
+/** Vector strength, as a share of the eyewall's, where the intense band
+ *  begins; and the width of the smooth max joining a cell's storm to the
+ *  sim's, so storms within it blend rather than meeting at a crease. */
+#define SimCellBandFloor FlowSimUB.CellBandFloor
+#define SimCellStormBlend FlowSimUB.CellStormBlend
+
+/** Rates, per turnover, at which the eye tracer rises toward its source and
+ *  falls back where the source has moved on. The fall against the eye's spin
+ *  sets how far the flow winds it, so in turnovers it winds as far at any
+ *  rotation and speed. */
+#define SimCellEyeRate FlowSimUB.CellEyeRate
+#define SimCellEyeDecay FlowSimUB.CellEyeDecay
+
+/** Intensity at which a cell pushes at full strength. */
+#define SimCellMaturity FlowSimUB.CellMaturity
+
+/** Least distance between cells at spawn, in radii; how far under the genesis
+ *  humidity a live cell's favour reaches zero. */
+#define SimCellSpacing FlowSimUB.CellSpacing
+#define SimCellDryTolerance FlowSimUB.CellDryTolerance
+
 /** Live cell slots, up to FLOWSIM_MAX_CELLS. */
 #define SimCellCount FlowSimUB.CellCount
 
@@ -232,6 +253,9 @@
  *  SimPerpetualForcing is the rate the flow relaxes toward their pushes. */
 #define SimPerpetualCount FlowSimUB.PerpetualCount
 #define SimPerpetualForcing FlowSimUB.PerpetualForcing
+
+/** Distance inside which no cell spawns near a perpetual storm, in reaches. */
+#define SimPerpetualClearance FlowSimUB.PerpetualClearance
 #define SimPerpetualShape FlowSimUB.PerpetualShape
 #define SimPerpetualLook FlowSimUB.PerpetualLook
 #define SimPerpetualForm FlowSimUB.PerpetualForm
@@ -442,7 +466,7 @@ void SimLayerJets(uint Layer, out float BandCount, out float JetStrength, out fl
     Asymmetry = SimJetParams.w;
 }
 
-/** Earth's three cells as an angular rate, peaking at 1: easterly trades to
+/** Earth's three cells as an angular rate, the jet peaking at 1: easterly trades to
  *  about 25 degrees, a westerly jet at 45, polar easterlies past about 65,
  *  each latitude scaled by JetLatitude / 45. Gaussians in mu, so the
  *  vorticity is smooth everywhere. Mirrors FlowSimProfile::JetRate. */
@@ -459,7 +483,7 @@ float SimThreeCellRate(float Mu)
     const float Trades = Mu / 0.33f;
     const float Polar = (A - 0.97f) / 0.09f;
 
-    return exp(-Jet * Jet) - 0.35f * exp(-Trades * Trades) - 0.5f * exp(-Polar * Polar);
+    return exp(-Jet * Jet) - SimJetForm.z * exp(-Trades * Trades) - SimJetForm.w * exp(-Polar * Polar);
 }
 
 /** Latitude shape of the thermal shear, peaking at 1: a Gaussian zone about
@@ -791,13 +815,6 @@ float SimInterfaceFlux(int2 C, uint Interface)
 /** Genesis window a seed must exceed to spawn. */
 #define SIM_GENESIS_WINDOW_GATE 0.5f
 
-/** Vector strength, as a fraction of the eyewall's, above which the band
- *  counts as intense: storm cloud rises across it to full at the eyewall. */
-#define SIM_CELL_BAND_FLOOR 0.4f
-
-/** Width of the smooth max joining a cell's storm to the sim's: storms within
- *  this of each other blend rather than meeting at a crease. */
-#define SIM_CELL_STORM_BLEND 0.25f
 
 /** Intensity below which a cell's slot frees. */
 #define SIM_CELL_FREE 0.05f
@@ -886,7 +903,7 @@ float2 SimCellConditions(float3 P, float Ring)
 /** Humidity below which a cell weakens, fully favourable at saturation. */
 float SimCellHumidityFavour(float Humidity)
 {
-    const float Floor = SimCellGenesis.y - 0.15f;
+    const float Floor = SimCellGenesis.y - SimCellDryTolerance;
 
     return saturate((Humidity - Floor) / max(1.0f - Floor, 1e-3f));
 }
@@ -973,14 +990,12 @@ float SimCellSeedScore(float3 P)
  *  the target. */
 #define SIM_CELL_GAIN_LIMIT 2.0f
 
-/** Intensity at which a cell pushes at full strength. The push ramps up to it
- *  rather than scaling with intensity throughout, so a young cell spins up its
- *  parent storm while it still has one to grow on. */
-#define SIM_CELL_MATURITY 0.25f
-
+/** The push ramps up to full at SimCellMaturity rather than scaling with
+ *  intensity throughout, so a young cell spins up its parent storm while it
+ *  still has one to grow on. */
 float SimCellStrength(float Intensity)
 {
-    return saturate(Intensity / SIM_CELL_MATURITY);
+    return saturate(Intensity / SimCellMaturity);
 }
 
 /** A push's gain toward Target from Measured, in units of what the push adds
@@ -1097,9 +1112,6 @@ float3 SimCellDisplayCentre(float4 Cell, float4 Life)
 // A slot's shape and look. Storm cells share the config's; the first
 // SimPerpetualCount slots are perpetual storms, each with its own, and an
 // ellipse whose longitude axis is Aspect times its latitude one.
-
-/** Distance, in radii, inside which no cell spawns near a perpetual storm. */
-#define SIM_PERPETUAL_CLEAR 1.5f
 
 struct SimTraits
 {
@@ -1302,13 +1314,6 @@ float SimCellStormFloor(float3 P)
 
     return SimCellSustain * Floor;
 }
-
-/** Rates, per turnover, at which the eye tracer rises toward its source and
- *  falls back where the source has moved on. The fall against the eye's spin
- *  sets how far the flow winds it, so in turnovers it winds as far at any
- *  rotation and speed. */
-#define SIM_CELL_EYE_RATE 3.14f
-#define SIM_CELL_EYE_DECAY 0.785f
 
 /** A quintic S curve from A to B: zero slope and curvature at both ends. */
 float SimSmootherstep(float A, float B, float X)
@@ -1593,7 +1598,7 @@ SimStamp SimCellStamp(float3 N)
         // Held full inside the eyewall: the vector profile falls toward the
         // eye, and a band read from it leaves the eye and its lining at the
         // whole-storm level, a clean disc inside the eyewall.
-        const float Band = (R <= SimCellWall()) ? 1.0f : smoothstep(SIM_CELL_BAND_FLOOR, 1.0f, Profile);
+        const float Band = (R <= SimCellWall()) ? 1.0f : smoothstep(SimCellBandFloor, 1.0f, Profile);
         const float Whole = 1.0f - smoothstep(SimCellWall(), 1.0f, R);
 
         const SimTraits T = SimCellTraitsOf((uint) Slot);
@@ -2333,8 +2338,8 @@ void SimCellWriteControl(uint Slot, float3 P, float Intensity, SimTraits T, floa
  *  draws SIM_CELL_SPAWN_DRAWS points in the genesis band and takes the best
  *  seed -- a storm with cyclonic spin -- then centres on that storm's peak by
  *  a shrinking ring search. The spawn holds where the window and humidity pass,
- *  no live cell is within two radii and no perpetual storm within
- *  SIM_PERPETUAL_CLEAR of its own.
+ *  no live cell is within SimCellSpacing radii and no perpetual storm within
+ *  SimPerpetualClearance of its own.
  *
  *  A LIVE CELL moves with the layers' flow, each weighed by its share of the
  *  vortex, a drift poleward and west, and a pull toward the storm-weighted centre of a ring half its radius
@@ -2357,7 +2362,7 @@ void SimCellWriteControl(uint Slot, float3 P, float Intensity, SimTraits T, floa
  *
  *  THE FIRST SimPerpetualCount SLOTS ARE PERPETUAL STORMS, placed from their
  *  uniforms at full intensity, never spawned, moved, merged or freed; no cell
- *  spawns within SIM_PERPETUAL_CLEAR of one's reach, and a cell inside one
+ *  spawns within SimPerpetualClearance of one's reach, and a cell inside one
  *  merges away. */
 groupshared float4 SimCellShared[FLOWSIM_MAX_CELLS];
 
@@ -2490,14 +2495,14 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
             return;
         }
 
-		// Two radii from a storm cell, SIM_PERPETUAL_CLEAR of its reach from a
-		// perpetual storm.
+		// SimCellSpacing radii from a storm cell, SimPerpetualClearance of its
+		// reach from a perpetual storm.
 		[loop]
         for (int Other = 0; Other < Active; Other++)
         {
             const float Spacing = (Other < SimPerpetualCount)
-				? cos(min(SIM_PERPETUAL_CLEAR * SimCellReachOf((uint) Other), PI))
-				: cos(min(2.0f * Radius, PI));
+				? cos(min(SimPerpetualClearance * SimCellReachOf((uint) Other), PI))
+				: cos(min(SimCellSpacing * Radius, PI));
 
             if (SimCellShared[Other].w > 0.0f && dot(SimCellShared[Other].xyz, P) > Spacing)
             {
@@ -3024,7 +3029,7 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
             const float Source = CellColumn.y;
 
-            const float Rate = (Source > Carried) ? SIM_CELL_EYE_RATE : SIM_CELL_EYE_DECAY;
+            const float Rate = (Source > Carried) ? SimCellEyeRate : SimCellEyeDecay;
 
             Carried = lerp(Carried, Source, 1.0f - exp(-Rate * Dt / SimTurnover));
         }
@@ -3721,7 +3726,7 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 
 		// The eye tracer, from the latest state, as far as a live cell claims it.
 		// PITFALL: UNWEIGHTED, A FREED CELL'S EYE LINGERS in the atlas while the
-		// tracer decays at SIM_CELL_EYE_DECAY with nothing in the sim working it.
+		// tracer decays at SimCellEyeDecay with nothing in the sim working it.
         const float Eye = saturate(SimSampleMeridianTaps(SimNoiseSRV, Taps, Layer + L).w)
 			* Stamp.Presence;
 
@@ -3733,7 +3738,7 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 
 		// The eye as depth alone; see SimCellEyeSource.
         NoiseB.w = 1.0f - SimCellEyeDepth * Eye;
-        Weather.w = SimSmoothMax(Weather.w, Stamp.Storm, SIM_CELL_STORM_BLEND);
+        Weather.w = SimSmoothMax(Weather.w, Stamp.Storm, SimCellStormBlend);
         Weather.yzw = saturate(Weather.yzw);
 
 		// The output's pressure is SimSoftSat of the sim's: undone, the drop
@@ -3880,8 +3885,8 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
     {
 		// What a seed here is judged on, each against its gate: red the genesis
 		// window, green humidity, blue the storm. Bright where all three pass,
-		// dim where any fails, dimmer within two radii of a live cell or
-		// SIM_PERPETUAL_CLEAR of a perpetual storm, where no seed may spawn.
+		// dim where any fails, dimmer within SimCellSpacing radii of a live cell or
+		// SimPerpetualClearance of a perpetual storm, where no seed may spawn.
         const float3 N = SimDirection(SimColumnToLon((float) C.x), Mu);
         const float2 Conditions = SimCellConditions(N, 0.0f);
 
@@ -3897,8 +3902,8 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
         {
             const float4 Cell = SimCellSRV[2 * Slot];
             const float Spacing = (Slot < SimPerpetualCount)
-				? cos(min(SIM_PERPETUAL_CLEAR * SimCellReachOf((uint) Slot), PI))
-				: cos(min(2.0f * SimCellShape.x, PI));
+				? cos(min(SimPerpetualClearance * SimCellReachOf((uint) Slot), PI))
+				: cos(min(SimCellSpacing * SimCellShape.x, PI));
 
             bExcluded = bExcluded || (Cell.w > 0.0f && dot(Cell.xyz, N) > Spacing);
         }

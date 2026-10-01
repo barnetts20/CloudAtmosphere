@@ -39,13 +39,9 @@
 
 /** The diffuse light's decay per optical depth of deck above it is
  *  sqrt(3 (1 - albedo)(1 - g)). This is g, the effective anisotropy; the
- *  absorption is floored so a white deck still darkens. */
+ *  absorption is floored at DeepDarkening so a white deck still darkens. */
 #ifndef TR_DEEP_DIFFUSE_G
 #define TR_DEEP_DIFFUSE_G 0.5f
-#endif
-
-#ifndef TR_DEEP_MIN_ABSORPTION
-#define TR_DEEP_MIN_ABSORPTION 0.01f
 #endif
 
 /** Claims the march's field slot; the march fails to compile without it. */
@@ -443,7 +439,7 @@ float3 Field_AmbientShare(float4 Sample, float3 Albedo, CompositeParams Atmo, Fi
     const float3 Tau = Atmo.cloudParams.cloudScatBeta * Field_Extinction(Sample.y, S)
 		* (F.Thickness * Sample.z);
 
-    const float3 Decay = sqrt(3.0f * max(1.0f - Albedo, TR_DEEP_MIN_ABSORPTION)
+    const float3 Decay = sqrt(3.0f * max(1.0f - Albedo, F.DeepDarkening)
 		* (1.0f - TR_DEEP_DIFFUSE_G));
 
     return exp(-Decay * Tau);

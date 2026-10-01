@@ -10,10 +10,9 @@
 // TWO CLOUD MODELS SHARE ONE FIELD AND ONE MARCH, run as compute passes with a
 // temporal resolve (FAtmosphereViewExtension), the sim as their weather map: a
 // terrestrial slab over a surface, or a gas giant's deep deck over a saturated
-// core. Each model has its own instance of every parameter group and its own
-// sim config, with only the pipeline shared between them; see
-// AtmosphereParams.h. The world's one sim is driven by the nearest claiming
-// planet; the others draw the field they kept (UFlowSimSubsystem).
+// core. Each model has its own parameter bundle and sim config
+// (AtmosphereParams.h). The nearest claiming planet drives the world's one sim;
+// the others draw the field they kept (UFlowSimSubsystem).
 
 #pragma once
 
@@ -68,16 +67,10 @@ class CLOUDATMOSPHERE_API APlanetAtmosphereActor : public AActor
 public:
     APlanetAtmosphereActor();
 
-    // --- Pipeline ---
-    //
-    // The assets and passes the actor drives, rather than anything the march
-    // reads. First in the panel because none of the parameters below mean
-    // anything until these are right.
+    // --- Pipeline: the assets and passes the actor drives. ---
 
-    /** Tiling single-channel blue noise for the march's per-pixel draws: sRGB
-     *  off, uncompressed grayscale, no mips, nearest filtering. Defaults to the
-     *  engine's. Cleared, the atmosphere does not draw, and says so once in the
-     *  log. */
+    /** Tiling single-channel blue noise for the march: sRGB off, uncompressed
+     *  grayscale, no mips, nearest filtering. Cleared, nothing draws. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
     TObjectPtr<UTexture2D> BlueNoise;
 
@@ -87,13 +80,11 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Raymarch", meta = (ShowOnlyInnerProperties))
     FAtmosphereRaymarchParams Raymarch;
 
-    // Baked Lighting: the targets the per-frame and on-change bakes write and
-    // the march reads. Set once for a performance tier, not tuned for looks. The
-    // terrestrial cascade extents are look, and live with its surface shadows.
+    // Baked Lighting: set once for a performance tier. The cascade extents are
+    // look, in each model's SurfaceShadow.
 
-    /** The deck shadow bake, in the light's frame: a cascade of slices, all one
-     *  resolution, each covering a smaller radius. Created on first use, one per
-     *  atmosphere, and sized by ShadowResolution. Open it to watch the bake. */
+    /** The deck shadow bake in the light's frame: a cascade of slices, each
+     *  covering a smaller radius, sized by ShadowResolution. */
     UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
     TObjectPtr<UTextureRenderTarget2DArray> ShadowTarget;
 
@@ -117,54 +108,33 @@ public:
     UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
     TObjectPtr<UTextureRenderTarget2D> SimDebugView;
 
-    /** Edge of each cascade slice, in texels; the shadow target is sized to
-     *  it. EVERY LEVEL SHARES
-     *  IT and the world scale falls out of the extents, so one number moves the
-     *  coarse disc slice and the fine detail slice together. Square, because the
-     *  map has one extent for both axes.
-     *
-     *  Bake time and memory scale with the square -- 2 MB per slice at 512 in
-     *  RGBA16F. The bake band-limits at its source, so a lower value softens
-     *  shadows rather than aliasing them. */
+    /** Edge of every cascade slice, in texels. Bake time and memory scale with
+     *  its square, 2 MB per slice at 512; lower softens rather than aliases. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "128", ClampMax = "4096"))
     int32 ShadowResolution = 1024;
 
-    /** Cascades rebaked per frame, taken in turn. 1 rebakes each level every
-     *  third frame at a third of the cost; the clouds and the light move slowly
-     *  enough that the lag does not show. Each level is read against the camera
-     *  it was baked with, so a moving camera costs nothing in placement. */
+    /** Cascades rebaked per frame, in turn; each is read against the camera it
+     *  was baked with. 1 rebakes a level every third frame. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "1", ClampMax = "3"))
     int32 ShadowLevelsPerFrame = 1;
 
-    /** Seconds over which a rebaked cascade fades in from its previous bake,
-     *  reprojected to the current light and camera. Hides the step each rebake
-     *  takes as the clouds advect under the texel lattice, at the cost of the
-     *  shadow trailing the clouds by about this long. 0 shows each bake as it
-     *  lands. */
+    /** Seconds a rebaked cascade fades in from its reprojected previous bake:
+     *  hides rebake steps, and the shadow trails the clouds by about this. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "0.0", ClampMax = "1.0"))
     float ShadowTemporalSmoothing = 0.1f;
 
     // --- Atmosphere ---
-    //
-    // What the actor IS, before anything about how it looks.
 
     /** True when spawned and driven by APlanetActor. Location and scale become
      *  read-only; rotation remains editable (controls light direction). */
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Atmosphere")
     bool bIsPlanetOwned = false;
 
-    /** Which cloud model renders. A change takes effect on the next tick, and
-     *  rebakes the shadow map and restarts the view histories.
-     *
-     *  BOTH CASES ARE LIVE: one cloud field, the gas giant's a deep deck with no
-     *  base (a shader permutation), each with its own parameter groups.
-     *  Everything a model's look depends on is twinned, so a type change swaps
-     *  the whole authored set rather than reinterpreting one. */
+    /** Which cloud model renders, from its own bundle: the terrestrial slab or
+     *  the gas giant's deep deck. A change rebakes the shadow map and restarts
+     *  the view histories on the next tick. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Atmosphere")
     EPlanetAtmosphereType PlanetType = EPlanetAtmosphereType::GasGiant;
-
-    // A GROUP OF ONE GETS NO WRAPPER: a substruct buys a fold-out, worth a click
-    // only when there is more than one thing behind it.
 
     /** The star's colour. Only its hue is read: the brightest channel counts as
      *  1. The march and the directional light both derive from LightProduct, so
@@ -190,13 +160,10 @@ public:
         return FLinearColor(LightColor.R * Scale, LightColor.G * Scale, LightColor.B * Scale, 1.0f);
     }
 
-    /** Parks or wakes the atmosphere: its passes, the light and the per-tick
-     *  push, bake and transmittance update. THE ONLY RELIABLE OFF-SWITCH for the
-     *  march: a view extension is not a primitive, so hiding the actor does not
-     *  stop it, and a stopped tick leaves it drawing its last frame. Parked
-     *  planets must call this with false, or every pooled atmosphere keeps
-     *  tinting the screen and lighting the scene. Parking gives up the sim,
-     *  keeping the field; waking rebakes every shadow level. */
+    /** Parks or wakes the passes, the light and the per-tick updates. THE ONLY
+     *  OFF-SWITCH for the march: hiding the actor or stopping its tick leaves
+     *  it drawing. Parking gives up the sim, keeping the field; waking rebakes
+     *  every shadow level. */
     void SetAtmosphereActive(bool bActive);
 
     /** Aim the light and the march at the star: sets the actor's relative
@@ -207,133 +174,18 @@ public:
 
     // --- Parameters ---
     //
-    // ONE PROPERTY PER PANEL GROUP, INLINED. ShowOnlyInnerProperties puts the
-    // members directly under the property's category, so the group name comes
-    // from the category rather than from a struct row, and members carry no
-    // category of their own so they display in declaration order.
-    //
-    // PITFALL: EditConditionHides does not survive the inlining. The condition
-    // lives on the property row and there is no row left, so both models' groups
-    // are visible at once, distinguished only by their parent category.
+    // ONE BUNDLE PER MODEL, each shown only while its model is active. A
+    // group's default lives with its struct; the constructor sets the
+    // terrestrial air, ambient, multiple scattering and surface shadows on the
+    // CDO, which the gas giant copies.
 
-    // ONE INSTANCE OF EVERY GROUP PER MODEL: shared STRUCTS, separate INSTANCES,
-    // so a type change swaps the whole authored set. Both models run the one
-    // cloud field; the gas giant adds its deep deck. A group's default lives
-    // with its struct, and the constructor sets the terrestrial air, ambient,
-    // multiple scattering and surface shadows on the CDO, which the gas giant
-    // copies.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Model", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides))
+    FAtmosphereModelParams Terrestrial;
 
-    // THE MASTER SCALE, first under Terrestrial: every cloud height is a
-    // fraction of the shell it sets.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialPlanetParams TerrestrialPlanet;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Model", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides))
+    FAtmosphereModelParams GasGiant;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Air", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereAirParams TerrestrialAir;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Ambient", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereAmbientParams TerrestrialAmbient;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Clouds|Shape", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialShapeParams TerrestrialShape;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Clouds|Coverage", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialCoverageParams TerrestrialCoverage;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Clouds|Type", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialTypeParams TerrestrialType;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Clouds|Lift", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialLiftParams TerrestrialLift;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Clouds|Warp", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialWarpParams TerrestrialWarp;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Clouds|Structure Layer", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialStructureLayerParams TerrestrialStructureLayer;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Clouds|Detail Layer", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialDetailLayerParams TerrestrialDetailLayer;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Cloud Lighting|Material", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialCloudMaterialParams TerrestrialCloudMaterial;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Cloud Lighting|Phase", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmospherePhaseParams TerrestrialPhase;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Cloud Lighting|Multiple Scattering", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereMultipleScatteringParams TerrestrialMultipleScattering;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Cloud Lighting|Surface Shadows", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereSurfaceShadowParams TerrestrialSurfaceShadow;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Sampling", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereSamplingParams TerrestrialSampling;
-
-    /** Bound on either cloud surface's slope, in cloud depths per flow texel:
-     *  the cone angle for the shadow bake's entry search. Per texel because the
-     *  surfaces are built on the flow, so their steepest walls narrow with the
-     *  grid. Under-declaring it is the one way that search steps over cloud, and
-     *  the symptom is shadow missing under steep cloud walls, such as a small
-     *  storm's eyewall or a sharp CoverageSoftness. Raise it first. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Advanced", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ClampMin = "0.001", UIMin = "0.5", UIMax = "8.0"))
-    float TerrestrialSlopePerTexel = 1.5f;
-
-    // Gas giant: the terrestrial groups' twins, and the deep deck.
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialPlanetParams GasGiantPlanet;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Air", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereAirParams Air;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Ambient", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereAmbientParams Ambient;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Shape", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialShapeParams GasGiantShape;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Deep Deck", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FGasGiantDeepParams GasGiantDeep;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Coverage", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialCoverageParams GasGiantCoverage;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Type", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialTypeParams GasGiantType;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Lift", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialLiftParams GasGiantLift;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Warp", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialWarpParams GasGiantWarp;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Structure Layer", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialStructureLayerParams GasGiantStructureLayer;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Clouds|Detail Layer", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialDetailLayerParams GasGiantDetailLayer;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Cloud Lighting|Material", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FTerrestrialCloudMaterialParams GasGiantCloudMaterial;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Cloud Lighting|Phase", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmospherePhaseParams Phase;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Cloud Lighting|Multiple Scattering", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereMultipleScatteringParams MultipleScattering;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Cloud Lighting|Surface Shadows", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereSurfaceShadowParams GasGiantSurfaceShadow;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Sampling", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
-    FAtmosphereSamplingParams GasGiantSampling;
-
-    /** TerrestrialSlopePerTexel's twin. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Advanced", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ClampMin = "0.001", UIMin = "0.5", UIMax = "8.0"))
-    float GasGiantSlopePerTexel = 1.5f;
-
-    // --- The active model's groups ---
+    // --- The active model ---
 
     /** The sim config the active model bids with. */
     UFlowSimConfig* ActiveSimConfig() const;
@@ -344,101 +196,26 @@ public:
         return FieldClock;
     }
 
-    const FTerrestrialPlanetParams& ActivePlanet() const
+    const FAtmosphereModelParams& ActiveModel() const
     {
-        return bTerrestrial() ? TerrestrialPlanet : GasGiantPlanet;
+        return bTerrestrial() ? Terrestrial : GasGiant;
     }
 
     /** Above zero: the atmosphere's thickness divides every height. */
     float ActiveHeightScale() const
     {
-        return FMath::Max(ActivePlanet().HeightScale, 1e-4f);
-    }
-
-    const FTerrestrialStructureLayerParams& ActiveStructureLayer() const
-    {
-        return bTerrestrial() ? TerrestrialStructureLayer : GasGiantStructureLayer;
-    }
-
-    const FTerrestrialDetailLayerParams& ActiveDetailLayer() const
-    {
-        return bTerrestrial() ? TerrestrialDetailLayer : GasGiantDetailLayer;
+        return FMath::Max(ActiveModel().Planet.HeightScale, 1e-4f);
     }
 
     /** The noise volumes, which both models bind under the same names. */
     UVolumeTexture* ActiveStructureVolume() const
     {
-        return ActiveStructureLayer().Volume.Get();
+        return ActiveModel().StructureLayer.Volume.Get();
     }
 
     UVolumeTexture* ActiveDetailVolume() const
     {
-        return ActiveDetailLayer().Volume.Get();
-    }
-
-    const FTerrestrialShapeParams& ActiveShape() const
-    {
-        return bTerrestrial() ? TerrestrialShape : GasGiantShape;
-    }
-
-    const FTerrestrialCoverageParams& ActiveCoverage() const
-    {
-        return bTerrestrial() ? TerrestrialCoverage : GasGiantCoverage;
-    }
-
-    const FTerrestrialTypeParams& ActiveType() const
-    {
-        return bTerrestrial() ? TerrestrialType : GasGiantType;
-    }
-
-    const FTerrestrialLiftParams& ActiveLift() const
-    {
-        return bTerrestrial() ? TerrestrialLift : GasGiantLift;
-    }
-
-    const FTerrestrialWarpParams& ActiveWarp() const
-    {
-        return bTerrestrial() ? TerrestrialWarp : GasGiantWarp;
-    }
-
-    const FTerrestrialCloudMaterialParams& ActiveCloudMaterial() const
-    {
-        return bTerrestrial() ? TerrestrialCloudMaterial : GasGiantCloudMaterial;
-    }
-
-    float ActiveSlopePerTexel() const
-    {
-        return bTerrestrial() ? TerrestrialSlopePerTexel : GasGiantSlopePerTexel;
-    }
-
-    const FAtmosphereAirParams& ActiveAir() const
-    {
-        return bTerrestrial() ? TerrestrialAir : Air;
-    }
-
-    const FAtmosphereAmbientParams& ActiveAmbient() const
-    {
-        return bTerrestrial() ? TerrestrialAmbient : Ambient;
-    }
-
-    const FAtmospherePhaseParams& ActivePhase() const
-    {
-        return bTerrestrial() ? TerrestrialPhase : Phase;
-    }
-
-    const FAtmosphereMultipleScatteringParams& ActiveMultipleScattering() const
-    {
-        return bTerrestrial() ? TerrestrialMultipleScattering : MultipleScattering;
-    }
-
-    const FAtmosphereSurfaceShadowParams& ActiveSurfaceShadow() const
-    {
-        return bTerrestrial() ? TerrestrialSurfaceShadow : GasGiantSurfaceShadow;
-    }
-
-    const FAtmosphereSamplingParams& ActiveSampling() const
-    {
-        return bTerrestrial() ? TerrestrialSampling : GasGiantSampling;
+        return ActiveModel().DetailLayer.Volume.Get();
     }
 
     // --- Lifecycle ---
@@ -471,10 +248,8 @@ private:
     UPROPERTY()
     TObjectPtr<USceneComponent> AtmosphereRoot;
 
-    /** Synced from the actor's rotation and LightColor; absolute rotation and
-     *  scale, so the planet's frame and the root's radius never reach it. A
-     *  COMPONENT, NOT A CHILD ACTOR: a duplicate or a deletion takes its own and
-     *  never another's. */
+    /** Synced from the actor's rotation and LightColor, in absolute rotation
+     *  and scale. A component, so a duplicate or deletion takes its own. */
     UPROPERTY(VisibleAnywhere, Category = "CloudAtmosphere|Pipeline")
     TObjectPtr<UDirectionalLightComponent> SunLightComponent;
 
@@ -486,16 +261,14 @@ private:
     UPROPERTY()
     TObjectPtr<ADirectionalLight> SunLight_DEPRECATED = nullptr;
 
-    /** Air transmittance table, created on first use. Visible for inspection,
-     *  though it depends only on the radii and the air profile so there is
-     *  nothing to watch it do. */
+    /** Air transmittance table, created on first use. */
     UPROPERTY(Transient, VisibleInstanceOnly, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
     TObjectPtr<UTextureRenderTarget2D> TransmittanceTable = nullptr;
 
     /** Inputs of the last enqueued bake; reset when the table is recreated. */
     FAtmosphereTransmittanceParams TransmittanceBaked;
 
-    /** What every Active* accessor asks. */
+    /** What ActiveModel asks. */
     bool bTerrestrial() const { return PlanetType == EPlanetAtmosphereType::Terrestrial; }
 
     /** The model the shadow map was last baked for: a change rebakes every
@@ -574,16 +347,12 @@ private:
      *  model. Called every tick. */
     void UpdateAtmosphere();
 
-    /** Queues this frame's deck shadow bake with the sim subsystem. The field
-     *  comes from the packer the march shares, and the bake derives from it with
-     *  the same shader functions, which keeps the deck the light sees identical
-     *  to the deck the eye sees. */
+    /** Queues this frame's shadow bake with the sim subsystem, on the field
+     *  packer and shader functions the march shares. */
     void RequestShadowBake(float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir);
 
-    /** Fills the half of a bake request that is not the field: the map, the
-     *  frame, the light, the camera, the history and the volumes. Returns false
-     *  when the request could not be made usable. Records nothing;
-     *  CommitShadowBake does once the subsystem takes the request. */
+    /** A bake request's map, frame, light, camera, history and volumes; false
+     *  when unusable. CommitShadowBake records it once taken. */
     bool FillShadowRequest(FTerrestrialShadowParams& Params, float PlanetRadius,
         const FVector& PlanetCenter, const FVector& LightDir);
 
@@ -611,10 +380,8 @@ private:
     FVector3f ShadowBakedLight[AtmoShadowBake::CascadeCount];
     double ShadowBakeTime[AtmoShadowBake::CascadeCount] = {};
 
-    /** False until every level has been baked into the current target. Cleared
-     *  when the target is reinitialised, the model or the field changes or the
-     *  atmosphere wakes, so the first request after any of them bakes all of
-     *  them. */
+    /** False until every level is baked into the current target; cleared on a
+     *  new target, model or field, or a wake, so the next request bakes all. */
     bool bShadowPrimed = false;
 
     /** The field the map was last requested for, as MakeShadowFieldKey. */
