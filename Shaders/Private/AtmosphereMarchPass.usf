@@ -52,6 +52,11 @@ float4 CloudExtinction;
 float4 StormExtinction;
 float CloudOpticalDepth;
 
+// The deep deck's material: albedo, extinction, and its share and depth.
+float3 DeepScatter;
+float4 DeepExtinction;
+float4 DeepMaterial;
+
 // -- Planet, light, clock -------------------------------------------------------
 
 /** The planet's centre less this view's camera, formed in double. */

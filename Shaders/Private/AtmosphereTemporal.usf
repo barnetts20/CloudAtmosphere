@@ -107,6 +107,10 @@ uint HistoryValid;
 float4x4 PrevCameraToClip;
 float4x4 PrevPlanetToClip;
 
+/** PrevPlanetToClip with the field's spin since then: for a depth short of the
+ *  scene's, which is cloud, carried round the planet's axis by the spin. */
+float4x4 PrevCloudToClip;
+
 // PITFALL: a local named as one of these uniforms hides it without a warning,
 // and the pass reads the local.
 float FreshWeight;
@@ -230,12 +234,15 @@ void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
 	// THE REPROJECTION, by this pixel's ray at its representative depth: its
 	// own when marched, else the best-weighted neighbour's. A point at a depth
-	// moves with the planet; sky moves as a direction, with no parallax.
+	// moves with the planet, and cloud with the field's spin too; sky moves as a
+	// direction, with no parallax.
     const float Depth = bFresh ? FreshDepth[Base].x : BestDepth;
     const float3 Dir = Atmo_RayDirection(Pixel / OutputSize);
 
+    const bool bCloud = Depth < 0.99f * Atmo_SceneRayDistance(PixelDepth, Dir);
+
     const float4 PrevClip = (Depth > 0.0f)
-		? mul(float4(Dir * Depth, 1.0f), PrevPlanetToClip)
+		? mul(float4(Dir * Depth, 1.0f), bCloud ? PrevCloudToClip : PrevPlanetToClip)
 		: mul(float4(Dir, 0.0f), PrevCameraToClip);
 
     const float2 PrevUV = PrevClip.xy / max(PrevClip.w, 1e-6f) * float2(0.5f, -0.5f) + 0.5f;

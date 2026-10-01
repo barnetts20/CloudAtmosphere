@@ -9,6 +9,47 @@
 
 #define TR_ExtinctionTintRange(Cloud, Storm) AtmoShadow_ExtinctionTintRange(Cloud, Storm)
 
+/** The deep material's share at a sample with Buried atmosphere fractions of
+ *  full-density deck above it: DeepMaterial.x at most, reached at .y of
+ *  buried deck. */
+float TR_DeepMaterialWeight(float Buried, float4 DeepMaterial)
+{
+    return DeepMaterial.x * smoothstep(0.0f, max(DeepMaterial.y, 1e-5f), Buried);
+}
+
+/** TR_ExtinctionTintRange over every material in use: the deep deck's joins
+ *  while its share is above zero. The bake's fold constant and the march's
+ *  reader both take it from here. */
+float2 TR_MaterialTintRange(float3 Cloud, float3 Storm, float3 Deep, float DeepShare)
+{
+    const float2 Range = TR_ExtinctionTintRange(Cloud, Storm);
+
+#if TR_DEEP_DECK
+    if (DeepShare > 0.0f)
+    {
+        return float2(min(Range.x, min(Deep.x, min(Deep.y, Deep.z))), max(Range.y, max(Deep.x, max(Deep.y, Deep.z))));
+    }
+#endif
+
+    return Range;
+}
+
+/** The least extinction, tint times amount, across the materials in use: what
+ *  the deep terminus counts the light out against. */
+float TR_MaterialLeastExtinction(float4 Cloud, float4 Storm, float4 Deep, float DeepShare)
+{
+    float3 Low = min(Cloud.rgb * Cloud.a, Storm.rgb * Storm.a);
+
+#if TR_DEEP_DECK
+    if (DeepShare > 0.0f)
+    {
+        Low = min(Low, Deep.rgb * Deep.a);
+    }
+#endif
+
+    return min(Low.x, min(Low.y, Low.z));
+}
+
 /** The radius the map covers: the field-wide top bound, the march's
  *  cloudOuterRadius. PITFALL: a map read against another radius than it was
  *  written at slides the whole shadow toward the limb. */

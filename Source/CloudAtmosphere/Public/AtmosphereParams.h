@@ -628,6 +628,26 @@ struct CLOUDATMOSPHERE_API FCloudDeepParams
 	 *  albedo: higher darkens the interior sooner below the cloud tops. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0", UIMax = "0.2"))
 	float Darkening = 0.01f;
+
+	/** How much of the buried deck turns to the deep material: 0 none, leaving
+	 *  it cloud and storm; 1 all of it past MaterialDepth. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MaterialShare = 0.0f;
+
+	/** Full-density deck above a sample, in fills, at which the deep material
+	 *  has fully taken over; it blends in from the base down to there. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", UIMax = "4.0"))
+	float MaterialDepth = 1.0f;
+
+	/** The deep material's single-scattering albedo, per channel, held to
+	 *  [0, 1]. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
+	FLinearColor Scatter = FLinearColor(0.98f, 0.98f, 0.98f, 1.0f);
+
+	/** The deep material's extinction tint in RGB, and in A its opacity as a
+	 *  multiple of fair-weather cloud's. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FLinearColor Extinction = FLinearColor(1.0f, 1.0f, 1.0f, 1.0f);
 };
 
 // The air, the cloud's lighting and the march's budget.

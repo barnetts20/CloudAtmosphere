@@ -538,6 +538,15 @@ static FTerrestrialFieldParameters PackCloudField(const APlanetAtmosphereActor& 
     Out.StormExtinction = ToVector4(Material.StormExtinction);
     Out.CloudOpticalDepth = FMath::Max(Material.CloudOpticalDepth, 0.0f);
 
+    // The deep material's depth goes from fills of buried deck to atmosphere
+    // fractions; the slab reads none of it.
+    const FLinearColor DeepExtinction = Model.Deep.Extinction;
+
+    Out.DeepExtinction = FVector4f(FMath::Max(DeepExtinction.R, 0.0f), FMath::Max(DeepExtinction.G, 0.0f),
+        FMath::Max(DeepExtinction.B, 0.0f), FMath::Max(DeepExtinction.A, 0.0f));
+    Out.DeepMaterial = FVector4f(bDeep ? FMath::Clamp(Model.Deep.MaterialShare, 0.0f, 1.0f) : 0.0f,
+        FMath::Max(Model.Deep.MaterialDepth, 0.0f) * DeepFill, 0.0f, 0.0f);
+
     return Out;
 }
 
@@ -551,7 +560,7 @@ static uint32 MakeShadowFieldKey(const FTerrestrialFieldParameters& F, float Pla
         F.CloudProfile, F.CloudCurves, F.CloudCoverage, F.CloudType, F.CloudLid, F.CloudLift,
         F.NoiseLevels, F.StructureSampling, F.StructureWarp, F.DetailSampling, F.DetailWarp,
         F.CloudGenusStratus, F.CloudGenusStratocumulus, F.CloudGenusCumulus, F.CloudGenusCirrus,
-        F.ShadowCascades, F.CloudResponse, F.CloudExtinction, F.StormExtinction,
+        F.ShadowCascades, F.CloudResponse, F.CloudExtinction, F.StormExtinction, F.DeepExtinction, F.DeepMaterial,
         FVector4f(F.CloudMotion.Z, F.CloudOpticalDepth, PlanetRadius, HeightScale) };
 
     return FCrc::MemCrc32(Pins, sizeof(Pins));
@@ -965,6 +974,7 @@ bool APlanetAtmosphereActor::FillMarchParams(
 
     Out.CloudScatter = ToVector3(Material.CloudScatter);
     Out.StormScatter = ToVector3(Material.StormScatter);
+    Out.DeepScatter = ToVector3(Model.Deep.Scatter.GetClamped(0.0f, 1.0f));
 
     // -- Air, ambient, lighting -----------------------------------------------
 

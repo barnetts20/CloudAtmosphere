@@ -746,15 +746,16 @@ float TR_DeepFloorRamp(float U)
 
 /** The deep deck's floor, as the step's mean density: full under a surface
  *  that rises FloorRelief fills above where the fill completes at the highest
- *  structure noise and sits there at the lowest, over a ramp
- *  TR_DEEP_FLOOR_SOFTNESS fills deep. Exact on the ramp, like the profile.
+ *  structure noise and sits there at the lowest, moved by Offset (the detail
+ *  layer's erosion, TR_DeepFloorDetail), over a ramp TR_DEEP_FLOOR_SOFTNESS
+ *  fills deep. Exact on the ramp, like the profile.
  *
  *  THE FLOOR ONLY ADDS DENSITY: the caller takes the larger of it and the
  *  cloud's. PITFALL: a floor that moves the fill instead changes the cloud
  *  above it, whose erosion and coverage the fill drives. */
-float TR_DeepFloor(float Height, float HalfStep, TRColumn Col, float Noise, TRFieldParams F)
+float TR_DeepFloor(float Height, float HalfStep, TRColumn Col, float Noise, float Offset, TRFieldParams F)
 {
-    const float Top = Col.Base - F.DeepFill * (1.0f - F.FloorRelief * Noise);
+    const float Top = Col.Base - F.DeepFill * (1.0f - F.FloorRelief * Noise) + Offset;
     const float Soft = F.DeepFill * TR_DEEP_FLOOR_SOFTNESS;
 
     if (HalfStep <= 1e-5f)
@@ -764,6 +765,14 @@ float TR_DeepFloor(float Height, float HalfStep, TRColumn Col, float Noise, TRFi
 
     return Soft * (TR_DeepFloorRamp((Top - Height + HalfStep) / Soft)
 		- TR_DeepFloorRamp((Top - Height - HalfStep) / Soft)) / (2.0f * HalfStep);
+}
+
+/** How far the detail layer moves the floor's surface: DetailErosion fills at
+ *  most, carved where the detail noise stands above its mean, so the floor
+ *  settles back as the detail fades with distance. */
+float TR_DeepFloorDetail(float Modifier, TRFieldParams F)
+{
+    return F.DeepFill * F.DetailErosion * (F.DetailFadeMean - Modifier);
 }
 
 /** Distance along a normalized ray at which it first reaches a slab, or T1:
@@ -1099,11 +1108,23 @@ float4 TR_DensityInColumn(
 	// fetch; the step's mean replaces them below.
     float DetailErode = 0.0f;
 
+#if TR_DEEP_DECK
+	// The floor's surface, which the detail erodes wherever a step reaches its
+	// ramp. Its offset settles to 0 as the detail fades.
+    const float FloorTop = Col.Base - F.DeepFill * (1.0f - F.FloorRelief * StructureNoise);
+    const float FloorReach = F.DeepFill * (TR_DEEP_FLOOR_SOFTNESS + F.DetailErosion) + HalfStep;
+    const bool bFloorDetail = F.FloorRelief > 0.0f && abs(Height - FloorTop) < FloorReach;
+#else
+    const bool bFloorDetail = false;
+#endif
+
+    float FloorModifier = F.DetailFadeMean;
+
 	// -- Detail: erosion of the edges ------------------------------------------
 
     BRANCH
 
-    if (F.DetailActive && Density > 0.0f && Fill < 1.0f)
+    if (F.DetailActive && ((Density > 0.0f && Fill < 1.0f) || bFloorDetail))
     {
 		// Faded toward the mean rather than off: see the header. Past the far
 		// edge, or once the mip has averaged the detail away, the fetch is
@@ -1132,10 +1153,14 @@ float4 TR_DensityInColumn(
 				float4(1.0f - Billow, Billow, 0.0f, 0.0f) * (1.0f - Col.Cirrus)
 				+ float4(0.0f, 0.0f, Col.Cirrus, 0.0f);
 
-            Modifier = lerp(F.DetailFadeMean, TR_BlendNoise(TR_DetailChannels(TR_SampleLayer(
+            const float4 Channels = TR_DetailChannels(TR_SampleLayer(
 				DetailVolume, DetailSampler, N,
-				DisplacementA, DisplacementB, F.DetailFlowInherit, UVWScale, Lod, F)),
-				Weights), Strength);
+				DisplacementA, DisplacementB, F.DetailFlowInherit, UVWScale, Lod, F));
+
+            Modifier = lerp(F.DetailFadeMean, TR_BlendNoise(Channels, Weights), Strength);
+
+			// The floor's mounds erode billowy.
+            FloorModifier = lerp(F.DetailFadeMean, TR_BlendNoise(Channels, float4(0.0f, 1.0f, 0.0f, 0.0f)), Strength);
         }
 
         DetailErode = Modifier * F.DetailErosion * TR_DETAIL_EROSION_SCALE * (1.0f - Fill);
@@ -1176,7 +1201,8 @@ float4 TR_DensityInColumn(
     Density *= pow(saturate(Col.Thinning), F.EyeOpenPower);
 
 #if TR_DEEP_DECK
-    Density = max(Density, TR_DeepFloor(Height, HalfStep, Col, StructureNoise, F));
+    Density = max(Density, TR_DeepFloor(
+		Height, HalfStep, Col, StructureNoise, TR_DeepFloorDetail(FloorModifier, F), F));
 
     return float4(Density, Col.Material, TR_DeepBuried(Height, Col, F), Col.Top);
 #else

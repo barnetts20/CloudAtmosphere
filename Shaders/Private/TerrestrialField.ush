@@ -6,31 +6,12 @@
 #include "/Plugin/CloudAtmosphere/Private/TerrestrialDeck.ush"
 #include "/Plugin/CloudAtmosphere/Private/TerrestrialShadow.ush"
 
-// The cloud field's side of the march, every model's: what this field is, and
-// what the march is allowed to ask it. A terrestrial planet's is the slab, a
-// gas giant's the deep deck (TR_DEEP_DECK), and air alone (ATMO_FIELD_CLOUDS 0)
-// the slab's air with no cloud band: no segment is cloud and the march reads
-// no cloud resource.
-//
-// THE MARCH KNOWS NOTHING BELOW THIS LINE. It calls the Field_ functions, the
-// FieldParams and FieldMaterialParams names, and the two texture macros, all
-// defined here. That is the whole interface, and it is small because the
-// march's real content -- the plan, the step bounds, the octaves, the shadow
-// read -- does not depend on what fills the shell.
-//
-// INCLUDED BEFORE THE MARCH, NEVER AFTER. The march declares AtmoMarchParams in
-// terms of the two type names below, so they have to exist first; a missing
-// include fails as an undeclared identifier rather than as a wrong branch.
-//
-// A SLAB WITH A SURFACE UNDER IT. Density is zero outside each column's slab
-// and the planet is opaque, so Field_Terminus clips on the planet and the
-// marched band ends at the lowest the base can fall rather than at an optical
-// depth. Inside the slab, coverage erodes the shape noise.
-//
-// THE DEEP DECK HAS NO SURFACE. The deck fills in below the bases and the core
-// is deck at full density, so the ray is not clipped on the planet: it
-// saturates, and Field_Terminus stops it where it provably has. The marched
-// band ends where the fill completes.
+// The cloud field's side of the march, every model's: the slab over an opaque
+// planet, the deep deck (TR_DEEP_DECK) with no surface, which saturates and
+// stops where it provably has, and air alone (ATMO_FIELD_CLOUDS 0), with no
+// cloud band. The march sees only the Field_ functions, the FieldParams and
+// FieldMaterialParams names and the two texture macros defined here, so this
+// is included before it.
 
 /** Optical depth at which the deep deck's shadow read stops growing, on its
  *  most transmissive term (see ATMO_SHADOW_SATURATION): about 1e-7. The slab's 5
@@ -54,24 +35,14 @@
 /** Claims the march's field slot; the march fails to compile without it. */
 #define ATMO_FIELD_INCLUDED 1
 
-/** The concrete types the march refers to by these names: the field's shape and
- *  its material.
- *
- *  PITFALL: neither alias may shadow a type the shared headers already declare.
- *  A macro over an existing struct name compiles wherever that struct was
- *  declared first and fails somewhere else, which is the worst shape a name
- *  collision can take. */
+/** The field's types under the march's names. PITFALL: neither may shadow a
+ *  type the shared headers declare; the collision fails far from here. */
 #define FieldParams TRFieldParams
 #define FieldMaterialParams TRScatterParams
 
-/** The field's own textures, as a declaration and as a forwarding list.
- *
- *  A MACRO BECAUSE HLSL CANNOT PUT A TEXTURE IN A STRUCT, so the march's
- *  signature has to name them and a shared march cannot. The march declares the
- *  first and forwards the second to every Field_ call.
- *
- *  PITFALL: the two must stay in step. A mismatch is an argument-count error
- *  inside the march, pointing at a line that never mentions a texture. */
+/** The field's textures, as a declaration and as a forwarding list, since HLSL
+ *  holds no texture in a struct. PITFALL: the two must stay in step, or the
+ *  march fails on an argument count far from any texture. */
 #define FIELD_TEXTURE_DECL \
 	Texture2DArray FlowField, \
 	SamplerState FlowSampler, \
@@ -83,9 +54,10 @@
 #define FIELD_TEXTURE_ARGS \
 	FlowField, FlowSampler, DetailVolume, DetailSampler, StructureVolume, StructureSampler
 
-/** The clouds' material and how they are lit. Two sets, blended by the
- *  column's material coordinate: fair-weather cloud at 0 and storm cloud at 1,
- *  which follows the sim's storm rather than how tall the cloud builds.
+/** The clouds' material and how they are lit. Fair-weather cloud and storm
+ *  cloud, blended by the column's material coordinate, which follows the sim's
+ *  storm; under the deep deck a third set takes over the buried interior
+ *  (TR_DeepMaterialWeight). A material is float2(coordinate, deep share).
  *
  *  Scatter     Single-scattering albedo: what fraction of extinction is
  *              scattered rather than absorbed, per channel.
@@ -99,7 +71,13 @@ struct TRScatterParams
     float4 CloudExtinction;
     float4 StormExtinction;
 
-	/** TR_ExtinctionTintRange of the two tints: (smallest, largest). */
+    float3 DeepScatter;
+    float4 DeepExtinction;
+
+	/** The deep share's ceiling and the buried depth it is reached at. */
+    float4 DeepMaterial;
+
+	/** TR_MaterialTintRange of the tints: (smallest, largest). */
     float2 TintRange;
 
 	/** Dual-lobe phase: forward g, backward g magnitude, forward share. */
@@ -122,25 +100,54 @@ struct TRScatterParams
     float MieLobeDecay;
 };
 
-/** Albedo at a material coordinate. */
-float3 TR_TypeScatter(float Type, TRScatterParams S)
+/** A sample's material: its coordinate, and under the deep deck the deep
+ *  share its buried depth (Sample.z) gives. */
+float2 TR_SampleMaterial(float4 Sample, TRScatterParams S)
 {
-    return lerp(S.CloudScatter, S.StormScatter, saturate(Type));
+#if TR_DEEP_DECK
+    return float2(Sample.y, TR_DeepMaterialWeight(Sample.z, S.DeepMaterial));
+#else
+    return float2(Sample.y, 0.0f);
+#endif
 }
 
-/** Extinction multiplier at a material coordinate, tint times amount: what the
- *  view ray applies to the solved coefficient. */
-float3 TR_TypeExtinction(float Type, TRScatterParams S)
+/** Albedo of a material. */
+float3 TR_TypeScatter(float2 Material, TRScatterParams S)
 {
-    return lerp(S.CloudExtinction.rgb * S.CloudExtinction.a,
-		S.StormExtinction.rgb * S.StormExtinction.a, saturate(Type));
+    const float3 Scatter = lerp(S.CloudScatter, S.StormScatter, saturate(Material.x));
+
+#if TR_DEEP_DECK
+    return lerp(Scatter, S.DeepScatter, Material.y);
+#else
+    return Scatter;
+#endif
 }
 
-/** Extinction tint alone at a material coordinate. The light ray's AMOUNTS are already
+/** Extinction multiplier of a material, tint times amount: what the view ray
+ *  applies to the solved coefficient. */
+float3 TR_TypeExtinction(float2 Material, TRScatterParams S)
+{
+    const float3 Extinction = lerp(S.CloudExtinction.rgb * S.CloudExtinction.a,
+		S.StormExtinction.rgb * S.StormExtinction.a, saturate(Material.x));
+
+#if TR_DEEP_DECK
+    return lerp(Extinction, S.DeepExtinction.rgb * S.DeepExtinction.a, Material.y);
+#else
+    return Extinction;
+#endif
+}
+
+/** Extinction tint alone of a material. The light ray's amounts are already
  *  in the shadow map's depth; its colour is applied where the depth is read. */
-float3 TR_TypeTint(float Type, TRScatterParams S)
+float3 TR_TypeTint(float2 Material, TRScatterParams S)
 {
-    return lerp(S.CloudExtinction.rgb, S.StormExtinction.rgb, saturate(Type));
+    const float3 Tint = lerp(S.CloudExtinction.rgb, S.StormExtinction.rgb, saturate(Material.x));
+
+#if TR_DEEP_DECK
+    return lerp(Tint, S.DeepExtinction.rgb, Material.y);
+#else
+    return Tint;
+#endif
 }
 
 /** Whether a planned segment carries cloud: the band, and under the deep deck
@@ -173,6 +180,9 @@ TRScatterParams TR_BuildScatter(
 	float4 CloudExtinction,
 	float3 StormScatter,
 	float4 StormExtinction,
+	float3 DeepScatter,
+	float4 DeepExtinction,
+	float4 DeepMaterial,
 	float ForwardG,
 	float BackwardG,
 	float ForwardWeight,
@@ -189,7 +199,11 @@ TRScatterParams TR_BuildScatter(
 
     S.CloudExtinction = CloudExtinction;
     S.StormExtinction = StormExtinction;
-    S.TintRange = TR_ExtinctionTintRange(CloudExtinction.rgb, StormExtinction.rgb);
+    S.DeepScatter = DeepScatter;
+    S.DeepExtinction = DeepExtinction;
+    S.DeepMaterial = DeepMaterial;
+    S.TintRange = TR_MaterialTintRange(
+		CloudExtinction.rgb, StormExtinction.rgb, DeepExtinction.rgb, DeepMaterial.x);
 
     S.ForwardG = ForwardG;
     S.BackwardG = BackwardG;
@@ -209,29 +223,17 @@ TRScatterParams TR_BuildScatter(
 /** TR_BuildScatter from the pass's uniforms, which carry exactly these names. */
 #define TR_BUILD_SCATTER() TR_BuildScatter( \
 	CloudScatter, CloudExtinction, StormScatter, StormExtinction, \
+	DeepScatter, DeepExtinction, DeepMaterial, \
 	ForwardG, BackwardG, ForwardWeight, \
 	OctaveCount, OctaveAttenuation, OctaveEccentricity, \
 	AmbientTerminator, MieLobeDecay)
 
-/** Fills CompositeParams for the terrestrial clouds, deriving the cloud shell from
- *  the field rather than taking it as two more pins. Air colours arrive as rgb
- *  with their profile terms as scalars and are packed here into the float4s
- *  Atmo_BuildParams takes; the field's shape, material and phase are its own,
- *  in TRFieldParams and TRScatterParams.
- *
- *  THE CLOUD RADII ARE NOT AUTHORED. Both come from the surfaces the field can
- *  actually produce: cloudOuterRadius from the highest a top can reach,
- *  cloudInnerRadius from the lowest a base can fall. That makes the fine band
- *  exactly the span that can hold cloud, so no fine step is spent under it and
- *  nothing below it is marched as cloud.
- *
- *  THE EXTINCTION IS SOLVED, NOT PASSED. TR_CloudBeta turns CloudOpticalDepth
- *  into a grey coefficient from the field's own anchors. PITFALL: the two cloud betas
- *  are not a scattering/absorption split despite their names -- cloudScatBeta is
- *  that full solved coefficient, which the VIEW ray extinguishes with, and
- *  cloudAbsBeta is LightExtinctionFraction of it, which the LIGHT ray uses. The
- *  material is applied per sample, and the bake solves the same way from the
- *  same values. */
+/** Fills CompositeParams for the field. The cloud radii come from the field:
+ *  the highest a top reaches and the lowest a base falls, so the fine band is
+ *  exactly the span that can hold cloud. The extinction is solved, grey, by
+ *  TR_CloudBeta, as the bake solves it. PITFALL: cloudScatBeta and cloudAbsBeta
+ *  are not a scattering/absorption split: the first is the view ray's whole
+ *  coefficient, the second LightExtinctionFraction of it, for the light. */
 CompositeParams TR_BuildAtmo(
 	float2 SvPosition,
 	float3 RayDir,
@@ -259,9 +261,7 @@ CompositeParams TR_BuildAtmo(
 	float4 SurfaceShadow,
 	TRFieldParams F)
 {
-	// THE FIELD-WIDE REACH, NOT THIS CAMERA'S. The outer shell decides where the
-	// cloud class begins on every ray, so it takes no input from the view: a
-	// bound that moved with the camera would move the step lattice with it.
+	// The field-wide reach, not this camera's, or the step lattice moves with it.
 #if ATMO_FIELD_CLOUDS
     const float CloudOuter =
 		F.PlanetRadius + F.Thickness * TR_TopMax(F);
@@ -269,17 +269,8 @@ CompositeParams TR_BuildAtmo(
     const float CloudOuter = F.PlanetRadius;
 #endif
 
-	// -- The band is the slab -----------------------------------------------
-	//
-	// GEOMETRIC, NOT OPTICAL. Where the cloud goes opaque is a property of the
-	// extinction, and deriving a radius from it would make retuning
-	// CloudOpticalDepth move the step size -- a coupling with no visible cause.
-	// The lowest a base can fall says it better and says it exactly: no density
-	// reaches below it at all.
-	//
-	// HELD AT THE SURFACE, since a base pushed below ground is cloud the planet
-	// has already cut off and a shell inside the planet plans segments the
-	// terminus then discards.
+	// The band is geometric, not optical, so retuning the opacity moves no
+	// step; held at the surface, where the planet cuts the ray anyway.
 #if !ATMO_FIELD_CLOUDS
 	// No band: both radii at the surface, where the ray stops anyway.
     const float CloudInner = F.PlanetRadius;
@@ -343,32 +334,15 @@ CompositeParams TR_BuildAtmo(
 // The march's hooks
 // ---------------------------------------------------------------------------
 
-/** Where the view ray stops, and whether it is opaque there.
+/** Where the view ray stops, and whether it is opaque there. The slab's planet
+ *  is a surface, so the sphere clips the ray, but only over sky. PITFALL:
+ *  clipped where geometry was drawn, geometry below the sphere (a crater, a sea
+ *  floor) draws as in-scatter over black.
  *
- *  THE PLANET STOPS THE RAY, because on this field it is a surface rather than
- *  an arbitrary radius under an opaque column. Without the clip a ray would pass
- *  under the base, cross the interior and come back up into cloud on the far
- *  side, which a sparse or thin slab lets the eye see.
- *
- *  THE SILHOUETTE IS WHERE THE SURFACE IS. MaxDist reaches Atmo_Plan, so the
- *  clip changes the SEGMENT STRUCTURE and not only the shading -- but the pixels
- *  either side of it are pixels either side of the planet's own edge, where the
- *  geometry changes anyway. A different step lattice cannot read as a march
- *  disparity there.
- *
- *  THE SPHERE CLIPS ONLY OVER SKY. Where nothing was rasterised the ray still
- *  needs stopping at the horizon; where geometry was, its depth is the bound,
- *  above the sphere or below it. PITFALL: clipped on the sphere there, geometry
- *  below it (a crater, a sea floor with no water mesh) draws as in-scatter over
- *  black, the composite multiplying the scene by the clip's zero transmittance.
- *  The planet's own mesh is what hides geometry behind it.
- *
- *  THE DEEP DECK STOPS WHERE IT IS PROVABLY OPAQUE: TR_DEEP_OPAQUE_DEPTH optical
- *  depths below the height where every column is full. A RADIUS, NOT A STEP:
- *  one long step through saturated deck spawns a single light read at its
- *  midpoint, fully shadowed, so the in-scattering of the first optical depths
- *  vanishes at a fixed radius -- a ring. Every ray reaching the radius is
- *  already opaque, so the segment structure changing there cannot show. */
+ *  The deep deck stops at a radius TR_DEEP_OPAQUE_DEPTH optical depths below
+ *  where every column is full. PITFALL: a long step through saturated deck
+ *  instead takes one shadowed light read, and the in-scatter vanishes in a
+ *  ring. */
 void Field_Terminus(
 	float3 Origin,
 	float3 Dir,
@@ -383,11 +357,9 @@ void Field_Terminus(
 
 #if TR_DEEP_DECK
 	// Counted down from where the deck is full, against the least extinction
-	// either material has, in atmosphere thicknesses.
-    const float3 Low = min(S.CloudExtinction.rgb * S.CloudExtinction.a,
-		S.StormExtinction.rgb * S.StormExtinction.a);
-
-    const float BetaMin = Atmo.cloudParams.cloudScatBeta.x * min(Low.x, min(Low.y, Low.z)) * F.Thickness;
+	// any material has, in atmosphere thicknesses.
+    const float BetaMin = Atmo.cloudParams.cloudScatBeta.x * F.Thickness * TR_MaterialLeastExtinction(
+		S.CloudExtinction, S.StormExtinction, S.DeepExtinction, S.DeepMaterial.x);
 
     const float Radius = TR_DeepTerminusRadius(F, BetaMin);
 
@@ -418,9 +390,8 @@ void Field_Terminus(
  *  half-extent along the radius, which the field integrates its height profile
  *  across.
  *
- *  THE SECOND CHANNEL IS OPAQUE TO THE MARCH. It carries it from here to
- *  Field_Albedo and Field_Extinction without interpreting it; on this field it
- *  is fair-weather to storm. */
+ *  THE SAMPLE IS OPAQUE TO THE MARCH beyond its density. It carries it from here
+ *  to Field_Albedo and Field_Extinction without interpreting it. */
 float4 Field_Sample(
 	FIELD_TEXTURE_DECL,
 	float3 LocalPos,
@@ -432,16 +403,16 @@ float4 Field_Sample(
 		StructureVolume, StructureSampler, LocalPos, StepHalfHeight, F);
 }
 
-/** Single-scattering albedo at a sample's material coordinate. */
-float3 Field_Albedo(float Material, FieldMaterialParams S)
+/** Single-scattering albedo of a sample's material. */
+float3 Field_Albedo(float4 Sample, FieldMaterialParams S)
 {
-    return TR_TypeScatter(Material, S);
+    return TR_TypeScatter(TR_SampleMaterial(Sample, S), S);
 }
 
 /** Extinction multiplier the VIEW ray applies, tint times amount. */
-float3 Field_Extinction(float Material, FieldMaterialParams S)
+float3 Field_Extinction(float4 Sample, FieldMaterialParams S)
 {
-    return TR_TypeExtinction(Material, S);
+    return TR_TypeExtinction(TR_SampleMaterial(Sample, S), S);
 }
 
 /** Share of the sky's ambient light that reaches a sample, per channel: 1
@@ -456,7 +427,7 @@ float3 Field_AmbientShare(float4 Sample, float3 Albedo, CompositeParams Atmo, Fi
 	FieldMaterialParams S)
 {
 #if TR_DEEP_DECK
-    const float3 Tau = Atmo.cloudParams.cloudScatBeta * Field_Extinction(Sample.y, S)
+    const float3 Tau = Atmo.cloudParams.cloudScatBeta * Field_Extinction(Sample, S)
 		* (F.Thickness * Sample.z);
 
     const float3 Decay = sqrt(3.0f * max(1.0f - Albedo, F.DeepDarkening)
@@ -538,7 +509,8 @@ float Field_ShadowSaturation()
  *  THE RECEIVER'S OWN MATERIAL COLOURS WHAT SHADOWED IT. The map holds one
  *  depth, not the colours of everything the light crossed, and weather systems
  *  are far wider than the cloud is deep, so the path stays mostly in the
- *  receiver's material. Off at a system's edge at low sun. */
+ *  receiver's material. Off at a system's edge at low sun. Read from the
+ *  weather alone, so without the deep share. */
 float3 Field_LightTint(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
@@ -546,14 +518,14 @@ float3 Field_LightTint(
 	FieldParams F,
 	FieldMaterialParams S)
 {
-    return TR_TypeTint(TR_TypeCoarse(FlowField, FlowSampler, LocalPos, F), S);
+    return TR_TypeTint(float2(TR_TypeCoarse(FlowField, FlowSampler, LocalPos, F), 0.0f), S);
 }
 
-/** Field_LightTint from a sample already taken at the receiver: its second
- *  channel is the material TR_TypeCoarse would read, so no second column. */
+/** Field_LightTint from a sample already taken at the receiver, its deep
+ *  share included: no second column. */
 float3 Field_SampleLightTint(float4 Sample, FieldMaterialParams S)
 {
-    return TR_TypeTint(Sample.y, S);
+    return TR_TypeTint(TR_SampleMaterial(Sample, S), S);
 }
 
 /** The tint to fall back on where nothing shadowed the receiver, so the branch
@@ -570,7 +542,7 @@ AtmoShadowFrame Field_ShadowFrame(FieldParams F)
 }
 
 /** What the bake folded into the map's depths, for the reader to divide back
- *  out: the light coefficient times the largest tint channel either set has.
+ *  out: the light coefficient times the largest tint channel in use.
  *
  *  AND THE SMALLEST, as the second channel. The caller exponentiates the depth
  *  at the receiver's tint over the largest, so the ceiling has to be set

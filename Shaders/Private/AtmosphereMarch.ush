@@ -667,7 +667,7 @@ float4 Atmo_MainMarchDepth(
 				// The sky's diffuse light reaching this depth, for the air's
 				// ambient and the cloud's alike.
                 const float3 AmbientShare = Field_AmbientShare(
-					Sample, Field_Albedo(Sample.y, P.Scatter), P.Atmo, P.Field, P.Scatter);
+					Sample, Field_Albedo(Sample, P.Scatter), P.Atmo, P.Field, P.Scatter);
 
                 const float3 RayleighScatter =
 					P.Atmo.scatteringParams.rayBeta * P.Atmo.scatteringParams.phaseR * AtmoDens.x;
@@ -729,7 +729,7 @@ float4 Atmo_MainMarchDepth(
                     {
 						// THE MATERIAL IS READ AT THE SCATTERING SITE: storm cloud
 						// is a different albedo and extinction, not less cloud.
-                        const float3 Albedo = Field_Albedo(Sample.y, P.Scatter);
+                        const float3 Albedo = Field_Albedo(Sample, P.Scatter);
 
 						// Single scattering and the octaves above it. Each later
 						// octave sees less of the deck toward the light and a
@@ -763,7 +763,7 @@ float4 Atmo_MainMarchDepth(
 						// The material scales the shared base rather than
 						// replacing it, so the deck stays on the same
 						// thickness-relative footing as the air around it.
-                        const float3 CloudExtinction = Sample.x * Field_Extinction(Sample.y, P.Scatter)
+                        const float3 CloudExtinction = Sample.x * Field_Extinction(Sample, P.Scatter)
 							* P.Atmo.cloudParams.cloudScatBeta * CurrentStep;
 
                         const float3 CloudStepTransmittance = exp(-CloudExtinction);

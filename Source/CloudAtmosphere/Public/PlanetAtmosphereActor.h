@@ -58,76 +58,16 @@ struct FAtmosphereFieldClock
  *  params snapshot of the active model's groups every tick by UpdateAtmosphere,
  *  with the shadow bake and the transmittance table. Owns a directional light
  *  component, synced from the actor's rotation and LightColor. When
- *  planet-owned, location and scale are locked and rotation stays editable. */
-UCLASS()
+ *  planet-owned, location and scale are locked and rotation stays editable.
+ *  Its panel shows CloudAtmosphere first after the transform, its groups in
+ *  declaration order: Atmosphere, Model, Pipeline. */
+UCLASS(meta = (PrioritizeCategories = "TransformCommon CloudAtmosphere"))
 class CLOUDATMOSPHERE_API APlanetAtmosphereActor : public AActor
 {
     GENERATED_BODY()
 
 public:
     APlanetAtmosphereActor();
-
-    // --- Pipeline: the assets and passes the actor drives. ---
-
-    /** Tiling single-channel blue noise for the march: sRGB off, uncompressed
-     *  grayscale, no mips, nearest filtering. Cleared, nothing draws. */
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
-    TObjectPtr<UTexture2D> BlueNoise;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline")
-    FAtmosphereSimulationParams Simulation;
-
-    // Quality: Raymarch, Sampling and the shadow settings below are a
-    // performance tier, shared by both models; tunes apply them only on request.
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Raymarch", meta = (ShowOnlyInnerProperties))
-    FAtmosphereRaymarchParams Raymarch;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Sampling", meta = (ShowOnlyInnerProperties))
-    FAtmosphereSamplingParams Sampling;
-
-    // Baked Lighting: set once for a performance tier. The cascade extents are
-    // look, in each model's SurfaceShadow.
-
-    /** The deck shadow bake in the light's frame: a cascade of slices, each
-     *  covering a smaller radius, sized by ShadowResolution. */
-    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
-    TObjectPtr<UTextureRenderTarget2DArray> ShadowTarget;
-
-    /** One texel: the coverage priority threshold the bake's coverage pass
-     *  solves each frame, read by the bake and the march. */
-    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
-    TObjectPtr<UTextureRenderTarget2D> CoverageTarget;
-
-    /** The flow atlas this planet draws: the sim's while it drives the sim,
-     *  KeptFlow while another planet does. */
-    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
-    TObjectPtr<UTextureRenderTarget2DArray> FlowTarget;
-
-    /** The field as this planet last drove it, copied when another planet took
-     *  the sim; clear until it first drives it. */
-    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
-    TObjectPtr<UTextureRenderTarget2DArray> KeptFlow;
-
-    /** The sim's debug view while this planet drives the sim and the config's
-     *  bDebugView is on. */
-    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
-    TObjectPtr<UTextureRenderTarget2D> SimDebugView;
-
-    /** Edge of every cascade slice, in texels. Bake time and memory scale with
-     *  its square, 2 MB per slice at 512; lower softens rather than aliases. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "128", ClampMax = "4096"))
-    int32 ShadowResolution = 1024;
-
-    /** Cascades rebaked per frame, in turn; each is read against the camera it
-     *  was baked with. 1 rebakes a level every third frame. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "1", ClampMax = "3"))
-    int32 ShadowLevelsPerFrame = 1;
-
-    /** Seconds a rebaked cascade fades in from its reprojected previous bake:
-     *  hides rebake steps, and the shadow trails the clouds by about this. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-    float ShadowTemporalSmoothing = 0.1f;
 
     // --- Atmosphere ---
 
@@ -217,6 +157,68 @@ public:
      *  which is how tuning saves. Null when the slot is empty. */
     UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
     UFlowSimConfig* GetWritableSimConfig(EPlanetAtmosphereType InModel);
+
+    // --- Pipeline: the assets and passes the actor drives. ---
+
+    /** Tiling single-channel blue noise for the march: sRGB off, uncompressed
+     *  grayscale, no mips, nearest filtering. Cleared, nothing draws. */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
+    TObjectPtr<UTexture2D> BlueNoise;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline")
+    FAtmosphereSimulationParams Simulation;
+
+    // Quality: Raymarch, Sampling and the shadow settings below are a
+    // performance tier, shared by both models; tunes apply them only on request.
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Raymarch", meta = (ShowOnlyInnerProperties))
+    FAtmosphereRaymarchParams Raymarch;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Sampling", meta = (ShowOnlyInnerProperties))
+    FAtmosphereSamplingParams Sampling;
+
+    // Baked Lighting: set once for a performance tier. The cascade extents are
+    // look, in each model's SurfaceShadow.
+
+    /** The deck shadow bake in the light's frame: a cascade of slices, each
+     *  covering a smaller radius, sized by ShadowResolution. */
+    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
+    TObjectPtr<UTextureRenderTarget2DArray> ShadowTarget;
+
+    /** One texel: the coverage priority threshold the bake's coverage pass
+     *  solves each frame, read by the bake and the march. */
+    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
+    TObjectPtr<UTextureRenderTarget2D> CoverageTarget;
+
+    /** The flow atlas this planet draws: the sim's while it drives the sim,
+     *  KeptFlow while another planet does. */
+    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
+    TObjectPtr<UTextureRenderTarget2DArray> FlowTarget;
+
+    /** The field as this planet last drove it, copied when another planet took
+     *  the sim; clear until it first drives it. */
+    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
+    TObjectPtr<UTextureRenderTarget2DArray> KeptFlow;
+
+    /** The sim's debug view while this planet drives the sim and the config's
+     *  bDebugView is on. */
+    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
+    TObjectPtr<UTextureRenderTarget2D> SimDebugView;
+
+    /** Edge of every cascade slice, in texels. Bake time and memory scale with
+     *  its square, 2 MB per slice at 512; lower softens rather than aliases. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "128", ClampMax = "4096"))
+    int32 ShadowResolution = 1024;
+
+    /** Cascades rebaked per frame, in turn; each is read against the camera it
+     *  was baked with. 1 rebakes a level every third frame. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "1", ClampMax = "3"))
+    int32 ShadowLevelsPerFrame = 1;
+
+    /** Seconds a rebaked cascade fades in from its reprojected previous bake:
+     *  hides rebake steps, and the shadow trails the clouds by about this. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float ShadowTemporalSmoothing = 0.1f;
 
     // --- The active model ---
 

@@ -43,6 +43,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereMarchParams
 	FTerrestrialFieldParameters Field{};
 	FVector3f CloudScatter = FVector3f::OneVector;
 	FVector3f StormScatter = FVector3f::OneVector;
+	FVector3f DeepScatter = FVector3f::OneVector;
 
 	float LightExtinctionFraction = 0.0f;
 
@@ -173,6 +174,7 @@ private:
 		FVector ViewOrigin = FVector::ZeroVector;
 		FVector PlanetCenter = FVector::ZeroVector;
 		FQuat PlanetRotation = FQuat::Identity;
+		float SpinAngle = 0.0f;
 		uint32 Frame = 0;
 		uint64 LastRendered = 0;
 	};

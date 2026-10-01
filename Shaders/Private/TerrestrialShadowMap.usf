@@ -31,12 +31,14 @@ SamplerState StructureVolumeSampler;
 /** One texel: the priority threshold MainCoverageCS solved this frame. */
 Texture2D<float> CoverageThreshold;
 
-/** The two material sets' extinction: rgb tint, amount in a. The map stores
- *  one scalar depth, so the bake weights density by the amount at each sample's
- *  cloud type and folds in the largest tint channel; colour is applied from the
- *  receiver's type where the depth is read. */
+/** The material sets' extinction: rgb tint, amount in a; and the deep share
+ *  and depth. The map stores one scalar depth, so the bake weights density by
+ *  the amount at each sample's material and folds in the largest tint channel;
+ *  colour is applied from the receiver's material where the depth is read. */
 float4 CloudExtinction;
 float4 StormExtinction;
+float4 DeepExtinction;
+float4 DeepMaterial;
 
 /** Solved into the light ray's coefficient by TR_CloudBeta, as the march
  *  solves it. */
@@ -83,16 +85,19 @@ TRFieldParams TRShadow_Field()
     return F;
 }
 
-/** Extinction amount at a cloud type. Mirrors TR_TypeTint on the a channel.
- *
- *  PITFALL: the view ray applies tint and amount together, as a lerp of
- *  products, while the light path is this amount times a separately lerped
- *  tint. Equal at both ends, differing mid-way by a quarter of
- *  (Cloud.rgb - Storm.rgb)(Cloud.a - Storm.a): the price of one scalar depth
- *  channel. */
-float TRShadow_TypeAlpha(float Type)
+/** Extinction amount of a sample's material, TR_TypeTint on the a channel.
+ *  PITFALL: the view ray lerps tint times amount, the light path this amount
+ *  times a separately lerped tint; they differ mid-blend, the price of one
+ *  scalar depth channel. */
+float TRShadow_Amount(float4 Deck)
 {
-    return lerp(CloudExtinction.a, StormExtinction.a, saturate(Type));
+    const float Amount = lerp(CloudExtinction.a, StormExtinction.a, saturate(Deck.y));
+
+#if TR_DEEP_DECK
+    return lerp(Amount, DeepExtinction.a, TR_DeepMaterialWeight(Deck.z, DeepMaterial));
+#else
+    return Amount;
+#endif
 }
 
 /** Extinction at a point, averaged across the texel's footprint. Averaged as
@@ -139,7 +144,7 @@ float TRShadow_Sigma(
 
 		// Type scales extinction, so storm cloud shadows more than fair-weather
 		// cloud, and it arrives on the same fetch the density came from.
-        Density += Deck.x * TRShadow_TypeAlpha(Deck.y);
+        Density += Deck.x * TRShadow_Amount(Deck);
     }
 
     return Density * AbsMax / float(ATMO_BAKE_SUBSAMPLES);
@@ -178,15 +183,12 @@ float BakeField_TopBound(BakeFieldParams F)
 
 /** Where the light ray stops: the planet under the slab; under the deep deck,
  *  the radius the light is provably extinguished by, on the least extinction
- *  either material has. Light-side, so LightExtinctionFraction is in it. */
+ *  any material in use has. Light-side, so LightExtinctionFraction is in it. */
 float BakeField_TerminusRadius(BakeFieldParams F)
 {
 #if TR_DEEP_DECK
-    const float3 Low = min(CloudExtinction.rgb * CloudExtinction.a,
-		StormExtinction.rgb * StormExtinction.a);
-
-    return TR_DeepTerminusRadius(F,
-		TR_CloudBeta(F, CloudOpticalDepth) * LightExtinctionFraction * min(Low.x, min(Low.y, Low.z)));
+    return TR_DeepTerminusRadius(F, TR_CloudBeta(F, CloudOpticalDepth) * LightExtinctionFraction
+		* TR_MaterialLeastExtinction(CloudExtinction, StormExtinction, DeepExtinction, DeepMaterial.x));
 #else
     return F.PlanetRadius;
 #endif
@@ -215,14 +217,13 @@ float BakeField_LateralArc(float Radius)
     return Flow_TexelArc(FlowTarget, Radius);
 }
 
-/** PER WORLD UNIT, matching what AtmosphereSetup hands the march after its own
- *  divide by thickness. The largest tint channel either set has is folded in
- *  so the stored thresholds mean transmittance on the fastest channel anywhere;
- *  Field_FoldConstant divides the same product back out on the read side. */
+/** Per world unit, as AtmosphereSetup hands the march its coefficients. The
+ *  largest tint channel in use is folded in, so the stored thresholds mean
+ *  transmittance on the fastest channel; Field_FoldConstant divides it out. */
 float BakeField_FoldConstant(BakeFieldParams F)
 {
     return TR_CloudBeta(F, CloudOpticalDepth) * LightExtinctionFraction / F.Thickness
-		* TR_ExtinctionTintRange(CloudExtinction.rgb, StormExtinction.rgb).y;
+		* TR_MaterialTintRange(CloudExtinction.rgb, StormExtinction.rgb, DeepExtinction.rgb, DeepMaterial.x).y;
 }
 
 float BakeField_Sigma(float3 Pos, float3 BasisU, float3 BasisV, float TexelWorld,

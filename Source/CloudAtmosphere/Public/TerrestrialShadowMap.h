@@ -42,10 +42,13 @@ SHADER_PARAMETER(FVector4f, CloudGenusCirrus)
 SHADER_PARAMETER(FVector4f, ShadowCascades)
 SHADER_PARAMETER(FVector4f, CloudResponse)
 
-// Both material sets' rgb tint and amount in a, and what TR_CloudBeta solves
-// the cloud's coefficient from.
+// The material sets' rgb tint and amount in a, and what TR_CloudBeta solves
+// the cloud's coefficient from. DeepMaterial: the deep material's share and
+// the buried depth it is reached at, in atmosphere fractions.
 SHADER_PARAMETER(FVector4f, CloudExtinction)
 SHADER_PARAMETER(FVector4f, StormExtinction)
+SHADER_PARAMETER(FVector4f, DeepExtinction)
+SHADER_PARAMETER(FVector4f, DeepMaterial)
 SHADER_PARAMETER(float, CloudOpticalDepth)
 
 END_SHADER_PARAMETER_STRUCT()
