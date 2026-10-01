@@ -331,11 +331,14 @@ float3 Atmo_LightMarch(
 	// the occlusion and is already fading to zero across the band the clamp
 	// covers.
     const float3 FromCentre = Start - P.Atmo.planetParams.planetPos;
-    const float Dist = length(FromCentre);
-    const float Mu = dot(FromCentre, LightDir) / max(Dist, 1e-4f);
+    float Dist = length(FromCentre);
+    float Mu = dot(FromCentre, LightDir) / max(Dist, 1e-4f);
+
+	// Air the table does not hold, the field's below its surface.
+    const float3 Buried = Field_AirBuried(FromCentre, LightDir, P.Atmo, Dist, Mu);
 
     const float3 AtmoOptDepth = AtmoT_Lookup(TransmittanceTable, TransmittanceSampler,
-		Dist / C.Thickness, Mu, C.Radii.x, C.Radii.y) * C.Thickness;
+		Dist / C.Thickness, Mu, C.Radii.x, C.Radii.y) * C.Thickness + Buried;
 
     return PlanetShadow * exp(-(P.Atmo.scatteringParams.rayBeta * AtmoOptDepth.x
 		+ P.Atmo.scatteringParams.mieBeta * AtmoOptDepth.y

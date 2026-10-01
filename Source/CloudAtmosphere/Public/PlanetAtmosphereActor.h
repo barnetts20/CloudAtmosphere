@@ -169,9 +169,11 @@ public:
     FLinearColor LightColor = FLinearColor(1.0f, 0.95f, 0.9f, 1.0f);
 
     /** The star's brightness, on its brightest channel. Every ambient is a ratio
-     *  of the light, so they follow it. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Atmosphere", meta = (ClampMin = "0.0"))
-    float LightIntensity = 30.0f;
+     *  of the light, so they follow it. Light is stored unexposed in half float,
+     *  so the haze's forward lobe clips past about 1000 at MieG 0.95 and about
+     *  40 at its 0.99 limit. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Atmosphere", meta = (ClampMin = "0.0", UIMax = "20.0"))
+    float LightIntensity = 4.0f;
 
     /** LightColor's hue at LightIntensity: the light the march and the
      *  directional light take. */
@@ -341,9 +343,10 @@ public:
         return bTerrestrial() ? TerrestrialPlanet : GasGiantPlanet;
     }
 
+    /** Above zero: the atmosphere's thickness divides every height. */
     float ActiveHeightScale() const
     {
-        return ActivePlanet().HeightScale;
+        return FMath::Max(ActivePlanet().HeightScale, 1e-4f);
     }
 
     const FTerrestrialStructureLayerParams& ActiveStructureLayer() const

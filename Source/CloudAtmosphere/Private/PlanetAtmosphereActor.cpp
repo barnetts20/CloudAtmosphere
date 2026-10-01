@@ -521,7 +521,7 @@ static FTerrestrialFieldParameters PackCloudField(const APlanetAtmosphereActor& 
 
     Out.CloudExtinction = ToVector4(Material.CloudExtinction);
     Out.StormExtinction = ToVector4(Material.StormExtinction);
-    Out.CloudOpticalDepth = Material.CloudOpticalDepth;
+    Out.CloudOpticalDepth = FMath::Max(Material.CloudOpticalDepth, 0.0f);
 
     return Out;
 }
@@ -544,7 +544,7 @@ static uint32 MakeShadowFieldKey(const FTerrestrialFieldParameters& F, float Pla
 
 /** ATMO_SHADOW_NO_DECK in AtmosphereShadowMap.ush: every crossing past any
  *  chord, so an unbaked texel reads as fully lit. */
-static constexpr float ShadowNoDeck = 1000.0f;
+static constexpr float ShadowNoDeck = 60000.0f;
 
 void APlanetAtmosphereActor::PrepareShadowTarget()
 {
@@ -582,7 +582,7 @@ void APlanetAtmosphereActor::PrepareShadowTarget()
         Target->ClearColor = Clear;
 
         // The map stores depths in atmosphere thicknesses, which run well past 1
-        // and reach the no-deck sentinel at 1000. A float format has no sRGB
+        // and reach the no-deck sentinel at 60000. A float format has no sRGB
         // variant, so nothing clamps them.
         Target->Init(Edge, Edge, DesiredSlices, PF_FloatRGBA);
         Target->UpdateResourceImmediate(true);
@@ -837,7 +837,7 @@ void APlanetAtmosphereActor::RequestShadowBake(
     // A changed field rebakes every level: reprojected, the old field's depths
     // would land at the new field's extents.
     const FTerrestrialFieldParameters Field = PackCloudField(*this);
-    const uint32 FieldKey = MakeShadowFieldKey(Field, PlanetRadius, ActivePlanet().HeightScale);
+    const uint32 FieldKey = MakeShadowFieldKey(Field, PlanetRadius, ActiveHeightScale());
 
     if (FieldKey != ShadowFieldKey)
     {
@@ -934,8 +934,11 @@ bool APlanetAtmosphereActor::FillMarchParams(
     Out.RayleighScaleHeight = AirP.RayleighScaleHeight;
     Out.MieBeta = ToVector3(AirP.MieBeta());
     Out.MieScaleHeight = AirP.MieScaleHeight;
-    Out.MieG = AirP.MieG;
-    Out.MieLobeDecay = AirP.MieLobeDecay;
+    // THE GUARDS ARE SINGULARITIES ONLY: the phase function at |g| 1, a lobe
+    // growing behind cloud, a terminator of zero width, mixing weights outside
+    // [0, 1]. The authored ranges are the parameter reference's, not the push's.
+    Out.MieG = FMath::Clamp(AirP.MieG, -0.99f, 0.99f);
+    Out.MieLobeDecay = FMath::Max(AirP.MieLobeDecay, 0.0f);
     Out.AbsorptionBeta = ToVector3(AirP.AbsorptionBeta());
     Out.AbsorptionAltitude = AirP.AbsorptionAltitude;
     Out.AbsorptionFalloff = AirP.AbsorptionFalloff;
@@ -946,11 +949,11 @@ bool APlanetAtmosphereActor::FillMarchParams(
     Out.AtmosphereAmbientFloor = AmbientP.AirAmbientFloor;
     Out.CloudAmbient = ToVector3(AmbientP.CloudAmbient);
     Out.CloudAmbientFloor = AmbientP.CloudAmbientFloor;
-    Out.AmbientTerminator = AmbientP.AmbientTerminator;
+    Out.AmbientTerminator = FMath::Max(AmbientP.AmbientTerminator, 1e-4f);
 
-    Out.ForwardG = PhaseP.ForwardG;
-    Out.BackwardG = PhaseP.BackwardG;
-    Out.ForwardWeight = PhaseP.ForwardWeight;
+    Out.ForwardG = FMath::Clamp(PhaseP.ForwardG, -0.99f, 0.99f);
+    Out.BackwardG = FMath::Clamp(PhaseP.BackwardG, -0.99f, 0.99f);
+    Out.ForwardWeight = FMath::Clamp(PhaseP.ForwardWeight, 0.0f, 1.0f);
 
     Out.LightExtinctionFraction = MS.LightExtinctionFraction();
     Out.OctaveCount = static_cast<float>(MS.OctaveCount);

@@ -111,7 +111,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereSurfaceShadowParams
 	 *  layout. */
 	FLinearColor Pack() const
 	{
-		return FLinearColor(bEnabled ? 1.0f : 0.0f, DirectFraction, 0.0f, Strength);
+		return FLinearColor(bEnabled ? 1.0f : 0.0f, FMath::Clamp(DirectFraction, 0.0f, 1.0f), 0.0f, FMath::Max(Strength, 0.0f));
 	}
 };
 
@@ -138,17 +138,17 @@ struct CLOUDATMOSPHERE_API FTerrestrialPlanetParams
 	GENERATED_BODY()
 
 	/** Atmosphere top, as a fraction of planet radius above the surface. The
-	 *  ceiling every other shell in the system is expressed against. Floored so
-	 *  the shadow map's no-deck sentinel (1000 thicknesses) lies past every
-	 *  chord with half-float precision to spare. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.005"))
+	 *  ceiling every other shell in the system is expressed against. Below
+	 *  about 0.005 the shadow map's depths, half floats in thicknesses, coarsen
+	 *  toward the terminator. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", UIMin = "0.005"))
 	float HeightScale = 0.2f;
 
 	/** The field's rotation as a share of the sim's own, PlanetaryVorticity / 2
 	 *  radians per unit sim time: 1 turns the clouds as fast as the planet the
 	 *  sim's Coriolis assumes. The sim runs in the rotating frame, so this
 	 *  rotates the sampling position. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "0.0"))
 	float SpinRatio = 1.0f;
 };
 
@@ -160,7 +160,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialShapeParams
 
 	/** Condensation level of an unlifted column, as a fraction of atmosphere
 	 *  thickness. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "0.0", UIMax = "1.0"))
 	float CloudBase = 0.15f;
 
 	/** Depth of a fully towering column before the pressure lid, as a fraction of
@@ -168,13 +168,13 @@ struct CLOUDATMOSPHERE_API FTerrestrialShapeParams
 	 *  MARCHED BAND IS BOUNDED BY THIS, so it also sets how much of the shell
 	 *  gets fine-stepped. PITFALL: keep CloudBase plus this below
 	 *  1 - CeilingFalloff, or the ceiling thins every tall column. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", UIMax = "1.0"))
 	float CloudThickness = 0.5f;
 
 	/** Share of CloudThickness each end of the height profile ramps over. At 0.5
 	 *  a full column has no flat core. Also sets the bake's step, which is why it
 	 *  stops short of 0: a near-zero ramp drives the bake into its step cap. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.05", ClampMax = "0.5"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", ClampMax = "0.5", UIMin = "0.05"))
 	float SurfaceSoftness = 0.35f;
 
 	/** Shape of the profile's top ramp. Below 0.5 it loses its C1 join. */
@@ -187,7 +187,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialShapeParams
 
 	/** Width of the band under the shell top across which density fades to zero,
 	 *  as a fraction of atmosphere thickness, so the tallest towers cap softly. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "0.5"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", UIMax = "0.5"))
 	float CeilingFalloff = 0.2f;
 
 	/** READOUT, not authored: the highest a column top can reach. Above
@@ -233,7 +233,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialCoverageParams
 
 	/** Half-width of the coverage threshold, in rank: how far a system's edge
 	 *  ramps from clear to fully covered. Lower is crisper. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", UIMax = "1.0"))
 	float CoverageSoftness = 0.2f;
 
 	/** How system edges thin out as coverage falls: 1 frays them into
@@ -280,7 +280,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialTypeParams
 
 	/** Exponent the storm term of type builds with. 1 is linear; higher lets
 	 *  only the stormiest columns approach full towering storm cloud. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1", ClampMax = "8.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1", UIMax = "8.0"))
 	float TypeCurve = 2.0f;
 
 	/** Depth of a stratiform column as a fraction of a towering one. */
@@ -359,7 +359,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialWarpParams
 
 	/** How far rising air stretches the noise vertically: towers drawn taller,
 	 *  subsiding air pressed into sheets. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-0.9"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "-0.9"))
 	float WarpStretch = 0.5f;
 
 	/** How far rising air lifts the noise, a multiple of CloudThickness. */
@@ -384,31 +384,31 @@ struct CLOUDATMOSPHERE_API FTerrestrialStructureLayerParams
 	/** Horizontal frequency at the planet's surface, in noise units per
 	 *  radian: higher is smaller clouds. It grows with height by
 	 *  exp(Aspect * HeightScale * height), height in atmosphere fractions. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.01"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "0.01"))
 	float Scale = 6.0f;
 
 	/** Vertical frequency over the horizontal one, at every height: higher is
 	 *  flatter features. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.01"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", UIMin = "0.01"))
 	float Aspect = 2.0f;
 
 	/** How far the noise breaks the cloud up. Below 1 some of each column fills
 	 *  whatever the noise; past 1 the shaping extrapolates, holes open that
 	 *  survive any coverage, and from about half up a fully covered column is
 	 *  cut clear as readily as a thin one. 0 leaves smooth sheets. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", UIMax = "2.0"))
 	float Erosion = 0.85f;
 
 	/** Share of the sim's carried noise displacement the layer follows: 1 moves
 	 *  with the weather, 0 stays fixed on the planet. At 1, high-turnover
 	 *  regions shear the noise into streaks. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "0.0", UIMax = "1.0"))
 	float FlowInherit = 0.9f;
 
 	/** Mips added to the one the volume is read at from the pixel's footprint:
 	 *  lower is sharper and shimmers more in motion, which the temporal resolve
 	 *  partly averages. The volume needs its mips. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-2.0", ClampMax = "4.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "-2.0", UIMax = "4.0"))
 	float MipBias = 1.0f;
 };
 
@@ -427,12 +427,12 @@ struct CLOUDATMOSPHERE_API FTerrestrialDetailLayerParams
 
 	/** Horizontal frequency at the surface, in noise units per radian: higher
 	 *  is finer grain. It grows with height as the structure layer's does. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.01"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "0.01"))
 	float Scale = 30.0f;
 
 	/** Vertical frequency over the horizontal one, at every height, as for the
 	 *  structure layer. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.01"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", UIMin = "0.01"))
 	float Aspect = 1.0f;
 
 	/** How hard the edges are eaten, up to TR_DETAIL_EROSION_SCALE of the
@@ -443,12 +443,12 @@ struct CLOUDATMOSPHERE_API FTerrestrialDetailLayerParams
 	/** Share of the sim's carried noise displacement the layer follows. Lower
 	 *  than the structure's, so sheared regions turn strandy and keep some
 	 *  rounded detail. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "0.0", UIMax = "1.0"))
 	float FlowInherit = 0.4f;
 
 	/** Mips added to the one the pixel's footprint reads, as for the
 	 *  structure layer. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-2.0", ClampMax = "4.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "-2.0", UIMax = "4.0"))
 	float MipBias = 0.0f;
 
 	/** Where the grain starts fading to the mean, and where it reaches it, in
@@ -483,7 +483,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialCloudMaterialParams
 	/** Optical depth through a full-depth column of fair-weather cloud at
 	 *  density 1: the clouds' opacity. Coverage and the noise take most columns
 	 *  well under it. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", UIMin = "0.1"))
 	float CloudOpticalDepth = 40.0f;
 
 	/** How much of the cloud is storm material: 0 none, 1 all. Each column
@@ -497,7 +497,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialCloudMaterialParams
 	/** Half-width of the storm threshold, in storm index: how gradually cloud
 	 *  scatter ramps into storm scatter from a system's edge toward its core.
 	 *  Small is a crisp split; large, a long gradient. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", UIMax = "1.0"))
 	float StormBlend = 0.15f;
 
 	/** Fair-weather cloud's single-scattering albedo, per channel, held to
@@ -544,11 +544,11 @@ struct CLOUDATMOSPHERE_API FAtmosphereSamplingParams
 	/** How much longer each cloud step is than the last, with the camera in or
 	 *  under the deck and from four shell depths above it, blended between by
 	 *  altitude. Lower is finer and costlier; equal values retire the blend. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", UIMax = "1.0"))
 	float LatticeGrowth = 0.2f;
 
 	/** The growth from four shell depths above the deck and beyond. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", UIMax = "1.0"))
 	float LatticeGrowthFar = 0.02f;
 };
 
@@ -563,7 +563,7 @@ struct CLOUDATMOSPHERE_API FGasGiantDeepParams
 	 *  and the eye's thinning fade out over it, on down through the core. The
 	 *  marched band ends where every column is full, so a deeper fill
 	 *  fine-steps further down. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", UIMin = "0.001", UIMax = "1.0"))
 	float DeepFill = 0.1f;
 
 	/** How far the floor rises into the fill, in fills: full-density mounds
@@ -683,7 +683,7 @@ private:
 	static FLinearColor ToBeta(const FLinearColor& Depth, float Column)
 	{
 		const float Inv = 1.0f / FMath::Max(Column, 1e-8f);
-		return FLinearColor(Depth.R * Inv, Depth.G * Inv, Depth.B * Inv, 1.0f);
+		return FLinearColor(FMath::Max(Depth.R, 0.0f) * Inv, FMath::Max(Depth.G, 0.0f) * Inv, FMath::Max(Depth.B, 0.0f) * Inv, 1.0f);
 	}
 };
 
@@ -719,7 +719,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereAmbientParams
 	/** Width of the ambient terminator, in cosine of sun elevation; 0.15 is about
 	 *  9 degrees either side. Ambient applied unconditionally washes the night
 	 *  side, which reads as the star shining through the planet. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", UIMax = "1.0"))
 	float AmbientTerminator = 0.15f;
 };
 
@@ -730,11 +730,11 @@ struct CLOUDATMOSPHERE_API FAtmospherePhaseParams
 	GENERATED_BODY()
 
 	/** Forward lobe asymmetry. What makes the rim bright near the sun. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "0.99"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-0.99", ClampMax = "0.99", UIMin = "0.0"))
 	float ForwardG = 0.9f;
 
 	/** Backward lobe asymmetry, as a magnitude. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "0.99"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-0.99", ClampMax = "0.99", UIMin = "0.0"))
 	float BackwardG = 0.1f;
 
 	/** Share of the forward lobe in the blend. */
@@ -812,7 +812,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereRaymarchParams
 	 *  THE COUNTS ARE EXACT, so this redistributes rather than adds: a ray costs
 	 *  what the two counts name however it is angled, and the only variance left
 	 *  is a step per segment boundary and rays that end early on transmittance. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0", ClampMax = "64.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0", UIMax = "64.0"))
 	float ChordSpread = 8.0f;
 
 };

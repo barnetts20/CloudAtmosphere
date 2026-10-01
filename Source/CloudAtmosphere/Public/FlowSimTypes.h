@@ -157,7 +157,7 @@ struct FFlowPerpetualStorm
 	float Latitude = -22.0f;
 
 	/** Centre longitude at sim time zero, degrees. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm", meta = (ClampMin = "-180.0", ClampMax = "180.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm", meta = (UIMin = "-180.0", UIMax = "180.0"))
 	float Longitude = 0.0f;
 
 	/** Half-height across latitude, in deformation radii, as StormCellRadius;
@@ -466,9 +466,10 @@ public:
 	float CloudLifetime = 30.0f;
 
 	/** The top layer's saturation as a fraction of the bottom's; layers between
-	 *  fall geometrically. Cold air aloft holds little. Floored: near 0 the
-	 *  upper layers turn any vapour into cloud and go overcast. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Moisture", meta = (EditCondition = "LayerCount > 1", EditConditionHides, ClampMin = "0.02", ClampMax = "1.0"))
+	 *  fall geometrically. Cold air aloft holds little; near the floor the upper
+	 *  layers condense whatever vapour reaches them. PITFALL: at 0 condensation
+	 *  forms cloud without spending vapour, and the upper layers stay overcast. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Moisture", meta = (EditCondition = "LayerCount > 1", EditConditionHides, ClampMin = "0.001", ClampMax = "1.0"))
 	float UpperSaturation = 0.3f;
 
 	/** How much the bottom layer's wind raises surface evaporation, as the gain
@@ -495,7 +496,7 @@ public:
 	 *  from passing waves goes too, so cloud amount falls as it lengthens and
 	 *  the deck's cover wants raising to match. The storm tracer is the most
 	 *  sensitive to it. 0 reads it raw. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Moisture", meta = (ClampMin = "0.0", ClampMax = "25.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Moisture", meta = (ClampMin = "0.0", UIMax = "25.0"))
 	float AscentSmoothing = 3.0f;
 
 	// -- Planet: storms -----------------------------------------------------
@@ -557,7 +558,7 @@ public:
 	/** Turnovers after which a cell decays whatever the conditions. It then
 	 *  fades at its decay rate, StormCellGrowth times one less
 	 *  StormCellPersistence, so it lives about ln(20) over that rate longer. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (ClampMin = "0.05"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (ClampMin = "0.01", UIMin = "0.05"))
 	float StormCellLifetime = 30.0f;
 
 	/** Storm tracer a mature cell tops its eyewall up toward, as a multiple of
@@ -793,7 +794,7 @@ public:
 
 	/** Turnovers to run at the spin-up step before the sim is considered ready.
 	 *  Skipped once InitialState is bound. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Time", meta = (ClampMin = "0.0", ClampMax = "360.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Time", meta = (ClampMin = "0.0", UIMax = "360.0"))
 	float SpinUpTurnovers = 13.0f;
 
 	// -- Quality ------------------------------------------------------------
@@ -870,13 +871,13 @@ public:
 	float ThermalRelaxation = 0.05f;
 
 	/** How long one forcing pattern lives, in turnovers. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rates", meta = (ClampMin = "0.05"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rates", meta = (ClampMin = "0.01", UIMin = "0.05"))
 	float ForcingLifetime = 5.0f;
 
 	/** Forcing volume tiles per deformation radius, so the stirring scales
 	 *  with the eddies. The injection scale is the volume's own features
 	 *  within a tile. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rates", meta = (ClampMin = "0.0001"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rates", meta = (ClampMin = "0.0", UIMin = "0.0001"))
 	float ForcingFrequency = 0.05f;
 
 	// -- Numerics -----------------------------------------------------------
@@ -902,7 +903,7 @@ public:
 	 *  the local compression per step. Higher widens and softens travelling
 	 *  fronts more; 0 leaves only GridDamping. The total is capped at
 	 *  the explicit scheme's stability bound, so any value is stable. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Numerics", meta = (ClampMin = "0.0", ClampMax = "50.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Numerics", meta = (ClampMin = "0.0", UIMax = "50.0"))
 	float ShockDamping = 2.0f;
 
 	/** Rebuild centre velocities to fourth order from the faces rather than as
@@ -945,7 +946,7 @@ public:
 	TObjectPtr<UFlowSnapshot> InitialState;
 
 	/** Spin-up substeps per frame. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline", meta = (ClampMin = "1", ClampMax = "64"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline", meta = (ClampMin = "1", UIMax = "64"))
 	int32 MaxSpinUpStepsPerFrame = 8;
 
 	// -- Debug --------------------------------------------------------------

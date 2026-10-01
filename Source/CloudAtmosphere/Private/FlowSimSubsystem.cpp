@@ -1630,7 +1630,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		}
 
 		const float Saturation = (Layers > 1)
-			? FMath::Pow(FMath::Clamp(Config->UpperSaturation, 0.02f, 1.0f), ShearShare(k, Layers))
+			? FMath::Pow(FMath::Clamp(Config->UpperSaturation, 0.001f, 1.0f), ShearShare(k, Layers))
 			: 1.0f;
 
 		Out.LayerState[k] = FVector4f(

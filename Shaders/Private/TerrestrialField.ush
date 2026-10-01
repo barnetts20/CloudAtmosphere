@@ -33,6 +33,13 @@
 /** Optical depth at which the deep deck's shadow read stops growing, on its
  *  most transmissive term (see ATMO_SHADOW_SATURATION): about 1e-7. The slab's 5
  *  leaves the octaves a percent of the sun at any depth. */
+/** The deep deck's light crossing its buried air (1), or reading the
+ *  transmittance table at the surface for any sample below it (0). A look
+ *  change under comparison (FlagAudit). */
+#ifndef TR_DEEP_AIR_LIGHT
+#define TR_DEEP_AIR_LIGHT 1
+#endif
+
 #ifndef TR_DEEP_SHADOW_SATURATION
 #define TR_DEEP_SHADOW_SATURATION 16.0f
 #endif
@@ -472,6 +479,36 @@ float3 Field_AirDensity(float Height, CompositeParams Atmo)
 			Atmo.scatteringParams.rayScaleH, Atmo.scatteringParams.mieScaleH,
 			Atmo.scatteringParams.absHeight, Atmo.scatteringParams.absFalloff)
 		: float3(0.0f, 0.0f, 0.0f);
+#endif
+}
+
+/** The light path's air below the surface, where the transmittance table does
+ *  not reach: R and Mu, a world radius and the light's cosine, move to where
+ *  the path leaves the surface sphere, and the density integral of the part
+ *  below, at the surface's density, is returned. Zero for the slab, whose air
+ *  ends at the surface. PITFALL: read at the sample's own radius, the table
+ *  lights buried air as if at the surface, and deep hollows brighten with
+ *  depth. */
+float3 Field_AirBuried(float3 FromCentre, float3 LightDir, CompositeParams Atmo, inout float R, inout float Mu)
+{
+#if TR_DEEP_DECK && TR_DEEP_AIR_LIGHT
+    const float Radius = Atmo.planetParams.planetRadius;
+    const float Inside = R * R - Radius * Radius;
+
+    if (Inside >= 0.0f)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
+    const float Along = R * Mu;
+    const float Length = sqrt(Along * Along - Inside) - Along;
+
+    R = Radius;
+    Mu = dot(FromCentre + LightDir * Length, LightDir) / max(Radius, 1e-4f);
+
+    return Length * Field_AirDensity(0.0f, Atmo);
+#else
+    return float3(0.0f, 0.0f, 0.0f);
 #endif
 }
 

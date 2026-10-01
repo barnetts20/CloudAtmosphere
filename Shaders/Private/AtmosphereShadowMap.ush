@@ -75,10 +75,11 @@
 #endif
 
 /** Written where a threshold is never reached, and where the ray misses the
- *  shell. Far past any real chord, so reconstruction reads zero rather than
- *  needing a validity test. */
+ *  shell. Past the longest chord, 2 (1 + HeightScale) / HeightScale
+ *  thicknesses, down to a HeightScale of 1e-4, and inside half float's range,
+ *  so reconstruction reads zero rather than needing a validity test. */
 #ifndef ATMO_SHADOW_NO_DECK
-#define ATMO_SHADOW_NO_DECK 1000.0f
+#define ATMO_SHADOW_NO_DECK 60000.0f
 #endif
 
 /** How far the map reaches past the cull radius. The limb is where the encoded
