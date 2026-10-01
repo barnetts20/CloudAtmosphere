@@ -3,10 +3,10 @@
 // Reading the flow simulation's output: how a sample is taken, and what its
 // channels mean.
 //
-// SHARED BY THE SIM AND EVERY FIELD THAT READS IT. The solver advects along the
-// velocity this rebuilds and a cloud field warps along the same one, so a second
-// copy would put the clouds on a different flow from the one that made them.
-// Nothing here knows what the field above it looks like.
+// SHARED BY THE SIM AND EVERY FIELD THAT READS IT. The sim writes the atlas
+// through the face frame, basis and gutter defined here, and every reader takes
+// them from the same place. Nothing here knows what the field above it looks
+// like.
 //
 // THE OUTPUT IS A CUBE, NOT THE SIM'S GRID. The sim runs on longitude by
 // sin(latitude), whose columns converge at the poles; it resamples its output
@@ -26,8 +26,8 @@
 //
 // THE LAYERS ARE A STACK, 0 ON TOP. The weather slice of a layer describes the
 // column from the top of the stack down to it, so the lowest layer's is the
-// whole sky seen from above; phase A's w carries the layer's top height and
-// phase B's the deck depth factor (Flow_SampleDepth).
+// whole sky seen from above. Phase A's w is unused; phase B's is the deck
+// depth factor (Flow_SampleDepth).
 
 /** Texels either side of a face edge over which neighbouring faces cross-fade.
  *  Each face resamples the sim on its own lattice, so their reconstructions
@@ -469,18 +469,9 @@ FlowColumnSample Flow_SampleColumn(Texture2DArray FlowField, SamplerState FlowSa
     return S;
 }
 
-/** Samples a layer's top height from phase A's w: the layer's top surface,
- *  soft-saturated into (-1, 1), the free surface for layer 0 and the interface
- *  above it for the rest, raised positive. What a deck's relief can take its
- *  height from. */
-float Flow_SampleLayerHeight(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
-{
-    return Flow_SampleSlice(FlowField, FlowSampler, N, Layer + 2.0f * Flow_LayerCount(FlowField)).w;
-}
-
-/** Samples the deck depth factor from phase B's w, [0, 1]: 1, falling across
- *  a storm cell's eye toward 1 - its intensity. A deck scales its column
- *  depth by it, so an eye is a bowl sloping to its floor. */
+/** Samples the deck depth factor from phase B's w, [0, 1]: 1 - StormCellEyeDepth
+ *  times the eye tracer, the tracer following the low's isobars. A deck scales
+ *  its column depth by it, so an eye is a bowl sloping to its floor. */
 float Flow_SampleDepth(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
 {
     return saturate(Flow_SampleSlice(FlowField, FlowSampler, N, Layer + 3.0f * Flow_LayerCount(FlowField)).w);

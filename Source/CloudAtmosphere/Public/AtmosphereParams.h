@@ -377,13 +377,14 @@ struct CLOUDATMOSPHERE_API FTerrestrialStructureLayerParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	TObjectPtr<UVolumeTexture> Volume = nullptr;
 
-	/** Horizontal frequency, in noise units per radian: higher is smaller
-	 *  clouds. */
+	/** Horizontal frequency at the planet's surface, in noise units per
+	 *  radian: higher is smaller clouds. It grows with height by
+	 *  exp(Aspect * HeightScale * height), height in atmosphere fractions. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.01"))
 	float Scale = 6.0f;
 
-	/** Vertical frequency against the horizontal one, over the shell: higher
-	 *  is flatter features. */
+	/** Vertical frequency over the horizontal one, at every height: higher is
+	 *  flatter features. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.01"))
 	float Aspect = 2.0f;
 
@@ -419,12 +420,13 @@ struct CLOUDATMOSPHERE_API FTerrestrialDetailLayerParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	TObjectPtr<UVolumeTexture> Volume = nullptr;
 
-	/** Horizontal frequency, in noise units per radian: higher is finer grain. */
+	/** Horizontal frequency at the surface, in noise units per radian: higher
+	 *  is finer grain. It grows with height as the structure layer's does. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.01"))
 	float Scale = 30.0f;
 
-	/** Vertical frequency against the horizontal one, over the shell: higher
-	 *  is flatter features. */
+	/** Vertical frequency over the horizontal one, at every height, as for the
+	 *  structure layer. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.01"))
 	float Aspect = 1.0f;
 
@@ -440,7 +442,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialDetailLayerParams
 	/** Mips added to the one the pixel's footprint reads, as for the
 	 *  structure layer. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-2.0", ClampMax = "4.0"))
-	float MipBias = 1.0f;
+	float MipBias = 0.0f;
 
 	/** Where the grain starts fading to the mean, and where it reaches it, in
 	 *  planet radii from the camera: the unit of the shadow cascades'
@@ -525,7 +527,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereSamplingParams
 	 *  and a pixel refreshes every CellSize^2 frames. Larger is cheaper, slower
 	 *  to settle and softer in motion. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1", ClampMax = "16"))
-	int32 CellSize = 4;
+	int32 CellSize = 3;
 
 	/** Least share a pixel's own new sample takes of its history. Lower averages
 	 *  more frames and settles smoother; higher follows change sooner. */

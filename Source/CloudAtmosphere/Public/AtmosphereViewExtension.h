@@ -75,7 +75,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereMarchParams
 	FVector3f ShadowCamera2 = FVector3f::ZeroVector;
 
 	// FAtmosphereSamplingParams.
-	int32 CellSize = 4;
+	int32 CellSize = 3;
 	float FreshWeight = 0.15f;
 	float LatticeGrowth = 0.2f;
 	float LatticeGrowthFar = 0.02f;

@@ -122,6 +122,15 @@
 #define TR_EYE_OPEN_POWER 1.0f
 #endif
 
+/** 1 grows a layer's frequency through the column as Scale times
+ *  exp(Aspect * HeightScale * Rise), so the vertical to horizontal frequency
+ *  ratio is Aspect at every height and the frequency stays positive; 0 adds
+ *  Rise * Vertical to Scale, which equals Aspect only at Rise 0 and crosses
+ *  zero below Rise = -1 / (Aspect * HeightScale). Under comparison. */
+#ifndef TR_NOISE_EXP_FREQUENCY
+#define TR_NOISE_EXP_FREQUENCY 1
+#endif
+
 /** 1 for the deep deck, a gas giant's; 0 for the slab. Set per pass by the
  *  model's shader permutation. */
 #ifndef TR_DEEP_DECK
@@ -280,8 +289,8 @@ struct TRFieldParams
 
     float SpinAngle;
 
-	/** Noise units the shell spans vertically, per layer: Scale * Aspect *
-	 *  HeightScale, which is what makes the aspect a ratio. */
+	/** Per layer, Scale * Aspect * HeightScale: the frequency's growth per
+	 *  atmosphere fraction of height at Rise 0 (TR_NoiseFrequency). */
     float StructureVertical;
     float DetailVertical;
 
@@ -1023,6 +1032,18 @@ float TR_SlabEntry(
     return TSearch;
 }
 
+/** A layer's frequency at Rise, an atmosphere fraction: noise units per radian
+ *  across the shell, which the sample's direction is scaled by. Vertical is
+ *  Scale * Aspect * HeightScale. See TR_NOISE_EXP_FREQUENCY. */
+float TR_NoiseFrequency(float Scale, float Vertical, float Rise)
+{
+#if TR_NOISE_EXP_FREQUENCY
+    return Scale * exp(Vertical / max(Scale, 1e-4f) * Rise);
+#else
+    return Scale + Rise * Vertical;
+#endif
+}
+
 /** The mip a layer reads at: the texels one march pixel spans, as a power of
  *  two, plus the layer's bias. UVWScale is noise units per radian, and a noise
  *  unit is the volume's width in texels.
@@ -1217,7 +1238,7 @@ float4 TR_DensityInColumn(
 
     if (F.StructureActive && Fill < 1.0f)
     {
-        const float UVWScale = F.StructureScale + Rise * F.StructureVertical;
+        const float UVWScale = TR_NoiseFrequency(F.StructureScale, F.StructureVertical, Rise);
 
         const float Noise = TR_BlendNoise(TR_StructureChannels(TR_SampleLayer(
 			StructureVolume, StructureSampler, N,
@@ -1260,7 +1281,7 @@ float4 TR_DensityInColumn(
 		// Faded toward the mean rather than off: see the header. Past the far
 		// edge, or once the mip has averaged the detail away, the fetch is
 		// skipped.
-        const float UVWScale = F.DetailScale + Rise * F.DetailVertical;
+        const float UVWScale = TR_NoiseFrequency(F.DetailScale, F.DetailVertical, Rise);
         const float Lod = TR_NoiseLod(DetailVolume, UVWScale, F.DetailMipBias, F);
 
         uint Width, VolumeHeight, Depth, Levels;

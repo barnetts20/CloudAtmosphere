@@ -72,8 +72,6 @@ public:
 	 *  the grid the state is allocated at, which the capture's layout follows. */
 	bool AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, class FRHIGPUBufferReadback* Readback, FIntVector& OutGrid);
 
-	bool IsInitialised() const { return bInitialised; }
-
 	/** Adds this frame's passes to the graph. Zero substeps is legal: the output
 	 *  and debug passes still run, so a paused sim can be inspected. */
 	void Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, int32 NumSubsteps);

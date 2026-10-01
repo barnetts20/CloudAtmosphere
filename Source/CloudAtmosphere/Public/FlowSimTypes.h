@@ -1014,7 +1014,7 @@ public:
  *  the start log. */
 namespace FlowSimProfile
 {
-	/** A layer's jets: SimThreeCellRate or GG_ZonalRate at a strength and boost. */
+	/** A layer's jets: SimThreeCellRate or SimBandedRate at a strength and boost. */
 	float JetRate(const UFlowSimConfig& Config, float Mu, float Strength, float Boost);
 
 	/** SimJetLatitudeScale: 45 degrees over JetLatitude. */

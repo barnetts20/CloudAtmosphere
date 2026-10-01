@@ -38,20 +38,6 @@
 #define TR_DEEP_OPAQUE_DEPTH 8.0f
 #endif
 
-/** The deep deck absorbs what reaches into it (1): the sky's ambient decays
- *  below each column's base, and the shadow read saturates at
- *  TR_DEEP_SHADOW_SATURATION. At 0, both as the slab. Under comparison. */
-#ifndef TR_DEEP_DARKNESS
-#define TR_DEEP_DARKNESS 1
-#endif
-
-/** The deep deck's air continues below the surface at the surface's density
- *  (1), its ambient buried with the deck's; at 0 it ends at the surface.
- *  Under comparison. */
-#ifndef TR_DEEP_AIR
-#define TR_DEEP_AIR 1
-#endif
-
 /** Optical depth at which the deep deck's shadow read stops growing, on its
  *  most transmissive term (see ATMO_SHADOW_SATURATION): about 1e-7. The slab's 5
  *  leaves the octaves a percent of the sun at any depth. */
@@ -493,7 +479,7 @@ float3 Field_Extinction(float Material, FieldMaterialParams S)
 float3 Field_AmbientShare(float4 Sample, float3 Albedo, CompositeParams Atmo, FieldParams F,
 	FieldMaterialParams S)
 {
-#if TR_DEEP_DECK && TR_DEEP_DARKNESS
+#if TR_DEEP_DECK
     const float3 Tau = Atmo.cloudParams.cloudScatBeta * Field_Extinction(Sample.y, S)
 		* (F.Thickness * Sample.z);
 
@@ -516,7 +502,7 @@ float3 Field_AmbientShare(float4 Sample, float3 Albedo, CompositeParams Atmo, Fi
  *  grows without bound below zero. */
 float3 Field_AirDensity(float Height, CompositeParams Atmo)
 {
-#if TR_DEEP_DECK && TR_DEEP_AIR
+#if TR_DEEP_DECK
     return Atmo_Density(max(Height, 0.0f),
 		Atmo.scatteringParams.rayScaleH, Atmo.scatteringParams.mieScaleH,
 		Atmo.scatteringParams.absHeight, Atmo.scatteringParams.absFalloff);
@@ -533,7 +519,7 @@ float3 Field_AirDensity(float Height, CompositeParams Atmo)
  *  transmissive term. */
 float Field_ShadowSaturation()
 {
-#if TR_DEEP_DECK && TR_DEEP_DARKNESS
+#if TR_DEEP_DECK
     return TR_DEEP_SHADOW_SATURATION;
 #else
     return ATMO_SHADOW_SATURATION;
