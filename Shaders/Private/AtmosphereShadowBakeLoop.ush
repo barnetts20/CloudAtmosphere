@@ -36,12 +36,6 @@
 /** Most a budgeted step grows past the cell: 2^8 cells. */
 #define ATMO_BAKE_MAX_DOUBLINGS 8
 
-/** The chord ends at the field's terminus (1), or crosses the planet to the
- *  shell's far side (0). A look change under comparison (FlagAudit). */
-#ifndef ATMO_BAKE_TERMINUS
-#define ATMO_BAKE_TERMINUS 1
-#endif
-
 /** Bakes one texel of one cascade: the four crossing depths.
  *
  *  EVERY FIELD QUESTION GOES THROUGH A BakeField_ CALL. What is left is the ray
@@ -143,7 +137,6 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 	// shadow, and lit ground below the terminus sphere is not.
     float PlanetDepth = -1.0f;
 
-#if ATMO_BAKE_TERMINUS
     {
         const float Terminus = BakeField_TerminusRadius(F);
         const float TerminusSq = Terminus * Terminus - PerpSq;
@@ -154,7 +147,6 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
             PlanetDepth = HalfChord;
         }
     }
-#endif
 
     const float TexelScale = 2.0f * HalfWidth * Extent0 / float(max(ShadowMapSize.x, 1));
 

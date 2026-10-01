@@ -691,25 +691,15 @@ bool SimNoiseResets(uint Phase)
 
 // -- Relaxation -------------------------------------------------------------
 
-/** The tracers and cell intensity step by exponential Euler (1) or explicit
- *  Euler (0). A look change under comparison (FlagAudit). */
-#ifndef SIM_EXP_RELAX
-#define SIM_EXP_RELAX 1
-#endif
-
 /** X after Dt under dX/dt = Rate0, which falls by Decay per unit of X: exact
  *  where the rate is linear in X, and never past its zero. PITFALL: an explicit
  *  step longer than 1 / Decay overshoots the zero and flips between the clamps,
  *  at short lifetimes and the spin-up step. */
 float SimRelax(float X, float Rate0, float Decay, float Dt)
 {
-#if SIM_EXP_RELAX
     const float K = Decay * Dt;
 
     return X + Rate0 * ((K > 1e-4f) ? (1.0f - exp(-K)) / Decay : Dt);
-#else
-    return X + Rate0 * Dt;
-#endif
 }
 
 // -- Moisture ---------------------------------------------------------------

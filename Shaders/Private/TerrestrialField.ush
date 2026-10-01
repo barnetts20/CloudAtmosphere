@@ -33,13 +33,6 @@
 /** Optical depth at which the deep deck's shadow read stops growing, on its
  *  most transmissive term (see ATMO_SHADOW_SATURATION): about 1e-7. The slab's 5
  *  leaves the octaves a percent of the sun at any depth. */
-/** The deep deck's light crossing its buried air (1), or reading the
- *  transmittance table at the surface for any sample below it (0). A look
- *  change under comparison (FlagAudit). */
-#ifndef TR_DEEP_AIR_LIGHT
-#define TR_DEEP_AIR_LIGHT 1
-#endif
-
 #ifndef TR_DEEP_SHADOW_SATURATION
 #define TR_DEEP_SHADOW_SATURATION 16.0f
 #endif
@@ -491,7 +484,7 @@ float3 Field_AirDensity(float Height, CompositeParams Atmo)
  *  depth. */
 float3 Field_AirBuried(float3 FromCentre, float3 LightDir, CompositeParams Atmo, inout float R, inout float Mu)
 {
-#if TR_DEEP_DECK && TR_DEEP_AIR_LIGHT
+#if TR_DEEP_DECK
     const float Radius = Atmo.planetParams.planetRadius;
     const float Inside = R * R - Radius * Radius;
 

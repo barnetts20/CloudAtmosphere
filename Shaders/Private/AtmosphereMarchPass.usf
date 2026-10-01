@@ -133,13 +133,6 @@ RWTexture2D<float4> MarchColor;
  *  every channel. */
 RWTexture2D<float2> MarchTint;
 
-/** The scene seen through the atmosphere per channel (1), or through its least
- *  transmissive channel (0), which greys what haze should redden. A look
- *  change under comparison (FlagAudit). */
-#ifndef ATMO_RGB_TRANSMITTANCE
-#define ATMO_RGB_TRANSMITTANCE 1
-#endif
-
 /** float2(representative depth, view-axis scene depth at the pixel): the
  *  resolve's reprojection and depth guide. */
 RWTexture2D<float2> MarchDepth;
@@ -202,20 +195,14 @@ void MainMarchCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		TransmittanceTable, TransmittanceTableSampler,
 		P, Depth, Transmittance);
 
-#if ATMO_RGB_TRANSMITTANCE
-    const float3 Through = Transmittance;
-#else
-    const float3 Through = Color.aaa;
-#endif
-
 	// PITFALL: ONE NON-FINITE SAMPLE SPREADS. The resolve's moments, clamp and
 	// fill take it into every pixel within two cells, the history carries it,
 	// and it grows by that much each frame. The target is half float and holds
 	// unexposed light, so a value past its range is one too.
-    const bool bFinite = all(isfinite(Color)) && isfinite(Depth) && all(isfinite(Through));
+    const bool bFinite = all(isfinite(Color)) && isfinite(Depth) && all(isfinite(Transmittance));
 
     MarchColor[DispatchThreadId.xy] = bFinite
-		? float4(min(Color.rgb, ATMO_HALF_MAX), Through.g) : float4(0.0f, 0.0f, 0.0f, 1.0f);
-    MarchTint[DispatchThreadId.xy] = bFinite ? Through.rb : float2(1.0f, 1.0f);
+		? float4(min(Color.rgb, ATMO_HALF_MAX), Transmittance.g) : float4(0.0f, 0.0f, 0.0f, 1.0f);
+    MarchTint[DispatchThreadId.xy] = bFinite ? Transmittance.rb : float2(1.0f, 1.0f);
     MarchDepth[DispatchThreadId.xy] = float2(bFinite ? Depth : ATMO_SKY_DEPTH, GuideDepth);
 }
