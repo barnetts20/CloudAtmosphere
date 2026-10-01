@@ -1,42 +1,21 @@
 #pragma once
 
-// The shadow map: its encoding, and the two sides that share it.
+// The shadow map's encoding, shared by the bake and the march. Model
+// independent: a model supplies an AtmoShadowFrame (shell radius, depth unit,
+// cascade half-widths) and both sides derive the basis, extents and depths from
+// it here. PITFALL: a map read in a basis it was not written in gives smooth,
+// plausible shadows in the wrong place, so nothing here is derived twice.
 //
-// MODEL-INDEPENDENT. Everything the map's geometry needs travels in
-// AtmoShadowFrame -- a shell radius, a depth unit and the cascade half-widths --
-// so a model contributes three numbers and inherits the format, the
-// reconstruction and the cascade walk unchanged. The
-// alternative, a reader per model, is four copies of a nonlinear reconstruction
-// drifting apart from the day they are written.
-//
-// INCLUDED BY BOTH THE BAKE AND THE MARCH. Basis, extent and the depth a sample
-// sits at are derived here from the frame, which both sides already have; a
-// second derivation can disagree, and a map sampled in a basis it was not
-// written in fails silently, the shadows staying smooth and plausible in the
-// wrong place.
-//
-// THE ENCODING IS INVERTED -- depths at which fixed optical depths are crossed,
-// not optical depth at fixed depths. That places the nodes by transmittance, so
-// they concentrate where the medium is dense: the top of the density ramp, where
-// view transmittance is spent and where a slab fit anchored at the shell entry
-// is worst. A deck top with near-zero density breaks the classic form.
-//
-// ONE SLICE PER CASCADE, holding the medium's four crossing depths.
-//
-// DEPTHS ARE OFFSETS FROM THE ANALYTIC SHELL ENTRY, in thicknesses, so fp16
-// resolves a fraction of a gradient rather than of a planet radius, and the
-// entry is recomputed in full precision on each side. Optical depth is on the
-// FASTEST ABSORPTION CHANNEL, the largest extinction tint folded in by the bake,
-// so the thresholds mean transmittance directly.
+// INVERTED ENCODING: one slice per cascade holds the depths at which four fixed
+// optical depths are crossed, so the nodes gather where the medium is dense.
+// Depths are offsets from the analytic shell entry in thicknesses, for fp16;
+// optical depth is on the fastest channel, the largest extinction tint the bake
+// folds in, so the thresholds mean transmittance.
 
-/** The four stored crossings, spaced by what transmittance does rather than
- *  evenly: 0.25 is a 22% loss, 1.0 is 63%, 3.0 is 95%. The second is low on
- *  purpose, resolving the soft top of the ramp -- what the eye reads and what a
- *  linear fit gets worst. THE FIRST IS THE SILHOUETTE, a threshold rather than a
- *  geometric entry: a cone-traced deck top is a point sample of one column, so
- *  it cannot be averaged over the texel and snaps by a whole one as the medium
- *  advects past the lattice. As a crossing of the same subsampled accumulation
- *  as the others, it moves continuously. */
+/** The four stored crossings, spaced by transmittance: 0.25 is a 22% loss, 1.0
+ *  63%, 3.0 95%. The first is the silhouette, a threshold of the same subsampled
+ *  accumulation, so it moves continuously as the medium advects; a geometric
+ *  deck top would snap by whole texels. */
 #ifndef ATMO_SHADOW_TAU_ENTRY
 #define ATMO_SHADOW_TAU_ENTRY 0.02f
 #endif
@@ -53,118 +32,81 @@
 #define ATMO_SHADOW_TAU2 3.0f
 #endif
 
-/** Optical depth at which the tail extrapolation stops growing, on the most
- *  transmissive term the caller will exponentiate. Under a percent at 5. A
- *  CEILING, NOT A CUTOFF: past the last node the reconstruction continues at the
- *  final segment's rate, unbounded on a dense column. Never use it to snap
- *  transmittance to zero -- a hard threshold on a texel-interpolated field draws
- *  an axis-aligned staircase.
- *
- *  PITFALL: the reader sees the map's depth scaled down, by each slower
- *  channel's share of the fastest and by any multiple-scattering attenuation, so
- *  a ceiling on the fastest channel leaves those glowing through saturated
- *  medium. The caller divides this by the smallest such scale. */
+/** Optical depth at which the tail extrapolation stops, on the most
+ *  transmissive term the caller exponentiates: a ceiling, not a cutoff (a hard
+ *  threshold on a texel-interpolated field draws a staircase). PITFALL: slower
+ *  channels and scattering octaves read the depth scaled down, so the caller
+ *  divides this by the smallest such scale or they glow through saturated
+ *  medium. */
 #ifndef ATMO_SHADOW_SATURATION
 #define ATMO_SHADOW_SATURATION 5.0f
 #endif
 
-/** Floor on that scale. A channel or octave the medium barely attenuates cannot
- *  be made opaque by any finite ceiling; this caps the ceiling instead. */
+/** Floor on that scale, which caps the ceiling for a barely attenuated term. */
 #ifndef ATMO_SHADOW_MIN_TAU_SCALE
 #define ATMO_SHADOW_MIN_TAU_SCALE 1e-3f
 #endif
 
-/** Written where a threshold is never reached, and where the ray misses the
- *  shell. Past the longest chord, 2 (1 + HeightScale) / HeightScale
- *  thicknesses, down to a HeightScale of 1e-4, and inside half float's range,
- *  so reconstruction reads zero rather than needing a validity test. */
+/** Written where a threshold is never reached or the ray misses the shell:
+ *  past the longest chord down to a HeightScale of 1e-4, inside half float, so
+ *  reconstruction reads zero without a validity test. */
 #ifndef ATMO_SHADOW_NO_DECK
 #define ATMO_SHADOW_NO_DECK 60000.0f
 #endif
 
-/** How far the map reaches past the cull radius. The limb is where the encoded
- *  depths vary fastest, and a map cut exactly at the shell puts that variation
- *  against the clamp edge with nothing outside to blend toward. Applied by
- *  whichever model builds the frame, not here. */
+/** The map's reach past the cull radius, so the limb, where the depths vary
+ *  fastest, has texels outside it to blend toward. Applied by the model. */
 #ifndef ATMO_SHADOW_EXTENT_MARGIN
 #define ATMO_SHADOW_EXTENT_MARGIN 1.02f
 #endif
 
-/** Lookup offset, in texels, applied per view sample. 1 is a full texel, larger
- *  softens the shadow, 0 disables. The opposite case to the bake, where a
- *  stochastic offset would print as fixed noise: here it is per pixel and per
- *  sample, so one ray's samples average the texel neighbourhood. It earns its
- *  place in the tangent case, where a view ray parallel to the light projects
- *  every sample into nearly one texel and that texel's error reaches the screen
- *  as a block. */
+/** Per-sample lookup offset, in texels: a ray's samples average the texel
+ *  neighbourhood, which matters where a view ray runs along the light and every
+ *  sample lands in one texel. 0 disables. */
 #ifndef ATMO_SHADOW_LOOKUP_JITTER
 #define ATMO_SHADOW_LOOKUP_JITTER 1.0f
 #endif
 
-/** Angular warp of the map plane, as a fraction of a quarter turn: 1 stores
- *  the disc against the angle from the sub-light point, 0 against the planar
- *  offset. EVERY CASCADE IS A WINDOW OF THE ONE WARPED DISC. BAKE AND READ BOTH
- *  TAKE IT FROM HERE, and a map read with a warp it was not baked with lands
- *  every shadow at the wrong radius.
- *
- *  WHY. A planar texel covers 1 / cos(angle) of ground along the light, and
- *  at the terminator its width is a spread in the ALTITUDE its grazing rays
- *  pass at. Points in one texel then read a ray up to half a texel above or
- *  below their own, through different cloud, and the error is coherent along
- *  the light and independent between neighbours: streaks along the light, one
- *  texel wide. At 1 the ground resolution is uniform across the lit
- *  hemisphere: 7 times finer at 85 degrees and 18 at 88. The price is bake
- *  time: more texels land on the long grazing chords. */
+/** Angular warp of the map plane, a fraction of a quarter turn: 1 stores the
+ *  disc against the angle from the sub-light point, 0 against the planar
+ *  offset. Every cascade windows the one warped disc. At 1 the ground
+ *  resolution is uniform over the lit hemisphere (7 times finer than planar at
+ *  85 degrees), where planar texels near the terminator streak along the light;
+ *  the cost is bake time on the grazing chords. */
 #ifndef ATMO_SHADOW_DISC_WARP
 #define ATMO_SHADOW_DISC_WARP 1.0f
 #endif
 
-/** Cascade count. Level 0 covers the whole disc; each inner level is sized by
- *  the model to match the radius a layer is drawn to, so shadow resolution steps
- *  up where the field gains a layer. Adding one costs a slice and a case in
- *  whatever builds the frame. */
-#ifndef ATMO_SHADOW_CASCADES
+/** Cascade count, fixed: level 0 covers the whole disc, and each inner level
+ *  has its authored radius and its camera uniform. AtmoShadowBake::CascadeCount
+ *  mirrors it. */
 #define ATMO_SHADOW_CASCADES 3
-#endif
 
-/** Where a cascade starts handing over to the one outside it, as a fraction of
- *  its half-width. The outer band reconstructs both and blends.
- *
- *  THE SEAM IS NOT THE RESOLUTION CHANGE. Subsample offsets scale with texel
- *  size, so the near map band-limits at a finer scale and reads slightly denser
- *  over the same ground. A narrow band turns that into a ring. */
+/** Where a cascade starts handing over to the one outside it, a fraction of its
+ *  half-width. PITFALL: the finer map band-limits finer and reads slightly
+ *  denser, so a narrow band shows the seam as a ring. */
 #ifndef ATMO_SHADOW_NEAR_BLEND
 #define ATMO_SHADOW_NEAR_BLEND 0.75f
 #endif
 
-/** Everything about a map's geometry that is not in the map.
- *
- *  THE MODEL'S ONLY CONTRIBUTION. A shell radius, the depth unit every stored
- *  depth is expressed in, and the cascade half-widths. Both sides build one from
- *  their own field and nothing below this line knows which model it came from. */
+/** The map's geometry, the model's only contribution. */
 struct AtmoShadowFrame
 {
-	/** Radius of the shell the map covers, BEFORE the extent margin. The chord
-	 *  the depth axis is anchored to, so both sides must use the same one. */
+	/** Radius of the shell covered, before the extent margin: the depth axis's
+	 *  anchor, the same on both sides. */
     float CullRadius;
 
 	/** Depth unit. Stored and reconstructed depths are multiples of it. */
     float Thickness;
 
-	/** Half-width per cascade, outermost first. Must be non-increasing: a fine
-	 *  level wider than a coarse one puts the coarse slice inside it, which
-	 *  reads as the fine slice not working. Zero collapses a level and the walk
-	 *  skips it. */
+	/** Half-width per cascade, outermost first and non-increasing; zero
+	 *  collapses a level. */
     float Extents[ATMO_SHADOW_CASCADES];
 };
 
-/** The smallest and largest channel across the two materials' extinction
- *  tints.
- *
- *  THE FOLD CONSTANT: the map stores optical depth scaled by the largest channel
- *  either material has, so its thresholds mean transmittance on the fastest
- *  channel anywhere, and the reader divides it back out and applies the
- *  receiver's tint. The smallest channel sets the saturation ceiling. */
+/** The smallest and largest channel of the two materials' extinction tints.
+ *  The largest is folded into the stored depth and divided back out by the
+ *  reader; the smallest sets the saturation ceiling. */
 float2 AtmoShadow_ExtinctionTintRange(float3 CloudTint, float3 StormTint)
 {
     const float3 Lo = min(CloudTint, StormTint);
@@ -173,16 +115,10 @@ float2 AtmoShadow_ExtinctionTintRange(float3 CloudTint, float3 StormTint)
     return float2(min(Lo.x, min(Lo.y, Lo.z)), max(Hi.x, max(Hi.y, Hi.z)));
 }
 
-/** The map plane's axes for a planet-local light direction, orthonormal and
- *  perpendicular to it. L must already be normalized.
- *
- *  ANCHORED TO THE SPIN AXIS rather than an arbitrary perpendicular, so the grid
- *  does not rotate as the light moves: a rotating lattice re-phases the
- *  reconstruction filter every frame and shimmers at the resolution limit even
- *  when nothing has moved. The axis lands on V, putting the pole up the map.
- *  (U, V, L) IS RIGHT-HANDED -- the other cross order mirrors the map, which is
- *  invisible on a banded planet and surfaces later as shadows on the wrong side
- *  of the lumps casting them. */
+/** The map plane's axes for a normalized planet-local light: V toward the spin
+ *  axis, so the lattice does not rotate (and shimmer) as the light moves.
+ *  PITFALL: (U, V, L) is right-handed; the other order mirrors the map, which
+ *  hides on a banded planet and puts shadows on the wrong side of lumps. */
 void AtmoShadow_Basis(float3 L, out float3 OutU, out float3 OutV)
 {
     float3 V = float3(0.0f, 0.0f, 1.0f) - L * L.z;
@@ -204,9 +140,7 @@ float AtmoShadow_WarpAngle()
 }
 
 /** Warped disc coordinate, [-1, 1] across cascade 0, to its plane offset over
- *  cascade 0's extent. Radius sin(A S) / sin(A) at map radius S: the planar projection
- *  of a sphere sampled evenly in angle. Past S = 1 it holds the edge, which is
- *  outside the shell. */
+ *  cascade 0's extent: radius sin(A S) / sin(A), held past S = 1. */
 float2 AtmoShadow_DiscToPlane(float2 Q)
 {
     const float A = AtmoShadow_WarpAngle();
@@ -244,9 +178,8 @@ float2 AtmoShadow_PlaneToDisc(float2 P)
     return P * (asin(min(R * sin(A), 1.0f)) / (A * R));
 }
 
-/** The plane offset one map-coordinate step moves along each map axis, over
- *  the extent: the columns of AtmoShadow_DiscToPlane's Jacobian. Radial and
- *  tangential scales differ, so a texel's footprint is an ellipse. */
+/** The columns of AtmoShadow_DiscToPlane's Jacobian: a texel's footprint is an
+ *  ellipse. */
 void AtmoShadow_DiscJacobian(float2 Q, out float2 OutX, out float2 OutY)
 {
     const float A = AtmoShadow_WarpAngle();
@@ -272,10 +205,9 @@ void AtmoShadow_DiscJacobian(float2 Q, out float2 OutX, out float2 OutY)
     OutY = float2(Cross * N.x * N.y, Tangential + Cross * N.y * N.y);
 }
 
-/** The camera each cascade was baked around, planet-local. Levels bake on
- *  different frames, so each is read against its own: a centre snapped from any
- *  other camera can land a whole texel from where the bake put it. Level 0 is
- *  planet-centred and reads none. */
+/** The camera each cascade was baked around, planet-local: levels bake on
+ *  different frames, and a centre snapped from another camera can land a texel
+ *  off. Level 0 is planet-centred. */
 struct AtmoShadowCameras
 {
     float3 Level[ATMO_SHADOW_CASCADES];
@@ -293,9 +225,8 @@ AtmoShadowCameras AtmoShadow_MakeCameras(float3 Camera1, float3 Camera2)
     return Cameras;
 }
 
-/** A cascade's half-width in disc coordinates: its planar Extent near the
- *  sub-light point, where the warp's scale is A / sin(A). Level 0 spans the
- *  disc. */
+/** A cascade's half-width in disc coordinates, its planar Extent near the
+ *  sub-light point. Level 0 spans the disc. */
 float AtmoShadow_CascadeHalfWidth(int Level, float Extent, float Extent0)
 {
     if (Level <= 0)
@@ -309,12 +240,9 @@ float AtmoShadow_CascadeHalfWidth(int Level, float Extent, float Extent0)
     return min(Extent / max(Extent0, 1e-6f) * Scale, 1.0f);
 }
 
-/** Centre of a cascade in disc coordinates, snapped to its own texel grid. Level
- *  0 is centred on the planet and never moves. SNAPPING IS LOAD-BEARING: the
- *  centre follows the camera, so an unsnapped map slides its lattice under the
- *  medium and every crossing depth moves with it -- the crawl an anchored march
- *  lattice exists to prevent, by another route. Whole-texel jumps land on
- *  boundaries that already exist. */
+/** Centre of a cascade in disc coordinates, following the camera, snapped to
+ *  its own texel grid. PITFALL: unsnapped, the lattice slides under the medium
+ *  and every crossing depth crawls. */
 float2 AtmoShadow_CascadeCentre(
 	int Level, float3 CameraLocal, float3 U, float3 V, float HalfWidth, float Extent0, float2 MapSize)
 {
@@ -331,14 +259,10 @@ float2 AtmoShadow_CascadeCentre(
     return floor(Disc / TexelSize) * TexelSize;
 }
 
-/** Optical depth from one texel's nodes at a given depth. Piecewise linear
- *  through the four nodes, monotone by construction since they are sorted by the
- *  depth they were crossed at. CONTINUOUS AT BOTH ENDS: below the entry node the
- *  first segment's rate runs backwards to zero rather than clamping, since the
- *  node marks where optical depth reached ATMO_SHADOW_TAU_ENTRY and clamping
- *  steps that whole threshold on at the silhouette -- 2% of brightness, along
- *  the edge a god ray draws. Past the last node the final rate continues, capped
- *  by Ceiling. */
+/** Optical depth from one texel's nodes at a depth: piecewise linear and
+ *  monotone. Below the entry node the first rate runs back to zero (a clamp
+ *  would step the entry threshold on at the silhouette); past the last node the
+ *  final rate continues up to Ceiling. */
 float AtmoShadow_TauFromNodes(float4 Node, float Depth, float Ceiling)
 {
     const float EntrySpan = max(Node.y - Node.x, 1e-4f);
@@ -374,23 +298,12 @@ float AtmoShadow_TauFromNodes(float4 Node, float Depth, float Ceiling)
     return min(ATMO_SHADOW_TAU2 + (Depth - Node.w) * TailRate, Ceiling);
 }
 
-/** Optical depth from one cascade slice, at a point already in disc
- *  coordinates. SAMPLER STATE MUST BE CLAMP ON BOTH AXES: the four taps come from
- *  a floored texel index, reaching one texel outside the map at either edge.
- *  They land on exact centres, so a bilinear sampler returns each texel
- *  unfiltered and the weights below are the only reconstruction applied.
- *
- *  FOUR TEXELS RECONSTRUCTED, THEN BLENDED -- not one reconstruction from
- *  blended nodes. The node depths select which segment a sample falls in, so
- *  interpolating first and branching after puts a slope discontinuity wherever a
- *  segment boundary crosses a texel. Those creases sit on the lattice, looking
- *  like resolution, but their width comes from the optical depth step across the
- *  boundary and does not shrink when texels do.
- *
- *  LINEAR WEIGHTS. PITFALL: smoothstep or quintic weights hold each texel's value
- *  flat around its centre and put the whole change in a band at its edge, which
- *  draws the lattice as blocks -- visible as voxels along a long shadow seen
- *  lengthwise, where one texel covers many pixels. */
+/** Optical depth from one cascade slice at a disc coordinate. The sampler must
+ *  clamp: the taps land on texel centres, one past the map at its edges.
+ *  PITFALL: four texels are reconstructed and then blended; blending the nodes
+ *  first creases the result on the lattice wherever a segment boundary crosses
+ *  a texel. PITFALL: the weights are linear; smoothstep weights draw the lattice
+ *  as blocks along a long shadow. */
 float AtmoShadow_TauSlice(
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
@@ -427,9 +340,8 @@ float AtmoShadow_TauSlice(
     return lerp(lerp(T00, T10, Frac.x), lerp(T01, T11, Frac.x), Frac.y);
 }
 
-/** What a lookup derives from the light, the cameras and the frame alone:
- *  constant across a pixel's samples, so a march builds it once. A level whose
- *  extent is zero carries a zero half-width and is skipped. */
+/** What a lookup derives from the light, cameras and frame: built once per
+ *  pixel. A zero half-width skips its level. */
 struct AtmoShadowReader
 {
     float3 L;
@@ -482,22 +394,11 @@ AtmoShadowReader AtmoShadow_MakeReader(
 }
 
 /** Optical depth between a planet-local position and the light, on the fastest
- *  absorption channel, through a reader built for that light. Ceiling bounds
- *  the tail past the last node; see ATMO_SHADOW_SATURATION.
- *
- *  ONE PARAMETERISATION, SEVERAL SCALES: every cascade is the whole field at a
- *  different extent, anchored to the same shell entry, so their depths are
- *  directly comparable. Walked outermost inward, each finer level that contains
- *  the sample replacing the result and blended across its own edge.
- *
- *  THE LEVELS DO NOT DECOMPOSE THE FIELD. Layered density composes as a product,
- *  so optical depths do not add across layers, and the encoding is
- *  depth-of-crossing, nonlinear in density -- even a sound linear split would not
- *  survive it. Each slice carries the complete field.
- *
- *  VALID ANYWHERE INSIDE THE SHELL, not only where the medium is. A point on a
- *  surface below the deck reads the whole column above it, which is what makes
- *  this the same call for shadows cast onto geometry. */
+ *  channel; Ceiling bounds the tail. Every cascade holds the whole field at its
+ *  own extent from the same shell entry, walked outermost inward, a finer level
+ *  replacing the result where it contains the point and blending at its edge.
+ *  Valid anywhere inside the shell, so geometry below the deck reads its
+ *  column the same way. */
 float AtmoShadow_ReadTau(
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
@@ -514,8 +415,7 @@ float AtmoShadow_ReadTau(
 
     const float2 Plane = float2(dot(LocalPos, R.U), dot(LocalPos, R.V));
 
-	// (U, V, L) is orthonormal, so the in-plane offset IS the ray's closest
-	// approach to the centre and its length squared is the perpendicular term.
+	// The in-plane offset is the ray's closest approach to the centre.
     const float HalfChordSq = R.CullRadius * R.CullRadius - dot(Plane, Plane);
 
     if (HalfChordSq <= 0.0f)
@@ -523,12 +423,9 @@ float AtmoShadow_ReadTau(
         return 0.0f;
     }
 
-	// Depth from the shell entry, matching what the bake marched from. Shared by
-	// every cascade: a property of the geometry, not of any lattice.
+	// Depth from the shell entry, as the bake marched; shared by every cascade.
     const float Depth = (dot(LocalPos, -R.L) + sqrt(HalfChordSq)) / R.Thickness;
 
-	// Every cascade windows the same warped disc, so the point's disc coordinate
-	// is shared by all of them.
     const float2 Disc = AtmoShadow_PlaneToDisc(Plane / R.Extent0);
 
     float Tau = AtmoShadow_TauSlice(
@@ -580,25 +477,11 @@ float AtmoShadow_Tau(
 		AtmoShadow_MakeReader(ShadowMap, LightLocal, Cameras, Frame), LocalPos, JitterTexels, Ceiling);
 }
 
-/** Material-weighted optical depth between a point on OPAQUE GEOMETRY and the
- *  light, with the bake's fold constant divided back out. Zero where the
- *  receiver is outside the shell.
- *
- *  DEPTH, NOT TRANSMITTANCE, mirroring what a light march hands back: the
- *  amounts are in the map and the colour is applied where the depth is read,
- *  since only the field can compute the receiver's material.
- *
- *  THE RADIAL GATE IS NOT REDUNDANT. AtmoShadow_Tau tests the ray's
- *  PERPENDICULAR offset, which admits any point laterally inside the disc. One
- *  in front of the planet reads near zero and is harmless; one behind it reads
- *  the ceiling, and would be shadowed for standing behind a planet rather than
- *  under a cloud.
- *
- *  JitterTexels IS NORMALLY ZERO HERE. A light ray offsets its lookups because
- *  it has many samples along one ray to average the texel neighbourhood with;
- *  one tap per pixel has nothing to average, so an offset is a dither rather
- *  than a filter, and it lands in transmittance. The bilinear reconstruction is
- *  continuous on its own. */
+/** Material-weighted optical depth between a point on opaque geometry and the
+ *  light, the fold constant divided back out; the caller applies the colour.
+ *  PITFALL: the radial gate is needed, since the lookup admits any point inside
+ *  the disc laterally, and one behind the planet reads the ceiling. Jitter is
+ *  normally zero here: one tap per pixel has nothing to average it over. */
 float AtmoShadow_SurfaceOptDepth(
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
@@ -618,5 +501,6 @@ float AtmoShadow_SurfaceOptDepth(
     const float Tau = AtmoShadow_Tau(
 		ShadowMap, ShadowSampler, LocalPos, LightLocal, Cameras, JitterTexels, Ceiling, Frame);
 
-    return Tau / max(FoldConstant, 1e-8f);
+	// Per world unit, so no floor: zero means no cloud.
+    return (FoldConstant > 0.0f) ? Tau / FoldConstant : 0.0f;
 }

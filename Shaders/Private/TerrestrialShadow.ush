@@ -3,34 +3,24 @@
 #include "/Plugin/CloudAtmosphere/Private/TerrestrialDeck.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereShadowMap.ush"
 
-// The cloud field's side of the shadow map, both models': what the field
-// contributes to a frame, and nothing else.
-//
-// THE FORMAT IS NOT HERE. Encoding, reconstruction and the cascade walk live
-// in AtmosphereShadowMap.ush and know nothing about this model. What remains
-// below is the three numbers the deck supplies -- a cull radius, a depth unit
-// and the cascade half-widths -- and the one alias the bake and the march call.
+// The cloud field's side of the shadow map, both models: the cull radius,
+// depth unit and cascade half-widths it gives the frame. The format, the
+// reconstruction and the cascade walk are AtmosphereShadowMap.ush's.
 
 #define TR_ExtinctionTintRange(Cloud, Storm) AtmoShadow_ExtinctionTintRange(Cloud, Storm)
 
-/** The radius the map covers: the field-wide top bound, the same radius the
- *  march plans against as cloudOuterRadius.
- *
- *  PITFALL: a map written against one radius and read against another samples
- *  at the wrong scale, sliding the whole shadow toward the limb. */
+/** The radius the map covers: the field-wide top bound, the march's
+ *  cloudOuterRadius. PITFALL: a map read against another radius than it was
+ *  written at slides the whole shadow toward the limb. */
 float TR_ShadowCullRadius(TRFieldParams F)
 {
     return F.PlanetRadius + F.Thickness * TR_TopMax(F);
 }
 
-/** Half-width of a cascade, from the authored ShadowCascades in planet radii.
- *  RESOLUTION TIERS ONLY: every level carries the whole field, a finer one
- *  resolving it more finely around the camera.
- *
- *  STRICTLY ORDERED, because nothing makes the authored values so: a level 2
- *  wider than level 1 would put the coarse slice inside the fine one, which
- *  reads as the fine slice not working. A zero extent collapses that level and
- *  the walk skips it. */
+/** Half-width of a cascade, from the authored radii in planet radii. Every
+ *  level carries the whole field, a finer one more finely around the camera.
+ *  Held non-increasing, since the authored values need not be; a zero extent
+ *  collapses its level and the walk skips it. */
 float TR_ShadowCascadeExtent(TRFieldParams F, int Level)
 {
     const float Disc = TR_ShadowCullRadius(F) * ATMO_SHADOW_EXTENT_MARGIN;
@@ -50,9 +40,7 @@ float TR_ShadowCascadeExtent(TRFieldParams F, int Level)
     return min(F.PlanetRadius * F.ShadowCascade2, Level1);
 }
 
-/** The deck's contribution to a shared frame. THE ONLY PLACE THIS MODEL MEETS
- *  THE FORMAT: everything downstream reads the frame, so a terrestrial field
- *  builds its own here and inherits the rest unchanged. */
+/** The field's frame: the only place it meets the map's format. */
 AtmoShadowFrame TR_ShadowFrame(TRFieldParams F)
 {
     AtmoShadowFrame Frame;

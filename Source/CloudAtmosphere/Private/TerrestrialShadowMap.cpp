@@ -69,6 +69,10 @@ namespace TerrestrialShadow
 		FRDGTextureRef Map = GraphBuilder.RegisterExternalTexture(
 			CreateRenderTarget(Params.MapTexture, TEXT("Terrestrial.ShadowMap")));
 
+		// Registered, so the graph puts it in a readable state like the map and coverage.
+		FRDGTextureRef Flow = GraphBuilder.RegisterExternalTexture(
+			CreateRenderTarget(Params.FlowTexture, TEXT("Terrestrial.Flow")));
+
 		// Any address mode works: every face of the atlas carries its own gutter.
 		FRHISamplerState* FlowSampler = TStaticSamplerState<SF_Bilinear, AM_Wrap, AM_Clamp, AM_Clamp>::GetRHI();
 
@@ -82,7 +86,7 @@ namespace TerrestrialShadow
 			CoverageP->PlanetRadius = Params.PlanetRadius;
 			CoverageP->HeightScale = Params.HeightScale;
 			CoverageP->Field = Params.Field;
-			CoverageP->FlowTarget = Params.FlowTexture;
+			CoverageP->FlowTarget = Flow;
 			CoverageP->FlowTargetSampler = FlowSampler;
 			CoverageP->CoverageUAV = GraphBuilder.CreateUAV(Coverage);
 
@@ -109,7 +113,7 @@ namespace TerrestrialShadow
 
 		P->ShadowMapUAV = GraphBuilder.CreateUAV(Map);
 
-		P->FlowTarget = Params.FlowTexture;
+		P->FlowTarget = Flow;
 		P->FlowTargetSampler = FlowSampler;
 		P->CoverageThreshold = Coverage;
 

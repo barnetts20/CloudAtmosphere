@@ -23,14 +23,13 @@ namespace AtmoShadowBake
 	 *  shader as ATMO_BAKE_THREADS. */
 	static constexpr int32 ThreadGroupSize = 8;
 
-	/** Cascade count, sizing both the dispatch and the render target's slice
-	 *  count, one slice per cascade. The shader decides what each level covers.
-	 *
-	 *  PITFALL: MUST MATCH ATMO_SHADOW_CASCADES in AtmosphereShadowMap.ush, and is NOT
-	 *  pushed as a define. The march reads that header too, through its own
-	 *  shader class, so a define pushed by the bake alone would move the bake
-	 *  without moving the march that reads it. Edit the pair together. */
+	/** Cascade count, one slice each: ATMO_SHADOW_CASCADES in
+	 *  AtmosphereShadowMap.ush, which the bake and the march both read. Each
+	 *  inner level has its authored radius (CascadeRadii) and the march's camera
+	 *  uniform (ShadowCamera1, ShadowCamera2). */
 	static constexpr int32 CascadeCount = 3;
+
+	static_assert(CascadeCount == 3, "The cascade radii, the march's camera uniforms and ATMO_SHADOW_CASCADES are built for three levels.");
 
 	/** Ceiling on the share of a level's previous bake a rebake keeps. At 1 the
 	 *  map would never change. */

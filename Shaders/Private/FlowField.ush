@@ -183,7 +183,6 @@ FlowFaceSet Flow_FaceSet(float3 N, float FaceSize)
 {
     FlowFaceSet Set;
 
-
     const float Band = 2.0f * FLOW_ATLAS_BLEND / FaceSize;
 
     float Total = 0.0f;
@@ -202,12 +201,14 @@ FlowFaceSet Flow_FaceSet(float3 N, float FaceSize)
         Total += Set.Weight[Axis];
     }
 
+	// Floored for a degenerate direction; the major axis's face always weighs in.
+    const float InvTotal = 1.0f / max(Total, 1e-6f);
+
 	[unroll]
     for (uint Slot = 0; Slot < 3u; ++Slot)
     {
-        Set.Weight[Slot] /= Total;
+        Set.Weight[Slot] *= InvTotal;
     }
-
 
     return Set;
 }
@@ -218,7 +219,7 @@ void Flow_AtlasMetrics(Texture2DArray FlowField, out float FaceSize, out float2 
     uint Width, Height, Slices, Levels;
     FlowField.GetDimensions(0, Width, Height, Slices, Levels);
 
-    FaceSize = Flow_AtlasFaceSize((float) Width);
+    FaceSize = max(Flow_AtlasFaceSize((float) Width), 1.0f);
     InvSize = 1.0f / float2(Width, Height);
 }
 

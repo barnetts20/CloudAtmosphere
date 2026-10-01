@@ -70,6 +70,9 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 
 	FIntPoint MapSize = FIntPoint(512, 512);
 
+	/** The map's slices, one per cascade. */
+	int32 MapSlices = 0;
+
 	// -- Frame --------------------------------------------------------------
 	//
 	// Planet-local. The light points TOWARD the star, matching the march.
@@ -121,9 +124,10 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	FTextureResource* DetailResource = nullptr;
 	FTextureResource* StructureResource = nullptr;
 
-	/** The bake's destination: AtmoShadowBake::CascadeCount slices, pushed to the
-	 *  march as a single array parameter. Fewer slices leaves the inner cascades
-	 *  unwritten and the march reads whatever the target held. */
+	/** The bake's destination, pushed to the march as a single array
+	 *  parameter. PITFALL: with fewer than AtmoShadowBake::CascadeCount slices
+	 *  the inner cascades go unwritten and the march reads whatever the target
+	 *  held, so IsUsable refuses it. */
 	FTextureRenderTargetResource* MapResource = nullptr;
 
 	/** One texel the coverage pass writes and the bake and the march read. */
@@ -148,6 +152,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 			&& CoverageResource
 			&& MapSize.X > 0
 			&& MapSize.X == MapSize.Y
+			&& MapSlices >= AtmoShadowBake::CascadeCount
 			&& PlanetRadius > 0.0f;
 	}
 };
@@ -175,7 +180,7 @@ SHADER_PARAMETER(float, LightExtinctionFraction)
 
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, ShadowMapUAV)
 
-SHADER_PARAMETER_TEXTURE(Texture2DArray, FlowTarget)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2DArray, FlowTarget)
 SHADER_PARAMETER_SAMPLER(SamplerState, FlowTargetSampler)
 
 SHADER_PARAMETER_TEXTURE(Texture3D, DetailVolume)
@@ -195,7 +200,7 @@ SHADER_PARAMETER(float, PlanetRadius)
 SHADER_PARAMETER(float, HeightScale)
 SHADER_PARAMETER_STRUCT_INCLUDE(FTerrestrialFieldParameters, Field)
 
-SHADER_PARAMETER_TEXTURE(Texture2DArray, FlowTarget)
+SHADER_PARAMETER_RDG_TEXTURE(Texture2DArray, FlowTarget)
 SHADER_PARAMETER_SAMPLER(SamplerState, FlowTargetSampler)
 
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, CoverageUAV)

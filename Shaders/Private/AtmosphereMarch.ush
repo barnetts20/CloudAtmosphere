@@ -24,53 +24,21 @@
 #endif
 
 
-// The march: a ray through the atmosphere and whatever cloud field the model
-// supplies, gathering light toward the camera.
+// The march: a ray through the atmosphere and the model's cloud field, which it
+// sees only through the Field_ interface. Atmo_Plan cuts the ray at the
+// atmosphere and the cloud band and flags the band's segments; Segments[].z is
+// the band flag, and Field_SegmentIsCloud alone decides cloud. Light toward the
+// star is read, from the transmittance table and the shadow map, not marched.
+// Coefficients and scale heights are in atmosphere thicknesses, radii in world
+// units; the march is camera-relative and world-oriented, the field planet-local
+// through WorldToLocal.
 //
-// WHAT IT KNOWS ABOUT THE FIELD IS ONE INTERFACE -- the Field_ functions, the
-// FieldParams and FieldMaterialParams names, and the two texture macros, all
-// supplied by a model header. The plan, the step bounds, the octaves, the air,
-// the shadow read and the alpha collapse do not depend on what fills the shell.
-//
-// WHAT Atmo_Plan DOES. It cuts the ray at the atmosphere and at the cloud
-// band, cloudOuterRadius at the highest the field reaches and cloudInnerRadius
-// where it stops varying, and flags the segments inside the band. cloudSteps
-// means steps across the band's depth.
-//
-// SEGMENTS[].z IS THE BAND FLAG, NOT A CLOUD FLAG: a field may owe extinction
-// below the band, as the deep deck does. Field_SegmentIsCloud is the only place
-// that decision is made.
-//
-// LIGHT TOWARD THE STAR IS READ, NOT MARCHED: the air's share from the
-// transmittance table, the cloud's from the shadow map. A view sample's light
-// costs the same at any depth and there is no light step budget.
-//
-// UNITS. Atmo_BuildParams scales coefficients and scale heights by atmosphere
-// thickness and leaves the RADII in world units. The march runs camera-relative
-// and world-oriented while a field is planet-local with the spin axis on Z;
-// WorldToLocal carries that rotation.
-//
-// LEVEL OF DETAIL IS THE FIELD'S, NOT THE MARCH'S. Both noise layers are high
-// frequency, and past some distance one sample stands for many features at once
-// -- undersampling the FIELD rather than the ray, so raising step counts does
-// not quiet it. The march measures the distance and sets the detail fade; what
-// it removes is the field's business.
-//
-// DISTANCE, NOT FOOTPRINT, for the fade. A footprint-derived mip is the
-// principled form and does not work here: it blurs along the shell, erasing the
-// vertical structure a high aspect ratio builds, so a layered field flattens
-// back to one shell at exactly the distances the layering was for. The trade is
-// resolution independence -- if 4K and 1080p visibly disagree, scale the fade
-// range against the march target's pixel count.
-//
-// THE MIP IS THE EXCEPTION: it follows the pixel footprint, which the march
-// writes per sample beside the fade. It only begins once a pixel spans more
-// than a texel, by which distance the view is looking down and the vertical
-// structure it blurs is below the pixel too.
+// The detail fade is by distance, not footprint: a footprint mip blurs along the
+// shell and flattens the layering. The mip itself follows the footprint, which
+// only bites once the view looks down.
 
-/** Isolates one lighting term so a stray glow can be attributed rather than
- *  guessed at. Every mode returns that term alone with transmittance untouched,
- *  so the resolve and the composite shape it as they shape the real image.
+/** Isolates one term, transmittance untouched, so the resolve and composite
+ *  shape it as they shape the image.
  *
  *    0  off, normal output
  *    1  air Rayleigh only
@@ -86,47 +54,30 @@
  *   11  1 where the ray was given any cloud segment at all, 0 where it was not
  *   12  total cloud chord on the ray, over the marched band's own thickness
  *
- *  1 to 4 PARTITION THE LIT IMAGE, air against deck and direct against ambient,
- *  so a glow present in 2 and absent in 3 and 4 is air Mie in front of the deck.
- *  Absent from all four but present with the mode off puts it in the resolve
- *  or the composite rather than in anything this file produced. 5 and 6 read a scalar
- *  instead of a term and between them cover the two shadow paths, which is where
- *  a terminator that looks wrong usually comes from.
- *
- *  7 TO 10 READ THE MARCH RATHER THAN THE IMAGE, which is what separates a
- *  lighting artefact from a sampling one. A boundary visible in 7 or 8 is the
- *  LATTICE differing between neighbouring rays -- how many samples they took, or
- *  whether they were given a fine segment at all -- and no amount of tuning the
- *  field will move it. A boundary visible in 9 or 10 and not in 7 or 8 is the
- *  FIELD answering differently at positions the rays agree on. All four are
- *  multiplied by ATMO_DEBUG_SCALE, since the range of interest is rarely
- *  [0,1]. */
+ *  1 to 4 partition the lit image: a glow in none of them is the resolve's or
+ *  the composite's. 5 and 6 cover the two shadow paths. 7 to 10 read the march:
+ *  a boundary in 7 or 8 is the lattice differing between rays, one in 9 or 10
+ *  alone the field; they scale by ATMO_DEBUG_SCALE. */
 #ifndef ATMO_DEBUG_TERM
 #define ATMO_DEBUG_TERM 0
 #endif
 
-/** Multiplies the scalar readouts, 7 to 10. Raise until the range of interest
- *  fills the screen. */
+/** Multiplies the scalar readouts, 7 to 10. */
 #ifndef ATMO_DEBUG_SCALE
 #define ATMO_DEBUG_SCALE 1.0f
 #endif
 
 
-/** The planet shadow's falloff width, in atmosphere thicknesses: a step, since
- *  the transmittance table carries a grazing sun ray's attenuation and any
- *  softness visibly above the floor reads worse. */
+/** The planet shadow's falloff, in atmosphere thicknesses: a step, since the
+ *  transmittance table carries the grazing attenuation. */
 #define ATMO_TERMINATOR_SOFTNESS 1e-4f
 
-/** Exponent on the planet shadow for the anisotropic terms only: a power on
- *  the same curve, so no new endpoint appears. */
+/** Exponent on the planet shadow for the anisotropic terms. */
 #define ATMO_LOBE_SHADOW_POWER 6.0f
 
-/** Transmittance below which a ray is opaque and stops.
- *
- *  PITFALL: wherever a march ends on this it must also snap to zero. The
- *  threshold asserts opacity, so returning the residual that tripped it leaves a
- *  leak carried only by rays that stopped early -- and since it fires on one
- *  channel while the others are still short, that leak is coloured. */
+/** Transmittance below which a ray is opaque and stops. PITFALL: a march that
+ *  ends on it must snap to zero, or the residual leaks, coloured, on the rays
+ *  that stopped early. */
 #ifndef ATMO_OPAQUE_TRANSMITTANCE
 #define ATMO_OPAQUE_TRANSMITTANCE 0.001f
 #endif
@@ -142,10 +93,8 @@ struct AtmoMarchParams
     float3x3 WorldToLocal;
 };
 
-/** World-to-planet-local rotation from the planet's orientation quaternion. Each
- *  row is a local axis in world space, rotated from the unit axis the way
- *  FQuat::RotateVector does it, so the matrix is the one the actor's forward,
- *  right and up vectors would give. Called once per pixel. */
+/** World-to-planet-local rotation from the planet's quaternion: rows are the
+ *  local axes as FQuat::RotateVector gives them. */
 float3x3 Atmo_WorldToLocal(float4 PlanetRotation)
 {
     const float3 Q = PlanetRotation.xyz;
@@ -189,18 +138,12 @@ AtmoLightConstants Atmo_LightConstants(Texture2DArray ShadowMap, AtmoShadowCamer
     C.Shadow = AtmoShadow_MakeReader(ShadowMap,
 		mul(P.WorldToLocal, P.Atmo.lightRayParams.lightDir), ShadowCameras, Field_ShadowFrame(P.Field));
 
-	// THE FOLD CONSTANT IS DIVIDED BACK OUT. The bake scales its accumulation by
-	// what Field_FoldConstant reports, so its thresholds mean transmittance;
-	// undoing it leaves the material-weighted depth, which the caller multiplies
-	// by cloudAbsBeta and the receiver's own tint. The second channel is the
-	// ceiling scale, set on the most transmissive term the caller exponentiates.
+	// The bake's fold constant, divided back out to leave the material-weighted
+	// depth; .y is the ceiling's scale.
     C.Fold = Field_FoldConstant(P.Atmo, P.Scatter);
 
-	// THE CEILING IS SET ON THE MOST TRANSMISSIVE TERM. The caller exponentiates
-	// the depth per channel at the receiver's tint over the largest tint,
-	// and each octave at Attenuation^i of that, so saturated deck is only dark
-	// if the smallest of those products is. See ATMO_SHADOW_SATURATION; the
-	// field sets the depth.
+	// The ceiling is set on the most transmissive term: the slowest channel at
+	// the deepest octave (ATMO_SHADOW_SATURATION).
     const float DeepestOctave =
 		pow(max(P.Scatter.OctaveAttenuation, 1e-4f), P.Scatter.OctaveCount - 1.0f);
 
@@ -221,15 +164,8 @@ AtmoLightConstants Atmo_LightConstants(Texture2DArray ShadowMap, AtmoShadowCamer
  *  the planet. */
 float Atmo_PlanetShadow(AtmoMarchParams P, float3 Start, float3 LightDir)
 {
-	// PLANET SHADOW, AS A GRADIENT RATHER THAN A TEST.
-	//
-	// PITFALL: returning black on (PlanetHit.x > 0) makes a sample fully lit or
-	// fully dark depending on whether its ray to the star clips a sphere. That
-	// boundary is a curve on screen and moves with the light, so it reads as a
-	// hard seam across the disc at some angles and none at others. The signed
-	// distance from the light ray's closest approach to the surface is the same
-	// decision as a continuous quantity, with the same sign, softened over a
-	// fraction of atmosphere thickness.
+	// A gradient, not a hit test: the light ray's closest approach against the
+	// surface, softened. PITFALL: a hit test draws a hard seam across the disc.
     const float3 ToCentre = P.Atmo.planetParams.planetPos - Start;
 
     const float Soft = max(
@@ -237,8 +173,7 @@ float Atmo_PlanetShadow(AtmoMarchParams P, float3 Start, float3 LightDir)
 			* ATMO_TERMINATOR_SOFTNESS,
 		1e-4f);
 
-	// How far ahead the closest approach lies. Negative means the planet is
-	// behind the sample and occludes nothing.
+	// Negative: the planet is behind the sample.
     const float Along = dot(ToCentre, LightDir);
 
     const float3 Closest = Start + LightDir * max(Along, 0.0f);
@@ -249,15 +184,9 @@ float Atmo_PlanetShadow(AtmoMarchParams P, float3 Start, float3 LightDir)
 		P.Atmo.planetParams.planetRadius + Soft,
 		ClosestDist);
 
-	// BLENDED IN, NOT BRANCHED ON. PITFALL: gating the test on (Along > 0) is a
-	// step discontinuity on the plane through the planet centre perpendicular to
-	// the light. A sample on that plane has its closest approach at itself, and
-	// at low altitude that radius falls INSIDE the smoothstep band, so it reads
-	// below one while a sample a hair behind the plane reads exactly one -- and
-	// the plane projects to a straight line on screen. max(Along, 0) alone does
-	// not fix it either: on the lit side the closest approach becomes the
-	// sample's own radius, inside the band, and the day hemisphere darkens.
-	// Ramping the front factor over the same width keeps both ends exact.
+	// PITFALL: ramped in, not branched on (Along > 0), which draws a line on
+	// screen where the terminator plane crosses low samples inside the band;
+	// max(Along, 0) alone darkens the day side.
     const float FrontFactor = smoothstep(0.0f, Soft, Along);
 
     const float PlanetShadow = lerp(1.0f, RadialShadow, FrontFactor);
@@ -275,11 +204,8 @@ float3 Atmo_SunAir(
 	float3 Start,
 	float3 LightDir)
 {
-	// THE AIR. Density integrals from the table, in thickness units, scaled back
-	// to world units so the betas apply exactly as they do to a marched depth.
-	// Below the horizon the table holds the horizon value: Atmo_PlanetShadow owns
-	// the occlusion and is already fading to zero across the band the clamp
-	// covers.
+	// Density integrals from the table, in thicknesses, back to world units.
+	// Below the horizon it holds the horizon value; Atmo_PlanetShadow occludes.
     const float3 FromCentre = Start - P.Atmo.planetParams.planetPos;
     float Dist = length(FromCentre);
     float Mu = dot(FromCentre, LightDir) / max(Dist, 1e-4f);
@@ -295,17 +221,11 @@ float3 Atmo_SunAir(
 		+ P.Atmo.scatteringParams.absBeta * AtmoOptDepth.z));
 }
 
-/** Light reaching a sample, as the air's transmittance with the planet shadow
- *  folded in, plus the deck's material-weighted depth toward the light separately.
- *
- *  THE DECK TERM COMES BACK UNEXPONENTIATED, because the multiple-scattering
- *  octaves each attenuate it by their own factor. Single scattering is
- *  AirTransmittance * exp(-cloudAbsBeta * Tint * OutCloudOptDepth), with Tint the
- *  receiver's extinction tint, so storm cloud absorbs as storm cloud does. It
- *  resolves through cloudAbsBeta rather than cloudScatBeta: light scattered out
- *  of this ray is gone either way, but light scattered INTO it is what the
- *  octaves stand in for, and the larger coefficient would count that loss
- *  twice. */
+/** Light reaching a sample: the air's transmittance with the planet shadow,
+ *  and the deck's material-weighted depth toward the light, unexponentiated,
+ *  since each scattering octave attenuates it by its own factor. It resolves
+ *  through cloudAbsBeta and the receiver's tint; cloudScatBeta would count the
+ *  in-scatter the octaves stand for as lost. */
 float3 Atmo_LightMarch(
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
@@ -330,25 +250,14 @@ float3 Atmo_LightMarch(
         return float3(0.0f, 0.0f, 0.0f);
     }
 
-	// The anisotropic terms read this instead of PlanetShadow. Same curve, tail
-	// crushed, so no new endpoint appears at either end.
+	// The anisotropic terms' shadow: the same curve, tail crushed.
     OutLobeShadow = pow(PlanetShadow, ATMO_LOBE_SHADOW_POWER);
 
 #if ATMO_FIELD_CLOUDS
 
-	// THE DECK, AS ONE TEXTURE READ. Looked up rather than estimated, and the
-	// difference is not just cost: a per-ray estimator's error is additive in
-	// OPTICAL DEPTH and so multiplicative in brightness, where half a unit of
-	// noise is a 1.6x swing between neighbouring pixels -- stipple rather than
-	// grain, tightening only as the square root of the sample count. A map has no
-	// per-pixel error to tighten.
-
-	// Salted by the pixel AND by the parent step, so neither successive samples
-	// along one ray nor neighbouring pixels read the map in phase. Both axes
-	// matter: the ray's samples are what average the texel neighbourhood, and
-	// the pixel term is what stops that average being identical next door.
-	// Also by the pixel's sample, so the offsets move between the frames a
-	// history averages.
+	// The deck as one map read. The jitter is salted by the step, the pixel and
+	// the frame's draw, so a ray's samples average the texel neighbourhood and
+	// neighbours and frames differ.
     uint ShadowSalt = uint(P.Atmo.lightRayParams.parentStepIndex) * 2749u;
     ShadowSalt += uint(P.Atmo.mainRayParams.jitterShift * 16777216.0f) * 0x27D4EB2Du;
 
@@ -359,11 +268,9 @@ float3 Atmo_LightMarch(
     const float ShadowTau = AtmoShadow_ReadTau(
 		ShadowMap, ShadowSampler, C.Shadow, LocalPos, ShadowJitter, C.Ceiling);
 
-	// PITFALL: no saturation snap. The depth is read, not accumulated, so a
-	// threshold here would only turn a smooth field into a hard contour, and
-	// that contour lands on the map's lattice as an axis-aligned staircase along
-	// the shadow edge. The deep end is handled by AtmoShadow_Tau's ceiling.
-    OutCloudOptDepth = ShadowTau / max(C.Fold.x, 1e-8f);
+	// PITFALL: no saturation snap, which draws the map's lattice as a staircase
+	// along the shadow edge. The fold is per world unit: no floor, 0 is no cloud.
+    OutCloudOptDepth = (C.Fold.x > 0.0f) ? ShadowTau / C.Fold.x : 0.0f;
 #endif
 
     return PlanetShadow * Atmo_SunAir(TransmittanceTable, TransmittanceSampler, C, P, Start, LightDir);
@@ -398,10 +305,8 @@ float4 Atmo_MainMarchDepth(
     const float3 RayOrigin = P.Atmo.mainRayParams.cameraPos;
     const float3 RayDir = P.Atmo.mainRayParams.cameraDir;
 
-	// WHERE THE RAY STOPS IS THE FIELD'S ANSWER. A deck with no surface clips on
-	// a provable opacity; a field with a floor would clip on the floor. Either way
-	// MaxDist reaches Atmo_Plan, so this decides the SEGMENT STRUCTURE and not
-	// only the shading.
+	// Where the ray stops is the field's answer, and it shapes the plan's
+	// segments, not only the shading.
     float MaxDist;
     bool bClippedOpaque;
 
@@ -415,18 +320,10 @@ float4 Atmo_MainMarchDepth(
     const float SurfaceDepth = (MaxDist < max(AtmoHit.y, 0.0f)) ? MaxDist : ATMO_SKY_DEPTH;
     OutDepth = SurfaceDepth;
 
-	// MIE IS CONSUMED BY DECK IN FRONT OF IT, NOT BY PATH LENGTH. The forward lobe
-	// is the brightest term in the image facing the light and has to be
-	// extinguished by the cloud between sample and camera -- see MieLobeDecay.
-	// CloudDepthAhead accumulates separately from the base transmittance below,
-	// because the lobe dies faster than the light does.
-	//
-	// PITFALL: two forms that do not work. Gating on (MaxDist < AtmoHit.y)
-	// switches Mie fully off for rays hitting the planet and fully on for rays
-	// missing it, so the silhouette becomes a step in the brightest term. Scaling
-	// by the fraction of the atmosphere chord traversed removes that step but
-	// answers a geometric question rather than the optical one, so a deck the ray
-	// never sees through still glows across its whole disc.
+	// Mie is consumed by the deck in front of it (MieLobeDecay), through
+	// CloudDepthAhead, which the lobe spends faster than the light. PITFALL: a
+	// gate on the planet hit steps the silhouette; scaling by the chord
+	// traversed leaves an opaque deck glowing.
 
     float3 Segments[ATMO_MAX_SEGMENTS];
 

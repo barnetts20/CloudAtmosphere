@@ -260,7 +260,7 @@ void APlanetAtmosphereActor::OnTransformUpdated(USceneComponent* Component, EUpd
         // Lock location and scale. Rotation is intentionally left alone (light direction).
         // Using _Direct setters avoids firing TransformUpdated recursively.
         bool bLocationDirty = !Root->GetRelativeLocation().IsNearlyZero(0.01);
-        bool bScaleDirty = !Root->GetComponentScale().Equals(PlanetDrivenScale, 0.01);
+        bool bScaleDirty = !Root->GetRelativeScale3D().Equals(PlanetDrivenScale, 0.01);
 
         if (bLocationDirty || bScaleDirty)
         {
@@ -284,7 +284,7 @@ void APlanetAtmosphereActor::InitializeFromPlanet(USceneComponent* InAttachParen
     if (!InScale.IsZero())
         SetActorScale3D(InScale);
 
-    PlanetDrivenScale = GetActorScale3D();
+    PlanetDrivenScale = GetRootComponent() ? GetRootComponent()->GetRelativeScale3D() : GetActorScale3D();
 
     // Re-bind the guard now that PlanetDrivenScale reflects the new scale.
     if (USceneComponent* Root = GetRootComponent())
@@ -785,11 +785,11 @@ bool APlanetAtmosphereActor::FillShadowRequest(
     // -- History ------------------------------------------------------------
     //
     // Each baked level keeps exp(-age / smoothing) of its previous bake, where
-    // age is the time since that bake. Per level and in seconds, so the fade is
-    // the same whatever the frame rate or the rotation's cadence. A light that
-    // jumped drops it: the reprojection holds for a light that turns, not for
-    // one that teleports.
-    const double Now = FPlatformTime::Seconds();
+    // age is the world time since that bake, the clock that pauses and dilates
+    // with the game. Per level, so the fade is the same whatever the frame rate
+    // or the rotation's cadence. A light that jumped drops it: the reprojection
+    // holds for a light that turns, not for one that teleports.
+    const double Now = World->GetTimeSeconds();
 
     for (int32 Level = 0; Level < LevelCount; ++Level)
     {
@@ -809,7 +809,7 @@ bool APlanetAtmosphereActor::FillShadowRequest(
 
         if (bHasHistory && bLightHeld && ShadowTemporalSmoothing > 0.0f && ShadowBakeTime[Level] > 0.0)
         {
-            const float Age = static_cast<float>(Now - ShadowBakeTime[Level]);
+            const float Age = static_cast<float>(FMath::Max(Now - ShadowBakeTime[Level], 0.0));
 
             History.Weight = FMath::Min(
                 FMath::Exp(-Age / ShadowTemporalSmoothing), AtmoShadowBake::MaxHistoryWeight);
@@ -821,6 +821,7 @@ bool APlanetAtmosphereActor::FillShadowRequest(
     // index is the only thing that distinguishes them -- and that comes from the
     // dispatch rather than from here.
     Params.MapSize = FIntPoint(ShadowTarget->SizeX, ShadowTarget->SizeY);
+    Params.MapSlices = ShadowTarget->Slices;
 
     // -- Field --------------------------------------------------------------
     //
@@ -903,7 +904,8 @@ void APlanetAtmosphereActor::CommitShadowBake(
     uint32 LevelMask, const FVector3f& LightDir, const FVector3f& CameraLocal)
 {
     const int32 LevelCount = AtmoShadowBake::CascadeCount;
-    const double Now = FPlatformTime::Seconds();
+    const UWorld* World = GetWorld();
+    const double Now = World ? World->GetTimeSeconds() : 0.0;
 
     for (int32 Level = 0; Level < LevelCount; ++Level)
     {

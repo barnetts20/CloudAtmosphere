@@ -350,7 +350,8 @@ private:
      *  however many paths push parameters. */
     uint64 ShadowBakeFrame = MAX_uint64;
 
-    /** Cached scale set by the planet actor, used by the transform guard. */
+    /** The root's scale relative to the planet, as the planet set it: what the
+     *  transform guard holds. */
     FVector PlanetDrivenScale = FVector::OneVector;
 
     /** Bound to RootComponent->TransformUpdated when planet-owned. Snaps location
@@ -425,7 +426,7 @@ private:
     int32 ShadowLevelCursor = 0;
     FVector3f ShadowBakedCamera[AtmoShadowBake::CascadeCount];
 
-    /** The light each level was last baked under, and when, in platform
+    /** The light each level was last baked under, and when, in world
      *  seconds: what the next bake of that level reprojects and weights its
      *  history by. */
     FVector3f ShadowBakedLight[AtmoShadowBake::CascadeCount];

@@ -3,68 +3,31 @@
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
 #include "/Plugin/CloudAtmosphere/Private/FlowField.ush"
 
-// The cloud field the march samples, both models'.
+// The cloud field the march samples, both models'. The sim is the weather map,
+// the noise the cloud: each column reads the sim once for coverage, type (0
+// stratiform, 1 towering), pressure, formation altitude and vertical motion.
+// A slab between the condensation base and a type-dependent top under the
+// pressure lid bounds it, exact per column; outside it density is zero. Inside,
+// a structure noise blended by genus (stratus, stratocumulus, cumulus, cirrus,
+// over the volumes' Perlin, Worley F1, F2 - F1 and ridged channels) times a
+// height profile survives by coverage, and a detail noise erodes the edges,
+// fading with distance to its mean. The noise is sampled through the sim's two
+// advected displacement fields, crossfaded.
 //
-// THE SIM IS THE WEATHER MAP, THE NOISE IS THE CLOUD. Each column reads the
-// sim once and gets five things: COVERAGE (the sim's cloud field), TYPE (from
-// vertical motion, latitude and storms: 0 stratiform, 1 towering), PRESSURE
-// (the lid and the base), ALTITUDE (how high in the sim's stack the cloud
-// formed, which floats stratiform cloud up) and W (vertical motion, which
-// stretches and lifts the noise).
-// Inside the column a shape noise is multiplied by a height profile, and
-// coverage decides how much of it survives: at low coverage only the densest
-// noise cores remain as scattered cloud, near 1 the column fills. A detail
-// noise then erodes the edges, wispy toward the base and billowy toward the
-// top. The noise draws every cloud; the sim decides where, how much and what
-// kind.
+// The deep deck (TR_DEEP_DECK), a gas giant's, has no base: below it the deck
+// fills to full density over DeepFill, with a floor of noise-shaped mounds.
 //
-// THE SIM CARRIES THE NOISE. It advects two displacement fields with the flow,
-// reset half a period apart, and the noise is sampled through both and
-// crossfaded, so it follows the flow's own trajectories, turning inside
-// vortices, on top of a solid-body drift about the axis.
-//
-// A SLAB BETWEEN TWO SURFACES BOUNDS IT. The base is the condensation level
-// and the top is the column's type-dependent depth under the pressure lid;
-// both are exact per column, which the entry search and the empty-air early-out
-// spend. Outside the slab density is exactly zero.
-//
-// THE NOISE IS CHOSEN BY GENUS. Both volumes share one layout of noise TYPES,
-// octaves summed in the bake: R Perlin, G Worley F1, B Worley F2 - F1, A ridged
-// Perlin. The structure layer reads them as smooth, billow (1 - F1), cellular
-// and fibrous; a column's type and altitude blend four genera -- stratus,
-// stratocumulus, cumulus, cirrus -- into weights over them. The detail layer
-// erodes by them: wispy (Perlin), billow (F1) and fibrous (1 - ridged).
-//
-// THE DETAIL LAYER FADES WITH DISTANCE, TO ITS MEAN. It erodes, so dropping it
-// would thicken distant cloud; settling on the noise's mean value keeps the
-// average erosion and removes only the grain. The structure layer draws the
-// cloud shapes and applies at every range. The shadow bake keeps full detail,
-// band-limited by its subsamples, so its mean matches either way.
-//
-// THE DEEP DECK (TR_DEEP_DECK), a gas giant's, has no base: under each
-// column's top the profile runs on down, and below the base the deck fills in
-// to full density over DeepFill, on down through the core. Under the cloud,
-// the floor rises into the fill as full-density mounds shaped by the structure
-// noise; it only adds density, so the cloud above it is untouched. Everything
-// above the base is the slab's.
-//
-// UNITS. Heights are atmosphere fractions: CloudBase, CloudThickness,
-// CeilingFalloff, DeepFill, SpanTop and every height a function takes or
-// returns. The lift and warp offsets are multiples of CloudThickness, and
-// FloorRelief is in fills. Space is planet-local, spin axis on Z, positions
-// unit directions except in TR_Density.
+// Heights are atmosphere fractions; lift and warp offsets multiples of
+// CloudThickness; FloorRelief in fills. Space is planet-local, spin on Z.
 
-/** How much of the density the detail layer can erode at full DetailErosion.
- *  Above about a half it eats whole thin clouds rather than their edges. */
+/** Share of the density full DetailErosion can erode; past about a half it eats
+ *  thin clouds whole. */
 #ifndef TR_DETAIL_EROSION_SCALE
 #define TR_DETAIL_EROSION_SCALE 0.35f
 #endif
 
-/** How many mips below the top of its chain the detail volume stops being
- *  fetched and reads as its mean. At that mip a tile is a few texels and the
- *  detail's cells average out, so the fetch returns the mean anyway; the last
- *  mip before it fades across. Matters for the shadow bake's coarse cascade,
- *  whose texels span dozens of detail texels. */
+/** Mips from the top of its chain at which the detail volume reads as its mean
+ *  instead of a fetch, faded across the mip before. */
 #ifndef TR_DETAIL_MEAN_MIPS
 #define TR_DETAIL_MEAN_MIPS 3
 #endif
@@ -74,22 +37,18 @@
 #define TR_STRETCH_MIN_STRATUS 0.1f
 #endif
 
-/** Fraction of the cone-trace advance actually taken. Under 1 because the slope
- *  is authored, and an under-declared slope is the one way the entry search
- *  steps over a surface. */
+/** Fraction of the cone-trace advance taken: an under-declared slope is how the
+ *  entry search steps over a surface. */
 #ifndef TR_CONE_RELAXATION
 #define TR_CONE_RELAXATION 0.9f
 #endif
 
-/** Cone-trace iteration cap. Reached only on rays that graze for their whole
- *  length, which return where the search stopped for the march to go on
- *  from. */
+/** Cone-trace iteration cap; a ray that reaches it marches on from there. */
 #ifndef TR_SLAB_ENTRY_PROBES
 #define TR_SLAB_ENTRY_PROBES 24
 #endif
 
-/** 1 for the deep deck, a gas giant's; 0 for the slab. Set per pass by the
- *  model's shader permutation. */
+/** 1 for the deep deck, 0 for the slab: the model's permutation. */
 #ifndef TR_DEEP_DECK
 #define TR_DEEP_DECK 0
 #endif
@@ -109,134 +68,70 @@ float TR_FlowLayer(Texture2DArray FlowField, float CloudLayer)
 }
 
 /** Everything the field reads. Authored members carry their C++ property
- *  names; they arrive packed on a handful of vector pins (see TR_BuildField)
- *  and are unpacked here once. */
+ *  names (AtmosphereParams.h documents them), unpacked from the pins once. */
 struct TRFieldParams
 {
 	// -- Authored ------------------------------------------------------------
 
     float PlanetRadius;
 
-	/** Condensation level of an unlifted column, an atmosphere fraction. */
     float CloudBase;
-
-	/** Depth of a fully towering column before the lid, an atmosphere fraction,
-	 *  and the unit every other height is a multiple of. */
     float CloudThickness;
-
-	/** Share of CloudThickness each end of the height profile ramps over, and
-	 *  each ramp's shape. Above 1 flattens that end; below 0.5 it loses its C1
-	 *  join. */
     float SurfaceSoftness;
     float TopCurve;
     float BottomCurve;
-
-	/** Width of the band under the shell top across which density fades to
-	 *  zero, an atmosphere fraction. */
     float CeilingFalloff;
 
-	/** How far down the columns' priority coverage reaches: 0 none, 1 all
-	 *  cloud. StormPriority is how far storm raises a column's priority over
-	 *  plain cloud, CoverageSoftness the threshold's half-width in priority.
-	 *  CoverageFray is how far low coverage raises the erosion threshold,
-	 *  fraying system edges, against fading them. */
     float CloudCover;
     float StormPriority;
     float CoverageSoftness;
     float CoverageFray;
-
-	/** The sim cloud at which a column's amount is 95% of the way to full, and
-	 *  the priority threshold covering CloudCover of the planet. */
     float CloudFull;
-    float CoverThreshold;
-
-	/** Coverage over which a column grows from no slab to its full depth, so
-	 *  sparse cloud is shallow and clear sky has no slab for the entry search
-	 *  to stop on. PITFALL: narrow makes the top a cliff at every coverage edge,
-	 *  steeper than the slope bound, and the entry search steps over cloud. */
     float CoverageDepthRamp;
-
-	/** Power on the sim's depth factor a column's density scales by: above 1
-	 *  keeps more of an eyewall and clears the floor sooner. */
     float EyeOpenPower;
 
-	/** The deep deck's fill: how far below a column's base, in atmosphere
-	 *  fractions, it reaches full density; and how many fills the floor's
-	 *  mounds rise above that. */
+	/** The priority threshold covering CloudCover of the planet, from the
+	 *  coverage pass. */
+    float CoverThreshold;
+
     float DeepFill;
     float FloorRelief;
-
-	/** Floor on the deep deck's absorption, so a white deck still darkens with
-	 *  depth. */
     float DeepDarkening;
 
-	/** The exponent type builds with: above 1 only the densest and stormiest
-	 *  columns approach full towering storm cloud. */
     float TypeCurve;
-
-	/** Where the storm threshold sits in the storm index, 0 none to 1 all
-	 *  cloud, and the half-width of its blend. */
     float StormBalance;
     float StormBlend;
-
-	/** Depth of a stratiform column as a fraction of a towering one. */
     float StratusDepth;
-
-	/** The sim layer the columns read, negative for the bottom. A layer's
-	 *  weather slice combines its cloud with every layer's above it, so the
-	 *  bottom's is the whole sky. Cloud, vertical motion, pressure and the noise
-	 *  displacement all come from it, so the cloud and the noise that breaks it
-	 *  up move with one flow. */
     float CloudLayer;
-
-	/** Type = TypeBias + TypeTropical * tropicality + TypeStorm * storm. */
     float TypeBias;
     float TypeTropical;
     float TypeStorm;
 
-	/** The geopotential anomaly that reads as a full low or high. */
     float PressureScale;
-
-	/** How far pressure moves a column's depth, as a share of CloudThickness:
-	 *  positive gives lows more room than highs. */
     float CeilingPressure;
-
-	/** How far tropicality and pressure move the base, multiples of
-	 *  CloudThickness. */
     float BaseTropical;
     float BasePressure;
-
-	/** Altitude = saturate(AltitudeGain * formation altitude); it lifts the
-	 *  base of a stratiform column by up to AltitudeLift cloud thicknesses. */
     float AltitudeGain;
     float AltitudeLift;
 
-	/** How far rising air stretches the noise vertically, and lifts it, the
-	 *  latter a multiple of CloudThickness. */
     float WarpStretch;
     float WarpShift;
 
-	/** Bound on either surface's slope, cloud depths per flow texel. Read only
-	 *  by the entry search's cone angle. */
+	/** Bound on either surface's slope, cloud depths per flow texel: the entry
+	 *  search's cone angle. */
     float CloudSlope;
 
-
-	/** The noise's solid-body drift about the spin axis, radians, wrapped, and
-	 *  noise phase A's position in its reset cycle, [0, 1). */
+	/** The noise's drift about the spin axis, radians, and phase A's position
+	 *  in its reset cycle, [0, 1). */
     float DriftAngle;
     float NoisePhase;
 
-	/** Mips added to the layer's footprint mip, and whether the layer is read:
-	 *  a bound volume and erosion above zero. FlowInherit is the share of the
-	 *  sim's noise displacement the layer follows. */
+	/** Active: a volume is bound and erosion is above zero. */
     float StructureMipBias;
     bool StructureActive;
     float StructureScale;
     float StructureErosion;
     float StructureFlowInherit;
-
-	/** Share of the noise's range full structure erosion cuts away: the hole
-	 *  fraction a thick system breaks up into. */
     float StructureBreakup;
 
     float DetailMipBias;
@@ -244,16 +139,9 @@ struct TRFieldParams
     float DetailScale;
     float DetailErosion;
     float DetailFlowInherit;
-
-	/** Height fraction over which detail erosion turns from wispy at the base
-	 *  to billowy toward the top. */
     float DetailBillowHeight;
-
-	/** The detail noise's mean value, which it settles to as it fades. */
     float DetailFadeMean;
 
-	/** Structure channel weights per genus, and how fast sinking air turns
-	 *  stratus into stratocumulus. */
     float4 GenusStratus;
     float4 GenusStratocumulus;
     float4 GenusCumulus;
@@ -265,21 +153,18 @@ struct TRFieldParams
 	/** Atmosphere thickness in world units: the one absolute length here. */
     float Thickness;
 
-	/** The ramp depth each end of the profile gets, an atmosphere fraction. Half
-	 *  CloudThickness at most, so a full column's two ramps never overlap and
-	 *  TR_CloudBeta is exact. */
+	/** Each end's ramp depth, at most half CloudThickness, so a full column's
+	 *  ramps never overlap and TR_CloudBeta is exact. */
     float SpanTop;
     float SpanBase;
 
     float SpinAngle;
 
-	/** Per layer, Scale * Aspect * HeightScale: the frequency's growth per
-	 *  atmosphere fraction of height at Rise 0 (TR_NoiseFrequency). */
+	/** Per layer, Scale * Aspect * HeightScale (TR_NoiseFrequency). */
     float StructureVertical;
     float DetailVertical;
 
-	/** The detail layer's fade range, in planet radii from the camera, which the
-	 *  march reads to set DetailFade per sample. */
+	/** The detail fade's range, planet radii from the camera. */
     float DetailFadeNear;
     float DetailFadeFar;
 
@@ -289,20 +174,17 @@ struct TRFieldParams
 
 	// -- Per sample ----------------------------------------------------------
 
-	/** The detail layer's level of detail, 1 near and 0 far, written per sample
-	 *  by the march and per cascade by the bake; 1 from TR_BuildField. */
+	/** The detail's level, 1 near and 0 far: per sample from the march, per
+	 *  cascade from the bake. */
     float DetailFade;
 
-	/** One march pixel's width at the sample, in radians of arc on the unit
-	 *  sphere: what the noise mip is chosen from. Written per sample by the
-	 *  march, and per texel by the bake from its subsample spacing; 0 from
-	 *  TR_BuildField, which is mip 0. */
+	/** A pixel's width at the sample, radians of arc, which picks the noise mip:
+	 *  per sample from the march, per texel from the bake; 0 is mip 0. */
     float PixelFootprint;
 };
 
-/** Fills TRFieldParams from the packed pins and derives the rest. The bake calls
- *  it with the same values, so the field the eye sees and the field the light
- *  sees share every derivation. Packing, member by member:
+/** Fills TRFieldParams from the packed pins and derives the rest, the same for
+ *  the bake and the march. Packing:
  *
  *    CloudProfile      CloudBase, CloudThickness, SurfaceSoftness, CeilingFalloff
  *    CloudCurves       TopCurve, BottomCurve, CloudSlope, WarpStretch
@@ -324,9 +206,8 @@ struct TRFieldParams
  *
  *  CoverThreshold arrives apart, read from the coverage pass's texel.
  *
- *  SpinAngle is the planet's own rotation, -SpinRatio * Omega * time wrapped in double
- *  on the CPU; the sim runs in the rotating frame, so it turns the sampling
- *  position. Every clock arrives wrapped. */
+ *  SpinAngle is the planet's rotation, wrapped in double on the CPU like every
+ *  clock; the sim runs in the rotating frame. */
 TRFieldParams TR_BuildField(
 	float PlanetRadius,
 	float HeightScale,
@@ -648,18 +529,11 @@ TRColumnInputs TR_ReadColumn(Texture2DArray FlowField, SamplerState FlowSampler,
 		FlowField, FlowSampler, N, TR_FlowLayer(FlowField, F.CloudLayer), false));
 }
 
-/** The column's material, from its weather alone: fair-weather 0 to storm 1.
- *
- *  A STORM INDEX: the raw column cloud, which grades from a system's edge to
- *  its core, or the storm where larger, which puts storm cells at the top.
- *  StormBalance sweeps a threshold down through it, from none at 0 to all
- *  cloud at 1, and StormBlend is the ramp's half-width. Nothing that shapes
- *  the density reads it.
- *
- *  PITFALL: an index built from the cloud amount saturates wherever the deck is
- *  dense, so the threshold stops moving anything and only the density
- *  settings change the balance. Taken from Type, the tropics term paints
- *  every tropical cloud storm-coloured, fading uniformly with latitude. */
+/** The column's material, fair-weather 0 to storm 1, from a storm index (the
+ *  raw column cloud, or the storm where larger) swept by StormBalance's
+ *  threshold over StormBlend. Nothing that shapes density reads it. PITFALL: an
+ *  index from the cloud amount saturates in dense deck; one from Type paints
+ *  every tropical cloud storm-coloured. */
 float TR_MaterialFromWeather(float4 Weather, TRFieldParams F)
 {
     const float StormIndex = max(saturate(Weather.y), saturate(Weather.w));
@@ -682,55 +556,24 @@ float TR_Priority(float4 Weather, TRFieldParams F)
 
 /** The column at a spun direction N from its inputs.
  *
- *  COVERAGE IS A THRESHOLD ON PRIORITY. A column's priority is its cloud
- *  amount raised by its storm: amount * (1 + StormPriority * storm) /
- *  (1 + StormPriority). Hurricanes, which hold the densest cloud and full
- *  storm, rank highest, then storms, then plain cloud, which tops out at
- *  1 / (1 + StormPriority), graded by amount from systems' cores to their edges.
- *  CloudCover is the share of the planet covered: the threshold is the
- *  priority's quantile over the sphere (MainCoverageCS), so the same setting
- *  covers the same share whatever the sim's cloud does, hurricanes first. It
- *  never falls below CoverageSoftness, so clear sky stays clear at any setting,
- *  and a system keeps a defined edge. Inside it coverage reaches 1 and erosion
- *  breaks it up.
+ *  Coverage is a threshold on priority, the threshold the priority's quantile
+ *  over the sphere (MainCoverageCS), so CloudCover is the share covered,
+ *  hurricanes first; it never falls below CoverageSoftness, so clear sky stays
+ *  clear. PITFALL: an additive cover flattens the sim's contrast until the noise
+ *  decides the gaps.
  *
- *  PITFALL: an additive CloudCover lifts every column by the same amount, so
- *  raising it to recover cloud flattens the sim's contrast until the noise,
- *  not the weather, decides where the gaps are.
+ *  Type is the cloud amount plus the tropics and storm: dense cloud towers,
+ *  thin stays layered. A towering column is CloudThickness deep, a stratiform
+ *  one StratusDepth of it, both scaled by the pressure lid. PITFALL: type from
+ *  local W draws the sim's vertical-motion waves as sliding bands; storm as a
+ *  floor on type makes every stormy column a full tower.
  *
- *  TYPE IS HOW MUCH CLOUD THERE IS, plus the tropics and the sim's storm
- *  intensity: dense cloud builds towering, thin cloud stays layered, and storm
- *  deepens cloud in proportion. The MATERIAL, fair-weather to storm, follows a
- *  storm index of raw cloud and storm, set by StormBalance and StormBlend
- *  alone. A towering column is
- *  CloudThickness deep, a stratiform one StratusDepth of that; the pressure lid
- *  then scales both, so highs flatten into sheets and lows build. PITFALL: type
- *  from the local W draws the sim's vertical-motion waves, which travel through
- *  the cloud rather than with it, as bands of towering cloud sliding across
- *  the flow's own structure. Storm taken as a floor on type rather than a term
- *  turns every stormy column into a full tower of storm material, a deck
- *  erosion barely touches beside the cloud around it.
- *
- *  EROSION IS BREAKUP: the structure layer's, or none where the layer is not
- *  read.
- *
- *  THE BASE is the condensation level: tropicality and pressure, plus the
- *  altitude the cloud formed at for all but towering columns. A tower stays
- *  rooted; cloud that formed high in the sim's stack, or drifted off an
- *  updraught, turns stratiform at that altitude, so outflow becomes high
- *  layered cloud and cloud grown under weak lift stays low. No noise, which
- *  keeps the base exact.
- *
- *  DEPTH is the type's, StratusDepth to full, under the lid. Relief comes from
- *  type, coverage's depth ramp and the sim's depth factor. PITFALL: relief
- *  steepens the top wherever those do; if cloud goes missing on grazing rays,
- *  raise SlopePerTexel.
- *
- *  SPARSE COLUMNS ARE SHALLOW. Depth ramps in over CoverageDepthRamp of
- *  coverage, so clear sky has no slab for the entry search to stop on.
- *
- *  THE SIM'S DEPTH FACTOR SCALES THE REST, so a storm cell's eye is a bowl
- *  sloping from the eyewall to its floor, whatever the cloud amount does. */
+ *  The base is the condensation level from tropicality and pressure, plus the
+ *  formation altitude for all but towers, so outflow becomes high layered
+ *  cloud; no noise keeps it exact. Depth ramps in over CoverageDepthRamp, so
+ *  clear sky has no slab, and the sim's depth factor scales it, so an eye is a
+ *  bowl. PITFALL: relief steepens the top; if grazing rays lose cloud, raise
+ *  SlopePerTexel. */
 TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
 {
     TRColumn Col;
@@ -782,9 +625,13 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
 		* smoothstep(0.0f, F.CoverageDepthRamp, Col.Coverage)
 		* In.Depth;
 
-	// Capped at the shell, where the ceiling fade has already taken density to
-	// zero.
-    Col.Top = min(Col.Base + Depth, 1.0f);
+	// Capped at the shell on a smooth minimum over the ceiling's falloff band,
+	// never below the base. PITFALL: a hard cap creases the lighting where a
+	// tall eyewall meets the shell and the depth factor pulls it into the eye.
+    const float Reach = Col.Base + Depth;
+    const float Knee = max(F.CeilingFalloff - abs(Reach - 1.0f), 0.0f) / F.CeilingFalloff;
+
+    Col.Top = max(min(Reach, 1.0f) - 0.25f * F.CeilingFalloff * Knee * Knee, min(Col.Base, 1.0f));
     Col.Thinning = In.Depth;
 
     return Col;
@@ -919,18 +766,11 @@ float TR_DeepFloor(float Height, float HalfStep, TRColumn Col, float Noise, TRFi
 		- TR_DeepFloorRamp((Top - Height - HalfStep) / Soft)) / (2.0f * HalfStep);
 }
 
-/** Distance along a ray at which it first reaches a slab, from either side,
- *  or T1 when it reaches none before T1. The shadow bake's entry.
- *
- *  TWO SKIPS ARE GEOMETRY: radius is monotone either side of the closest
- *  approach, so a ray climbing clear of TopMax has nothing ahead, and one below
- *  the lowest base any column has (TR_BaseMin) and still descending has nothing
- *  before its perigee. The rest is a cone trace on CloudSlope. PITFALL: an
- *  under-declared slope steps over cloud, and the map shows shadow holes.
- *
- *  A CONE TRACE, AND NOT AN OPTIMIZATION: a grazing chord stepped at the
- *  field's own step size exhausts the iteration cap in empty space. LocalDir is
- *  normalized. */
+/** Distance along a normalized ray at which it first reaches a slab, or T1:
+ *  the shadow bake's entry. A ray climbing clear of TopMax, or below every base
+ *  and descending, skips by geometry; the rest is a cone trace on CloudSlope,
+ *  since a grazing chord at the field's step size exhausts the cap. PITFALL: an
+ *  under-declared slope steps over cloud and leaves shadow holes. */
 float TR_SlabEntry(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
@@ -974,8 +814,7 @@ float TR_SlabEntry(
 
         const bool bAbove = ProbeHeight > Col.Base;
 
-		// A clear column has no top to close on; its base stands in, which is a
-		// lower surface than any cloud nearby and so never overshoots one.
+		// A clear column's base stands in for its top: lower, so never past cloud.
         const float Gap = bAbove
 			? ProbeHeight - max(Col.Top, Col.Base)
 			: Col.Base - ProbeHeight;
@@ -988,16 +827,10 @@ float TR_SlabEntry(
             return T1;
         }
 
-		// BELOW EVERY BASE AND STILL DESCENDING: nothing lies ahead until the
-		// perigee, so resume there rather than give up, or a limb ray that skims
-		// under the cloud and climbs back into it misses the cloud it shadows.
-		//
-		// PITFALL: BELOW THIS COLUMN'S BASE IS NOT ENOUGH. Neighbouring bases sit
-		// lower where lift, pressure and latitude move them, and a jump from under
-		// a high base skips the cloud beneath it.
-		// PITFALL: THE RATE IS ZERO TO WITHIN NOISE AT THE PERIGEE ITSELF, and its
-		// sign there is arbitrary. The epsilon keeps the branch to rays genuinely
-		// still descending; a perigee that is not ahead means nothing to skip.
+		// Below every base and descending: resume at the perigee, where a limb ray
+		// can climb back into cloud. PITFALL: this column's base is not enough,
+		// since neighbours sit lower. The epsilon keeps out the perigee itself,
+		// where the rate's sign is noise.
         if (!bAbove && ProbeRate < -1e-4f && ProbeHeight < BaseMin)
         {
             const float TPerigee = -dot(LocalOrigin, LocalDir);
@@ -1014,12 +847,9 @@ float TR_SlabEntry(
             }
         }
 
-		// The surface moves to meet the ray, so the closing rate is the ray's
-		// own approach plus the surface's slope across the ground it covers. A
-		// ray moving away counts as still: the surface can outrun it, so its
-		// recession earns no longer step.
-		// PITFALL: CloudSlope has to bound the steeper surface, which at a
-		// coverage edge is the top collapsing onto the base.
+		// Closing rate: the ray's approach, receding counted as still, plus the
+		// surface's slope over the ground covered. PITFALL: CloudSlope must bound
+		// the steeper surface, the top collapsing onto the base at a coverage edge.
         const float Horizontal = sqrt(max(1.0f - ProbeRate * ProbeRate, 0.0f));
 
         const float ClosingRate = max(Approach, 0.0f)
@@ -1133,15 +963,9 @@ bool TR_SlabMissed(TRColumn Col, float Height, float HalfStep)
 #endif
 }
 
-/** Density inside a column's slab, given the column and its noise
- *  displacements. N is the spun direction, Height the atmosphere fraction and
- *  HalfStep the step's half-extent along the radius; the caller has already
- *  tested TR_SlabMissed.
- *
- *  THE PROFILE IS INTEGRATED ACROSS THE STEP, not sampled at its midpoint: one
- *  midpoint sample makes the slab a near-binary decision per step, and as a
- *  surface drifts against the lattice that decision flips along a line on
- *  screen.
+/** Density inside a column's slab, past TR_SlabMissed. N is the spun
+ *  direction, HalfStep the step's radial half-extent. The profile is integrated
+ *  across the step: a midpoint sample flips along a line as a surface drifts.
  *
  *  Returns:
  *    x  Density in [0, 1]. Multiply by an extinction coefficient in the march.
@@ -1162,10 +986,8 @@ float4 TR_DensityInColumn(
 	TRFieldParams F)
 {
 #if TR_DEEP_DECK
-	// BELOW THE BASE THE DECK FILLS IN: coverage to full, erosion, detail and
-	// the eye's thinning away, so the deck is uniform at full density from the
-	// fill's depth down. Taken at the sample, like the ceiling fade: it varies
-	// over the fill, not over a step.
+	// Below the base the deck fills in to uniform full density, coverage,
+	// erosion, detail and thinning fading out; taken at the sample.
     const float Fill = TR_DeepFill(Height, Col, F);
 
     Col.Coverage = lerp(Col.Coverage, 1.0f, Fill);
@@ -1348,12 +1170,9 @@ float4 TR_DensityInColumn(
         Density = (P0 < 1.0f) ? saturate(Gain * Excess) : 0.0f;
     }
 
-	// THINNED IS FAINT: the eye's floor fades as it thins rather than holding
-	// its peak density. After erosion and coverage, as a plain scale, so the
-	// eyewall keeps its shape. PITFALL: A SLAB KEEPS ITS PEAK HOWEVER THIN, so
-	// at a high CloudOpticalDepth a thinned floor left at full density holds
-	// as an opaque sheet; scaled before erosion, the threshold cuts it away
-	// abruptly instead.
+	// The eye's floor fades as it thins, scaled after erosion and coverage so
+	// the eyewall keeps its shape. PITFALL: unscaled it stays an opaque sheet;
+	// scaled before erosion the threshold cuts it away abruptly.
     Density *= pow(saturate(Col.Thinning), F.EyeOpenPower);
 
 #if TR_DEEP_DECK
@@ -1365,18 +1184,10 @@ float4 TR_DensityInColumn(
 #endif
 }
 
-/** Density and material at a planet-local point, as (density, material,
- *  pressure, top), the column read where the sample stands; the deep deck
- *  returns TR_DeepBuried in place of pressure. HalfStep is the sample's own
- *  half-extent along the radius.
- *
- *  PITFALL: COLUMN KEYFRAMES ON A PER-RAY LATTICE DRAW THE LATTICE. Read at
- *  keyframes along each ray and interpolated between, the blending error
- *  follows the angle from the ray's closest approach to the sample, set by the
- *  ray's distance from the planet centre: lines concentric with the planet's
- *  disc, sliding as the camera moves, and a pinwheel at the nadir. Linear
- *  blending also creases at every keyframe, which the thresholds turn into
- *  rings through thin cloud. */
+/** (density, material, pressure, top) at a planet-local point, the column read
+ *  where the sample stands; the deep deck returns TR_DeepBuried for pressure.
+ *  PITFALL: columns keyframed along each ray and interpolated draw rings
+ *  concentric with the disc and a pinwheel at the nadir. */
 float4 TR_Density(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,

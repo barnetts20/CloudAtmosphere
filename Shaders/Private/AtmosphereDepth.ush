@@ -2,31 +2,22 @@
 
 // Scene depth for the atmosphere passes, read from the view's depth buffer.
 //
-// PITFALL: NOT CalcSceneDepth. The engine's device-Z to depth conversion
-// carries an epsilon that keeps a cleared sky from dividing by zero, and that
-// epsilon is a saturation term: it returns z / (1 + 1e-8 z), so depth reads 1%
-// short at 10 km, 50% short at 1,000 km, and never exceeds 1,000 km however far
-// the geometry is. Reconstructing from the raw device Z and the projection has
-// no such term and is exact to float32.
+// PITFALL: NOT CalcSceneDepth, whose epsilon saturates depth as z / (1 + 1e-8 z):
+// 1% short at 10 km, half at 1,000 km. The projection's inverse below is exact.
 
-/** Ray distance returned where the depth buffer holds no geometry. Finite so it
- *  survives the segment math, which only takes minima against it. */
+/** Ray distance where the buffer holds no geometry, finite for the minima. */
 #ifndef ATMO_NO_OCCLUDER_DISTANCE
 #define ATMO_NO_OCCLUDER_DISTANCE 1e30f
 #endif
 
-/** Representative depth of a ray that met neither cloud nor a surface, as the
- *  march writes it and the resolve reads it: a reprojection treats it as a
- *  direction. */
+/** Depth of a ray that met nothing, which the resolve reprojects as a direction. */
 #define ATMO_SKY_DEPTH (-1.0f)
 
 /** The view's scene depth, bound by each pass that reads it. */
 Texture2D<float> AtmoSceneDepth;
 
-/** Raw device Z at a depth buffer UV, at the texel a point sample would read,
- *  clamped to the view rect: the buffer is larger than the view under a screen
- *  percentage, texels outside it hold stale depth, and the last march cells
- *  can fall past its edge. */
+/** Raw device Z at a buffer UV, clamped to the view rect: under a screen
+ *  percentage the texels outside it hold stale depth. */
 float Atmo_LoadDeviceZ(float2 BufferUV)
 {
     const float2 RectMin = View.ViewRectMin.xy;
@@ -36,10 +27,8 @@ float Atmo_LoadDeviceZ(float2 BufferUV)
     return AtmoSceneDepth.Load(int3(Texel, 0));
 }
 
-/** View-axis depth from a raw device Z, inverting the perspective projection
- *  in place: deviceZ = A + B / z. Reverse Z with an infinite far plane has
- *  A = 0 and clears the sky to 0, which reads as no occluder. The passes skip
- *  views that are not perspective. */
+/** View-axis depth from device Z = A + B / z (perspective only). The reverse-Z
+ *  clear of 0 reads as no occluder; a finite far plane would place sky at it. */
 float Atmo_DeviceZToDepth(float deviceZ)
 {
     const float A = View.ViewToClip[2][2];
@@ -47,7 +36,7 @@ float Atmo_DeviceZToDepth(float deviceZ)
 
     const float denom = deviceZ - A;
 
-    return denom > 0.0f ? B / denom : ATMO_NO_OCCLUDER_DISTANCE;
+    return (deviceZ > 0.0f && denom > 0.0f) ? B / denom : ATMO_NO_OCCLUDER_DISTANCE;
 }
 
 /** Exact view-axis scene depth at a buffer UV. */
@@ -56,10 +45,8 @@ float Atmo_SceneDepthAt(float2 bufferUV)
     return Atmo_DeviceZToDepth(Atmo_LoadDeviceZ(bufferUV));
 }
 
-/** A view-axis scene depth as a TRUE RAY DISTANCE, the form the march spends
- *  as a bound on its ray parameter: the depth over the ray's cosine to the view
- *  axis. rayDir is the world direction through the pixel the depth was read at,
- *  so the depth and the ray it bounds come from one pixel by construction. */
+/** A view-axis depth as a ray distance, the march's bound, for the ray through
+ *  the pixel the depth was read at. */
 float Atmo_SceneRayDistance(float depth, float3 rayDir)
 {
     return depth / max(dot(rayDir, View.ViewForward), 1e-3f);
