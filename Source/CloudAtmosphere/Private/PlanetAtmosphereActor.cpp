@@ -127,6 +127,13 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
         UE_LOG(LogCloudAtmosphere, Warning, TEXT("PlanetAtmosphereActor: Failed to load default sim config"));
     }
 
+    // The gas giant's noise: broad structure stretched tall through the deep
+    // deck, and fine detail.
+    GasGiantStructureLayer.Scale = 1.5f;
+    GasGiantStructureLayer.Aspect = 20.0f;
+    GasGiantDetailLayer.Scale = 24.0f;
+    GasGiantDetailLayer.Aspect = 8.0f;
+
     // The gas giant starts from the terrestrial tune.
     Air = TerrestrialAir;
     Ambient = TerrestrialAmbient;

@@ -22,6 +22,7 @@ namespace FlowSimShader
 		OutEnvironment.SetDefine(TEXT("FLOWSIM_LINE_MAX"), MaxGridLongitude);
 		OutEnvironment.SetDefine(TEXT("FLOWSIM_COLUMN_MAX"), MaxGridLatitude);
 		OutEnvironment.SetDefine(TEXT("FLOWSIM_MAX_CELLS"), MaxStormCells);
+		OutEnvironment.SetDefine(TEXT("FLOWSIM_MAX_PERPETUAL"), MaxPerpetualStorms);
 
 		// The Rhs pass reads the R32F UAV it also writes. R32F is in the
 		// guaranteed typed-UAV-load set; every other UAV here is write-only, which

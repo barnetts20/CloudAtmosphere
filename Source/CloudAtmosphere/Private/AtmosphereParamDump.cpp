@@ -200,6 +200,24 @@ namespace AtmosphereDump
 		Derived->SetStringField(TEXT("Grid"), FString::Printf(TEXT("%dx%dx%d"), Params.GridSize.X, Params.GridSize.Y, Layers));
 		Derived->SetField(TEXT("LayerDepth"), Floats(MakeArrayView(Params.Stack.Depth, Layers)));
 		Derived->SetField(TEXT("ModeWaveSpeed"), Floats(Speeds));
+
+		// Each perpetual storm's settled latitude in degrees, its longitude rate
+		// in radians per unit sim time, and its spin from the shear, 1
+		// counterclockwise seen from outside.
+		TArray<float> PerpetualLatitudes;
+		TArray<float> PerpetualRates;
+		TArray<float> PerpetualSenses;
+
+		for (int32 i = 0; i < Params.PerpetualCount; ++i)
+		{
+			PerpetualLatitudes.Add(FMath::RadiansToDegrees(Params.PerpetualShape[i].X));
+			PerpetualRates.Add((float)Params.PerpetualRate[i]);
+			PerpetualSenses.Add(Params.PerpetualLook[i].X >= 0.0f ? 1.0f : -1.0f);
+		}
+
+		Derived->SetField(TEXT("PerpetualLatitudes"), Floats(PerpetualLatitudes));
+		Derived->SetField(TEXT("PerpetualRates"), Floats(PerpetualRates));
+		Derived->SetField(TEXT("PerpetualSenses"), Floats(PerpetualSenses));
 		Out->SetObjectField(TEXT("Derived"), Derived);
 
 		Describe(UFlowSimConfig::StaticClass(), Config, GetDefault<UFlowSimConfig>(), Current, *Out);

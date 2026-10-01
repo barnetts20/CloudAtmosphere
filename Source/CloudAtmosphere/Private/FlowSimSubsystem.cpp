@@ -259,6 +259,116 @@ namespace
 		return Jets + ShearShare(Layer, LayerCountOf(Config)) * Speeds.ThermalShear * FlowSimProfile::ThermalShape(Config, Mu);
 	}
 
+	/** The layers' mean zonal angular rate at mu. */
+	float MeanZonalRate(const UFlowSimConfig& Config, const FFlowSimScales& Speeds, float Mu)
+	{
+		const int32 Layers = LayerCountOf(Config);
+		float Sum = 0.0f;
+
+		for (int32 k = 0; k < Layers; ++k)
+		{
+			Sum += LayerZonalRate(Config, Speeds, Mu, k);
+		}
+
+		return Sum / (float)Layers;
+	}
+
+	/** The latitude nearest Requested, radians, where the layers' mean zonal
+	 *  flow changes direction: the middle of the shear zone between two
+	 *  opposite jets. Searched out to 45 degrees either side; Requested where
+	 *  none lies within it. */
+	float NearestFlowReversal(const UFlowSimConfig& Config, const FFlowSimScales& Speeds, float Requested)
+	{
+		const float Step = FMath::DegreesToRadians(0.25f);
+		const float Limit = FMath::DegreesToRadians(85.0f);
+
+		const auto Speed = [&Config, &Speeds](float Lat)
+			{
+				return MeanZonalRate(Config, Speeds, FMath::Sin(Lat)) * FMath::Cos(Lat);
+			};
+
+		for (int32 i = 0; i < 180; ++i)
+		{
+			for (const float Side : { -1.0f, 1.0f })
+			{
+				const float A = Requested + Side * (float)i * Step;
+				const float B = A + Side * Step;
+
+				if (FMath::Abs(A) > Limit || FMath::Abs(B) > Limit)
+				{
+					continue;
+				}
+
+				const float SpeedA = Speed(A);
+				const float SpeedB = Speed(B);
+
+				if (SpeedA == 0.0f)
+				{
+					return A;
+				}
+
+				if (SpeedA * SpeedB < 0.0f)
+				{
+					return A + (B - A) * SpeedA / (SpeedA - SpeedB);
+				}
+			}
+		}
+
+		return Requested;
+	}
+
+	/** The zonal flow a perpetual storm sits in: the layers' mean, sampled
+	 *  along its latitude axis and weighted by a wind profile peaking at its
+	 *  eyewall, so the two sides of its eyewall count most. Speed is eastward,
+	 *  at the storm's centre; vorticity is relative, positive counterclockwise
+	 *  seen from outside. */
+	struct FPerpetualBackground
+	{
+		float Speed = 0.0f;
+		float Vorticity = 0.0f;
+	};
+
+	FPerpetualBackground PerpetualBackground(const UFlowSimConfig& Config, const FFlowSimScales& Speeds,
+		float CentreLat, float HalfHeight, float Collar)
+	{
+		const auto MeanRate = [&Config, &Speeds](float M)
+			{
+				return MeanZonalRate(Config, Speeds, M);
+			};
+
+		constexpr int32 Taps = 8;
+		constexpr float Step = 1e-3f;
+
+		double Speed = 0.0;
+		double Vorticity = 0.0;
+		double Weight = 0.0;
+
+		for (int32 t = -Taps; t <= Taps; ++t)
+		{
+			const float R = FMath::Abs((float)t / (float)Taps);
+			const float Inside = R / Collar;
+			const float Outside = 1.0f - FMath::Clamp((R - Collar) / (1.0f - Collar), 0.0f, 1.0f);
+			const float W = (R < Collar) ? Inside * Inside : Outside * Outside;
+
+			const float Lat = FMath::Clamp(CentreLat + (float)t / (float)Taps * HalfHeight, -UE_HALF_PI + 1e-3f, UE_HALF_PI - 1e-3f);
+			const float M = FMath::Sin(Lat);
+			const float Hi = FMath::Min(M + Step, 1.0f);
+			const float Lo = FMath::Max(M - Step, -1.0f);
+			const float Rate = MeanRate(M);
+			const float Slope = (MeanRate(Hi) - MeanRate(Lo)) / (Hi - Lo);
+
+			// zeta = 2 mu R - (1 - mu^2) dR/dmu for an angular rate R(mu).
+			Speed += W * Rate * FMath::Cos(Lat);
+			Vorticity += W * (2.0f * M * Rate - (1.0f - M * M) * Slope);
+			Weight += W;
+		}
+
+		FPerpetualBackground Out;
+		Out.Speed = (float)(Speed / FMath::Max(Weight, 1e-6));
+		Out.Vorticity = (float)(Vorticity / FMath::Max(Weight, 1e-6));
+		return Out;
+	}
+
 	/** Eigen-decomposition of a symmetric matrix by cyclic Jacobi rotations:
 	 *  S = Q diag(Lambda) Q^T, eigenvectors in Q's columns. Exact to double
 	 *  precision in a few sweeps at the stack's size. */
@@ -618,9 +728,25 @@ void UFlowSimSubsystem::ReportInertSettings() const
 			TEXT("StormCellInflow and the layers' DepthScale do nothing."));
 	}
 
-	if (Config->MaxStormCells <= 0)
+	if (Config->PerpetualStorms.Num() > FlowSimShader::MaxPerpetualStorms)
 	{
-		UE_LOG(LogFlowSim, Log, TEXT("MaxStormCells is 0: the storm cell and hurricane look settings do nothing."));
+		UE_LOG(LogFlowSim, Warning,
+			TEXT("PerpetualStorms holds %d storms; only the first %d run."),
+			Config->PerpetualStorms.Num(), FlowSimShader::MaxPerpetualStorms);
+	}
+
+	const int32 Perpetual = FMath::Min(Config->PerpetualStorms.Num(), FlowSimShader::MaxPerpetualStorms);
+
+	if (FMath::Max(Config->MaxStormCells, 0) + Perpetual > FlowSimShader::MaxStormCells)
+	{
+		UE_LOG(LogFlowSim, Warning,
+			TEXT("MaxStormCells %d and %d perpetual storms need more than %d slots; the hurricanes get %d."),
+			Config->MaxStormCells, Perpetual, FlowSimShader::MaxStormCells, FlowSimShader::MaxStormCells - Perpetual);
+	}
+
+	if (Config->MaxStormCells <= 0 && Perpetual == 0)
+	{
+		UE_LOG(LogFlowSim, Log, TEXT("MaxStormCells is 0 with no perpetual storms: the storm cell and hurricane look settings do nothing."));
 	}
 	else
 	{
@@ -787,12 +913,19 @@ void UFlowSimSubsystem::ReportCourant() const
 		Speeds.CloudLifetime / Day, Speeds.StormLifetime / Day, Speeds.CellLifetime / Day,
 		Speeds.ForcingLifetime / Day, FMath::RadiansToDegrees(Speeds.CellRadius));
 
-	if (TopWind + TopEddies > 0.7f || (Config->MaxStormCells > 0 && Cells > 0.7f))
+	float PerpetualWind = 0.0f;
+
+	for (int32 i = 0; i < FMath::Min(Config->PerpetualStorms.Num(), FlowSimShader::MaxPerpetualStorms); ++i)
+	{
+		PerpetualWind = FMath::Max(PerpetualWind, Config->PerpetualStorms[i].Wind);
+	}
+
+	if (TopWind + TopEddies > 0.7f || (Config->MaxStormCells > 0 && Cells > 0.7f) || PerpetualWind > 0.7f)
 	{
 		UE_LOG(LogFlowSim, Warning,
 			TEXT("Winds past 0.7 of the speed root reach the ceiling, which then drags the ")
 			TEXT("zonal mean and clips eddies and vortices instead of the flow settling. ")
-			TEXT("Lower JetSpeed, ShearSpeed, EddySpeed or StormCellSpeed."));
+			TEXT("Lower JetSpeed, ShearSpeed, EddySpeed, StormCellSpeed or a perpetual storm's Wind."));
 	}
 }
 
@@ -1358,7 +1491,65 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.CellCoreFollow = Scales.CellCoreFollow;
 	Out.CellEyeSoftness = FMath::Clamp(Config->StormCellEyeSoftness, 0.05f, 1.0f);
 
-	Out.CellCount = FMath::Clamp(Config->MaxStormCells, 0, FlowSimShader::MaxStormCells);
+
+	// -- Perpetual storms -------------------------------------------------------
+	//
+	// The first cell slots. Each settles at the flow reversal nearest its
+	// latitude, turns with the shear there and moves at the flow across it,
+	// scaled by its steering, plus its drift, in closed form, so
+	// FillCommonParameters places it at any time.
+	const float Deformation = FMath::Max(Config->DeformationRadius, 0.01f);
+
+	// The eyewall spans two grid columns at least, or the ring its wind is
+	// measured on reads inside a cell or two and the gain pins.
+	const float LeastRadius = FMath::Max(2.0f * UE_TWO_PI / (Wall * (float)FMath::Max(Out.GridSize.X, 1)), FMath::DegreesToRadians(0.5f));
+
+	Out.PerpetualCount = FMath::Min(Config->PerpetualStorms.Num(), FlowSimShader::MaxPerpetualStorms);
+	Out.PerpetualForcing = FMath::Max(Config->PerpetualStormForcing, 0.0f) / Scales.Turnover;
+
+	for (int32 i = 0; i < Out.PerpetualCount; ++i)
+	{
+		const FFlowPerpetualStorm& Entry = Config->PerpetualStorms[i];
+		const float Lat = NearestFlowReversal(*Config, Scales, FMath::DegreesToRadians(FMath::Clamp(Entry.Latitude, -85.0f, 85.0f)));
+		const float HalfHeight = FMath::Clamp(Entry.Radius * Deformation,
+			FMath::Min(LeastRadius, FMath::DegreesToRadians(45.0f)), FMath::DegreesToRadians(45.0f));
+
+		// THE SPIN FOLLOWS THE SHEAR: positive turns counterclockwise seen from
+		// outside, where the flow across the storm has positive vorticity.
+		// PITFALL: a spin against the shear is torn apart by the jets.
+		const FPerpetualBackground Background = PerpetualBackground(*Config, Scales, Lat, HalfHeight, Wall);
+		const float Sense = (Background.Vorticity >= 0.0f) ? 1.0f : -1.0f;
+		const float Cover = FMath::Clamp(Entry.Cover, 0.0f, 0.99f);
+
+		Out.PerpetualShape[i] = FVector4f(
+			Lat,
+			FMath::DegreesToRadians(Entry.Longitude),
+			HalfHeight,
+			FMath::Clamp(Entry.Aspect, 1.0f, 4.0f));
+
+		// Cover as a lift rate against the cloud's decay, as CellCloud.x; Lift
+		// as the pressure drop, as CellDraft.w.
+		Out.PerpetualLook[i] = FVector4f(
+			Sense * FMath::Clamp(Entry.Wind, 0.0f, 0.9f) * Scales.Root,
+			FMath::Clamp(Entry.Storm, 0.0f, 1.0f),
+			FMath::Clamp(Entry.Lift, 0.0f, 2.0f),
+			Cover / (1.0f - Cover) / Out.CloudLifetime);
+
+		Out.PerpetualForm[i] = FVector4f(
+			FMath::Clamp(Entry.Spiral, -1.0f, 1.0f),
+			FMath::Clamp(Entry.Eye, 0.0f, 1.0f),
+			0.0f,
+			0.0f);
+
+		// Between balanced jets of opposite direction the flow across it nets
+		// to about zero and it holds its place; a stronger jet on one side
+		// carries it that way.
+		Out.PerpetualRate[i] = (double)(FMath::Clamp(Entry.Steering, 0.0f, 1.0f) * Background.Speed
+			+ FMath::Clamp(Entry.Drift, -1.0f, 1.0f) * Scales.Root) / (double)FMath::Cos(Lat);
+	}
+
+	// The perpetual storms first, the hurricanes after them.
+	Out.CellCount = FMath::Clamp(FMath::Max(Config->MaxStormCells, 0) + Out.PerpetualCount, 0, FlowSimShader::MaxStormCells);
 
 	Out.StepIndex = StepsCompleted;
 

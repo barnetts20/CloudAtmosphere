@@ -35,6 +35,12 @@ static_assert(UFlowSnapshot::TrailingFloats == FFlowSimulation::StateTrailingFlo
 	&& FFlowSimulation::StateTrailingFloats == 8 * FlowSimShader::MaxStormCells,
 	"Snapshot layout and solver state disagree about the storm cells.");
 
+static_assert(sizeof(FFlowSimParams::PerpetualShape) == FlowSimShader::MaxPerpetualStorms * sizeof(FVector4f)
+	&& sizeof(FFlowSimParams::PerpetualLook) == FlowSimShader::MaxPerpetualStorms * sizeof(FVector4f)
+	&& sizeof(FFlowSimParams::PerpetualForm) == FlowSimShader::MaxPerpetualStorms * sizeof(FVector4f)
+	&& sizeof(FFlowSimParams::PerpetualRate) == FlowSimShader::MaxPerpetualStorms * sizeof(double),
+	"FFlowSimParams holds one perpetual storm per slot.");
+
 /** Everything registered into this frame's graph. Bundled so the pass helpers
  *  take one argument, and so the ping-pong swap is a single Swap(). */
 struct FFlowSimResources
@@ -187,6 +193,21 @@ namespace
 		P.CellEyeSoftness = Params.CellEyeSoftness;
 		P.CellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
 		P.StepIndex = Params.StepIndex;
+
+		// Each perpetual storm's longitude at PerpetualTime, in double and
+		// wrapped, so it holds its precision however long the sim has run.
+		P.PerpetualCount = FMath::Clamp(Params.PerpetualCount, 0, FlowSimShader::MaxPerpetualStorms);
+		P.PerpetualForcing = Params.PerpetualForcing;
+
+		for (int32 i = 0; i < FlowSimShader::MaxPerpetualStorms; ++i)
+		{
+			FVector4f Shape = Params.PerpetualShape[i];
+			Shape.Y = (float)FMath::Fmod((double)Shape.Y + Params.PerpetualRate[i] * Params.PerpetualTime, 2.0 * UE_DOUBLE_PI);
+
+			P.PerpetualShape[i] = Shape;
+			P.PerpetualLook[i] = Params.PerpetualLook[i];
+			P.PerpetualForm[i] = Params.PerpetualForm[i];
+		}
 
 		P.NoiseDriftRate = Params.NoiseDriftRate;
 		P.NoiseResetTime = Params.NoiseResetTime;
@@ -422,7 +443,8 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 
 	// Two float4 of state per slot (captured in snapshots), then two of vortex
 	// gains, two of inflow gains, one of health and one of the low per
-	// slot (rewritten each step). Must match SIM_CELL_BUFFER_SIZE.
+	// slot (rewritten each step). Perpetual storms take the first slots. Must
+	// match SIM_CELL_BUFFER_SIZE.
 	PooledCells = AllocatePooledBuffer(
 		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), 8 * FlowSimShader::MaxStormCells),
 		TEXT("FlowSim.Cells"));
@@ -621,8 +643,9 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 	AddReconstructPass(GraphBuilder, Params, R, false);
 	AddCellsPass(GraphBuilder, Params, R);
 
-	// Without cells Predict reads none of the fields, so they are left stale.
-	if (Params.CellCount > 0)
+	// Without cells or perpetual storms Predict reads none of the fields, so
+	// they are left stale.
+	if (Params.CellCount > 0 || Params.PerpetualCount > 0)
 	{
 		AddCellFieldPass(GraphBuilder, Params, R);
 	}
@@ -813,7 +836,12 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	R.Cells = GraphBuilder.RegisterExternalBuffer(PooledCells);
 	R.CellFlow = GraphBuilder.RegisterExternalTexture(PooledCellFlow);
 	R.CellColumn = GraphBuilder.RegisterExternalTexture(PooledCellColumn);
-	const TRDGUniformBufferRef<FFlowSimUniformParameters> FrameUniforms = CreateUniforms(GraphBuilder, Params);
+	// The frame's passes place the perpetual storms at the output's time,
+	// where the resample stamps them.
+	FFlowSimParams FrameParams = Params;
+	FrameParams.PerpetualTime = Params.Time + ((double)NumSubsteps - 1.0 + (double)Params.StateBlend) * Params.DeltaTime;
+
+	const TRDGUniformBufferRef<FFlowSimUniformParameters> FrameUniforms = CreateUniforms(GraphBuilder, FrameParams);
 
 	R.Uniforms = FrameUniforms;
 	R.Current = CurrentFace;
@@ -882,6 +910,7 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 		FFlowSimParams StepParams = Params;
 		StepParams.Time = Params.Time + (double)Step * Params.DeltaTime;
 		StepParams.StepIndex = Params.StepIndex + Step;
+		StepParams.PerpetualTime = StepParams.Time + Params.DeltaTime;
 
 		AddSubstep(GraphBuilder, StepParams, R);
 	}
@@ -912,4 +941,4 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	// three times per substep and the tracers once, so both genuinely alternate.
 	CurrentFace = R.Current;
 	CurrentTracer = R.TracerCurrent;
-}
+}

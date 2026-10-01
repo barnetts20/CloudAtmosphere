@@ -14,6 +14,14 @@
  *  PITFALL: A MEMBER NAMED LIKE ITS ALIAS BREAKS THE ENGINE'S PREPROCESSOR,
  *  which expands a self-referential macro twice when it is passed through
  *  another macro, as the stack matrices are through SIM_MATRIX. */
+namespace FlowSimShader
+{
+	/** Perpetual storm slots: the uniform arrays' length, and the count
+	 *  MainCellsCS updates on its first threads, so no more than
+	 *  MaxStormCells. */
+	static constexpr int32 MaxPerpetualStorms = 4;
+}
+
 BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FFlowSimUniformParameters, )
 
 // -- Grid ---------------------------------------------------------------
@@ -87,6 +95,13 @@ SHADER_PARAMETER(float, CellCoreFollow)
 SHADER_PARAMETER(float, CellEyeSoftness)
 SHADER_PARAMETER(int32, CellCount)
 SHADER_PARAMETER(int32, StepIndex)
+
+// -- Perpetual storms ---------------------------------------------------
+SHADER_PARAMETER(int32, PerpetualCount)
+SHADER_PARAMETER(float, PerpetualForcing)
+SHADER_PARAMETER_ARRAY(FVector4f, PerpetualShape, [FlowSimShader::MaxPerpetualStorms])
+SHADER_PARAMETER_ARRAY(FVector4f, PerpetualLook, [FlowSimShader::MaxPerpetualStorms])
+SHADER_PARAMETER_ARRAY(FVector4f, PerpetualForm, [FlowSimShader::MaxPerpetualStorms])
 
 // -- Noise coordinates --------------------------------------------------
 SHADER_PARAMETER(float, NoiseDriftRate)
@@ -202,6 +217,8 @@ namespace FlowSimShader
 	/** Storm cell slots, and the thread group of the pass that advances them.
 	 *  PITFALL: UFlowSnapshot::CellFloats is sized from this too. */
 	static constexpr int32 MaxStormCells = 32;
+
+	static_assert(MaxPerpetualStorms <= MaxStormCells, "MainCellsCS updates the perpetual storms on its cell threads.");
 
 	/** Gutter texels around each atlas face. PITFALL: must equal
 	 *  FLOW_ATLAS_GUTTER in FlowField.ush, which the materials read without
