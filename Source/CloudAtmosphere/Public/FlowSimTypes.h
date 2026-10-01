@@ -709,6 +709,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Dynamics", meta = (ClampMin = "0.0", UIMin = "0.05", UIMax = "1.0"))
 	float GenesisStormRatio = 0.25f;
 
+	/** How far humidity stands in for a parent storm, at genesis and while a
+	 *  cell lives, scaled by how far the bottom layer is past the genesis
+	 *  humidity toward saturation. At 0 a cell needs the sim's storm under it,
+	 *  which the stirring's eddies raise, so EddySpeed sets how often
+	 *  hurricanes form; at 1 a saturated column is parent enough, and they form
+	 *  at StormCellSpawnRate wherever the window and humidity pass, building
+	 *  their own storm through StormCellSustainRatio and their own vortex. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Dynamics", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float GenesisMoisture = 0.0f;
+
 	/** Normalised cyclonic vorticity at which a seed counts fully; below it the
 	 *  seed is weighted down. Zero ignores spin. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Dynamics", meta = (ClampMin = "0.0"))
@@ -1255,6 +1265,9 @@ struct FFlowSimParams
 	float CellMaturity = 0.0f;
 	float CellSpacing = 0.0f;
 	float CellDryTolerance = 0.0f;
+
+	/** GenesisMoisture: how far humidity stands in for a parent storm. */
+	float CellMoisture = 0.0f;
 	float PerpetualClearance = 0.0f;
 	int32 CellCount = 0;
 

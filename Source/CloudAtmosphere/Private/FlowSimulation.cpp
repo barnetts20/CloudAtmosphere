@@ -200,6 +200,7 @@ namespace
 		P.CellMaturity = Params.CellMaturity;
 		P.CellSpacing = Params.CellSpacing;
 		P.CellDryTolerance = Params.CellDryTolerance;
+		P.CellMoisture = Params.CellMoisture;
 		P.CellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
 		P.StepIndex = Params.StepIndex;
 

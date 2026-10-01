@@ -1531,6 +1531,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.CellMaturity = FMath::Max(Config->StormCellMaturity, 0.001f);
 	Out.CellSpacing = FMath::Max(Config->StormCellSpacing, 0.0f);
 	Out.CellDryTolerance = Config->StormCellDryTolerance;
+	Out.CellMoisture = FMath::Clamp(Config->GenesisMoisture, 0.0f, 1.0f);
 
 
 	// -- Perpetual storms -------------------------------------------------------

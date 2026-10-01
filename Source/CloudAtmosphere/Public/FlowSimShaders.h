@@ -102,6 +102,7 @@ SHADER_PARAMETER(float, CellEyeDecay)
 SHADER_PARAMETER(float, CellMaturity)
 SHADER_PARAMETER(float, CellSpacing)
 SHADER_PARAMETER(float, CellDryTolerance)
+SHADER_PARAMETER(float, CellMoisture)
 SHADER_PARAMETER(int32, CellCount)
 SHADER_PARAMETER(int32, StepIndex)
 

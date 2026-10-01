@@ -239,6 +239,9 @@
 #define SimCellSpacing FlowSimUB.CellSpacing
 #define SimCellDryTolerance FlowSimUB.CellDryTolerance
 
+/** How far humidity stands in for a parent storm (GenesisMoisture). */
+#define SimCellMoisture FlowSimUB.CellMoisture
+
 /** Live cell slots, up to FLOWSIM_MAX_CELLS. */
 #define SimCellCount FlowSimUB.CellCount
 
@@ -908,6 +911,21 @@ float SimCellHumidityFavour(float Humidity)
     return saturate((Humidity - Floor) / max(1.0f - Floor, 1e-3f));
 }
 
+/** The share of a parent storm humidity stands in for: SimCellMoisture times
+ *  how far Humidity is past the genesis humidity, 0 there to 1 at saturation. */
+float SimCellMoistureParent(float Humidity)
+{
+    return SimCellMoisture * saturate((Humidity - SimCellGenesis.y) / max(1.0f - SimCellGenesis.y, 1e-3f));
+}
+
+/** The bottom layer's relative humidity at P. */
+float SimCellHumidity(float3 P)
+{
+    const uint L = (uint) SimGridSize.z;
+
+    return SimSampleBilinear4(SimLatLonSRV, SimDirectionToGrid(P), (L - 1u) + 3u * L).w;
+}
+
 /** The column's storm at P, and the bottom layer's vorticity in the sense a
  *  storm cell turns with there (SimSpinSense), normalised as the output
  *  carries it. */
@@ -930,14 +948,25 @@ float SimCellPressure(float3 P)
 }
 
 /** How good a seed P is: its storm weighted by cyclonic spin, zero below the
- *  storm a seed needs. */
+ *  storm a seed needs; or, as a storm of that share of the genesis storm, the
+ *  part of a parent its humidity stands in for, which needs no spin since the
+ *  cell spins up its own vortex. */
 float SimCellSeedScore(float3 P)
 {
     const float2 Parent = SimCellParent(P);
 
     const float Spin = (SimCellGenesis.w > 0.0f) ? saturate(Parent.y / SimCellGenesis.w) : 1.0f;
 
-    return (Parent.x >= SimCellGenesis.z) ? Parent.x * Spin : 0.0f;
+    float Score = (Parent.x >= SimCellGenesis.z) ? Parent.x * Spin : 0.0f;
+
+    BRANCH
+
+    if (SimCellMoisture > 0.0f)
+    {
+        Score = max(Score, SimCellGenesis.z * SimCellMoistureParent(SimCellHumidity(P)));
+    }
+
+    return Score;
 }
 
 // -- Storm vortex -----------------------------------------------------------
@@ -2618,7 +2647,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
     const float3 Health = float3(
 		Conditions.x,
 		SimCellHumidityFavour(Conditions.y),
-		saturate(ParentPeak / max(SimCellGenesis.z, 1e-3f)));
+		saturate(max(ParentPeak / max(SimCellGenesis.z, 1e-3f), SimCellMoistureParent(Conditions.y))));
 
     float Favour = (Age > SimCellLife.w) ? 0.0f : Health.x * Health.y * Health.z;
 
@@ -3884,7 +3913,8 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
     if (SimDebugMode == SIM_DEBUG_GENESIS)
     {
 		// What a seed here is judged on, each against its gate: red the genesis
-		// window, green humidity, blue the storm. Bright where all three pass,
+		// window, green humidity, blue the storm or the share of it humidity
+		// stands in for. Bright where all three pass,
 		// dim where any fails, dimmer within SimCellSpacing radii of a live cell or
 		// SimPerpetualClearance of a perpetual storm, where no seed may spawn.
         const float3 N = SimDirection(SimColumnToLon((float) C.x), Mu);
@@ -3893,7 +3923,7 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
         const float3 Gate = float3(
 			Conditions.x / SIM_GENESIS_WINDOW_GATE,
 			Conditions.y / max(SimCellGenesis.y, 1e-3f),
-			SimCellParent(N).x / max(SimCellGenesis.z, 1e-3f));
+			max(SimCellParent(N).x / max(SimCellGenesis.z, 1e-3f), SimCellMoistureParent(Conditions.y)));
 
         bool bExcluded = false;
 
