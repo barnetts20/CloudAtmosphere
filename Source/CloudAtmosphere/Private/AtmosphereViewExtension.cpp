@@ -108,6 +108,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereMarchParameters, )
 	SHADER_PARAMETER_SAMPLER(SamplerState, ShadowTargetSampler)
 	SHADER_PARAMETER_TEXTURE(Texture2D, TransmittanceTable)
 	SHADER_PARAMETER_SAMPLER(SamplerState, TransmittanceTableSampler)
+	SHADER_PARAMETER_TEXTURE(Texture2D<float>, CoverageThreshold)
 
 	SHADER_PARAMETER(FUintVector2, MarchCells)
 	SHADER_PARAMETER(uint32, MarchStride)
@@ -263,6 +264,7 @@ void FAtmosphereMarchParams::ResolveTextures_RenderThread()
 	FlowTexture = RenderTarget(FlowResource);
 	ShadowTexture = RenderTarget(ShadowResource);
 	TransmittanceTexture = RenderTarget(TransmittanceResource);
+	CoverageTexture = RenderTarget(CoverageResource);
 	StructureTexture = Texture(StructureResource);
 	DetailTexture = Texture(DetailResource);
 	BlueNoiseTexture = Texture(BlueNoiseResource);
@@ -393,6 +395,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		|| !SceneTextures || !SceneTextures->SceneDepthTexture
 		|| !March.FlowTexture.IsValid() || !March.ShadowTexture.IsValid()
 		|| !March.TransmittanceTexture.IsValid() || !March.BlueNoiseTexture.IsValid()
+		|| !March.CoverageTexture.IsValid()
 		|| View.bIsReflectionCapture || View.bIsPlanarReflection
 		|| !View.IsPerspectiveProjection()
 		|| View.GetFeatureLevel() < ERHIFeatureLevel::SM5)
@@ -589,6 +592,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		P->ShadowTargetSampler = BilinearClamp;
 		P->TransmittanceTable = March.TransmittanceTexture;
 		P->TransmittanceTableSampler = BilinearClamp;
+		P->CoverageThreshold = March.CoverageTexture;
 
 		P->MarchCells = FUintVector2((uint32)MarchCells.X, (uint32)MarchCells.Y);
 		P->MarchStride = MarchN;

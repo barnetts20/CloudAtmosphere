@@ -126,11 +126,15 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	 *  unwritten and the march reads whatever the target held. */
 	FTextureRenderTargetResource* MapResource = nullptr;
 
+	/** One texel the coverage pass writes and the bake and the march read. */
+	FTextureRenderTargetResource* CoverageResource = nullptr;
+
 	/** Render thread only, filled by ResolveTextures_RenderThread. */
 	FTextureRHIRef FlowTexture;
 	FTextureRHIRef DetailTexture;
 	FTextureRHIRef StructureTexture;
 	FTextureRHIRef MapTexture;
+	FTextureRHIRef CoverageTexture;
 
 	void ResolveTextures_RenderThread();
 
@@ -141,6 +145,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	{
 		return FlowResource
 			&& MapResource
+			&& CoverageResource
 			&& MapSize.X > 0
 			&& MapSize.X == MapSize.Y
 			&& PlanetRadius > 0.0f;
@@ -179,7 +184,37 @@ SHADER_PARAMETER_SAMPLER(SamplerState, DetailVolumeSampler)
 SHADER_PARAMETER_TEXTURE(Texture3D, StructureVolume)
 SHADER_PARAMETER_SAMPLER(SamplerState, StructureVolumeSampler)
 
+SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, CoverageThreshold)
+
 END_SHADER_PARAMETER_STRUCT()
+
+/** The coverage pass: the field's pins and the flow in, one texel out. */
+BEGIN_SHADER_PARAMETER_STRUCT(FTerrestrialCoverageParameters, )
+
+SHADER_PARAMETER(float, PlanetRadius)
+SHADER_PARAMETER(float, HeightScale)
+SHADER_PARAMETER_STRUCT_INCLUDE(FTerrestrialFieldParameters, Field)
+
+SHADER_PARAMETER_TEXTURE(Texture2DArray, FlowTarget)
+SHADER_PARAMETER_SAMPLER(SamplerState, FlowTargetSampler)
+
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, CoverageUAV)
+
+END_SHADER_PARAMETER_STRUCT()
+
+/** The priority threshold covering CloudCover of the planet: MainCoverageCS,
+ *  one group, ahead of the bake. Both models' priority is the same function,
+ *  so it has no permutation. */
+class FTerrestrialCoverageCS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FTerrestrialCoverageCS);
+
+public:
+	using FParameters = FTerrestrialCoverageParameters;
+	SHADER_USE_PARAMETER_STRUCT(FTerrestrialCoverageCS, FGlobalShader);
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+};
 
 class FTerrestrialShadowBakeCS : public FGlobalShader
 {

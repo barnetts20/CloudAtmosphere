@@ -28,6 +28,8 @@ SamplerState DetailVolumeSampler;
 Texture3D StructureVolume;
 SamplerState StructureVolumeSampler;
 
+/** One texel: the priority threshold MainCoverageCS solved this frame. */
+Texture2D<float> CoverageThreshold;
 
 /** The two material sets' extinction: rgb tint, amount in a. The map stores
  *  one scalar depth, so the bake weights density by the amount at each sample's
@@ -235,4 +237,83 @@ float BakeField_Sigma(float3 Pos, float3 BasisU, float3 BasisV, float TexelWorld
 void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
     AtmoBake_Texel(DispatchThreadId);
+}
+
+// ---------------------------------------------------------------------------
+// The coverage threshold
+//
+// The priority threshold that covers CloudCover of the planet: a histogram of
+// TR_Priority over equal-area directions, read from the top. One group, ahead
+// of the bake and the march, which read the texel it writes.
+// ---------------------------------------------------------------------------
+
+#define TR_COVERAGE_THREADS 256
+#define TR_COVERAGE_BINS TR_COVERAGE_THREADS
+
+/** Directions sampled, on a Fibonacci sphere. Each is one column read, so a
+ *  bin holds about 16 at 4096; finer than the flow, the samples repeat it. */
+#ifndef TR_COVERAGE_SAMPLES
+#define TR_COVERAGE_SAMPLES 4096
+#endif
+
+RWTexture2D<float> CoverageUAV;
+
+groupshared uint CoverageBins[TR_COVERAGE_BINS];
+
+[numthreads(TR_COVERAGE_THREADS, 1, 1)]
+void MainCoverageCS(uint Thread : SV_GroupIndex)
+{
+    CoverageBins[Thread] = 0u;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    const TRFieldParams F = TR_BUILD_FIELD();
+
+    for (uint i = Thread; i < TR_COVERAGE_SAMPLES; i += TR_COVERAGE_THREADS)
+    {
+        const float Z = 1.0f - (2.0f * float(i) + 1.0f) / float(TR_COVERAGE_SAMPLES);
+        const float Ring = sqrt(max(1.0f - Z * Z, 0.0f));
+        const float Phi = float(i) * 2.39996323f;
+
+        const TRColumnInputs In = TR_ReadColumn(
+			FlowTarget, FlowTargetSampler, float3(Ring * cos(Phi), Ring * sin(Phi), Z), F);
+
+        const uint Bin = min(uint(saturate(TR_Priority(In.Weather, F)) * TR_COVERAGE_BINS), TR_COVERAGE_BINS - 1u);
+
+        InterlockedAdd(CoverageBins[Bin], 1u);
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    if (Thread != 0u)
+    {
+        return;
+    }
+
+	// From the top until CloudCover of the samples lie above, interpolated
+	// within the bin that reaches it. Held at or above CoverageSoftness so a
+	// column without cloud is never covered.
+    const float Soft = F.CoverageSoftness;
+    const float Wanted = saturate(F.CloudCover) * float(TR_COVERAGE_SAMPLES);
+
+    float Threshold = 1.0f + Soft;
+    float Above = 0.0f;
+
+    if (Wanted > 0.0f)
+    {
+        for (int Bin = TR_COVERAGE_BINS - 1; Bin >= 0; Bin--)
+        {
+            const float Count = float(CoverageBins[Bin]);
+
+            if (Above + Count >= Wanted)
+            {
+                Threshold = (float(Bin + 1) - (Wanted - Above) / max(Count, 1.0f)) / float(TR_COVERAGE_BINS);
+                break;
+            }
+
+            Above += Count;
+        }
+    }
+
+    CoverageUAV[uint2(0, 0)] = clamp(Threshold, Soft, 1.0f + Soft);
 }

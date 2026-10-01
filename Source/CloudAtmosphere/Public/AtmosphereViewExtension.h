@@ -82,6 +82,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereMarchParams
 	FTextureRenderTargetResource* FlowResource = nullptr;
 	FTextureRenderTargetResource* ShadowResource = nullptr;
 	FTextureRenderTargetResource* TransmittanceResource = nullptr;
+	FTextureRenderTargetResource* CoverageResource = nullptr;
 	FTextureResource* StructureResource = nullptr;
 	FTextureResource* DetailResource = nullptr;
 	FTextureResource* BlueNoiseResource = nullptr;
@@ -89,6 +90,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereMarchParams
 	FTextureRHIRef FlowTexture;
 	FTextureRHIRef ShadowTexture;
 	FTextureRHIRef TransmittanceTexture;
+	FTextureRHIRef CoverageTexture;
 	FTextureRHIRef StructureTexture;
 	FTextureRHIRef DetailTexture;
 	FTextureRHIRef BlueNoiseTexture;
@@ -99,7 +101,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereMarchParams
 	 *  noise volume binds black and is left out by its amount, as in the bake. */
 	bool IsUsable() const
 	{
-		return FlowResource && ShadowResource && TransmittanceResource && BlueNoiseResource
+		return FlowResource && ShadowResource && TransmittanceResource && CoverageResource && BlueNoiseResource
 			&& PlanetRadius > 0.0f;
 	}
 };

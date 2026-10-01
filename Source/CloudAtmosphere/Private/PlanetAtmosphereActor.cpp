@@ -485,7 +485,7 @@ static FTerrestrialFieldParameters PackCloudField(const APlanetAtmosphereActor& 
     const float FloorRelief = bDeep ? A.GasGiantDeep.FloorRelief : 0.0f;
 
     Out.CloudCoverage = FVector4f(Coverage.CloudCover, Coverage.StormPriority, Coverage.CoverageSoftness, DeepFill);
-    Out.CloudType = FVector4f(Type.TypeBias, 0.0f, Type.TypeTropical, 0.0f);
+    Out.CloudType = FVector4f(Type.TypeBias, Coverage.CloudFull, Type.TypeTropical, 0.0f);
     Out.CloudLid = FVector4f(Lift.PressureScale, 0.0f, Lift.CeilingPressure, Type.StratusDepth);
     Out.CloudLift = FVector4f(Lift.BaseTropical, Lift.BasePressure, Lift.AltitudeGain, Lift.AltitudeLift);
     Out.CloudMotion = FVector4f(DriftAngle, NoisePhase, Warp.WarpShift, SpinAngle);
@@ -594,6 +594,27 @@ void APlanetAtmosphereActor::PrepareShadowTarget()
     }
 }
 
+void APlanetAtmosphereActor::PrepareCoverageTarget()
+{
+    if (!CoverageTarget)
+    {
+        CoverageTarget = NewObject<UTextureRenderTarget2D>(this, TEXT("CoverageTarget"), RF_Transient);
+    }
+
+    UTextureRenderTarget2D* Target = CoverageTarget;
+
+    if (Target->SizeX != 1 || Target->OverrideFormat != PF_R32_FLOAT || !Target->bCanCreateUAV)
+    {
+        Target->bCanCreateUAV = true;
+
+        // Above any priority: nothing is covered until the first pass runs.
+        Target->ClearColor = FLinearColor(2.0f, 0.0f, 0.0f, 0.0f);
+
+        Target->InitCustomFormat(1, 1, PF_R32_FLOAT, true);
+        Target->UpdateResourceImmediate(true);
+    }
+}
+
 void APlanetAtmosphereActor::PrepareTransmittanceTable()
 {
     if (!TransmittanceTable)
@@ -675,11 +696,13 @@ bool APlanetAtmosphereActor::FillShadowRequest(
     }
 
     PrepareShadowTarget();
+    PrepareCoverageTarget();
 
     Params.FlowResource = FlowTarget->GameThread_GetRenderTargetResource();
     Params.MapResource = ShadowTarget->GameThread_GetRenderTargetResource();
+    Params.CoverageResource = CoverageTarget->GameThread_GetRenderTargetResource();
 
-    if (!Params.FlowResource || !Params.MapResource)
+    if (!Params.FlowResource || !Params.MapResource || !Params.CoverageResource)
     {
         return false;
     }
@@ -1002,6 +1025,7 @@ bool APlanetAtmosphereActor::FillMarchParams(
     Out.FlowResource = FlowTarget ? FlowTarget->GameThread_GetRenderTargetResource() : nullptr;
     Out.ShadowResource = ShadowTarget ? ShadowTarget->GameThread_GetRenderTargetResource() : nullptr;
     Out.TransmittanceResource = TransmittanceTable ? TransmittanceTable->GameThread_GetRenderTargetResource() : nullptr;
+    Out.CoverageResource = CoverageTarget ? CoverageTarget->GameThread_GetRenderTargetResource() : nullptr;
     Out.StructureResource = ActiveStructureVolume() ? ActiveStructureVolume()->GetResource() : nullptr;
     Out.DetailResource = ActiveDetailVolume() ? ActiveDetailVolume()->GetResource() : nullptr;
     Out.BlueNoiseResource = Noise ? Noise->GetResource() : nullptr;

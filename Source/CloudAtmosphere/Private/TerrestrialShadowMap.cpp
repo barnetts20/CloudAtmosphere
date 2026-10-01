@@ -29,12 +29,24 @@ IMPLEMENT_GLOBAL_SHADER(
 	"MainShadowBakeCS",
 	SF_Compute);
 
+bool FTerrestrialCoverageCS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+{
+	return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+}
+
+IMPLEMENT_GLOBAL_SHADER(
+	FTerrestrialCoverageCS,
+	"/Plugin/CloudAtmosphere/Private/TerrestrialShadowMap.usf",
+	"MainCoverageCS",
+	SF_Compute);
+
 void FTerrestrialShadowParams::ResolveTextures_RenderThread()
 {
 	check(IsInRenderingThread());
 
 	FlowTexture = FlowResource ? FTextureRHIRef(FlowResource->GetRenderTargetTexture()) : FTextureRHIRef();
 	MapTexture = MapResource ? FTextureRHIRef(MapResource->GetRenderTargetTexture()) : FTextureRHIRef();
+	CoverageTexture = CoverageResource ? FTextureRHIRef(CoverageResource->GetRenderTargetTexture()) : FTextureRHIRef();
 	DetailTexture = DetailResource ? DetailResource->TextureRHI : FTextureRHIRef();
 	StructureTexture = StructureResource ? StructureResource->TextureRHI : FTextureRHIRef();
 }
@@ -46,7 +58,8 @@ namespace TerrestrialShadow
 		check(IsInRenderingThread());
 
 		// Resolved by the caller; a resource still initialising has no handle.
-		if (!Params.IsUsable() || !Params.FlowTexture.IsValid() || !Params.MapTexture.IsValid())
+		if (!Params.IsUsable() || !Params.FlowTexture.IsValid() || !Params.MapTexture.IsValid()
+			|| !Params.CoverageTexture.IsValid())
 		{
 			return;
 		}
@@ -55,6 +68,29 @@ namespace TerrestrialShadow
 
 		FRDGTextureRef Map = GraphBuilder.RegisterExternalTexture(
 			CreateRenderTarget(Params.MapTexture, TEXT("Terrestrial.ShadowMap")));
+
+		// Any address mode works: every face of the atlas carries its own gutter.
+		FRHISamplerState* FlowSampler = TStaticSamplerState<SF_Bilinear, AM_Wrap, AM_Clamp, AM_Clamp>::GetRHI();
+
+		// THE COVERAGE THRESHOLD FIRST: the bake below and this frame's march
+		// read the texel it writes.
+		FRDGTextureRef Coverage = GraphBuilder.RegisterExternalTexture(
+			CreateRenderTarget(Params.CoverageTexture, TEXT("Terrestrial.Coverage")));
+		{
+			auto* CoverageP = GraphBuilder.AllocParameters<FTerrestrialCoverageCS::FParameters>();
+
+			CoverageP->PlanetRadius = Params.PlanetRadius;
+			CoverageP->HeightScale = Params.HeightScale;
+			CoverageP->Field = Params.Field;
+			CoverageP->FlowTarget = Params.FlowTexture;
+			CoverageP->FlowTargetSampler = FlowSampler;
+			CoverageP->CoverageUAV = GraphBuilder.CreateUAV(Coverage);
+
+			TShaderMapRef<FTerrestrialCoverageCS> CoverageShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+
+			FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("Terrestrial.Coverage"),
+				CoverageShader, CoverageP, FIntVector(1, 1, 1));
+		}
 
 		FTerrestrialShadowParameters* P = GraphBuilder.AllocParameters<FTerrestrialShadowParameters>();
 
@@ -74,9 +110,8 @@ namespace TerrestrialShadow
 		P->ShadowMapUAV = GraphBuilder.CreateUAV(Map);
 
 		P->FlowTarget = Params.FlowTexture;
-
-		// Any address mode works: every face of the atlas carries its own gutter.
-		P->FlowTargetSampler = TStaticSamplerState<SF_Bilinear, AM_Wrap, AM_Clamp, AM_Clamp>::GetRHI();
+		P->FlowTargetSampler = FlowSampler;
+		P->CoverageThreshold = Coverage;
 
 		// A missing volume binds black so the binding is complete. It is never
 		// weighted in: the actor zeroes a layer's amount when it has no volume.

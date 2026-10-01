@@ -97,6 +97,11 @@ public:
     UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
     TObjectPtr<UTextureRenderTarget2DArray> ShadowTarget;
 
+    /** One texel: the coverage priority threshold the bake's coverage pass
+     *  solves each frame, read by the bake and the march. */
+    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
+    TObjectPtr<UTextureRenderTarget2D> CoverageTarget;
+
     /** The flow atlas this planet draws: the sim's while it drives the sim,
      *  KeptFlow while another planet does. */
     UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
@@ -590,6 +595,10 @@ private:
      *  support at ShadowResolution, cleared to the no-deck sentinel,
      *  reinitialising only on a mismatch. */
     void PrepareShadowTarget();
+
+    /** Creates the one-texel R32F coverage target if absent, cleared above any
+     *  priority. */
+    void PrepareCoverageTarget();
 
     /** The next cascade in the bake rotation, and the camera each level was
      *  last baked around -- what the march reads that level against. */

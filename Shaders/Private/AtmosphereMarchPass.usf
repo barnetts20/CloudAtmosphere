@@ -108,6 +108,9 @@ SamplerState ShadowTargetSampler;
 Texture2D TransmittanceTable;
 SamplerState TransmittanceTableSampler;
 
+/** One texel: the priority threshold the coverage pass solved this frame. */
+Texture2D<float> CoverageThreshold;
+
 // -- The pass -------------------------------------------------------------------
 
 /** Threads dispatched, and the output pixels between them. */

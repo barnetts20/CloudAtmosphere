@@ -219,15 +219,21 @@ struct CLOUDATMOSPHERE_API FTerrestrialCoverageParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-1", ClampMax = "7"))
 	int32 CloudLayer = -1;
 
-	/** How far down the ranking of cloud coverage reaches. A column holding
-	 *  any cloud ranks by its storm (TR_CLOUD_FULL: the amount is all but
-	 *  binary), so hurricanes rank highest, then storms, and plain cloud all
-	 *  ranks alike. 0 is clear sky, low values keep only hurricanes and large
-	 *  storms, and plain cloud comes in everywhere at once, centred on
-	 *  1 + CoverageSoftness - 1 / (1 + StormPriority); at 1 every column
-	 *  holding cloud is covered and the noise alone breaks it up. */
+	/** The share of the planet covered, 0 clear sky to 1 every column holding
+	 *  cloud. Columns rank by priority, their cloud amount raised by their
+	 *  storm, and the threshold is solved each frame so this share lies above
+	 *  it: hurricanes first, then storms, then plain cloud from systems' cores
+	 *  outward. The same setting covers the same share whatever the sim's cloud
+	 *  does; the noise breaks up what is covered. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float CloudCover = 0.8f;
+	float CloudCover = 0.5f;
+
+	/** The sim cloud at which a column's amount is 95% of the way to full.
+	 *  Small makes the amount all but binary, so plain cloud ranks alike and
+	 *  storm alone orders it; larger grades it from systems' cores to their
+	 *  edges, which coverage then takes in that order. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.000001", UIMin = "0.001", UIMax = "1.0"))
+	float CloudFull = 0.05f;
 
 	/** How far storm raises a column's rank over plain cloud: rank is amount *
 	 *  (1 + StormPriority * storm) / (1 + StormPriority), so plain cloud tops

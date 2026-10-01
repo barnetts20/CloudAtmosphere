@@ -93,14 +93,11 @@
 #define TR_COVERAGE_DEPTH_RAMP 0.25f
 #endif
 
-/** The sim cloud at which a column's cloud amount, which ranks coverage and
- *  drives type and relief, is 95% of the way to full: the amount is
- *  1 - exp(-3 cloud / TR_CLOUD_FULL), a presence ease with no slope break.
- *  Small, so CloudCover and CoverageSoftness decide where cloud shows.
- *  PITFALL: a linear ramp here draws its end as an edge; a large value grades
- *  coverage by the cloud and competes with those two. */
-#ifndef TR_CLOUD_FULL
-#define TR_CLOUD_FULL 1e-3f
+/** CloudCover as the share of the planet covered, the threshold the priority's
+ *  quantile from MainCoverageCS (1), or as a sweep of the threshold through
+ *  priority (0). A look change under comparison (FlagAudit). */
+#ifndef TR_COVER_FRACTION
+#define TR_COVER_FRACTION 1
 #endif
 
 /** Fraction of the cone-trace advance actually taken. Under 1 because CloudSlope
@@ -180,6 +177,11 @@ struct TRFieldParams
     float StormPriority;
     float CoverageSoftness;
     float CoverageFray;
+
+	/** The sim cloud at which a column's amount is 95% of the way to full, and
+	 *  the priority threshold covering CloudCover of the planet. */
+    float CloudFull;
+    float CoverThreshold;
 
 	/** The deep deck's fill: how far below a column's base, in atmosphere
 	 *  fractions, it reaches full density; and how many fills the floor's
@@ -316,7 +318,7 @@ struct TRFieldParams
  *    CloudProfile      CloudBase, CloudThickness, SurfaceSoftness, CeilingFalloff
  *    CloudCurves       TopCurve, BottomCurve, CloudSlope, WarpStretch
  *    CloudCoverage     CloudCover, StormPriority, CoverageSoftness, DeepFill
- *    CloudType         TypeBias, (unused), TypeTropical, (unused)
+ *    CloudType         TypeBias, CloudFull, TypeTropical, (unused)
  *    CloudLid          PressureScale, (unused), CeilingPressure, StratusDepth
  *    CloudLift         BaseTropical, BasePressure, AltitudeGain, AltitudeLift
  *    CloudMotion       DriftAngle, NoisePhase, WarpShift, SpinAngle
@@ -331,7 +333,9 @@ struct TRFieldParams
  *    CloudGenus<Name>  structure channel weights for that genus
  *    CloudResponse     (unused), TypeCurve, StormBalance, StormBlend
  *
- *  SpinAngle is the planet's own rotation, -SpinRate * time wrapped in double
+ *  CoverThreshold arrives apart, read from the coverage pass's texel.
+ *
+ *  SpinAngle is the planet's own rotation, -SpinRatio * Omega * time wrapped in double
  *  on the CPU; the sim runs in the rotating frame, so it turns the sampling
  *  position. Every clock arrives wrapped. */
 TRFieldParams TR_BuildField(
@@ -354,7 +358,8 @@ TRFieldParams TR_BuildField(
 	float4 CloudGenusCumulus,
 	float4 CloudGenusCirrus,
 	float4 ShadowCascades,
-	float4 CloudResponse)
+	float4 CloudResponse,
+	float CoverThreshold)
 {
     TRFieldParams F;
 
@@ -376,6 +381,8 @@ TRFieldParams TR_BuildField(
     F.DeepFill = max(CloudCoverage.w, 1e-4f);
 
     F.TypeBias = CloudType.x;
+    F.CloudFull = max(CloudType.y, 1e-6f);
+    F.CoverThreshold = CoverThreshold;
     F.TypeTropical = CloudType.z;
 
     F.PressureScale = max(CloudLid.x, 1e-6f);
@@ -455,7 +462,8 @@ TRFieldParams TR_BuildField(
 	NoiseLevels, StructureSampling, StructureWarp, \
 	DetailSampling, DetailWarp, \
 	CloudGenusStratus, CloudGenusStratocumulus, CloudGenusCumulus, CloudGenusCirrus, \
-	ShadowCascades, CloudResponse)
+	ShadowCascades, CloudResponse, \
+	CoverageThreshold.Load(int3(0, 0, 0)))
 
 /** The shell's ceiling: 1 below the falloff band, 0 at the atmosphere top,
  *  smoothstep between, so a tower that would cross it softens into a cap. */
@@ -667,17 +675,30 @@ float TR_MaterialFromWeather(float4 Weather, TRFieldParams F)
     return smoothstep(StormThreshold - Blend, StormThreshold + Blend, StormIndex);
 }
 
+/** A column's coverage priority: its cloud amount raised by its storm. The
+ *  amount is 1 - exp(-3 cloud / CloudFull), 95% of the way to full at
+ *  CloudFull and with no slope break. PITFALL: a linear ramp draws its end as
+ *  an edge. Shared by the march, the bake and the coverage pass. */
+float TR_Priority(float4 Weather, TRFieldParams F)
+{
+    const float Amount = 1.0f - exp(-3.0f * max(Weather.y, 0.0f) / F.CloudFull);
+
+    return Amount * (1.0f + F.StormPriority * saturate(Weather.w)) / (1.0f + F.StormPriority);
+}
+
 /** The column at a spun direction N from its inputs.
  *
  *  COVERAGE IS A THRESHOLD ON PRIORITY. A column's priority is its cloud
  *  amount raised by its storm: amount * (1 + StormPriority * storm) /
  *  (1 + StormPriority). Hurricanes, which hold the densest cloud and full
  *  storm, rank highest, then storms, then plain cloud, which tops out at
- *  1 / (1 + StormPriority). CloudCover sweeps the threshold down through that
- *  ranking: at 0 nothing is covered, low values keep only hurricanes and large
- *  storms, and the rest comes in toward 1. Storm raises only cloud that
- *  exists, so clear sky stays clear at any setting, and a system keeps a
- *  defined edge. Inside it coverage reaches 1 and erosion breaks it up.
+ *  1 / (1 + StormPriority), graded by amount from systems' cores to their edges.
+ *  CloudCover is the share of the planet covered: the threshold is the
+ *  priority's quantile over the sphere (MainCoverageCS), so the same setting
+ *  covers the same share whatever the sim's cloud does, hurricanes first. It
+ *  never falls below CoverageSoftness, so clear sky stays clear at any setting,
+ *  and a system keeps a defined edge. Inside it coverage reaches 1 and erosion
+ *  breaks it up.
  *
  *  PITFALL: an additive CloudCover lifts every column by the same amount, so
  *  raising it to recover cloud flattens the sim's contrast until the noise,
@@ -730,15 +751,18 @@ TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
     Col.Ascent = Weather.x;
     Col.Altitude = saturate(F.AltitudeGain * Weather.z);
 
-    const float Amount = 1.0f - exp(-3.0f * max(Weather.y, 0.0f) / TR_CLOUD_FULL);
     const float Storm = saturate(Weather.w);
 
-    const float Priority = Amount * (1.0f + F.StormPriority * Storm) / (1.0f + F.StormPriority);
+    const float Priority = TR_Priority(Weather, F);
+    const float Soft = F.CoverageSoftness;
 
+#if TR_COVER_FRACTION
+    const float Threshold = F.CoverThreshold;
+#else
 	// From above the highest priority at CloudCover 0 to just above none at 1,
 	// so both ends are exact: nothing, then every column holding cloud.
-    const float Soft = F.CoverageSoftness;
     const float Threshold = lerp(1.0f + Soft, Soft, saturate(F.CloudCover));
+#endif
 
     Col.Coverage = smoothstep(Threshold - Soft, Threshold + Soft, Priority);
 
