@@ -142,10 +142,12 @@ struct CLOUDATMOSPHERE_API FTerrestrialPlanetParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001"))
 	float HeightScale = 0.2f;
 
-	/** The planet's own rotation, radians per unit of simulated time. The sim
-	 *  runs in the rotating frame, so this rotates the sampling position. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	float SpinRate = 0.1f;
+	/** The field's rotation as a share of the sim's own, PlanetaryVorticity / 2
+	 *  radians per unit sim time: 1 turns the clouds as fast as the planet the
+	 *  sim's Coriolis assumes. The sim runs in the rotating frame, so this
+	 *  rotates the sampling position. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float SpinRatio = 1.0f;
 };
 
 /** Where the clouds sit and how a column's height profile is shaped. */

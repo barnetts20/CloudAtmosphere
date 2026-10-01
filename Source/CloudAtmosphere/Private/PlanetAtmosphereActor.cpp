@@ -379,12 +379,6 @@ void APlanetAtmosphereActor::UpdateAtmosphere()
     UpdateComputeMarch(PlanetRadius, PlanetCenter, LightDir);
 }
 
-/** The planet shadow is a step: the transmittance table carries a grazing sun
- *  ray's attenuation, and any softness visibly above the floor reads worse. At
- *  a step the lobe power has nothing left to shape. */
-static constexpr float PlanetTerminatorSoftness = 1e-4f;
-static constexpr float PlanetLobeShadowPower = 6.0f;
-
 /** READOUT ONLY, NEVER PUSHED. Mirrors TR_FieldReach, TR_TopMax and
  *  TR_BaseMin, for the active model's shape. A mismatch misreports the
  *  readouts and changes nothing drawn. */
@@ -471,9 +465,14 @@ static FTerrestrialFieldParameters PackCloudField(const APlanetAtmosphereActor& 
     float DriftAngle, NoisePhase;
     NoiseClock(Clock.Config.Get(), Clock.Time, DriftAngle, NoisePhase);
 
-    // The planet's own spin, wrapped in double like the drift. Negated: turning
-    // the sample point back carries the field forward.
-    const float SpinAngle = (float)FMath::Fmod(-(double)A.ActivePlanet().SpinRate * Clock.SpinTime, 2.0 * UE_DOUBLE_PI);
+    // The planet's own spin, half the clock's PlanetaryVorticity times the
+    // ratio, wrapped in double like the drift. Negated: turning the sample
+    // point back carries the field forward.
+    const UFlowSimConfig* SpinConfig = Clock.Config.Get();
+    const double Omega = SpinConfig
+        ? 0.5 * (double)FMath::Max(SpinConfig->PlanetaryVorticity, 0.1f) * FMath::Max(A.ActivePlanet().SpinRatio, 0.0f)
+        : 0.0;
+    const float SpinAngle = (float)FMath::Fmod(-Omega * Clock.SpinTime, 2.0 * UE_DOUBLE_PI);
 
     // Free slots stay zero.
     Out.CloudProfile = FVector4f(Shape.CloudBase, Shape.CloudThickness, Shape.SurfaceSoftness, Shape.CeilingFalloff);
@@ -776,7 +775,6 @@ bool APlanetAtmosphereActor::FillShadowRequest(
 
     Params.PlanetRadius = PlanetRadius;
     Params.HeightScale = ActiveHeightScale();
-    Params.Time = static_cast<float>(FieldClock.Time);
 
     // -- Extinction ---------------------------------------------------------
 
@@ -883,7 +881,6 @@ bool APlanetAtmosphereActor::FillMarchParams(
     Out.LightColor = ToVector3(Light);
     Out.PlanetRadius = PlanetRadius;
     Out.HeightScale = ActiveHeightScale();
-    Out.Time = static_cast<float>(FieldClock.Time);
 
     // -- Field ----------------------------------------------------------------
 
@@ -897,9 +894,6 @@ bool APlanetAtmosphereActor::FillMarchParams(
 
     Out.CloudScatter = ToVector3(Material.CloudScatter);
     Out.StormScatter = ToVector3(Material.StormScatter);
-
-    Out.TerminatorSoftness = PlanetTerminatorSoftness;
-    Out.LobeShadowPower = PlanetLobeShadowPower;
 
     // -- Air, ambient, lighting -----------------------------------------------
 
@@ -933,7 +927,6 @@ bool APlanetAtmosphereActor::FillMarchParams(
     Out.LightExtinctionFraction = MS.LightExtinctionFraction();
     Out.OctaveCount = static_cast<float>(MS.OctaveCount);
     Out.OctaveAttenuation = MS.OctaveAttenuation();
-    Out.OctaveContribution = MS.OctaveAttenuation();
     Out.OctaveEccentricity = MS.OctaveEccentricity();
 
     // -- Pipeline and shadows -------------------------------------------------

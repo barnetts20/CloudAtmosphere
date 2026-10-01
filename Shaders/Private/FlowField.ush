@@ -16,7 +16,7 @@
 // an edge a read cross-fades the faces that meet there (FLOW_ATLAS_BLEND).
 //
 // VELOCITY IS STORED IN EACH FACE'S OWN TANGENT BASIS, which is defined
-// everywhere on the face, and Flow_Sample turns it back into east and north.
+// everywhere on the face; a reader rotates it out through Flow_FaceBasis.
 // The gutter texels hold the neighbour's data in THIS face's basis, since the
 // resample evaluates every texel by direction.
 //
@@ -27,7 +27,8 @@
 // THE LAYERS ARE A STACK, 0 ON TOP. The weather slice of a layer describes the
 // column from the top of the stack down to it, so the lowest layer's is the
 // whole sky seen from above. Phase A's w is unused; phase B's is the deck
-// depth factor (Flow_SampleDepth).
+// depth factor, 1 - StormCellEyeDepth times the eye tracer, which a deck
+// scales its columns by so an eye is a bowl sloping to its floor.
 
 /** Texels either side of a face edge over which neighbouring faces cross-fade.
  *  Each face resamples the sim on its own lattice, so their reconstructions
@@ -295,7 +296,7 @@ float4 Flow_SampleTile(
 
 /** Samples one slice of the atlas by direction, raw, blended across face
  *  edges. For scalar slices only: the flow slice's velocity is in each face's
- *  own basis and has to be rotated before it blends, which Flow_Sample does. */
+ *  own basis and has to be rotated before it blends. */
 float4 Flow_SampleSlice(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Slice)
 {
     float FaceSize;
@@ -320,55 +321,6 @@ float4 Flow_SampleSlice(Texture2DArray FlowField, SamplerState FlowSampler, floa
     return Result;
 }
 
-/** Samples a layer's flow slice by direction.
- *
- *  Returns (u_east, u_north, pressure, vorticity):
- *    xy  Tangent velocity, physical speed on the unit sphere; rebuild the 3D
- *        vector with Flow_TangentVelocity. Stored in the face's basis and
- *        turned into east and north here.
- *    z   Pressure: the layer's Montgomery potential less its zonal mean,
- *        soft-saturated into (-1, 1). Positive in highs in BOTH hemispheres.
- *    w   Normalized vorticity, near [-1,1], positive counterclockwise. The band
- *        signal.
- *
- *  PITFALL: w is a rotation sense, not cyclone or anticyclone -- which one a
- *  sense is flips at the equator. */
-float4 Flow_Sample(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
-{
-    float FaceSize;
-    float2 InvSize;
-    Flow_AtlasMetrics(FlowField, FaceSize, InvSize);
-
-    const FlowFaceSet Set = Flow_FaceSet(N, FaceSize);
-
-    float3 Velocity = 0.0f;
-    float2 Scalars = 0.0f;
-
-	[unroll]
-    for (uint Slot = 0; Slot < 3u; ++Slot)
-    {
-        [branch]
-        if (Set.Weight[Slot] > 0.0f)
-        {
-            const float4 S = Flow_SampleTile(
-				FlowField, FlowSampler, Set.Face[Slot], Set.Coord[Slot], Layer, FaceSize, InvSize);
-
-            float3 T1, T2;
-            Flow_FaceBasis(N, Set.Face[Slot], T1, T2);
-
-            Velocity += Set.Weight[Slot] * (T1 * S.x + T2 * S.y);
-            Scalars += Set.Weight[Slot] * S.zw;
-        }
-    }
-
-    const float C = max(length(N.xy), 1e-5f);
-
-    return float4(
-		dot(Velocity, float3(-N.y, N.x, 0.0f) / C),
-		dot(Velocity, float3(-N.z * N.x / C, -N.z * N.y / C, C)),
-		Scalars);
-}
-
 /** Samples a layer's weather slice. Returns (W, cloud, altitude, storm):
  *    x  The layer's own vertical motion, soft-saturated into (-1, 1),
  *       positive rising. No hemisphere interpretation.
@@ -382,43 +334,6 @@ float4 Flow_Sample(Texture2DArray FlowField, SamplerState FlowSampler, float3 N,
 float4 Flow_SampleWeather(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
 {
     return Flow_SampleSlice(FlowField, FlowSampler, N, Layer + Flow_LayerCount(FlowField));
-}
-
-/** Samples a layer's two noise displacements, phase A then phase B: xyz
- *  offsets from N, in radians, to the coordinate the noise is sampled at. Each
- *  grows from zero as its phase ages and resets where its crossfade weight is
- *  zero; see Flow_NoiseWeightA. */
-void Flow_SampleNoise(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	float3 N,
-	float Layer,
-	out float3 OutA,
-	out float3 OutB)
-{
-    const float L = Flow_LayerCount(FlowField);
-
-    float FaceSize;
-    float2 InvSize;
-    Flow_AtlasMetrics(FlowField, FaceSize, InvSize);
-
-    const FlowFaceSet Set = Flow_FaceSet(N, FaceSize);
-
-    OutA = 0.0f;
-    OutB = 0.0f;
-
-	[unroll]
-    for (uint Slot = 0; Slot < 3u; ++Slot)
-    {
-        [branch]
-        if (Set.Weight[Slot] > 0.0f)
-        {
-            const FlowTileTaps Taps = Flow_TileTaps(Set.Face[Slot], Set.Coord[Slot], FaceSize, InvSize);
-
-            OutA += Set.Weight[Slot] * Flow_TapSlice(FlowField, FlowSampler, Taps, Layer + 2.0f * L).xyz;
-            OutB += Set.Weight[Slot] * Flow_TapSlice(FlowField, FlowSampler, Taps, Layer + 3.0f * L).xyz;
-        }
-    }
 }
 
 /** A layer's flow slice raw, weather slice and both noise slices at one
@@ -469,14 +384,6 @@ FlowColumnSample Flow_SampleColumn(Texture2DArray FlowField, SamplerState FlowSa
     return S;
 }
 
-/** Samples the deck depth factor from phase B's w, [0, 1]: 1 - StormCellEyeDepth
- *  times the eye tracer, the tracer following the low's isobars. A deck scales
- *  its column depth by it, so an eye is a bowl sloping to its floor. */
-float Flow_SampleDepth(Texture2DArray FlowField, SamplerState FlowSampler, float3 N, float Layer)
-{
-    return saturate(Flow_SampleSlice(FlowField, FlowSampler, N, Layer + 3.0f * Flow_LayerCount(FlowField)).w);
-}
-
 /** Phase A's crossfade weight from its phase in [0, 1): zero at the reset,
  *  one half a period later. Phase B's is one minus this. */
 float Flow_NoiseWeightA(float PhaseA)
@@ -493,18 +400,4 @@ float Flow_TexelArc(Texture2DArray FlowField, float Radius)
     FlowField.GetDimensions(0, Width, Height, Slices, Levels);
 
     return (0.5f * PI * Radius) / max(Flow_AtlasFaceSize((float) Width), 1.0f);
-}
-
-/** Rebuilds the 3D tangent velocity from the stored east/north components. No
- *  trig: with c = length(N.xy) the basis is east = (-N.y, N.x, 0)/c and north =
- *  (-N.z*N.x/c, -N.z*N.y/c, c). Guarded at the poles, where c goes to zero and
- *  east is undefined -- no texel sits on a pole, but a shading point can. */
-float3 Flow_TangentVelocity(float3 N, float2 Components)
-{
-    const float C = max(length(N.xy), 1e-5f);
-
-    const float3 East = float3(-N.y, N.x, 0.0f) / C;
-    const float3 North = float3(-N.z * N.x / C, -N.z * N.y / C, C);
-
-    return East * Components.x + North * Components.y;
 }

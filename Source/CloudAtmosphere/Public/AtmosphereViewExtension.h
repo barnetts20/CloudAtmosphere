@@ -29,7 +29,6 @@ struct CLOUDATMOSPHERE_API FAtmosphereMarchParams
 
 	float PlanetRadius = 0.0f;
 	float HeightScale = 0.0f;
-	float Time = 0.0f;
 
 	// The field and its cloud material's albedo.
 	FTerrestrialFieldParameters Field{};
@@ -46,13 +45,10 @@ struct CLOUDATMOSPHERE_API FAtmosphereMarchParams
 
 	float OctaveCount = 1.0f;
 	float OctaveAttenuation = 0.0f;
-	float OctaveContribution = 0.0f;
 	float OctaveEccentricity = 0.0f;
 
-	float TerminatorSoftness = 0.0f;
 	float AmbientTerminator = 0.0f;
 	float MieLobeDecay = 0.0f;
-	float LobeShadowPower = 0.0f;
 
 	FVector3f RayleighBeta = FVector3f::ZeroVector;
 	float RayleighScaleHeight = 0.0f;

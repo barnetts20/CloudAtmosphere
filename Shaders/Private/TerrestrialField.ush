@@ -11,11 +11,10 @@
 // gas giant's the deep deck (TR_DEEP_DECK).
 //
 // THE MARCH KNOWS NOTHING BELOW THIS LINE. It calls the Field_ functions, the
-// FieldParams and FieldMaterialParams names, and the two texture macros; every
-// one of them is defined here, and a second model defines the same set over its
-// own field. That is the whole interface, and it is small because the march's real
-// content -- the plan, the step bounds, the octaves, the shadow read -- does not
-// depend on what fills the shell.
+// FieldParams and FieldMaterialParams names, and the two texture macros, all
+// defined here. That is the whole interface, and it is small because the
+// march's real content -- the plan, the step bounds, the octaves, the shadow
+// read -- does not depend on what fills the shell.
 //
 // INCLUDED BEFORE THE MARCH, NEVER AFTER. The march declares AtmoMarchParams in
 // terms of the two type names below, so they have to exist first; a missing
@@ -56,8 +55,7 @@
 #define TR_DEEP_MIN_ABSORPTION 0.01f
 #endif
 
-/** Claims the march's one model slot. A second field defines this too, so
- *  whichever header the pass included is the one that answers. */
+/** Claims the march's field slot; the march fails to compile without it. */
 #define ATMO_FIELD_INCLUDED 1
 
 /** The concrete types the march refers to by these names: the field's shape and
@@ -114,27 +112,18 @@ struct TRScatterParams
     float ForwardWeight;
 
 	/** Octave i sees the optical depth toward the light scaled by
-	 *  OctaveAttenuation^i, weighs OctaveContribution^i, and uses the phase
-	 *  with both lobes' g scaled by OctaveEccentricity^i. Octave 0 is single
-	 *  scattering. OctaveCount is whole and in [1, ATMO_MS_MAX_OCTAVES]. */
+	 *  OctaveAttenuation^i, weighs the same power, and uses the phase with both
+	 *  lobes' g scaled by OctaveEccentricity^i. Octave 0 is single scattering.
+	 *  OctaveCount is whole and in [1, ATMO_MS_MAX_OCTAVES]. */
     float OctaveCount;
     float OctaveAttenuation;
-    float OctaveContribution;
     float OctaveEccentricity;
-
-	/** Width of the planet-shadow falloff, as a fraction of atmosphere
-	 *  thickness. What shapes the terminator. */
-    float TerminatorSoftness;
 
 	/** Width of the ambient terminator, in cosine of sun elevation. */
     float AmbientTerminator;
 
 	/** How fast the Mie forward lobe dies behind cloud, per optical depth. */
     float MieLobeDecay;
-
-	/** Exponent on the planet shadow for the ANISOTROPIC terms only: a power on
-	 *  the same smoothstep, so no new endpoint appears. */
-    float LobeShadowPower;
 };
 
 /** Albedo at a material coordinate. */
@@ -158,45 +147,24 @@ float3 TR_TypeTint(float Type, TRScatterParams S)
     return lerp(S.CloudExtinction.rgb, S.StormExtinction.rgb, saturate(Type));
 }
 
-/** Whether a planned segment carries cloud: the fine band, and nothing else.
+/** Whether a planned segment carries cloud: the band, and under the deep deck
+ *  whatever lies below it.
  *
- *  THE FLAG ALONE, BECAUSE THE BAND IS BOUNDED BOTH WAYS. cloudInnerRadius is
- *  the lowest the base can fall, so below it there is no cloud to miss -- and
- *  above the top the same. Marching either as cloud would spend seven fetches a
- *  step and the field's lateral step bound on provably empty air, which on a
- *  grazing ray is the longest span on the ray. A band demoted to coarse because
- *  the ray never reached the slab is not cloud either. */
-bool Field_SegmentIsCloud(float3 Origin, float3 Dir, float4 Segment, PlanetParams Planet)
+ *  THE FLAG ALONE ON THE SLAB, BECAUSE THE BAND IS BOUNDED BOTH WAYS.
+ *  cloudInnerRadius is the lowest the base can fall, so below it there is no
+ *  cloud to miss -- and above the top the same. Marching either as cloud would
+ *  spend the field's fetches on provably empty air, which on a grazing ray is
+ *  the longest span on the ray. */
+bool Field_SegmentIsCloud(float3 Origin, float3 Dir, float3 Segment, PlanetParams Planet)
 {
 #if TR_DEEP_DECK
 	// Under the band the deep deck is full and still owes extinction.
     const float3 Mid = Origin + Dir * ((Segment.x + Segment.y) * 0.5f);
 
-    return Segment.w > 0.5f || length(Mid - Planet.planetPos) < Planet.cloudInnerRadius;
+    return Segment.z > 0.5f || length(Mid - Planet.planetPos) < Planet.cloudInnerRadius;
 #else
-    return Segment.w > 0.5f;
+    return Segment.z > 0.5f;
 #endif
-}
-
-/** The plan as the shells leave it: this field places no segment by itself.
- *
- *  PITFALL: A PLAN THAT PLACES STEPS BY THE FIELD DRAWS THE FIELD INTO THE
- *  LATTICE. Steps that follow the occupied cells move as the weather does, and
- *  at some angles the pattern reads as sampling artifacts. A split at a
- *  cone-traced entry also steps over features narrower than the probe spacing,
- *  and everything before the split goes coarse: a slice of a system missing
- *  from below. */
-void Field_PlanSegments(
-	Texture2DArray FlowField,
-	SamplerState FlowSampler,
-	float3 LocalOrigin,
-	float3 LocalDir,
-	float TopMax,
-	float CoarseStep,
-	TRFieldParams F,
-	inout float4 Segments[ATMO_MAX_SEGMENTS],
-	inout int SegmentCount)
-{
 }
 
 /** Fills TRScatterParams from the Cloud Material, Phase, Multiple Scattering
@@ -212,12 +180,9 @@ TRScatterParams TR_BuildScatter(
 	float ForwardWeight,
 	float OctaveCount,
 	float OctaveAttenuation,
-	float OctaveContribution,
 	float OctaveEccentricity,
-	float TerminatorSoftness,
 	float AmbientTerminator,
-	float MieLobeDecay,
-	float LobeShadowPower)
+	float MieLobeDecay)
 {
     TRScatterParams S;
 
@@ -226,7 +191,7 @@ TRScatterParams TR_BuildScatter(
 
     S.CloudExtinction = CloudExtinction;
     S.StormExtinction = StormExtinction;
-    S.TintRange = TR_ExtinctionTintRange(CloudExtinction.rgb, StormExtinction.rgb, CloudExtinction.rgb);
+    S.TintRange = TR_ExtinctionTintRange(CloudExtinction.rgb, StormExtinction.rgb);
 
     S.ForwardG = ForwardG;
     S.BackwardG = BackwardG;
@@ -234,15 +199,11 @@ TRScatterParams TR_BuildScatter(
 
     S.OctaveCount = clamp(round(OctaveCount), 1.0f, float(ATMO_MS_MAX_OCTAVES));
     S.OctaveAttenuation = saturate(OctaveAttenuation);
-    S.OctaveContribution = saturate(OctaveContribution);
     S.OctaveEccentricity = saturate(OctaveEccentricity);
 
-	// Floored where zero is degenerate: the softness divides a smoothstep's
-	// width, and a zero-width one is a step along the light's tangent cone.
-    S.TerminatorSoftness = max(TerminatorSoftness, 1e-4f);
+	// Floored where zero is degenerate: the width divides a smoothstep's.
     S.AmbientTerminator = max(AmbientTerminator, 1e-4f);
     S.MieLobeDecay = max(MieLobeDecay, 0.0f);
-    S.LobeShadowPower = max(LobeShadowPower, 0.0f);
 
     return S;
 }
@@ -251,8 +212,8 @@ TRScatterParams TR_BuildScatter(
 #define TR_BUILD_SCATTER() TR_BuildScatter( \
 	CloudScatter, CloudExtinction, StormScatter, StormExtinction, \
 	ForwardG, BackwardG, ForwardWeight, \
-	OctaveCount, OctaveAttenuation, OctaveContribution, OctaveEccentricity, \
-	TerminatorSoftness, AmbientTerminator, MieLobeDecay, LobeShadowPower)
+	OctaveCount, OctaveAttenuation, OctaveEccentricity, \
+	AmbientTerminator, MieLobeDecay)
 
 /** Fills CompositeParams for the terrestrial clouds, deriving the cloud shell from
  *  the field rather than taking it as two more pins. Air colours arrive as rgb

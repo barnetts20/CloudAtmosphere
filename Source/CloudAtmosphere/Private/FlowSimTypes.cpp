@@ -14,7 +14,7 @@ namespace
 		{
 			/** PITFALL: never lower this number. The engine refuses a package
 			 *  saved at a version above Latest. */
-			Current = 7,
+			Current = 8,
 
 			Latest = Current
 		};
@@ -152,7 +152,7 @@ float UFlowSimConfig::GetNoiseDriftRate() const
 // crossfade all read this value, so they reset together.
 float UFlowSimConfig::GetNoiseResetTime() const
 {
-	return FMath::Max(FMath::Max(NoiseResetTurnovers, 0.05f) * GetTurnover(), 1e-3f);
+	return FMath::Max(NoiseResetTurnovers, 2.0f * FlowSimStep::SpinUp) * GetTurnover();
 }
 
 float UFlowSimConfig::GetTurnover() const

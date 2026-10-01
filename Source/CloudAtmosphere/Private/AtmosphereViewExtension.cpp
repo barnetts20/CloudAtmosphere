@@ -1,5 +1,6 @@
 #include "AtmosphereViewExtension.h"
 
+#include "AtmosphereTransmittance.h"
 #include "DataDrivenShaderPlatformInfo.h"
 #include "GlobalShader.h"
 #include "HAL/IConsoleManager.h"
@@ -61,7 +62,6 @@ BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereMarchParameters, )
 	SHADER_PARAMETER(FVector3f, LightColor)
 	SHADER_PARAMETER(float, PlanetRadius)
 	SHADER_PARAMETER(float, HeightScale)
-	SHADER_PARAMETER(float, Time)
 
 	SHADER_PARAMETER(float, LightExtinctionFraction)
 
@@ -73,13 +73,10 @@ BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereMarchParameters, )
 
 	SHADER_PARAMETER(float, OctaveCount)
 	SHADER_PARAMETER(float, OctaveAttenuation)
-	SHADER_PARAMETER(float, OctaveContribution)
 	SHADER_PARAMETER(float, OctaveEccentricity)
 
-	SHADER_PARAMETER(float, TerminatorSoftness)
 	SHADER_PARAMETER(float, AmbientTerminator)
 	SHADER_PARAMETER(float, MieLobeDecay)
-	SHADER_PARAMETER(float, LobeShadowPower)
 
 	SHADER_PARAMETER(FVector3f, RayleighBeta)
 	SHADER_PARAMETER(float, RayleighScaleHeight)
@@ -145,6 +142,8 @@ public:
 	{
 		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
 		OutEnvironment.SetDefine(TEXT("ATMO_MARCH_THREADS"), ThreadGroupSize);
+		OutEnvironment.SetDefine(TEXT("ATMO_TRANSMITTANCE_WIDTH"), AtmosphereTransmittance::Width);
+		OutEnvironment.SetDefine(TEXT("ATMO_TRANSMITTANCE_HEIGHT"), AtmosphereTransmittance::Height);
 	}
 };
 
@@ -533,7 +532,6 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		P->LightColor = March.LightColor;
 		P->PlanetRadius = March.PlanetRadius;
 		P->HeightScale = March.HeightScale;
-		P->Time = March.Time;
 
 		P->LightExtinctionFraction = March.LightExtinctionFraction;
 
@@ -545,13 +543,10 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 
 		P->OctaveCount = March.OctaveCount;
 		P->OctaveAttenuation = March.OctaveAttenuation;
-		P->OctaveContribution = March.OctaveContribution;
 		P->OctaveEccentricity = March.OctaveEccentricity;
 
-		P->TerminatorSoftness = March.TerminatorSoftness;
 		P->AmbientTerminator = March.AmbientTerminator;
 		P->MieLobeDecay = March.MieLobeDecay;
-		P->LobeShadowPower = March.LobeShadowPower;
 
 		P->RayleighBeta = March.RayleighBeta;
 		P->RayleighScaleHeight = March.RayleighScaleHeight;

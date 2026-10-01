@@ -54,7 +54,6 @@ float3 LightColor;
 
 float PlanetRadius;
 float HeightScale;
-float Time;
 
 // -- Lighting -------------------------------------------------------------------
 
@@ -68,13 +67,10 @@ float CloudAmbientFloor;
 
 float OctaveCount;
 float OctaveAttenuation;
-float OctaveContribution;
 float OctaveEccentricity;
 
-float TerminatorSoftness;
 float AmbientTerminator;
 float MieLobeDecay;
-float LobeShadowPower;
 
 // -- Air ------------------------------------------------------------------------
 

@@ -45,7 +45,6 @@ float LightExtinctionFraction;
 
 float PlanetRadius;
 float HeightScale;
-float Time;
 float4 CloudProfile;
 float4 CloudCurves;
 float4 CloudCoverage;
@@ -181,21 +180,15 @@ float BakeField_TopBound(BakeFieldParams F)
 float BakeField_Entry(float3 Origin, float3 Dir, float RayLength, float TopMax,
 	BakeFieldParams F)
 {
-	// The miss flag is the view march's: the bake marches from wherever the
-	// trace stopped either way, and a ray that reaches no cloud accumulates
-	// nothing and writes the sentinel.
-    bool bMissed;
-
-    return TR_SlabEntry(
-		FlowTarget, FlowTargetSampler, Origin, Dir, 0.0f, RayLength, TopMax, F, bMissed);
+    return TR_SlabEntry(FlowTarget, FlowTargetSampler, Origin, Dir, 0.0f, RayLength, TopMax, F);
 }
 
-/** The radial advance a step is allowed, spent on the finer of the profile's
- *  two ramps -- sized against the top's alone, a sharp base is crossed in one
- *  step and the map holds a hard edge the march resolves softly. */
+/** The radial advance a step is allowed, spent on a ramp of the profile, which
+ *  both ends share. Coarser, a ramp is crossed in one step and the map holds a
+ *  hard edge the march resolves softly. */
 float BakeField_HeightStep(BakeFieldParams F)
 {
-    return min(F.SpanTop, F.SpanBase) * F.Thickness
+    return F.SpanTop * F.Thickness
 		/ max(ATMO_BAKE_STEPS_PER_GRADIENT, 1.0f);
 }
 
@@ -211,8 +204,7 @@ float BakeField_LateralArc(float Radius)
 float BakeField_FoldConstant(BakeFieldParams F)
 {
     return TR_CloudBeta(F, CloudOpticalDepth) * LightExtinctionFraction / F.Thickness
-		* TR_ExtinctionTintRange(
-			CloudExtinction.rgb, StormExtinction.rgb, CloudExtinction.rgb).y;
+		* TR_ExtinctionTintRange(CloudExtinction.rgb, StormExtinction.rgb).y;
 }
 
 float BakeField_Sigma(float3 Pos, float3 BasisU, float3 BasisV, float TexelWorld,

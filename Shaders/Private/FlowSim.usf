@@ -102,6 +102,9 @@
 
 #define SimDeltaTime FlowSimUB.DeltaTime
 
+/** One turnover in sim time. */
+#define SimTurnover FlowSimUB.Turnover
+
 /** The step's start in forcing lifetimes, as a whole cycle and a fraction,
  *  and in noise reset periods, wrapped in double precision on the CPU.
  *  PITFALL: AN ABSOLUTE TIME IN FLOAT32 STOPS RESOLVING THE STEP after a few
@@ -1291,11 +1294,12 @@ float SimCellStormFloor(float3 P)
     return SimCellSustain * Floor;
 }
 
-/** Rates, per unit time, at which the eye tracer rises toward its source and
+/** Rates, per turnover, at which the eye tracer rises toward its source and
  *  falls back where the source has moved on. The fall against the eye's spin
- *  sets how far the flow winds it. */
-#define SIM_CELL_EYE_RATE 16.0f
-#define SIM_CELL_EYE_DECAY 4.0f
+ *  sets how far the flow winds it, so in turnovers it winds as far at any
+ *  rotation and speed. */
+#define SIM_CELL_EYE_RATE 3.14f
+#define SIM_CELL_EYE_DECAY 0.785f
 
 /** A quintic S curve from A to B: zero slope and curvature at both ends. */
 float SimSmootherstep(float A, float B, float X)
@@ -3003,7 +3007,7 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
             const float Rate = (Source > Carried) ? SIM_CELL_EYE_RATE : SIM_CELL_EYE_DECAY;
 
-            Carried = lerp(Carried, Source, 1.0f - exp(-Rate * Dt));
+            Carried = lerp(Carried, Source, 1.0f - exp(-Rate * Dt / SimTurnover));
         }
 
         SimNoiseUAV[int3(C, Slice)] = float4(Displacement, Carried);

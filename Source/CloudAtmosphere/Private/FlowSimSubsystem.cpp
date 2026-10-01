@@ -766,12 +766,12 @@ void UFlowSimSubsystem::ReportInertSettings() const
 		}
 	}
 
-	if (Config->InitialState && Config->SpinUpSteps > 0)
+	if (Config->InitialState && Config->SpinUpTurnovers > 0.0f)
 	{
 		UE_LOG(LogFlowSim, Log,
-			TEXT("InitialState is bound, so SpinUpSteps (%d) is skipped. It still ")
+			TEXT("InitialState is bound, so SpinUpTurnovers (%.1f) is skipped. It still ")
 			TEXT("matters when CREATING snapshots."),
-			Config->SpinUpSteps);
+			Config->SpinUpTurnovers);
 	}
 
 	if (Config->FilterLatitude <= 0.0f)
@@ -1096,7 +1096,7 @@ void UFlowSimSubsystem::ResetSimulation()
 			});
 	}
 
-	SpinUpTarget = (bRestored || !Config) ? 0 : FMath::Max(Config->SpinUpSteps, 0);
+	SpinUpTarget = (bRestored || !Config) ? 0 : Config->GetSpinUpSteps();
 
 	// Said every time: a missing or broken InitialState reference falls back to
 	// a seed, which is otherwise indistinguishable from a restore gone wrong.
@@ -1381,7 +1381,8 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		Out.LayerProfile[i] = FVector4f(P.JetScale, P.BoostScale, P.EddyScale * P.DragScale, P.DragScale);
 	}
 
-	Out.DeltaTime = FMath::Clamp(Step, 0.0f, FlowSimStep::SpinUp);
+	Out.DeltaTime = FMath::Clamp(Step, 0.0f, Config->GetSpinUpStep());
+	Out.Turnover = Scales.Turnover;
 	Out.Time = SimulatedTime;
 	Out.PlanetaryVorticity = FMath::Max(Config->PlanetaryVorticity, 0.1f);
 	Out.ImplicitWeight = Config->GetImplicitWeight(Out.DeltaTime);
@@ -1983,7 +1984,8 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 	// THE OUTPUT SHOWS SimulatedTime - Step + PendingTime, a blend of the last
 	// two states. Spin-up and manual steps show the state they reach, so they
 	// leave exactly one step owed and running resumes from what is on screen.
-	if (StepsCompleted < SpinUpTarget)
+	// A pause holds spin-up too.
+	if (!bPaused && StepsCompleted < SpinUpTarget)
 	{
 		// Spread over frames: one graph of hundreds of substeps hitches, and a
 		// watchable spin-up says more than the converged state.
@@ -1991,7 +1993,7 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 			FMath::Max(Config->MaxSpinUpStepsPerFrame, 1),
 			SpinUpTarget - StepsCompleted);
 
-		Step = FlowSimStep::SpinUp;
+		Step = Config->GetSpinUpStep();
 		PendingTime = RunStep;
 		Blend = 1.0f;
 	}

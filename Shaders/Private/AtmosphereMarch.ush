@@ -16,10 +16,6 @@
  *  mainRayParams.jitterShift so the resolve's history averages the draws. */
 #define ATMO_DRAW(Svxy, Index, Shift) frac(Atmo_TextureJitter(BlueNoise, Svxy, Index) + (Shift))
 
-/** Representative depth of a ray that met neither cloud nor a surface: a
- *  reprojection treats it as a direction. */
-#define ATMO_SKY_DEPTH (-1.0f)
-
 /** Mean cloud opacity below which the cloud does not set a ray's
  *  representative depth. */
 #ifndef ATMO_DEPTH_MIN_OPACITY
@@ -35,16 +31,14 @@
 // supplied by a model header. The plan, the step bounds, the octaves, the air,
 // the shadow read and the alpha collapse do not depend on what fills the shell.
 //
-// WHAT Atmo_Plan DOES. With cloudOuterRadius at the highest the field can reach
-// and cloudInnerRadius at the depth it has certainly gone opaque, the planner
-// emits three regions: coarse air above, FINE across the band the gradients live
-// in, and coarse below where the field no longer varies. cloudSteps therefore
-// means steps across the GRADIENT, not across the whole field.
+// WHAT Atmo_Plan DOES. It cuts the ray at the atmosphere and at the cloud
+// band, cloudOuterRadius at the highest the field reaches and cloudInnerRadius
+// where it stops varying, and flags the segments inside the band. cloudSteps
+// means steps across the band's depth.
 //
-// SEGMENTS[].w IS THE FINE-STEP FLAG, NOT A CLOUD FLAG: the solid region below
-// the band carries no flag and still owes extinction, and the split above the
-// entry carries the band's radius and owes nothing. Field_SegmentIsCloud is the
-// only place that decision is made.
+// SEGMENTS[].z IS THE BAND FLAG, NOT A CLOUD FLAG: a field may owe extinction
+// below the band, as the deep deck does. Field_SegmentIsCloud is the only place
+// that decision is made.
 //
 // LIGHT TOWARD THE STAR IS READ, NOT MARCHED: the air's share from the
 // transmittance table, the cloud's from the shadow map. A view sample's light
@@ -58,18 +52,18 @@
 // LEVEL OF DETAIL IS THE FIELD'S, NOT THE MARCH'S. Both noise layers are high
 // frequency, and past some distance one sample stands for many features at once
 // -- undersampling the FIELD rather than the ray, so raising step counts does
-// not quiet it. The march measures the distance and sets the two fades; what
-// they remove is the field's business.
+// not quiet it. The march measures the distance and sets the detail fade; what
+// it removes is the field's business.
 //
-// DISTANCE, NOT FOOTPRINT, for those fades. A footprint-derived mip is the
+// DISTANCE, NOT FOOTPRINT, for the fade. A footprint-derived mip is the
 // principled form and does not work here: it blurs along the shell, erasing the
 // vertical structure a high aspect ratio builds, so a layered field flattens
 // back to one shell at exactly the distances the layering was for. The trade is
 // resolution independence -- if 4K and 1080p visibly disagree, scale the fade
-// ranges against the march target's pixel count.
+// range against the march target's pixel count.
 //
 // THE MIP IS THE EXCEPTION: it follows the pixel footprint, which the march
-// writes per sample beside the fades. It only begins once a pixel spans more
+// writes per sample beside the fade. It only begins once a pixel spans more
 // than a texel, by which distance the view is looking down and the vertical
 // structure it blurs is below the pixel too.
 
@@ -90,9 +84,6 @@
  *   10  altitude of that sample, in atmosphere fractions
  *   11  1 where the ray was given any cloud segment at all, 0 where it was not
  *   12  total cloud chord on the ray, over the marched band's own thickness
- *   13  how far the entry split moved the first cloud segment's start, over the
- *       band's thickness: 0 where the field was found at the shell crossing,
- *       large where a long span was demoted to coarse ahead of it
  *
  *  1 to 4 PARTITION THE LIT IMAGE, air against deck and direct against ambient,
  *  so a glow present in 2 and absent in 3 and 4 is air Mie in front of the deck.
@@ -119,6 +110,15 @@
 #define ATMO_DEBUG_SCALE 1.0f
 #endif
 
+
+/** The planet shadow's falloff width, in atmosphere thicknesses: a step, since
+ *  the transmittance table carries a grazing sun ray's attenuation and any
+ *  softness visibly above the floor reads worse. */
+#define ATMO_TERMINATOR_SOFTNESS 1e-4f
+
+/** Exponent on the planet shadow for the anisotropic terms only: a power on
+ *  the same curve, so no new endpoint appears. */
+#define ATMO_LOBE_SHADOW_POWER 6.0f
 
 /** Transmittance below which a ray is opaque and stops.
  *
@@ -195,7 +195,7 @@ AtmoLightConstants Atmo_LightConstants(Texture2DArray ShadowMap, AtmoShadowCamer
     C.Fold = Field_FoldConstant(P.Atmo, P.Scatter);
 
 	// THE CEILING IS SET ON THE MOST TRANSMISSIVE TERM. The caller exponentiates
-	// the depth per channel at the receiving band's tint over the largest tint,
+	// the depth per channel at the receiver's tint over the largest tint,
 	// and each octave at Attenuation^i of that, so saturated deck is only dark
 	// if the smallest of those products is. See ATMO_SHADOW_SATURATION; the
 	// field sets the depth.
@@ -211,12 +211,12 @@ AtmoLightConstants Atmo_LightConstants(Texture2DArray ShadowMap, AtmoShadowCamer
 }
 
 /** Light reaching a sample, as the air's transmittance with the planet shadow
- *  folded in, plus the deck's band-weighted depth toward the light separately.
+ *  folded in, plus the deck's material-weighted depth toward the light separately.
  *
  *  THE DECK TERM COMES BACK UNEXPONENTIATED, because the multiple-scattering
  *  octaves each attenuate it by their own factor. Single scattering is
  *  AirTransmittance * exp(-cloudAbsBeta * Tint * OutCloudOptDepth), with Tint the
- *  receiving band's extinction tint, so a belt absorbs more than a zone. It
+ *  receiver's extinction tint, so storm cloud absorbs as storm cloud does. It
  *  resolves through cloudAbsBeta rather than cloudScatBeta: light scattered out
  *  of this ray is gone either way, but light scattered INTO it is what the
  *  octaves stand in for, and the larger coefficient would count that loss
@@ -252,7 +252,7 @@ float3 Atmo_LightMarch(
 
     const float Soft = max(
 		(P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius)
-			* P.Scatter.TerminatorSoftness,
+			* ATMO_TERMINATOR_SOFTNESS,
 		1e-4f);
 
 	// How far ahead the closest approach lies. Negative means the planet is
@@ -287,7 +287,7 @@ float3 Atmo_LightMarch(
 
 	// The anisotropic terms read this instead of PlanetShadow. Same curve, tail
 	// crushed, so no new endpoint appears at either end.
-    OutLobeShadow = pow(PlanetShadow, P.Scatter.LobeShadowPower);
+    OutLobeShadow = pow(PlanetShadow, ATMO_LOBE_SHADOW_POWER);
 
 	// THE DECK, AS ONE TEXTURE READ. Looked up rather than estimated, and the
 	// difference is not just cost: a per-ray estimator's error is additive in
@@ -390,12 +390,9 @@ float4 Atmo_MainMarchDepth(
 	// answers a geometric question rather than the optical one, so a deck the ray
 	// never sees through still glows across its whole disc.
 
-    float4 Segments[ATMO_MAX_SEGMENTS];
+    float3 Segments[ATMO_MAX_SEGMENTS];
 
-    int SegmentCount = Atmo_Plan(
-		RayOrigin, RayDir, MaxDist, P.Atmo.planetParams,
-		P.Atmo.mainRayParams.atmoSteps, P.Atmo.mainRayParams.cloudSteps,
-		Segments);
+    const int SegmentCount = Atmo_Plan(RayOrigin, RayDir, MaxDist, P.Atmo.planetParams, Segments);
 
     if (SegmentCount == 0)
     {
@@ -410,18 +407,8 @@ float4 Atmo_MainMarchDepth(
     float DepthWeight = 0.0f;
     float HalfDepth = -1.0f;
 
-	// READ BACK FROM THE CULL RADIUS RATHER THAN RECOMPUTED, so the cone trace
-	// cannot bound the deck differently from the plan that plans for it. The
-	// radius already carries the fades folded in.
-    const float TopMax =
-		(P.Atmo.planetParams.cloudOuterRadius - P.Field.PlanetRadius) / P.Field.Thickness;
-
     const float3 LocalOrigin = Atmo_ToLocal(RayOrigin, P);
     const float3 LocalDir = mul(P.WorldToLocal, RayDir);
-
-
-    const float AtmoThickness = max(
-		P.Atmo.planetParams.atmoRadius - P.Atmo.planetParams.planetRadius, 1e-4f);
 
 	// The LOD fades' unit, reciprocal so the loop multiplies. PLANET RADII, NOT
 	// ATMOSPHERE THICKNESSES: both volumes are sampled against a unit direction,
@@ -433,40 +420,6 @@ float4 Atmo_MainMarchDepth(
 	// A pixel's angle, so a distance in planet radii times this is its width in
 	// radians of arc on the unit sphere the volumes are sampled against.
     const float PixelAngle = Atmo_PixelAngle();
-
-    const float CoarseStep = AtmoThickness / float(max(P.Atmo.mainRayParams.atmoSteps, 1));
-
-#if ATMO_DEBUG_TERM == 13
-	// The first cloud segment as the planner left it, before the field is given
-	// a chance to move it.
-    float DebugFineBefore = -1.0f;
-
-    for (int e = 0; e < SegmentCount; e++)
-    {
-        if (Field_SegmentIsCloud(RayOrigin, RayDir, Segments[e], P.Atmo.planetParams))
-        {
-            DebugFineBefore = Segments[e].x;
-            break;
-        }
-    }
-#endif
-
-    Field_PlanSegments(
-		FlowField, FlowSampler, LocalOrigin, LocalDir, TopMax, CoarseStep,
-		P.Field, Segments, SegmentCount);
-
-#if ATMO_DEBUG_TERM == 13
-    float DebugFineAfter = DebugFineBefore;
-
-    for (int f = 0; f < SegmentCount; f++)
-    {
-        if (Field_SegmentIsCloud(RayOrigin, RayDir, Segments[f], P.Atmo.planetParams))
-        {
-            DebugFineAfter = Segments[f].x;
-            break;
-        }
-    }
-#endif
 
     float3 AccumLight = float3(0.0f, 0.0f, 0.0f);
     float3 Transmittance = float3(1.0f, 1.0f, 1.0f);
@@ -508,16 +461,14 @@ float4 Atmo_MainMarchDepth(
     float CloudDepthAhead = 0.0f;
 
 	// Per-octave constants, fixed per pixel since the view and the light are:
-	// phase times contribution, the optical-depth factor, and how much of the
-	// lobe shadow the octave keeps. Octave 0 is exactly single scattering -- the
-	// authored dual lobe, full optical depth, full lobe shadow. Unused octaves
-	// carry zero weight.
+	// phase times the octave's attenuation, which is also its optical-depth
+	// factor, and how much of the lobe shadow it keeps. Octave 0 is exactly
+	// single scattering. Unused octaves carry zero weight.
     float4 OctaveWeight = float4(0.0f, 0.0f, 0.0f, 0.0f);
     float4 OctaveAtten = float4(1.0f, 1.0f, 1.0f, 1.0f);
     float4 OctaveEcc = float4(1.0f, 1.0f, 1.0f, 1.0f);
     {
         float Atten = 1.0f;
-        float Contrib = 1.0f;
         float Ecc = 1.0f;
 
         UNROLL
@@ -526,7 +477,7 @@ float4 Atmo_MainMarchDepth(
         {
             if (float(o) < P.Scatter.OctaveCount)
             {
-                OctaveWeight[o] = Contrib * Atmo_PhaseDualLobe(P.Atmo.scatteringParams.cosTheta,
+                OctaveWeight[o] = Atten * Atmo_PhaseDualLobe(P.Atmo.scatteringParams.cosTheta,
 					P.Scatter.ForwardG * Ecc,
 					P.Scatter.BackwardG * Ecc,
 					P.Scatter.ForwardWeight);
@@ -535,7 +486,6 @@ float4 Atmo_MainMarchDepth(
             }
 
             Atten *= P.Scatter.OctaveAttenuation;
-            Contrib *= P.Scatter.OctaveContribution;
             Ecc *= P.Scatter.OctaveEccentricity;
         }
     }
@@ -689,10 +639,9 @@ float4 Atmo_MainMarchDepth(
                 P.Atmo.lightRayParams.samplePos = SamplePos;
                 P.Atmo.lightRayParams.parentStepIndex = StepIndex;
 
-				// THE FADES BELONG TO THE SAMPLE, NOT TO THE PATH. The field's build
-				// leaves both at 1 and the march sets them per sample; the light
-				// march does not read them, since the bake applies the same fades at
-				// its own positions. Measured to THIS SAMPLE, so a grazing ray's
+				// THE FADE BELONGS TO THE SAMPLE, NOT TO THE PATH. The field's build
+				// leaves it at 1 and the march sets it per sample; the light march
+				// does not read it, since the bake applies its own per cascade. Measured to THIS SAMPLE, so a grazing ray's
 				// near end stays detailed while its far end fades.
 				//
 				// THE JITTERED POSITION, LIKE EVERYTHING ELSE IN THE LOOP. Read at
@@ -705,9 +654,6 @@ float4 Atmo_MainMarchDepth(
 
                 P.Field.DetailFade = 1.0f - smoothstep(
 					P.Field.DetailFadeNear, P.Field.DetailFadeFar, SampleDistance);
-
-                P.Field.StructureFade = 1.0f - smoothstep(
-					P.Field.StructureFadeNear, P.Field.StructureFadeFar, SampleDistance);
 
                 P.Field.PixelFootprint = SampleDistance * PixelAngle;
 
@@ -836,10 +782,8 @@ float4 Atmo_MainMarchDepth(
                 {
                     if (Sample.x > 0.0f)
                     {
-						// THE BAND IS READ AT THE SCATTERING SITE. It says what
-						// the material is, so it belongs here rather than in
-						// density: a belt is a different albedo and a different
-						// extinction, not less cloud.
+						// THE MATERIAL IS READ AT THE SCATTERING SITE: storm cloud
+						// is a different albedo and extinction, not less cloud.
                         const float3 Albedo = Field_Albedo(Sample.y, P.Scatter);
 
 						// Single scattering and the octaves above it. Each later
@@ -851,7 +795,7 @@ float4 Atmo_MainMarchDepth(
 						//
 						// PITFALL: at low deck optical depth every octave sees full
 						// transmittance, so thin cloud brightens by the sum of the
-						// contributions. Contribution is the handle.
+						// weights. OctaveAttenuation is the handle.
                         float3 OctaveLight = float3(0.0f, 0.0f, 0.0f);
 
                         UNROLL
@@ -871,9 +815,9 @@ float4 Atmo_MainMarchDepth(
 							+ P.Atmo.mainRayParams.lightCol * P.Atmo.cloudParams.cloudAmb.rgb
 								* CloudAmbientFactor * AmbientShare;
 
-						// Band scales the shared base rather than replacing it,
-						// so the deck stays on the same thickness-relative
-						// footing as the air around it.
+						// The material scales the shared base rather than
+						// replacing it, so the deck stays on the same
+						// thickness-relative footing as the air around it.
                         const float3 CloudExtinction = Sample.x * Field_Extinction(Sample.y, P.Scatter)
 							* P.Atmo.cloudParams.cloudScatBeta * CurrentStep;
 
@@ -994,10 +938,6 @@ float4 Atmo_MainMarchDepth(
 	DebugAccum = (DebugCloudChord
 		/ max(P.Atmo.planetParams.cloudOuterRadius
 			- P.Atmo.planetParams.cloudInnerRadius, 1e-4f) * ATMO_DEBUG_SCALE).xxx;
-#elif ATMO_DEBUG_TERM == 13
-	DebugAccum = (max(DebugFineAfter - DebugFineBefore, 0.0f)
-		/ max(P.Atmo.planetParams.cloudOuterRadius
-			- P.Atmo.planetParams.cloudInnerRadius, 1e-4f) * ATMO_DEBUG_SCALE).xxx;
 #endif
 
 	// -- Cloud shadows on geometry ------------------------------------------
@@ -1039,15 +979,13 @@ float4 Atmo_MainMarchDepth(
 			Field_ShadowFrame(P.Field), Fold.x)
 			* P.Atmo.surfaceShadowParams.strength;
 
-		// THE RECEIVER'S BAND COLOURS THE DECK IT WAS SHADOWED BY, the rule the
-		// deck samples above already follow, with the same guard and the same
-		// fallback. A second tint would be a second answer to one question.
+		// THE RECEIVER'S MATERIAL COLOURS THE DECK IT WAS SHADOWED BY, the rule
+		// the deck samples above follow, with the same guard and fallback.
 		//
-		// PITFALL: the rule rests on bands being far wider than the deck is
-		// deep, so the light path stays mostly in the receiver's band. A surface
-		// can sit much further below the deck than a deck sample does, which
-		// makes that path longer and the approximation weaker -- worst at low
-		// sun near a band edge.
+		// PITFALL: the rule rests on weather systems being far wider than the
+		// deck is deep. A surface sits further below the deck than a deck sample
+		// does, so its light path is longer and the rule weaker -- worst at low
+		// sun near a system's edge.
         float3 LightTint = Field_NeutralTint(P.Scatter);
 
         BRANCH

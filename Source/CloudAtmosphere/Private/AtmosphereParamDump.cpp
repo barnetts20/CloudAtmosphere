@@ -561,6 +561,11 @@ namespace AtmosphereLoad
 			{ TEXT("ForcingLifetime"), TEXT(""), 7 },
 			{ TEXT("StormCellRadius"), TEXT(""), 7 },
 			{ TEXT("ForcingFrequency"), TEXT(""), 7 },
+
+			// Version 8 authors the step in turnovers, and spin-up as turnovers
+			// at the spin-up step.
+			{ TEXT("StepSize"), TEXT(""), 8 },
+			{ TEXT("SpinUpSteps"), TEXT("") },
 		};
 		return Rows;
 	}
@@ -604,7 +609,7 @@ namespace AtmosphereLoad
 			// decay with it. The terrestrial planet shadow is fixed, so the rest of
 			// its terminator group retires.
 			{ TEXT("TerrestrialGeometry"), TEXT("TerrestrialPlanet") },
-			{ TEXT("TerrestrialMotion.RotationWeight"), TEXT("TerrestrialPlanet.SpinRate") },
+			{ TEXT("TerrestrialMotion.RotationWeight"), TEXT("") },
 			{ TEXT("TerrestrialProfile"), TEXT("TerrestrialShape") },
 			{ TEXT("TerrestrialShape.CloudLayer"), TEXT("TerrestrialCoverage.CloudLayer") },
 			{ TEXT("TerrestrialShape.CloudCover"), TEXT("TerrestrialCoverage.CloudCover") },
@@ -701,7 +706,7 @@ namespace AtmosphereLoad
 			// over, its own deck's groups retire, and it takes GasGiant twins of the
 			// terrestrial groups at their defaults.
 			{ TEXT("Geometry.HeightScale"), TEXT("GasGiantPlanet.HeightScale") },
-			{ TEXT("Flow.RotationWeight"), TEXT("GasGiantPlanet.SpinRate") },
+			{ TEXT("Flow.RotationWeight"), TEXT("") },
 			{ TEXT("Geometry"), TEXT("") },
 			{ TEXT("GasGiantProfile"), TEXT("") },
 			{ TEXT("Flow"), TEXT("") },
@@ -727,6 +732,11 @@ namespace AtmosphereLoad
 			{ TEXT("TerrestrialDetailLayer.FadeLength"), TEXT("") },
 			{ TEXT("GasGiantDetailLayer.FadeStart"), TEXT("") },
 			{ TEXT("GasGiantDetailLayer.FadeLength"), TEXT("") },
+
+			// The spin is a ratio of the sim's rotation, SpinRatio, where it was
+			// radians per unit sim time.
+			{ TEXT("TerrestrialPlanet.SpinRate"), TEXT("") },
+			{ TEXT("GasGiantPlanet.SpinRate"), TEXT("") },
 		};
 		return Rows;
 	}

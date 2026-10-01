@@ -157,16 +157,17 @@ struct AtmoShadowFrame
     float Extents[ATMO_SHADOW_CASCADES];
 };
 
-/** The smallest and largest channel across the bands' extinction tints.
+/** The smallest and largest channel across the two materials' extinction
+ *  tints.
  *
  *  THE FOLD CONSTANT: the map stores optical depth scaled by the largest channel
- *  any band can have, so its thresholds mean transmittance on the fastest
+ *  either material has, so its thresholds mean transmittance on the fastest
  *  channel anywhere, and the reader divides it back out and applies the
- *  receiving band's tint. The smallest channel sets the saturation ceiling. */
-float2 AtmoShadow_ExtinctionTintRange(float3 TintNegative, float3 TintPositive, float3 TintBase)
+ *  receiver's tint. The smallest channel sets the saturation ceiling. */
+float2 AtmoShadow_ExtinctionTintRange(float3 CloudTint, float3 StormTint)
 {
-    const float3 Lo = min(TintNegative, min(TintPositive, TintBase));
-    const float3 Hi = max(TintNegative, max(TintPositive, TintBase));
+    const float3 Lo = min(CloudTint, StormTint);
+    const float3 Hi = max(CloudTint, StormTint);
 
     return float2(min(Lo.x, min(Lo.y, Lo.z)), max(Hi.x, max(Hi.y, Hi.z)));
 }
@@ -578,13 +579,13 @@ float AtmoShadow_Tau(
 		AtmoShadow_MakeReader(ShadowMap, LightLocal, Cameras, Frame), LocalPos, JitterTexels, Ceiling);
 }
 
-/** Band-weighted optical depth between a point on OPAQUE GEOMETRY and the light,
- *  with the bake's fold constant divided back out. Zero where the receiver is
- *  outside the shell.
+/** Material-weighted optical depth between a point on OPAQUE GEOMETRY and the
+ *  light, with the bake's fold constant divided back out. Zero where the
+ *  receiver is outside the shell.
  *
  *  DEPTH, NOT TRANSMITTANCE, mirroring what a light march hands back: the
  *  amounts are in the map and the colour is applied where the depth is read,
- *  since the band coordinate at the receiver only a model can compute.
+ *  since only the field can compute the receiver's material.
  *
  *  THE RADIAL GATE IS NOT REDUNDANT. AtmoShadow_Tau tests the ray's
  *  PERPENDICULAR offset, which admits any point laterally inside the disc. One

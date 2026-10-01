@@ -294,11 +294,8 @@ struct TRFieldParams
     float StructureVertical;
     float DetailVertical;
 
-	/** Per-layer fade range, in planet radii from the camera, which the march
-	 *  reads to set the per-sample fades. The structure layer applies at every
-	 *  range, so its pair only completes the march's interface. */
-    float StructureFadeNear;
-    float StructureFadeFar;
+	/** The detail layer's fade range, in planet radii from the camera, which the
+	 *  march reads to set DetailFade per sample. */
     float DetailFadeNear;
     float DetailFadeFar;
 
@@ -308,10 +305,8 @@ struct TRFieldParams
 
 	// -- Per sample ----------------------------------------------------------
 
-	/** Per-layer level of detail, 1 near and 0 far, written per sample by the
-	 *  march; left at 1 by TR_BuildField. The bake sets DetailFade per cascade.
-	 *  Only DetailFade is read here. */
-    float StructureFade;
+	/** The detail layer's level of detail, 1 near and 0 far, written per sample
+	 *  by the march and per cascade by the bake; 1 from TR_BuildField. */
     float DetailFade;
 
 	/** One march pixel's width at the sample, in radians of arc on the unit
@@ -343,13 +338,12 @@ struct TRFieldParams
  *    CloudGenus<Name>  structure channel weights for that genus
  *    CloudResponse     (unused), TypeCurve, StormBalance, StormBlend
  *
- *  SpinAngle is the planet's own rotation, -RotationWeight * Time wrapped in
- *  double on the CPU; the sim runs in the rotating frame, so it turns the
- *  sampling position. Time is unread here: every clock arrives wrapped. */
+ *  SpinAngle is the planet's own rotation, -SpinRate * time wrapped in double
+ *  on the CPU; the sim runs in the rotating frame, so it turns the sampling
+ *  position. Every clock arrives wrapped. */
 TRFieldParams TR_BuildField(
 	float PlanetRadius,
 	float HeightScale,
-	float Time,
 	float4 CloudProfile,
 	float4 CloudCurves,
 	float4 CloudCoverage,
@@ -436,9 +430,6 @@ TRFieldParams TR_BuildField(
     F.StructureVertical = StructureSampling.x * StructureSampling.y * HeightScale;
     F.DetailVertical = DetailSampling.x * DetailSampling.y * HeightScale;
 
-    F.StructureFadeNear = 0.0f;
-    F.StructureFadeFar = 1.0f;
-
 	// The far edge held above the near one, so a zero span cannot collapse a
 	// cascade onto the one inside it.
     F.DetailFadeNear = max(DetailWarp.z, 0.0f);
@@ -454,7 +445,6 @@ TRFieldParams TR_BuildField(
     F.StormBalance = saturate(CloudResponse.z);
     F.StormBlend = max(CloudResponse.w, 1e-3f);
 
-    F.StructureFade = 1.0f;
     F.DetailFade = 1.0f;
     F.PixelFootprint = 0.0f;
 
@@ -466,7 +456,7 @@ TRFieldParams TR_BuildField(
  *  AtmosphereMarchPass.usf's and TerrestrialShadowMap.usf's uniforms carry
  *  exactly these names. A missing one is an undeclared identifier naming it. */
 #define TR_BUILD_FIELD() TR_BuildField( \
-	PlanetRadius, HeightScale, Time, \
+	PlanetRadius, HeightScale, \
 	CloudProfile, CloudCurves, CloudCoverage, CloudType, \
 	CloudLid, CloudLift, CloudMotion, \
 	NoiseLevels, StructureSampling, StructureWarp, \
@@ -637,7 +627,7 @@ struct TRColumn
 
 /** What a column is built from: the sim read at one spun direction. Only the
  *  flow slice's pressure is used, so it is read raw rather than through
- *  Flow_Sample's velocity rotation. Weather is (W, cloud, altitude, storm);
+ *  a rotation out of the face basis. Weather is (W, cloud, altitude, storm);
  *  Depth the sim's depth factor, which thins storm cells' eyes. */
 struct TRColumnInputs
 {
@@ -906,21 +896,18 @@ float TR_DeepFloor(float Height, float HalfStep, TRColumn Col, float Noise, TRFi
 		- TR_DeepFloorRamp((Top - Height - HalfStep) / Soft)) / (2.0f * HalfStep);
 }
 
-/** Distance along a ray at which it first reaches a slab, from either side.
- *  Returns T1 when it does not reach one between T0 and T1, and sets OutMissed
- *  only when that is PROVED rather than merely not found.
+/** Distance along a ray at which it first reaches a slab, from either side,
+ *  or T1 when it reaches none before T1. The shadow bake's entry.
  *
- *  THE TWO ARE NOT THE SAME ANSWER. The proofs are geometry: radius is monotone
- *  either side of the closest approach, so a ray climbing clear of TopMax, or
- *  below the lowest base any column has (TR_BaseMin) and still descending with
- *  its perigee outside the span, is ruled out whatever the field does. Running
- *  out of segment rests on CloudSlope bounding the surface, and an
- *  under-declared slope overshoots -- so it costs a full fine march, never
- *  missing cloud.
+ *  TWO SKIPS ARE GEOMETRY: radius is monotone either side of the closest
+ *  approach, so a ray climbing clear of TopMax has nothing ahead, and one below
+ *  the lowest base any column has (TR_BaseMin) and still descending has nothing
+ *  before its perigee. The rest is a cone trace on CloudSlope. PITFALL: an
+ *  under-declared slope steps over cloud, and the map shows shadow holes.
  *
  *  A CONE TRACE, AND NOT AN OPTIMIZATION: a grazing chord stepped at the
- *  field's own step size exhausts the iteration cap in empty space and leaves a
- *  hard silhouette at the limb. LocalDir is normalized. */
+ *  field's own step size exhausts the iteration cap in empty space. LocalDir is
+ *  normalized. */
 float TR_SlabEntry(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
@@ -929,10 +916,8 @@ float TR_SlabEntry(
 	float T0,
 	float T1,
 	float TopMax,
-	TRFieldParams F,
-	out bool OutMissed)
+	TRFieldParams F)
 {
-    OutMissed = false;
 
     const float BaseMin = TR_BaseMin(F);
 
@@ -975,14 +960,12 @@ float TR_SlabEntry(
 		// Climbing and clear of the highest the field can reach.
         if (bAbove && ProbeRate >= 0.0f && ProbeHeight > TopMax)
         {
-            OutMissed = true;
             return T1;
         }
 
 		// BELOW EVERY BASE AND STILL DESCENDING: nothing lies ahead until the
 		// perigee, so resume there rather than give up, or a limb ray that skims
-		// under the cloud and climbs back into it reports the whole segment as
-		// missing the slab.
+		// under the cloud and climbs back into it misses the cloud it shadows.
 		//
 		// PITFALL: BELOW THIS COLUMN'S BASE IS NOT ENOUGH. Neighbouring bases sit
 		// lower where lift, pressure and latitude move them, and a jump from under
@@ -996,7 +979,6 @@ float TR_SlabEntry(
 
             if (TPerigee >= T1)
             {
-                OutMissed = true;
                 return T1;
             }
 

@@ -46,9 +46,6 @@
 
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereSetup.ush"
 
-/** Representative depth of sky, as Atmo_MainMarchDepth writes it. */
-#define ATMO_TEMPORAL_SKY_DEPTH (-1.0f)
-
 /** The view rect's size in output pixels. */
 float2 OutputSize;
 
@@ -161,7 +158,7 @@ void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     float4 Fill = 0.0f;
     float FillTotal = 0.0f;
     float BestWeight = 0.0f;
-    float BestDepth = ATMO_TEMPORAL_SKY_DEPTH;
+    float BestDepth = ATMO_SKY_DEPTH;
     float4 Own = 0.0f;
 
     float4 M1 = 0.0f;

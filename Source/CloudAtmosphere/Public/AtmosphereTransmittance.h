@@ -69,13 +69,9 @@ public:
 
 namespace AtmosphereTransmittance
 {
-	/** Table size. Width is the cosine axis, height the altitude axis.
-	 *
-	 *  PITFALL: MUST MATCH ATMO_TRANSMITTANCE_WIDTH and _HEIGHT in
-	 *  AtmosphereTransmittance.ush. ModifyCompilationEnvironment pushes these to
-	 *  the BAKE only -- the material reads that header too and never passes
-	 *  through it, so changing one here moves the bake without moving the lookup
-	 *  that reads it. Edit the pair together. */
+	/** Table size. Width is the cosine axis, height the altitude axis. The bake
+	 *  and the march push both to AtmosphereTransmittance.ush as
+	 *  ATMO_TRANSMITTANCE_WIDTH and _HEIGHT. */
 	static constexpr int32 Width = 256;
 	static constexpr int32 Height = 64;
 

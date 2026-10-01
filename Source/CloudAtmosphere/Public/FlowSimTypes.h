@@ -229,16 +229,18 @@ inline TArray<FFlowLayerProfile> FlowSimDefaultLayers()
 	return { Top, Bottom };
 }
 
+/** Step limits in turnovers, so a step turns the flow by the same angle at any
+ *  rotation rate; the subsystem steps in sim time, UFlowSimConfig converting. */
 namespace FlowSimStep
 {
 	/** Smallest running step StepSize accepts. */
-	static constexpr float Min = 1e-6f;
+	static constexpr float Min = 1e-5f;
 
 	/** Spin-up step, and the largest running step: reaches a developed state
-	 *  quickly. Its weather carries roughly 40% more thick cloud than 1e-5,
-	 *  and relaxes to the running step's look over about a cloud lifetime
-	 *  after spin-up ends. */
-	static constexpr float SpinUp = 0.0086f;
+	 *  quickly. Its weather carries more thick cloud than a running step a
+	 *  hundredth its size, and relaxes to the running step's look over about a
+	 *  cloud lifetime after spin-up ends. */
+	static constexpr float SpinUp = 0.044f;
 
 	/** Steps a frame above which the log warns that the sim dominates frame
 	 *  time. */
@@ -777,7 +779,7 @@ public:
 	 *  noise's warp grows with the
 	 *  flow's strain times the reset time, and strain scales with the root, so
 	 *  this holds the winding per reset at any speed. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Noise Motion", meta = (ClampMin = "0.05"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Noise Motion", meta = (ClampMin = "0.1"))
 	float NoiseResetTurnovers = 3.0f;
 
 	// -- Time ---------------------------------------------------------------
@@ -788,10 +790,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Time", meta = (ClampMin = "0.0"))
 	float SimSpeed = 0.0025f;
 
-	/** Substeps to run before the sim is considered ready. Skipped once
-	 *  InitialState is bound. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Time", meta = (ClampMin = "0", ClampMax = "8192"))
-	int32 SpinUpSteps = 300;
+	/** Turnovers to run at the spin-up step before the sim is considered ready.
+	 *  Skipped once InitialState is bound. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Time", meta = (ClampMin = "0.0", ClampMax = "360.0"))
+	float SpinUpTurnovers = 13.0f;
 
 	// -- Quality ------------------------------------------------------------
 
@@ -802,15 +804,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Quality", meta = (ClampMin = "16", ClampMax = "512"))
 	int32 GridResolution = 64;
 
-	/** Sim time per step: a look and cost control, independent of speed.
+	/** Turnovers per step: a look and cost control, independent of speed.
 	 *
 	 *  PITFALL: THE WEATHER DEPENDS ON THE STEP, and no conversion of the
 	 *  per-step settings removes that. The semi-Lagrangian interpolation
 	 *  smooths once per step, and the solver splits grid-scale gravity waves
 	 *  between pressure and divergence by an amount the step sets. Larger
 	 *  steps give sharper, thicker cloud. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Quality", meta = (ClampMin = "0.000001", ClampMax = "0.0086"))
-	float StepSize = 1e-5f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Quality", meta = (ClampMin = "0.00001", ClampMax = "0.044"))
+	float StepSize = 1e-4f;
 
 	/** Layers in the stack, 0 on top, coupled through their pressure. Two is
 	 *  the smallest with baroclinic storms; one is a single shallow layer. */
@@ -969,13 +971,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
 	bool bPaused = false;
 
-	/** StepSize held to the solver's range. */
-	float GetStepSize() const { return FMath::Clamp(StepSize, FlowSimStep::Min, FlowSimStep::SpinUp); }
+	/** StepSize held to the solver's range, in sim time. */
+	float GetStepSize() const { return FMath::Clamp(StepSize, FlowSimStep::Min, FlowSimStep::SpinUp) * GetTurnover(); }
+
+	/** The spin-up step in sim time, and the steps SpinUpTurnovers takes. */
+	float GetSpinUpStep() const { return FlowSimStep::SpinUp * GetTurnover(); }
+	int32 GetSpinUpSteps() const { return FMath::CeilToInt(FMath::Max(SpinUpTurnovers, 0.0f) / FlowSimStep::SpinUp); }
 
 	/** NoiseDriftSpeed as an angular rate, radians per unit sim time. */
 	float GetNoiseDriftRate() const;
 
-	/** NoiseResetTurnovers in sim time. */
+	/** NoiseResetTurnovers in sim time, two spin-up steps at least. */
 	float GetNoiseResetTime() const;
 
 	/** One turnover in sim time: DeformationRadius over the speed root. */
@@ -1078,6 +1084,9 @@ struct FFlowSimParams
 	FFlowSimStack Stack;
 
 	float DeltaTime = 0.0086f;
+
+	/** One turnover in sim time: the unit the eye tracer's rates are in. */
+	float Turnover = 1.0f;
 
 	/** Sim time at the start of the step, in double precision; the shader gets
 	 *  it wrapped by each clock's period. */

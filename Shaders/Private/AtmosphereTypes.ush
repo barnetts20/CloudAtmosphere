@@ -30,8 +30,6 @@ struct PlanetParams
     float atmoRadius;
     float cloudOuterRadius;
     float cloudInnerRadius;
-    float cloudOuterRadiusSq;
-    float cloudInnerRadiusSq;
 };
 
 struct ScatterParams

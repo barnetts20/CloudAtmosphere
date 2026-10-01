@@ -11,7 +11,7 @@
 // below is the three numbers the deck supplies -- a cull radius, a depth unit
 // and the cascade half-widths -- and the one alias the bake and the march call.
 
-#define TR_ExtinctionTintRange(Neg, Pos, Base) AtmoShadow_ExtinctionTintRange(Neg, Pos, Base)
+#define TR_ExtinctionTintRange(Cloud, Storm) AtmoShadow_ExtinctionTintRange(Cloud, Storm)
 
 /** The radius the map covers: the field-wide top bound, the same radius the
  *  march plans against as cloudOuterRadius.

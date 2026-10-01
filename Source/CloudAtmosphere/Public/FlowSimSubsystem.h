@@ -324,7 +324,7 @@ private:
 	 *  resets the sim, since the state is reallocated either way. */
 	FIntVector RunningGrid = FIntVector::ZeroValue;
 
-	/** Substeps to run before free-running. Set from SpinUpSteps at start. */
+	/** Substeps to run before free-running. Set from SpinUpTurnovers at start. */
 	int32 SpinUpTarget = 0;
 
 	/** Manual steps queued by StepOnce, honoured even while paused. */

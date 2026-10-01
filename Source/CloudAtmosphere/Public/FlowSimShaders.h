@@ -45,6 +45,7 @@ SHADER_PARAMETER_ARRAY(FVector4f, MatModeToMontgomery, [16])
 
 // -- Time, rotation and gravity waves -----------------------------------
 SHADER_PARAMETER(float, DeltaTime)
+SHADER_PARAMETER(float, Turnover)
 SHADER_PARAMETER(uint32, ForcingCycle)
 SHADER_PARAMETER(float, ForcingFraction)
 SHADER_PARAMETER(float, NoiseClock)

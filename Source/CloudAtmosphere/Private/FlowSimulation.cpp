@@ -139,11 +139,12 @@ namespace
 		}
 
 		P.DeltaTime = Params.DeltaTime;
+		P.Turnover = Params.Turnover;
 
-		// Wrapped in double: the forcing's pattern seeds repeat after 4096
-		// lifetimes, and the reset test needs only the phase.
-		// The forcing clock as a whole cycle and a fraction, so the fraction keeps
-		// full precision however many cycles have run.
+		// The forcing clock as a whole cycle, wrapped at 2^32, and a fraction,
+		// so the fraction keeps full precision however many cycles have run; the
+		// noise clock wrapped in double, since the reset test needs only the
+		// phase.
 		const double ForcingCycles = Params.Time / FMath::Max((double)Params.ForcingLifetime, 1e-3);
 		const double ForcingWhole = FMath::FloorToDouble(ForcingCycles);
 

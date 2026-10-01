@@ -13,12 +13,12 @@ class FTextureResource;
 class FTextureRenderTargetResource;
 
 /** The cloud field's authored values, both models': TR_BuildField's packed
- *  pins, in its order, and the cloud material's extinction. The planet, clock and light
- *  extinction arrive beside them, as each pass shares them with its other
- *  uniforms.
+ *  pins, in its order, and the cloud material's extinction. The planet and the
+ *  light extinction arrive beside them, as each pass shares them with its other
+ *  uniforms; the field's clocks arrive packed, already wrapped.
  *
  *  ONE STRUCT FOR THE MARCH AND THE BAKE, filled by one packer and included in
- *  both passes' parameters, so the band the light sees is the band the eye
+ *  both passes' parameters, so the field the light sees is the field the eye
  *  sees. Names must match AtmosphereMarchPass.usf and TerrestrialShadowMap.usf;
  *  an addition to TR_BuildField's signature has to appear in all three. */
 BEGIN_SHADER_PARAMETER_STRUCT(FTerrestrialFieldParameters, )
@@ -98,7 +98,6 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 
 	float PlanetRadius = 0.0f;
 	float HeightScale = 0.0f;
-	float Time = 0.0f;
 
 	FTerrestrialFieldParameters Field{};
 
@@ -166,7 +165,6 @@ SHADER_PARAMETER_RDG_TEXTURE(Texture2DArray<float4>, ShadowHistory)
 
 SHADER_PARAMETER(float, PlanetRadius)
 SHADER_PARAMETER(float, HeightScale)
-SHADER_PARAMETER(float, Time)
 SHADER_PARAMETER_STRUCT_INCLUDE(FTerrestrialFieldParameters, Field)
 SHADER_PARAMETER(float, LightExtinctionFraction)
 

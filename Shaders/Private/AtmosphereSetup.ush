@@ -13,19 +13,12 @@
  *  holds, and the resolve the unjittered one its history is kept in. */
 float4x4 RayViewToClip;
 
-/** World ray direction through a viewport UV, from RayViewToClip.
- *
- *  Perspective inverts in place: NDC = view.xy / view.z * (P00, P11) + (P20,
- *  P21), which also covers an off-axis frustum. An orthographic view has one
- *  direction for every pixel. */
+/** World ray direction through a viewport UV, from RayViewToClip, inverted in
+ *  place: NDC = view.xy / view.z * (P00, P11) + (P20, P21), which also covers
+ *  an off-axis frustum. Perspective only; the passes skip other views. */
 float3 Atmo_RayDirection(float2 viewportUV)
 {
     const float4x4 P = RayViewToClip;
-
-    if (P[3][3] >= 1.0f)
-    {
-        return View.ViewForward;
-    }
 
     const float2 ClipXY = viewportUV * float2(2, -2) + float2(-1, 1);
 
@@ -38,8 +31,7 @@ float3 Atmo_RayDirection(float2 viewportUV)
 }
 
 /** The angle one pixel subtends at the view centre, from the unjittered
- *  projection and the internal resolution. The march target is coarser than
- *  that, which the noise layers' MipBias absorbs. */
+ *  projection and the internal resolution. */
 float Atmo_PixelAngle()
 {
     return 2.0f / max(View.ViewToClipNoAA[1][1] * View.ViewSizeAndInvSize.y, 1e-4f);
@@ -104,8 +96,6 @@ CompositeParams Atmo_BuildParams(
     params.planetParams.atmoRadius = atmoRadius;
     params.planetParams.cloudOuterRadius = cloudOuterRadius;
     params.planetParams.cloudInnerRadius = cloudInnerRadius;
-    params.planetParams.cloudOuterRadiusSq = cloudOuterRadius * cloudOuterRadius;
-    params.planetParams.cloudInnerRadiusSq = cloudInnerRadius * cloudInnerRadius;
 
     params.scatteringParams.cosTheta = cosTheta;
 

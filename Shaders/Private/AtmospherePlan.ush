@@ -52,37 +52,40 @@ void Atmo_ChordSteps(float Length, float Count, float Spread, out float First, o
     Growth = R - 1.0f;
 }
 
-/** The step plan: cloud steps on a lattice anchored at the camera, each
- *  pixel's lattice phase-shifted and each cloud entry refined; air steps spread
- *  over each ray's air chord by Atmo_ChordSteps.
- *
- *  THE LATTICE. Step length is a function of distance alone, so every ray's
- *  steps agree wherever the rays agree, whatever their chords. A cloud segment
- *  widens to the lattice points either side of it, so no cloud step is cut
- *  short by a shell; only the terminus trims one.
- *
- *  THE PHASE. Each pixel's lattice starts a fraction of a step into its first
- *  step, so neighbouring pixels do not share step boundaries: the noise the
- *  sample jitter leaves follows where features fall inside a step, and forms
- *  rings about the view centre wherever the lattice is shared.
- *
- *  THE ENTRY REFINE. The step in which a ray first meets cloud, and the
- *  ATMO_ENTRY_SPAN steps after it, are re-marched at ATMO_ENTRY_SUBSTEPS
- *  substeps each, again at every re-entry after a clear sample. A step's
- *  single sample decides its whole transmittance, and near the cloud's surface
- *  that decision carries a bias that follows where the surface falls in the
- *  step: rings about the camera. Substeps divide the bias, and they lie on the
- *  divided lattice, so the entry moves no step boundary.
- *
- *  PITFALL:
- *  A STEP CUT AT A SHELL IS A SAWTOOTH ACROSS THE SCREEN. Its length runs
- *  from zero to a full step each time the shell crossing passes a lattice
- *  point, every step-length bias follows it, and the lattice's spheres show
- *  as rings about the camera.
- *  PITFALL: A CHORD BUDGET STEPS DIFFERENTLY WHEREVER THE CHORD JUMPS. The
- *  chord ends at the planet on one side of the limb and runs on to the far
- *  shell on the other, so neighbouring rays through the same cloud step at
- *  different lengths and the limb shows through opaque deck. */
+// THE STEP PLAN: cloud steps on a lattice anchored at the camera, each
+// pixel's lattice phase-shifted and each cloud entry refined; air steps spread
+// over each ray's air chord by Atmo_ChordSteps.
+//
+// THE LATTICE. Step length is a function of distance alone, so every ray's
+// steps agree wherever the rays agree, whatever their chords. A cloud segment
+// widens to the lattice points either side of it, so no cloud step is cut
+// short by a shell; only the terminus trims one.
+//
+// THE PHASE. Each pixel's lattice starts a fraction of a step into its first
+// step, so neighbouring pixels do not share step boundaries: the noise the
+// sample jitter leaves follows where features fall inside a step, and forms
+// rings about the view centre wherever the lattice is shared.
+//
+// THE ENTRY REFINE. The step in which a ray first meets cloud, and the
+// ATMO_ENTRY_SPAN steps after it, are re-marched at ATMO_ENTRY_SUBSTEPS
+// substeps each, again at every re-entry after a clear sample. A step's
+// single sample decides its whole transmittance, and near the cloud's surface
+// that decision carries a bias that follows where the surface falls in the
+// step: rings about the camera. Substeps divide the bias, and they lie on the
+// divided lattice, so the entry moves no step boundary.
+//
+// PITFALL: A STEP CUT AT A SHELL IS A SAWTOOTH ACROSS THE SCREEN. Its length
+// runs from zero to a full step each time the shell crossing passes a lattice
+// point, every step-length bias follows it, and the lattice's spheres show as
+// rings about the camera.
+// PITFALL: A CHORD BUDGET STEPS DIFFERENTLY WHEREVER THE CHORD JUMPS. The
+// chord ends at the planet on one side of the limb and runs on to the far
+// shell on the other, so neighbouring rays through the same cloud step at
+// different lengths and the limb shows through opaque deck.
+// PITFALL: STEPS PLACED BY THE FIELD DRAW THE FIELD INTO THE LATTICE. They
+// move as the weather does, and a split at a cone-traced entry steps over
+// features narrower than the probe spacing.
+
 /** Camera lattice step growth, the model's Sampling group: each step past the
  *  knee is this fraction of its distance from the camera. Smaller is finer
  *  and costs about 1/x steps per e-fold of distance, so the cost is in grazing
@@ -190,18 +193,9 @@ float Atmo_LeadStep(float First, float Growth, float Phase)
 		: First * Phase;
 }
 
-/** Builds the segment list for a ray. Returns the count; each segment is
- *  (start, end, stepSize, isCloudBand).
- *
- *  STEP SIZES COME FROM THE SHELLS, NOT FROM THIS RAY'S CHORD. cloudSteps means
- *  samples across the band's radial depth for every ray, so a grazing ray takes
- *  more steps because it genuinely traverses more cloud rather than being handed
- *  coarser ones to compensate. Sized from the chord instead, a limb ray through
- *  a thin band gets steps longer by 2*sqrt(2*R*d)/d -- two orders of magnitude
- *  at planetary scale -- at exactly the angle where its path through cloud is
- *  longest and the integral hardest. The march does not read the step size a
- *  segment carries: cloud steps sit on the camera lattice, and air divides its
- *  own chord.
+/** Builds the segment list for a ray, cut at the atmosphere and cloud shells.
+ *  Returns the count; each segment is (start, end, 1 inside the cloud band).
+ *  The march sizes the steps: cloud on the camera lattice, air over its chord.
  *
  *  The boundary list is built in ORDER and never sorted, which works only
  *  because the guards enforce the ordering as they go: each candidate is
@@ -218,9 +212,7 @@ int Atmo_Plan(
 	float3 dir,
 	float maxDist,
 	PlanetParams planet,
-	int atmoSteps,
-	int cloudSteps,
-	out float4 segments[ATMO_MAX_SEGMENTS])
+	out float3 segments[ATMO_MAX_SEGMENTS])
 {
     int segmentCount = 0;
 
@@ -244,25 +236,16 @@ int Atmo_Plan(
         return 0;
     }
 
-	// Floored at one: the counts arrive as uniforms, and a zero divisor
-	// makes an infinite step that covers the segment in a single sample.
-    const float coarseStep =
-		max(planet.atmoRadius - planet.planetRadius, 1e-4f) / float(max(atmoSteps, 1));
-
-    const float bandThickness = max(planet.cloudOuterRadius - planet.cloudInnerRadius, 1e-4f);
-
-    const float fineStep = bandThickness / float(max(cloudSteps, 1));
-
     float2 cloudOHit = Atmo_RaySphere(origin, dir, planet.planetPos, planet.cloudOuterRadius);
     float2 cloudIHit = Atmo_RaySphere(origin, dir, planet.planetPos, planet.cloudInnerRadius);
 
     bool hasCloudOuter = cloudOHit.y > 0.0 && cloudOHit.x < maxDist;
     bool hasCloudInner = cloudIHit.y > 0.0 && cloudIHit.x < maxDist;
 
-	// No cloud band on this ray: one segment, whole atmosphere, coarse.
+	// No cloud band on this ray: one air segment, the whole atmosphere.
     if (!hasCloudOuter)
     {
-        segments[0] = float4(atmoStart, atmoEnd, coarseStep, 0.0);
+        segments[0] = float3(atmoStart, atmoEnd, 0.0);
         return 1;
     }
 
@@ -285,9 +268,8 @@ int Atmo_Plan(
         boundaries[bCount++] = co_far;
     boundaries[bCount++] = atmoEnd;
 
-	// Emit the segments with their step sizes. A segment is fine if its MIDPOINT
-	// lies in the band, which the boundaries above make exact: the band's
-	// crossings are themselves boundaries, so no segment straddles one.
+	// A segment is in the band if its MIDPOINT is, which the boundaries make
+	// exact: the band's crossings are boundaries, so no segment straddles one.
     for (int j = 0; j < bCount - 1; j++)
     {
         float segStart = boundaries[j];
@@ -301,7 +283,7 @@ int Atmo_Plan(
 
         bool inCloudBand = (midRadius >= planet.cloudInnerRadius && midRadius <= planet.cloudOuterRadius);
 
-        segments[segmentCount] = float4(segStart, segEnd, inCloudBand ? fineStep : coarseStep, inCloudBand ? 1.0 : 0.0);
+        segments[segmentCount] = float3(segStart, segEnd, inCloudBand ? 1.0 : 0.0);
         segmentCount++;
 
         if (segmentCount >= ATMO_MAX_SEGMENTS)

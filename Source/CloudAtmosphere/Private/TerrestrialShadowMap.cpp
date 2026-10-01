@@ -68,7 +68,6 @@ namespace TerrestrialShadow
 
 		P->PlanetRadius = Params.PlanetRadius;
 		P->HeightScale = Params.HeightScale;
-		P->Time = Params.Time;
 		P->Field = Params.Field;
 		P->LightExtinctionFraction = Params.LightExtinctionFraction;
 
