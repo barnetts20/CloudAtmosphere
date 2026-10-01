@@ -570,8 +570,8 @@ struct CLOUDATMOSPHERE_API FCloudMaterialParams
 };
 
 /** How the march spreads its samples over pixels, frames and distance. For a
- *  performance tier, with Raymarch's step counts. Each model has its own, the
- *  lattice growth being relative to its own cloud shell. */
+ *  performance tier, with Raymarch's step counts: one per actor, its lattice
+ *  growth relative to the active model's cloud shell. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FAtmosphereSamplingParams
 {
@@ -864,9 +864,10 @@ struct CLOUDATMOSPHERE_API FAtmosphereRaymarchParams
 
 };
 
-/** One model's authored set: every group the field, the air and the cloud's
- *  lighting read. The actor holds one per model, and a group the model does
- *  not read is hidden. Declaration order is the panel's. */
+/** One model's look: every group the field, the air and the cloud's lighting
+ *  read, and no performance setting. The actor holds one per model, and a
+ *  group the model does not read is hidden. Declaration order is the
+ *  panel's. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FAtmosphereModelParams
 {
@@ -917,9 +918,6 @@ struct CLOUDATMOSPHERE_API FAtmosphereModelParams
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	FAtmosphereSurfaceShadowParams SurfaceShadow;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	FAtmosphereSamplingParams Sampling;
 
 	/** The model draws a deep deck, so Deep is shown. Set per model by the
 	 *  actor's constructor; transient, so neither saves nor tunes carry it. */

@@ -12,6 +12,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "AtmospherePreset.h"
 #include "PlanetAtmosphereActor.h"
 #include "Serialization/CustomVersion.h"
 #include "Serialization/JsonReader.h"
@@ -30,11 +31,12 @@
 // with both values, so the tuned assets can be told apart from the class
 // defaults and read back as the source of new defaults and presets.
 //
-// CloudAtmosphere.LoadParams FileName [Sim|Atmospheres] [Pipeline]
+// CloudAtmosphere.LoadParams FileName [Sim|Atmospheres] [Pipeline] [Quality]
 //
 // Reads a file in the same layout back into the world's atmosphere actors and
 // the active model's sim config of the one that ran the sim when dumped (else
 // the first), or into the running config when no atmosphere is loaded.
+// UAtmosphereTuneLibrary::ApplyTune does the same for one actor at runtime.
 
 DEFINE_LOG_CATEGORY_STATIC(LogAtmosphereDump, Log, All);
 
@@ -470,8 +472,18 @@ namespace AtmosphereLoad
 		TArray<FString> Skipped;
 		TArray<FString> Clamped;
 
-		/** Top-level members left alone unless the Pipeline argument is given. */
-		const TSet<FName>* Excluded = nullptr;
+		/** Top-level members left alone unless the scope includes them. */
+		const TSet<FName>* Pipeline = nullptr;
+		const TSet<FName>* Quality = nullptr;
+	};
+
+	/** What a load applies; FAtmosphereTuneScope's fields. */
+	struct FScope
+	{
+		bool bAtmospheres = true;
+		bool bSim = true;
+		bool bPipeline = false;
+		bool bQuality = false;
 	};
 
 	/** Assets, targets, debug views and start state: what a machine or a
@@ -489,6 +501,15 @@ namespace AtmosphereLoad
 	{
 		static const TSet<FName> Names = {
 			TEXT("BlueNoise"), TEXT("Simulation") };
+		return Names;
+	}
+
+	/** The performance tier: a tune sets the look, and a machine its cost. */
+	const TSet<FName>& ActorQuality()
+	{
+		static const TSet<FName> Names = {
+			TEXT("Raymarch"), TEXT("Sampling"), TEXT("ShadowResolution"),
+			TEXT("ShadowLevelsPerFrame"), TEXT("ShadowTemporalSmoothing") };
 		return Names;
 	}
 
@@ -804,6 +825,11 @@ namespace AtmosphereLoad
 			{ TEXT("GasGiant.Type.Stratocumulus"), TEXT("GasGiant.Type.Genus.Stratocumulus") },
 			{ TEXT("GasGiant.Type.Cumulus"), TEXT("GasGiant.Type.Genus.Cumulus") },
 			{ TEXT("GasGiant.Type.Cirrus"), TEXT("GasGiant.Type.Genus.Cirrus") },
+
+			// Sampling is one quality group per actor. A file carrying both models'
+			// keeps the terrestrial members where the two differ.
+			{ TEXT("Terrestrial.Sampling"), TEXT("Sampling") },
+			{ TEXT("GasGiant.Sampling"), TEXT("Sampling") },
 		};
 		return Rows;
 	}
@@ -1053,6 +1079,33 @@ namespace AtmosphereLoad
 	 *  was. */
 	void SetValue(FProperty* Property, void* Value, const TSharedPtr<FJsonValue>& Json, const FString& Name, FReport& Report)
 	{
+		// The converter drops a struct element's unknown keys without a word.
+		if (const FArrayProperty* Array = CastField<FArrayProperty>(Property); Array && Json.IsValid() && Json->Type == EJson::Array)
+		{
+			if (const FStructProperty* Inner = CastField<FStructProperty>(Array->Inner))
+			{
+				const TArray<TSharedPtr<FJsonValue>>& Items = Json->AsArray();
+
+				for (int32 i = 0; i < Items.Num(); ++i)
+				{
+					const TSharedPtr<FJsonObject>* Item = nullptr;
+
+					if (!Items[i].IsValid() || !Items[i]->TryGetObject(Item))
+					{
+						continue;
+					}
+
+					for (const TPair<FString, TSharedPtr<FJsonValue>>& Key : (*Item)->Values)
+					{
+						if (!FindFProperty<FProperty>(Inner->Struct, *Key.Key))
+						{
+							Report.Skipped.Add(FString::Printf(TEXT("%s[%d].%s (unknown)"), *Name, i, *Key.Key));
+						}
+					}
+				}
+			}
+		}
+
 		void* Scratch = FMemory::Malloc(Property->GetSize(), Property->GetMinAlignment());
 		Property->InitializeValue(Scratch);
 		Property->CopyCompleteValue(Scratch, Value);
@@ -1116,9 +1169,15 @@ namespace AtmosphereLoad
 			return nullptr;
 		}
 
-		if (bTop && Report.Excluded && Report.Excluded->Contains(Property->GetFName()))
+		if (bTop && Report.Pipeline && Report.Pipeline->Contains(Property->GetFName()))
 		{
 			Report.Skipped.Add(Name + TEXT(" (pipeline; pass Pipeline to apply)"));
+			return nullptr;
+		}
+
+		if (bTop && Report.Quality && Report.Quality->Contains(Property->GetFName()))
+		{
+			Report.Skipped.Add(Name + TEXT(" (quality; pass Quality to apply)"));
 			return nullptr;
 		}
 
@@ -1214,7 +1273,7 @@ namespace AtmosphereLoad
 	 *  full state, otherwise its Overrides of the C++ defaults over what the
 	 *  object already holds. */
 	void ApplySection(UObject& Target, const UStruct* Type, const FJsonObject& Section, const FString& Label,
-		const TSet<FName>* Excluded)
+		const TSet<FName>* Pipeline, const TSet<FName>* Quality = nullptr)
 	{
 		const TSharedPtr<FJsonObject>* Values = nullptr;
 		const TSharedPtr<FJsonObject>* Overrides = nullptr;
@@ -1230,7 +1289,8 @@ namespace AtmosphereLoad
 #endif
 
 		FReport Report;
-		Report.Excluded = Excluded;
+		Report.Pipeline = Pipeline;
+		Report.Quality = Quality;
 
 		if (Values)
 		{
@@ -1277,22 +1337,17 @@ namespace AtmosphereLoad
 		return FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CloudAtmosphere"), Name));
 	}
 
-	/** Each atmosphere in the file onto the world's actor of the same name, or
-	 *  onto the only actor when both hold exactly one. Returns the actor whose
-	 *  entry was dumped driving the sim (DrivesSim, else SimConfigIsRunning),
-	 *  else the first written, or null: the Sim section is that one's config. */
-	APlanetAtmosphereActor* ApplyAtmospheres(const TArray<TSharedPtr<FJsonValue>>& Entries, UWorld& World, const TSet<FName>* Excluded)
+	/** Each atmosphere in the file onto the actor of the same name, or onto the
+	 *  only actor when both hold exactly one; with Only, the first entry onto
+	 *  it. Returns the actor whose entry was dumped driving the sim (DrivesSim,
+	 *  else SimConfigIsRunning), else the first written, or null: the Sim
+	 *  section is that one's config. */
+	APlanetAtmosphereActor* ApplyAtmospheres(const TArray<TSharedPtr<FJsonValue>>& Entries,
+		TConstArrayView<APlanetAtmosphereActor*> Actors, APlanetAtmosphereActor* Only, const FScope& Scope)
 	{
 		APlanetAtmosphereActor* First = nullptr;
 		APlanetAtmosphereActor* SimActor = nullptr;
 		APlanetAtmosphereActor* Driver = nullptr;
-
-		TArray<APlanetAtmosphereActor*> Actors;
-
-		for (TActorIterator<APlanetAtmosphereActor> It(&World); It; ++It)
-		{
-			Actors.Add(*It);
-		}
 
 		for (const TSharedPtr<FJsonValue>& Entry : Entries)
 		{
@@ -1309,7 +1364,8 @@ namespace AtmosphereLoad
 			APlanetAtmosphereActor* const* Match = Actors.FindByPredicate(
 				[&Name](const APlanetAtmosphereActor* Actor) { return Actor->GetActorNameOrLabel() == Name; });
 
-			APlanetAtmosphereActor* Target = Match ? *Match : (Actors.Num() == 1 && Entries.Num() == 1 ? Actors[0] : nullptr);
+			APlanetAtmosphereActor* Target = Only ? Only
+				: Match ? *Match : (Actors.Num() == 1 && Entries.Num() == 1 ? Actors[0] : nullptr);
 
 			if (!Target)
 			{
@@ -1320,7 +1376,8 @@ namespace AtmosphereLoad
 			const FString Label = FString::Printf(TEXT("Atmosphere '%s'"), *Target->GetActorNameOrLabel());
 
 			ApplyRenames(**Section, AtmosphereRenames(), Label);
-			ApplySection(*Target, APlanetAtmosphereActor::StaticClass(), **Section, Label, Excluded);
+			ApplySection(*Target, APlanetAtmosphereActor::StaticClass(), **Section, Label,
+				Scope.bPipeline ? nullptr : &ActorPipeline(), Scope.bQuality ? nullptr : &ActorQuality());
 
 			bool bDrove = false;
 			bool bRanSim = false;
@@ -1330,100 +1387,168 @@ namespace AtmosphereLoad
 			Driver = (bDrove && !Driver) ? Target : Driver;
 			SimActor = (bRanSim && !SimActor) ? Target : SimActor;
 			First = First ? First : Target;
+
+			if (Only)
+			{
+				break;
+			}
 		}
 
 		return Driver ? Driver : SimActor ? SimActor : First;
+	}
+
+	/** The Sim section onto Config, under the current names. NO CONVERSION: a
+	 *  file from an older config version applies its values under today's
+	 *  meanings. */
+	void ApplySim(const FJsonObject& Sim, UFlowSimConfig* Config, const FScope& Scope)
+	{
+		double FileVersion = -1.0;
+		const int32 Current = AtmosphereDump::ConfigVersion();
+
+		if (!Sim.TryGetNumberField(TEXT("ConfigVersion"), FileVersion))
+		{
+			UE_LOG(LogAtmosphereDump, Warning,
+				TEXT("The Sim section records no ConfigVersion; values written before a conversion apply under the current meanings."));
+		}
+		else if ((int32)FileVersion < Current)
+		{
+			UE_LOG(LogAtmosphereDump, Warning,
+				TEXT("The Sim section is config version %d, the config is %d; values written before a conversion apply under the current meanings."),
+				(int32)FileVersion, Current);
+		}
+
+		ApplyRenames(Sim, SimRenames(), TEXT("Sim section"), FileVersion < 0.0 ? Current : (int32)FileVersion);
+
+		if (!Config)
+		{
+			UE_LOG(LogAtmosphereDump, Warning, TEXT("No sim config for the file's atmosphere and none running, so the Sim section is not applied."));
+			return;
+		}
+
+		ApplySection(*Config, UFlowSimConfig::StaticClass(), Sim, FString::Printf(TEXT("Sim config '%s'"), *Config->GetName()),
+			Scope.bPipeline ? nullptr : &SimPipeline());
+	}
+
+	/** A parsed file onto Actors, and its Sim section onto the sim owner's
+	 *  writable config for the model it leaves active, or Fallback. THE
+	 *  ATMOSPHERES FIRST: the file's PlanetType selects that model. */
+	void ApplyRoot(const FJsonObject& Root, TConstArrayView<APlanetAtmosphereActor*> Actors, APlanetAtmosphereActor* Only,
+		UFlowSimConfig* Fallback, const FScope& Scope)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Atmospheres = nullptr;
+		APlanetAtmosphereActor* SimOwner = nullptr;
+
+		if (Scope.bAtmospheres && Root.TryGetArrayField(TEXT("Atmospheres"), Atmospheres))
+		{
+			SimOwner = ApplyAtmospheres(*Atmospheres, Actors, Only, Scope);
+		}
+
+		SimOwner = SimOwner ? SimOwner : Only;
+
+		const TSharedPtr<FJsonObject>* Sim = nullptr;
+
+		if (Scope.bSim && Root.TryGetObjectField(TEXT("Sim"), Sim))
+		{
+			ApplySim(**Sim, SimOwner ? SimOwner->GetWritableSimConfig(SimOwner->PlanetType) : Fallback, Scope);
+		}
+	}
+
+	TSharedPtr<FJsonObject> Parse(const FString& Text)
+	{
+		TSharedPtr<FJsonObject> Root;
+		return FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Root) ? Root : nullptr;
 	}
 
 	void Load(const TArray<FString>& Args, UWorld* World)
 	{
 		if (Args.Num() == 0 || !World)
 		{
-			UE_LOG(LogAtmosphereDump, Error, TEXT("Usage: CloudAtmosphere.LoadParams FileName [Sim|Atmospheres] [Pipeline]"));
+			UE_LOG(LogAtmosphereDump, Error, TEXT("Usage: CloudAtmosphere.LoadParams FileName [Sim|Atmospheres] [Pipeline] [Quality]"));
 			return;
 		}
 
 		const FString Path = Locate(Args[0]);
 
-		FString Scope;
-		bool bPipeline = false;
+		FScope Scope;
+		FString Only;
 
 		for (int32 i = 1; i < Args.Num(); ++i)
 		{
 			if (Args[i].Equals(TEXT("Pipeline"), ESearchCase::IgnoreCase))
 			{
-				bPipeline = true;
+				Scope.bPipeline = true;
+			}
+			else if (Args[i].Equals(TEXT("Quality"), ESearchCase::IgnoreCase))
+			{
+				Scope.bQuality = true;
 			}
 			else
 			{
-				Scope = Args[i];
+				Only = Args[i];
 			}
 		}
 
-		const bool bSim = Scope.IsEmpty() || Scope.Equals(TEXT("Sim"), ESearchCase::IgnoreCase);
-		const bool bAtmospheres = Scope.IsEmpty() || Scope.Equals(TEXT("Atmospheres"), ESearchCase::IgnoreCase);
+		Scope.bSim = Only.IsEmpty() || Only.Equals(TEXT("Sim"), ESearchCase::IgnoreCase);
+		Scope.bAtmospheres = Only.IsEmpty() || Only.Equals(TEXT("Atmospheres"), ESearchCase::IgnoreCase);
 
 		FString Text;
 		TSharedPtr<FJsonObject> Root;
 
-		if (!FFileHelper::LoadFileToString(Text, *Path)
-			|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Root) || !Root.IsValid())
+		if (!FFileHelper::LoadFileToString(Text, *Path) || !(Root = Parse(Text)).IsValid())
 		{
 			UE_LOG(LogAtmosphereDump, Error, TEXT("Could not read %s"), *Path);
 			return;
 		}
 
-		// THE ATMOSPHERES FIRST: the Sim section belongs to the config of the
-		// model the file sets, which its PlanetType has to select before the
-		// section is applied.
-		const TArray<TSharedPtr<FJsonValue>>* Atmospheres = nullptr;
-		APlanetAtmosphereActor* SimOwner = nullptr;
+		TArray<APlanetAtmosphereActor*> Actors;
 
-		if (bAtmospheres && Root->TryGetArrayField(TEXT("Atmospheres"), Atmospheres))
+		for (TActorIterator<APlanetAtmosphereActor> It(World); It; ++It)
 		{
-			SimOwner = ApplyAtmospheres(*Atmospheres, *World, bPipeline ? nullptr : &ActorPipeline());
+			Actors.Add(*It);
 		}
 
-		const TSharedPtr<FJsonObject>* Sim = nullptr;
-
-		if (bSim && Root->TryGetObjectField(TEXT("Sim"), Sim))
-		{
-			const UFlowSimSubsystem* Sub = World->GetSubsystem<UFlowSimSubsystem>();
-			UFlowSimConfig* Config = SimOwner ? SimOwner->ActiveSimConfig() : (Sub ? Sub->GetConfig() : nullptr);
-
-			// NO CONVERSION ON LOAD. A file from an older config version applies its
-			// values under today's meanings; renamed members are read under their
-			// current names (SimRenames).
-			double FileVersion = -1.0;
-			const int32 Current = AtmosphereDump::ConfigVersion();
-
-			if (!(*Sim)->TryGetNumberField(TEXT("ConfigVersion"), FileVersion))
-			{
-				UE_LOG(LogAtmosphereDump, Warning,
-					TEXT("The Sim section records no ConfigVersion; values written before a conversion apply under the current meanings."));
-			}
-			else if ((int32)FileVersion < Current)
-			{
-				UE_LOG(LogAtmosphereDump, Warning,
-					TEXT("The Sim section is config version %d, the config is %d; values written before a conversion apply under the current meanings."),
-					(int32)FileVersion, Current);
-			}
-
-			ApplyRenames(**Sim, SimRenames(), TEXT("Sim section"), FileVersion < 0.0 ? Current : (int32)FileVersion);
-
-			if (Config)
-			{
-				ApplySection(*Config, UFlowSimConfig::StaticClass(), **Sim, FString::Printf(TEXT("Sim config '%s'"), *Config->GetName()),
-					bPipeline ? nullptr : &SimPipeline());
-			}
-			else
-			{
-				UE_LOG(LogAtmosphereDump, Warning, TEXT("No sim config for the file's atmosphere and none running, so the Sim section is not applied."));
-			}
-		}
+		const UFlowSimSubsystem* Sub = World->GetSubsystem<UFlowSimSubsystem>();
+		ApplyRoot(*Root, Actors, nullptr, Sub ? Sub->GetConfig() : nullptr, Scope);
 
 		UE_LOG(LogAtmosphereDump, Display, TEXT("Loaded %s. Save the changed assets to keep the values."), *Path);
 	}
+}
+
+void UAtmosphereTuneLibrary::ApplyPreset(APlanetAtmosphereActor* Actor, const UAtmospherePreset* Preset, EPlanetAtmosphereType InModel)
+{
+	if (!Actor || !Preset)
+	{
+		return;
+	}
+
+	Actor->SetModelParams(InModel, Preset->Model);
+
+	if (Preset->SimConfig)
+	{
+		TObjectPtr<UFlowSimConfig>& Slot = (InModel == EPlanetAtmosphereType::Terrestrial)
+			? Actor->Simulation.TerrestrialConfig : Actor->Simulation.GasGiantConfig;
+		Slot = Preset->SimConfig;
+	}
+}
+
+bool UAtmosphereTuneLibrary::ApplyTune(APlanetAtmosphereActor* Actor, const FString& TuneJson, FAtmosphereTuneScope Scope)
+{
+	const TSharedPtr<FJsonObject> Root = Actor ? AtmosphereLoad::Parse(TuneJson) : nullptr;
+
+	if (!Root.IsValid())
+	{
+		UE_LOG(LogAtmosphereDump, Warning, TEXT("ApplyTune: no actor, or the text is not a tune."));
+		return false;
+	}
+
+	AtmosphereLoad::FScope LoadScope;
+	LoadScope.bAtmospheres = Scope.bAtmosphere;
+	LoadScope.bSim = Scope.bSim;
+	LoadScope.bPipeline = Scope.bPipeline;
+	LoadScope.bQuality = Scope.bQuality;
+
+	AtmosphereLoad::ApplyRoot(*Root, MakeArrayView(&Actor, 1), Actor, nullptr, LoadScope);
+	return true;
 }
 
 static FAutoConsoleCommandWithWorldAndArgs GAtmosphereDumpParamsCmd(
@@ -1437,6 +1562,8 @@ static FAutoConsoleCommandWithWorldAndArgs GAtmosphereLoadParamsCmd(
 	TEXT("Apply a parameter file in DumpParams' layout to the running sim config and the world's atmosphere actors: ")
 	TEXT("each section's Values, or its Overrides when it has no Values. Any subset of members may be given. ")
 	TEXT("File from Saved/CloudAtmosphere or a full path; optional Sim or Atmospheres limits it. Assets, targets, ")
-	TEXT("debug views and start state are left alone unless Pipeline is given; numbers are held to their ranges; ")
+	TEXT("debug views and start state are left alone unless Pipeline is given, and the quality settings (Raymarch, ")
+	TEXT("Sampling, the shadow settings) unless Quality is; in a game world the Sim section goes to the actor's runtime ")
+	TEXT("copy of its config; numbers are held to their ranges in the editor; ")
 	TEXT("members written under a former name are read under the current one."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AtmosphereLoad::Load));

@@ -86,6 +86,10 @@ public:
 	void ClaimSimulation(const UObject* Claimant, UFlowSimConfig* InConfig, double Distance,
 		UTextureRenderTarget2DArray* Keep);
 
+	/** Moves the running sim from From to To without a restart, when Claimant
+	 *  drives it under From: a config replaced by its runtime copy. */
+	void AdoptConfig(const UObject* Claimant, UFlowSimConfig* From, UFlowSimConfig* To);
+
 	/** Gives up the sim if Claimant drives it, stopping the sim until the next
 	 *  bid; bKeepField copies its field into its Keep target first. */
 	void ReleaseClaim(const UObject* Claimant, bool bKeepField);

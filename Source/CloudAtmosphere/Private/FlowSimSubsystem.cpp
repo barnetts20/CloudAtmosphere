@@ -1822,6 +1822,14 @@ void UFlowSimSubsystem::ClaimSimulation(const UObject* Claimant, UFlowSimConfig*
 	Bid.Keep = Keep;
 }
 
+void UFlowSimSubsystem::AdoptConfig(const UObject* Claimant, UFlowSimConfig* From, UFlowSimConfig* To)
+{
+	if (To && Config == From && IsOwner(Claimant))
+	{
+		Config = To;
+	}
+}
+
 void UFlowSimSubsystem::ReleaseClaim(const UObject* Claimant, bool bKeepField)
 {
 	Claims.RemoveAll([Claimant](const FSimClaim& Bid) { return Bid.Claimant.Get() == Claimant; });

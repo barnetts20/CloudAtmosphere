@@ -77,8 +77,14 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline")
     FAtmosphereSimulationParams Simulation;
 
+    // Quality: Raymarch, Sampling and the shadow settings below are a
+    // performance tier, shared by both models; tunes apply them only on request.
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Raymarch", meta = (ShowOnlyInnerProperties))
     FAtmosphereRaymarchParams Raymarch;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Sampling", meta = (ShowOnlyInnerProperties))
+    FAtmosphereSamplingParams Sampling;
 
     // Baked Lighting: set once for a performance tier. The cascade extents are
     // look, in each model's SurfaceShadow.
@@ -136,6 +142,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Atmosphere")
     EPlanetAtmosphereType PlanetType = EPlanetAtmosphereType::GasGiant;
 
+    /** Switches the model; takes effect as PlanetType's edit does. */
+    UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
+    void SetPlanetType(EPlanetAtmosphereType InType);
+
     /** The star's colour. Only its hue is read: the brightest channel counts as
      *  1. The march and the directional light both derive from LightProduct, so
      *  they cannot disagree about the star; light DIRECTION comes from the
@@ -164,12 +174,17 @@ public:
      *  OFF-SWITCH for the march: hiding the actor or stopping its tick leaves
      *  it drawing. Parking gives up the sim, keeping the field; waking rebakes
      *  every shadow level. */
+    UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
     void SetAtmosphereActive(bool bActive);
+
+    UFUNCTION(BlueprintPure, Category = "CloudAtmosphere")
+    bool IsAtmosphereActive() const { return bAtmosphereActive; }
 
     /** Aim the light and the march at the star: sets the actor's relative
      *  rotation, which is the light direction, toward StarWorldPos and runs the
      *  rotation-to-light sync. The cloud field keeps the planet's frame. Called
      *  each frame by the owning planet from IStarLit::SetStarWorldPosition. */
+    UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
     void OrientToStar(const FVector& StarWorldPos);
 
     // --- Parameters ---
@@ -184,6 +199,23 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Model", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides))
     FAtmosphereModelParams GasGiant;
+
+    /** A model's bundle, as a copy. */
+    UFUNCTION(BlueprintPure, Category = "CloudAtmosphere")
+    FAtmosphereModelParams GetModelParams(EPlanetAtmosphereType InModel) const;
+
+    /** Replaces a model's bundle; the next tick pushes it and rebakes the
+     *  shadows if the field changed. Which groups the model shows is kept. */
+    UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
+    void SetModelParams(EPlanetAtmosphereType InModel, const FAtmosphereModelParams& InParams);
+
+    /** A model's sim config to change at runtime. In a game world the first
+     *  call replaces the slot's shared asset with a transient copy owned by
+     *  this actor, which a running sim carries on under, so no other planet
+     *  and no asset sees the change. In an editor world it is the asset,
+     *  which is how tuning saves. Null when the slot is empty. */
+    UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
+    UFlowSimConfig* GetWritableSimConfig(EPlanetAtmosphereType InModel);
 
     // --- The active model ---
 
@@ -240,6 +272,7 @@ public:
     /** Called by PlanetActor after spawn and attach. Sets bIsPlanetOwned, binds
      *  the transform guard and runs Initialize, with InScale applied first.
      *  Skips the deferred OnConstruction path. */
+    UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
     void InitializeFromPlanet(USceneComponent* InAttachParent,
         FVector InScale = FVector::ZeroVector);
 

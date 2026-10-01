@@ -1002,8 +1002,6 @@ bool APlanetAtmosphereActor::FillMarchParams(
 
     // -- Sampling -------------------------------------------------------------
 
-    const FAtmosphereSamplingParams& Sampling = Model.Sampling;
-
     Out.CellSize = Sampling.CellSize;
     Out.FreshWeight = Sampling.FreshWeight;
     Out.LatticeGrowth = Sampling.LatticeGrowth;
@@ -1090,6 +1088,52 @@ void APlanetAtmosphereActor::ReleaseViewExtension()
 // --------------------------------------------------------------------------
 // Flow simulation
 // --------------------------------------------------------------------------
+
+void APlanetAtmosphereActor::SetPlanetType(EPlanetAtmosphereType InType)
+{
+    PlanetType = InType;
+}
+
+FAtmosphereModelParams APlanetAtmosphereActor::GetModelParams(EPlanetAtmosphereType InModel) const
+{
+    return (InModel == EPlanetAtmosphereType::Terrestrial) ? Terrestrial : GasGiant;
+}
+
+void APlanetAtmosphereActor::SetModelParams(EPlanetAtmosphereType InModel, const FAtmosphereModelParams& InParams)
+{
+    FAtmosphereModelParams& Target = (InModel == EPlanetAtmosphereType::Terrestrial) ? Terrestrial : GasGiant;
+    const bool bDeep = Target.bDeepDeck;
+
+    Target = InParams;
+    Target.bDeepDeck = bDeep;
+}
+
+UFlowSimConfig* APlanetAtmosphereActor::GetWritableSimConfig(EPlanetAtmosphereType InModel)
+{
+    TObjectPtr<UFlowSimConfig>& Slot = (InModel == EPlanetAtmosphereType::Terrestrial)
+        ? Simulation.TerrestrialConfig : Simulation.GasGiantConfig;
+
+    UFlowSimConfig* Shared = Slot.Get();
+    UWorld* World = GetWorld();
+
+    if (!Shared || !World || !World->IsGameWorld() || Shared->GetOuter() == this)
+    {
+        return Shared;
+    }
+
+    // The other slot keeps the shared asset when both name it.
+    UFlowSimConfig* Copy = DuplicateObject<UFlowSimConfig>(Shared, this,
+        MakeUniqueObjectName(this, UFlowSimConfig::StaticClass(), Shared->GetFName()));
+    Copy->SetFlags(RF_Transient);
+    Slot = Copy;
+
+    if (UFlowSimSubsystem* Sim = World->GetSubsystem<UFlowSimSubsystem>())
+    {
+        Sim->AdoptConfig(this, Shared, Copy);
+    }
+
+    return Copy;
+}
 
 UFlowSimConfig* APlanetAtmosphereActor::ActiveSimConfig() const
 {
