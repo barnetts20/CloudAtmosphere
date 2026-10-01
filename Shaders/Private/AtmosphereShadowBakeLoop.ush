@@ -5,7 +5,7 @@
 // The bake's march: one texel of one cascade, from the shell entry to the last
 // threshold crossed.
 //
-// A MODEL DEFINES ELEVEN HOOKS AND INCLUDES THIS. The ray setup, the dyadic step
+// A MODEL DEFINES THE HOOKS BELOW AND INCLUDES THIS. The ray setup, the dyadic step
 // lattice, the optical-depth allowance and the crossing accumulation are the
 // FORMAT's, and a second field changes none of them -- it changes what sigma is
 // at a point, where the ray enters and how wide a cascade reaches.
@@ -23,6 +23,7 @@
 //   BakeField_CascadeExtent(F, Level)       half-width, 0 to collapse a level
 //   BakeField_TopBound(F)                   highest the field reaches, unfaded
 //   BakeField_Entry(O, D, Len, Top, F)      where to start marching
+//   BakeField_TerminusRadius(F)             where the light stops, <= 0 for none
 //   BakeField_HeightStep(F)                 radial advance a step may take
 //   BakeField_LateralArc(Radius)            finest lateral feature at a radius
 //   BakeField_FoldConstant(F)               folded into every stored depth
@@ -34,6 +35,12 @@
 
 /** Most a budgeted step grows past the cell: 2^8 cells. */
 #define ATMO_BAKE_MAX_DOUBLINGS 8
+
+/** The chord ends at the field's terminus (1), or crosses the planet to the
+ *  shell's far side (0). A look change under comparison (FlagAudit). */
+#ifndef ATMO_BAKE_TERMINUS
+#define ATMO_BAKE_TERMINUS 1
+#endif
 
 /** Bakes one texel of one cascade: the four crossing depths.
  *
@@ -127,7 +134,27 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 
     const float3 Origin = Offset - Dir * HalfChord;
 
-    const float RayLength = 2.0f * HalfChord;
+    float RayLength = 2.0f * HalfChord;
+
+	// THE CHORD ENDS AT THE TERMINUS: no light reaches past it, and the step
+	// budget spread over the planet's interior would coarsen every step before
+	// it. Unreached thresholds then go to the chord's closest approach to the
+	// centre, the terminator plane: everything behind the planet is in its
+	// shadow, and lit ground below the terminus sphere is not.
+    float PlanetDepth = -1.0f;
+
+#if ATMO_BAKE_TERMINUS
+    {
+        const float Terminus = BakeField_TerminusRadius(F);
+        const float TerminusSq = Terminus * Terminus - PerpSq;
+
+        if (Terminus > 0.0f && TerminusSq > 0.0f)
+        {
+            RayLength = max(HalfChord - sqrt(TerminusSq), 0.0f);
+            PlanetDepth = HalfChord;
+        }
+    }
+#endif
 
     const float TexelScale = 2.0f * HalfWidth * Extent0 / float(max(ShadowMapSize.x, 1));
 
@@ -347,34 +374,47 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
         }
     }
 
-	// Thresholds the ray never reached, extrapolated at the last extinction seen
-	// rather than flagged. From the chord's exit the result lands past the shell,
-	// where no view sample lives, being outside the cull radius where the march
-	// does not run the deck path. A zero LastSigma sends it to the sentinel.
-	// The step budget is what keeps T at the exit: a ray stopped inside the chord
-	// would extrapolate where view samples do live.
-    const float TailRate = 1.0f / max(LastSigma, 1e-6f);
+	// Thresholds the ray never reached. On the terminus they go to PlanetDepth.
+	// Otherwise they extrapolate at the last extinction seen, from the chord's
+	// exit to past the shell, where no view sample lives; a ray that met no
+	// cloud writes the sentinel. The step budget is what keeps T at the exit: a
+	// ray stopped inside the chord would extrapolate where view samples do live.
+    float TailBase = T;
+    float TailRate = 1.0f / max(LastSigma, 1e-6f);
+
+    if (PlanetDepth >= 0.0f && T >= RayLength)
+    {
+        TailBase = PlanetDepth;
+        TailRate = 0.0f;
+    }
+    else if (LastSigma <= 0.0f)
+    {
+        TailBase = ATMO_SHADOW_NO_DECK * F.Thickness;
+        TailRate = 0.0f;
+    }
 
     if (NodeEntry < 0.0f)
     {
-        NodeEntry = T + (ATMO_SHADOW_TAU_ENTRY - Tau) * TailRate;
+        NodeEntry = TailBase + max(ATMO_SHADOW_TAU_ENTRY - Tau, 0.0f) * TailRate;
     }
     if (Node0 < 0.0f)
     {
-        Node0 = T + (ATMO_SHADOW_TAU0 - Tau) * TailRate;
+        Node0 = TailBase + max(ATMO_SHADOW_TAU0 - Tau, 0.0f) * TailRate;
     }
     if (Node1 < 0.0f)
     {
-        Node1 = T + (ATMO_SHADOW_TAU1 - Tau) * TailRate;
+        Node1 = TailBase + max(ATMO_SHADOW_TAU1 - Tau, 0.0f) * TailRate;
     }
     if (Node2 < 0.0f)
     {
-        Node2 = T + (ATMO_SHADOW_TAU2 - Tau) * TailRate;
+        Node2 = TailBase + max(ATMO_SHADOW_TAU2 - Tau, 0.0f) * TailRate;
     }
 
     float4 Out = min(float4(NodeEntry, Node0, Node1, Node2) / F.Thickness, ATMO_SHADOW_NO_DECK);
 
-    Out = AtmoBake_History(Out, Level, Offset, RayLength / F.Thickness, HalfWidth, Extent0);
+	// History blends only nodes inside the chord, PlanetDepth included.
+    Out = AtmoBake_History(Out, Level, Offset, max(RayLength, PlanetDepth) / F.Thickness,
+		HalfWidth, Extent0);
 
 	// NO DEBUG REMAP HERE. The march reads this map, so a define rescaling what
 	// is written rescales the lighting with it, and the symptom -- a fully

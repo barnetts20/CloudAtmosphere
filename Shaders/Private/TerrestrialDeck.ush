@@ -848,6 +848,23 @@ float TR_DeckFull(TRFieldParams F)
     return TR_BaseMin(F) - max(F.DeepFill, F.SpanTop);
 }
 
+/** Optical depths below the deep deck's full height at which a ray is opaque:
+ *  past ATMO_OPAQUE_TRANSMITTANCE's 6.9 and the bake's last threshold, with a
+ *  margin. Erring shallow blacks out deck that should still show, at a fixed
+ *  radius. */
+#ifndef TR_DEEP_OPAQUE_DEPTH
+#define TR_DEEP_OPAQUE_DEPTH 8.0f
+#endif
+
+/** The deep deck's terminus: the radius TR_DEEP_OPAQUE_DEPTH optical depths
+ *  below TR_DeckFull, given the least extinction per thickness the ray can
+ *  meet. At or below zero there is none. */
+float TR_DeepTerminusRadius(TRFieldParams F, float BetaMin)
+{
+    return F.PlanetRadius
+		+ F.Thickness * (TR_DeckFull(F) - TR_DEEP_OPAQUE_DEPTH / max(BetaMin, 1e-6f));
+}
+
 /** The deep deck's fill at Height in a column: 0 at and above its base, 1 from
  *  DeepFill below it. */
 float TR_DeepFill(float Height, TRColumn Col, TRFieldParams F)

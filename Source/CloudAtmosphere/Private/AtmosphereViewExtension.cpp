@@ -487,8 +487,10 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 	// -- March ----------------------------------------------------------------
 
 	// A frame without history marches at most every other pixel, so the view
-	// starts from more than a fill of sparse samples.
-	const uint32 MarchN = bHistoryValid ? CellSize : FMath::Min(CellSize, 2u);
+	// starts from more than a fill of sparse samples. A view without state never
+	// has history, so it marches every pixel: at any larger N it would march one
+	// fixed rank each frame, a dither upsampled into every scene capture.
+	const uint32 MarchN = !History ? 1u : (bHistoryValid ? CellSize : FMath::Min(CellSize, 2u));
 	const uint32 CellPixels = MarchN * MarchN;
 
 	// The rank marched this frame, rotated each cycle so a pixel's revisits are

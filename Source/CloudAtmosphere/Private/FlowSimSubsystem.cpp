@@ -227,11 +227,35 @@ namespace
 		return FMath::Clamp(Config.LayerCount, 1, 8);
 	}
 
+	/** A layer's profile, the authored list resampled over the stack's depth:
+	 *  first entry on top, last at the bottom. An empty list takes an unscaled
+	 *  profile rather than zero, which would read as a sim bug. */
 	FFlowLayerProfile LayerOf(const UFlowSimConfig& Config, int32 Layer)
 	{
-		// Layers past the authored list take an unscaled copy of the shared
-		// profile rather than zero, which would read as a sim bug.
-		return Config.LayerProfiles.IsValidIndex(Layer) ? Config.LayerProfiles[Layer] : FFlowLayerProfile();
+		const TArray<FFlowLayerProfile>& List = Config.LayerProfiles;
+		const int32 Count = LayerCountOf(Config);
+
+		if (List.Num() == 0)
+		{
+			return FFlowLayerProfile();
+		}
+
+		const float Depth = (Count > 1) ? (float)FMath::Clamp(Layer, 0, Count - 1) / (float)(Count - 1) : 0.0f;
+		const float At = Depth * (float)(List.Num() - 1);
+		const int32 Upper = FMath::Min(FMath::FloorToInt(At), List.Num() - 1);
+		const int32 Lower = FMath::Min(Upper + 1, List.Num() - 1);
+		const float T = At - (float)Upper;
+
+		const FFlowLayerProfile& A = List[Upper];
+		const FFlowLayerProfile& B = List[Lower];
+
+		FFlowLayerProfile Out;
+		Out.JetScale = FMath::Lerp(A.JetScale, B.JetScale, T);
+		Out.BoostScale = FMath::Lerp(A.BoostScale, B.BoostScale, T);
+		Out.EddyScale = FMath::Lerp(A.EddyScale, B.EddyScale, T);
+		Out.DragScale = FMath::Lerp(A.DragScale, B.DragScale, T);
+		Out.DepthScale = FMath::Lerp(A.DepthScale, B.DepthScale, T);
+		return Out;
 	}
 
 	/** The grid a config runs at: the dimensions rounded to what the solver
@@ -666,6 +690,7 @@ void UFlowSimSubsystem::StartSimulation(UFlowSimConfig* InConfig)
 
 	SimulatedTime = 0.0f;
 	StepsCompleted = 0;
+	ClockStep = 0.0f;
 	PendingManualSteps = 0;
 
 	ReportCourant();
@@ -1062,6 +1087,7 @@ void UFlowSimSubsystem::ResetSimulation()
 {
 	SimulatedTime = 0.0f;
 	StepsCompleted = 0;
+	ClockStep = 0.0f;
 	CurrentStep = Config ? Config->GetStepSize() : 1e-5f;
 	PendingTime = CurrentStep;
 	StateBlend = 1.0f;
@@ -1112,6 +1138,7 @@ void UFlowSimSubsystem::ResetSimulation()
 	{
 		SimulatedTime = Config->InitialState->SimulatedTime;
 		StepsCompleted = Config->InitialState->StepsCompleted;
+		ClockStep = 0.0f;
 	}
 }
 
@@ -1384,6 +1411,11 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.DeltaTime = FMath::Clamp(Step, 0.0f, Config->GetSpinUpStep());
 	Out.Turnover = Scales.Turnover;
 	Out.Time = SimulatedTime;
+
+	// A step other than the clock's starts its own clock here.
+	const bool bOnClock = (Step == ClockStep);
+	Out.AnchorTime = bOnClock ? ClockAnchorTime : SimulatedTime;
+	Out.AnchorStep = bOnClock ? ClockAnchorStep : StepsCompleted;
 	Out.PlanetaryVorticity = FMath::Max(Config->PlanetaryVorticity, 0.1f);
 	Out.ImplicitWeight = Config->GetImplicitWeight(Out.DeltaTime);
 
@@ -1598,7 +1630,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		}
 
 		const float Saturation = (Layers > 1)
-			? FMath::Pow(FMath::Clamp(Config->UpperSaturation, 0.0f, 1.0f), ShearShare(k, Layers))
+			? FMath::Pow(FMath::Clamp(Config->UpperSaturation, 0.02f, 1.0f), ShearShare(k, Layers))
 			: 1.0f;
 
 		Out.LayerState[k] = FVector4f(
@@ -2046,6 +2078,15 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 		}
 	}
 
+	// THE CLOCK COUNTS STEPS: a step's time is its index from the anchor, so
+	// it does not depend on how frames grouped the steps.
+	if (Step != ClockStep)
+	{
+		ClockAnchorTime = SimulatedTime;
+		ClockAnchorStep = StepsCompleted;
+		ClockStep = Step;
+	}
+
 	FFlowSimParams Params;
 	if (!BuildParams(Params, Step))
 	{
@@ -2057,8 +2098,8 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 	CurrentStep = Step;
 	StateBlend = Blend;
 	LastSubsteps = Substeps;
-	SimulatedTime += Substeps * Step;
 	StepsCompleted += Substeps;
+	SimulatedTime = ClockAnchorTime + (double)(StepsCompleted - ClockAnchorStep) * (double)ClockStep;
 
 	FFlowSimulation* Sim = Simulation;
 

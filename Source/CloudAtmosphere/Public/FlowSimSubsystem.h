@@ -320,6 +320,13 @@ private:
 	double SimulatedTime = 0.0;
 	int32 StepsCompleted = 0;
 
+	/** The step clock, FFlowSimParams::AnchorTime and AnchorStep at ClockStep:
+	 *  re-anchored at the current time when the step changes, and at zero
+	 *  ClockStep after a reset or restore. */
+	double ClockAnchorTime = 0.0;
+	int32 ClockAnchorStep = 0;
+	float ClockStep = 0.0f;
+
 	/** The grid the running state was reset at. A config grid that differs
 	 *  resets the sim, since the state is reallocated either way. */
 	FIntVector RunningGrid = FIntVector::ZeroValue;

@@ -1,6 +1,7 @@
 #include "PlanetAtmosphereActor.h"
 #include "CloudAtmosphere.h"
 #include "CoreGlobals.h"
+#include "Misc/Crc.h"
 #include "Engine/PostProcessVolume.h"
 #include "Engine/DirectionalLight.h"
 #include "Components/DirectionalLightComponent.h"
@@ -130,7 +131,7 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     // The gas giant's noise: broad structure stretched tall through the deep
     // deck, and fine detail.
     GasGiantStructureLayer.Scale = 1.5f;
-    GasGiantStructureLayer.Aspect = 20.0f;
+    GasGiantStructureLayer.Aspect = 16.0f;
     GasGiantDetailLayer.Scale = 24.0f;
     GasGiantDetailLayer.Aspect = 8.0f;
 
@@ -525,6 +526,22 @@ static FTerrestrialFieldParameters PackCloudField(const APlanetAtmosphereActor& 
     return Out;
 }
 
+/** A key for the field a shadow map was baked from: every pin but the clock's
+ *  slots of CloudMotion (drift, noise phase, spin), which move every frame,
+ *  with the radius and height scale the extents follow. PITFALL: a pin added
+ *  to FTerrestrialFieldParameters and missing here keeps a stale history. */
+static uint32 MakeShadowFieldKey(const FTerrestrialFieldParameters& F, float PlanetRadius, float HeightScale)
+{
+    const FVector4f Pins[] = {
+        F.CloudProfile, F.CloudCurves, F.CloudCoverage, F.CloudType, F.CloudLid, F.CloudLift,
+        F.NoiseLevels, F.StructureSampling, F.StructureWarp, F.DetailSampling, F.DetailWarp,
+        F.CloudGenusStratus, F.CloudGenusStratocumulus, F.CloudGenusCumulus, F.CloudGenusCirrus,
+        F.ShadowCascades, F.CloudResponse, F.CloudExtinction, F.StormExtinction,
+        FVector4f(F.CloudMotion.Z, F.CloudOpticalDepth, PlanetRadius, HeightScale) };
+
+    return FCrc::MemCrc32(Pins, sizeof(Pins));
+}
+
 /** ATMO_SHADOW_NO_DECK in AtmosphereShadowMap.ush: every crossing past any
  *  chord, so an unbaked texel reads as fully lit. */
 static constexpr float ShadowNoDeck = 1000.0f;
@@ -817,6 +834,17 @@ void APlanetAtmosphereActor::RequestShadowBake(
         bShadowPrimed = false;
     }
 
+    // A changed field rebakes every level: reprojected, the old field's depths
+    // would land at the new field's extents.
+    const FTerrestrialFieldParameters Field = PackCloudField(*this);
+    const uint32 FieldKey = MakeShadowFieldKey(Field, PlanetRadius, ActivePlanet().HeightScale);
+
+    if (FieldKey != ShadowFieldKey)
+    {
+        ShadowFieldKey = FieldKey;
+        bShadowPrimed = false;
+    }
+
     FTerrestrialShadowParams Params;
 
     if (!FillShadowRequest(Params, PlanetRadius, PlanetCenter, LightDir))
@@ -825,7 +853,7 @@ void APlanetAtmosphereActor::RequestShadowBake(
     }
 
     Params.bDeepDeck = !bTerrestrial();
-    Params.Field = PackCloudField(*this);
+    Params.Field = Field;
 
     if (Sim->RequestShadowBake(Params))
     {

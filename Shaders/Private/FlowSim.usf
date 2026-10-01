@@ -689,6 +689,29 @@ bool SimNoiseResets(uint Phase)
     return floor(After) != floor(Before);
 }
 
+// -- Relaxation -------------------------------------------------------------
+
+/** The tracers and cell intensity step by exponential Euler (1) or explicit
+ *  Euler (0). A look change under comparison (FlagAudit). */
+#ifndef SIM_EXP_RELAX
+#define SIM_EXP_RELAX 1
+#endif
+
+/** X after Dt under dX/dt = Rate0, which falls by Decay per unit of X: exact
+ *  where the rate is linear in X, and never past its zero. PITFALL: an explicit
+ *  step longer than 1 / Decay overshoots the zero and flips between the clamps,
+ *  at short lifetimes and the spin-up step. */
+float SimRelax(float X, float Rate0, float Decay, float Dt)
+{
+#if SIM_EXP_RELAX
+    const float K = Decay * Dt;
+
+    return X + Rate0 * ((K > 1e-4f) ? (1.0f - exp(-K)) / Decay : Dt);
+#else
+    return X + Rate0 * Dt;
+#endif
+}
+
 // -- Moisture ---------------------------------------------------------------
 
 /** Saturation vapour amount of a layer at a latitude. */
@@ -2632,7 +2655,9 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
         }
     }
 
-    float Intensity = Cell.w + Dt * (SimCellLife.y * Favour * (1.0f - Cell.w) - SimCellLife.z * (1.0f - Favour) * Cell.w);
+    float Intensity = SimRelax(Cell.w,
+		SimCellLife.y * Favour * (1.0f - Cell.w) - SimCellLife.z * (1.0f - Favour) * Cell.w,
+		SimCellLife.y * Favour + SimCellLife.z * (1.0f - Favour), Dt);
 
     Intensity = (Intensity < SIM_CELL_FREE) ? 0.0f : saturate(Intensity);
 
@@ -2915,39 +2940,52 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
     const float Formed = Condensing * (1.0f - Tracer.x);
     const float Loss = SimEvaporationRate * Sinking + SimCloudDecay;
 
-    float Cloud = saturate(Tracer.x + Dt * (Formed - Loss * Tracer.x));
+    float Cloud = saturate(SimRelax(Tracer.x, Formed - Loss * Tracer.x, Condensing + Loss, Dt));
 
 	// The storm cells' own cloud: lifted toward full, less where the eye is calm.
     if (bCellNear)
     {
         const float Feed = CellColumn.z * (1.0f - Eye);
 
-        Cloud = saturate(Cloud + Dt * Feed * (1.0f - Cloud));
+        Cloud = saturate(SimRelax(Cloud, Feed * (1.0f - Cloud), Feed, Dt));
     }
 
-    const float CloudAscent = clamp(Tracer.y + Dt * (Formed * Rising - Loss * Tracer.y), 0.0f, Cloud);
+    const float CloudAscent = clamp(
+		SimRelax(Tracer.y, Formed * Rising - Loss * Tracer.y, Loss, Dt), 0.0f, Cloud);
 
     float VapourRate = (SimEvaporationRate * Sinking * Tracer.x - Condensing) * Saturation;
+
+	// How fast VapourRate falls as vapour rises: condensation's onset ramp and
+	// excess, the exchange with each neighbour layer, the surface's supply.
+    const float Humidity = Tracer.z / max(Saturation, 1e-6f);
+    const float OnsetSlope = (Humidity > SimMoistureParams.z && Humidity < 1.0f)
+		? 1.0f / max(1.0f - SimMoistureParams.z, 1e-3f) : 0.0f;
+
+    float VapourDecay = SimCondensationRate * (Rising * OnsetSlope + ((Humidity > 1.0f) ? 1.0f : 0.0f));
 
     const float Thickness = max(Depth + Phi, 0.1f * Depth);
 
     if (L > 1u && FluxIn > 0.0f)
     {
         VapourRate += FluxIn * (SimTracerSRV.Load(int4(C, Layer + 1u, 0)).z - Tracer.z) / Thickness;
+        VapourDecay += FluxIn / Thickness;
     }
 
     if (Layer > 0u && FluxOut < 0.0f)
     {
         VapourRate -= FluxOut * (SimTracerSRV.Load(int4(C, Layer - 1u, 0)).z - Tracer.z) / Thickness;
+        VapourDecay -= FluxOut / Thickness;
     }
 
     if (Layer + 1u == L)
     {
-        VapourRate += SimMoistureParams.w * (1.0f + SimWindEvaporation * length(Centre.xyz))
-			* max(Saturation - Tracer.z, 0.0f);
+        const float Supply = SimMoistureParams.w * (1.0f + SimWindEvaporation * length(Centre.xyz));
+
+        VapourRate += Supply * max(Saturation - Tracer.z, 0.0f);
+        VapourDecay += (Tracer.z < Saturation) ? Supply : 0.0f;
     }
 
-    const float Vapour = max(Tracer.z + Dt * VapourRate, 0.0f);
+    const float Vapour = max(SimRelax(Tracer.z, VapourRate, VapourDecay, Dt), 0.0f);
 
 	// Intensity is the condensing ascent, W near saturation, raised by
 	// cyclonic vorticity, the hemisphere's on either profile: a banded planet's
@@ -2956,8 +2994,11 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
     const float Intensity = Condensing / max(SimCondensationRate, 1e-6f) * (1.0f + SimStormParams.z * Cyclonic);
     const float Drive = saturate((Intensity - SimStormParams.y) / max(1.0f - SimStormParams.y, 1e-3f));
 
-    float Storm = saturate(Tracer.w + Dt * (SimStormParams.x * Drive * (1.0f - Tracer.w)
-		- Tracer.w * (SimStormParams.w + SimEvaporationRate * Sinking)));
+    const float StormLoss = SimStormParams.w + SimEvaporationRate * Sinking;
+
+    float Storm = saturate(SimRelax(Tracer.w,
+		SimStormParams.x * Drive * (1.0f - Tracer.w) - Tracer.w * StormLoss,
+		SimStormParams.x * Drive + StormLoss, Dt));
 
 	// The cells and perpetual storms hold their storm up toward the floor at
 	// the formation rate.

@@ -599,9 +599,13 @@ private:
     double ShadowBakeTime[AtmoShadowBake::CascadeCount] = {};
 
     /** False until every level has been baked into the current target. Cleared
-     *  when the target is reinitialised, the model changes or the atmosphere
-     *  wakes, so the first request after any of them bakes all of them. */
+     *  when the target is reinitialised, the model or the field changes or the
+     *  atmosphere wakes, so the first request after any of them bakes all of
+     *  them. */
     bool bShadowPrimed = false;
+
+    /** The field the map was last requested for, as MakeShadowFieldKey. */
+    uint32 ShadowFieldKey = 0;
 
     /** Creates the transmittance table if needed, and rebakes it when its
      *  inputs or its resource change. */

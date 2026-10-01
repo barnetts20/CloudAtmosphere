@@ -30,13 +30,6 @@
 // saturates, and Field_Terminus stops it where it provably has. The marched
 // band ends where the fill completes.
 
-/** Optical depths below the deep deck's full height at which the view ray is
- *  clipped as opaque: past ATMO_OPAQUE_TRANSMITTANCE's 6.9, with a margin.
- *  Erring shallow blacks out deck that should still show, at a fixed radius. */
-#ifndef TR_DEEP_OPAQUE_DEPTH
-#define TR_DEEP_OPAQUE_DEPTH 8.0f
-#endif
-
 /** Optical depth at which the deep deck's shadow read stops growing, on its
  *  most transmissive term (see ATMO_SHADOW_SATURATION): about 1e-7. The slab's 5
  *  leaves the octaves a percent of the sun at any depth. */
@@ -347,10 +340,12 @@ CompositeParams TR_BuildAtmo(
  *  geometry changes anyway. A different step lattice cannot read as a march
  *  disparity there.
  *
- *  THE SPHERE, NOT THE DEPTH BUFFER, is what makes this a bound: terrain occupies
- *  only the pixels it is drawn into, and the ray needs stopping at the horizon
- *  whether or not anything was rasterised there. Scene depth still wins where it
- *  is nearer, which is what keeps cloud out of geometry standing above ground.
+ *  THE SPHERE CLIPS ONLY OVER SKY. Where nothing was rasterised the ray still
+ *  needs stopping at the horizon; where geometry was, its depth is the bound,
+ *  above the sphere or below it. PITFALL: clipped on the sphere there, geometry
+ *  below it (a crater, a sea floor with no water mesh) draws as in-scatter over
+ *  black, the composite multiplying the scene by the clip's zero transmittance.
+ *  The planet's own mesh is what hides geometry behind it.
  *
  *  THE DEEP DECK STOPS WHERE IT IS PROVABLY OPAQUE: TR_DEEP_OPAQUE_DEPTH optical
  *  depths below the height where every column is full. A RADIUS, NOT A STEP:
@@ -378,14 +373,18 @@ void Field_Terminus(
 
     const float BetaMin = Atmo.cloudParams.cloudScatBeta.x * min(Low.x, min(Low.y, Low.z)) * F.Thickness;
 
-    const float Radius = F.PlanetRadius
-		+ F.Thickness * (TR_DeckFull(F) - TR_DEEP_OPAQUE_DEPTH / max(BetaMin, 1e-6f));
+    const float Radius = TR_DeepTerminusRadius(F, BetaMin);
 
     if (Radius <= 0.0f)
     {
         return;
     }
 #else
+    if (OutMaxDist < ATMO_NO_OCCLUDER_DISTANCE)
+    {
+        return;
+    }
+
     const float Radius = F.PlanetRadius;
 #endif
 

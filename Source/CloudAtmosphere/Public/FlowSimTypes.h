@@ -466,8 +466,9 @@ public:
 	float CloudLifetime = 30.0f;
 
 	/** The top layer's saturation as a fraction of the bottom's; layers between
-	 *  fall geometrically. Cold air aloft holds little. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Moisture", meta = (EditCondition = "LayerCount > 1", EditConditionHides, ClampMin = "0.0", ClampMax = "1.0"))
+	 *  fall geometrically. Cold air aloft holds little. Floored: near 0 the
+	 *  upper layers turn any vapour into cloud and go overcast. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Moisture", meta = (EditCondition = "LayerCount > 1", EditConditionHides, ClampMin = "0.02", ClampMax = "1.0"))
 	float UpperSaturation = 0.3f;
 
 	/** How much the bottom layer's wind raises surface evaporation, as the gain
@@ -821,9 +822,10 @@ public:
 
 	// -- Layers -------------------------------------------------------------
 
-	/** Per-layer scales on the shared winds, eddies, drag and depth, top layer
-	 *  first. Layers past the array take a profile's defaults; entries past
-	 *  LayerCount are ignored. */
+	/** Per-layer scales on the shared winds, eddies, drag and depth, resampled
+	 *  over the stack: the first entry is the top layer, the last the bottom,
+	 *  and layers between interpolate. A list LayerCount long maps one to one;
+	 *  an empty one takes a profile's defaults. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Layers")
 	TArray<FFlowLayerProfile> LayerProfiles = FlowSimDefaultLayers();
 
@@ -1091,6 +1093,18 @@ struct FFlowSimParams
 	/** Sim time at the start of the step, in double precision; the shader gets
 	 *  it wrapped by each clock's period. */
 	double Time = 0.0;
+
+	/** The step clock: step AnchorStep fell at AnchorTime, and each since is
+	 *  DeltaTime on. A step's time depends on its index alone, not on how
+	 *  frames grouped the steps, which replay needs. */
+	double AnchorTime = 0.0;
+	int32 AnchorStep = 0;
+
+	/** Sim time at the start of step Index. */
+	double TimeAt(int32 Index) const
+	{
+		return AnchorTime + (double)(Index - AnchorStep) * (double)DeltaTime;
+	}
 	float PlanetaryVorticity = 24.0f;
 	float ImplicitWeight = 0.6f;
 

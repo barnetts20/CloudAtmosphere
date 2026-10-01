@@ -22,6 +22,13 @@
 #define ATMO_DEPTH_MIN_OPACITY 0.001f
 #endif
 
+/** A ray leaving through the shell with no cloud depth takes its air's
+ *  in-scatter-weighted distance (1) or the sky depth (0). A look change under
+ *  comparison (FlagAudit). */
+#ifndef ATMO_AIR_DEPTH
+#define ATMO_AIR_DEPTH 1
+#endif
+
 
 // The march: a ray through the atmosphere and whatever cloud field the model
 // supplies, gathering light toward the camera.
@@ -343,9 +350,11 @@ float3 Atmo_LightMarch(
  *
  *  OutDepth is the ray distance a reprojection moves the result by: where the
  *  cloud's own transmittance crosses 0.5, else the cloud's opacity-weighted mean
- *  distance, else the surface the ray stops on, else ATMO_SKY_DEPTH. Air is
- *  left out: along the limb it alone can fall below half ahead of the cloud, and
- *  the first wisp would take the depth. */
+ *  distance, else the surface the ray stops on, else the air's in-scatter-
+ *  weighted distance (ATMO_AIR_DEPTH), else ATMO_SKY_DEPTH. Air sets no
+ *  half-transmittance depth: along the limb it alone can fall below half ahead
+ *  of the cloud, and the first wisp would take the depth. A limb ray with the
+ *  sky depth reprojects as a direction and trails behind a moving planet. */
 float4 Atmo_MainMarchDepth(
 	FIELD_TEXTURE_DECL,
 	Texture2D BlueNoise,
@@ -406,6 +415,11 @@ float4 Atmo_MainMarchDepth(
     float DepthSum = 0.0f;
     float DepthWeight = 0.0f;
     float HalfDepth = -1.0f;
+
+#if ATMO_AIR_DEPTH
+    float AirDepthSum = 0.0f;
+    float AirDepthWeight = 0.0f;
+#endif
 
     const float3 LocalOrigin = Atmo_ToLocal(RayOrigin, P);
     const float3 LocalDir = mul(P.WorldToLocal, RayDir);
@@ -776,6 +790,14 @@ float4 Atmo_MainMarchDepth(
 #endif
 
                 AccumLight += Transmittance * Inscattered;
+
+#if ATMO_AIR_DEPTH
+                const float AirLight = dot(Transmittance * Inscattered, (1.0f / 3.0f).xxx);
+
+                AirDepthSum += AirLight * SampleT;
+                AirDepthWeight += AirLight;
+#endif
+
                 Transmittance *= exp(-Extinction);
 
                 if (IsCloud)
@@ -927,6 +949,11 @@ float4 Atmo_MainMarchDepth(
     OutDepth = (HalfDepth >= 0.0f) ? HalfDepth
 		: (DepthWeight > ATMO_DEPTH_MIN_OPACITY) ? DepthSum / DepthWeight
 		: SurfaceDepth;
+
+#if ATMO_AIR_DEPTH
+    OutDepth = (OutDepth == ATMO_SKY_DEPTH && AirDepthWeight > 0.0f)
+		? AirDepthSum / AirDepthWeight : OutDepth;
+#endif
 
 #if ATMO_DEBUG_TERM == 7
 	DebugAccum = (float(StepIndex) / float(ATMO_MAX_ITER) * ATMO_DEBUG_SCALE).xxx;

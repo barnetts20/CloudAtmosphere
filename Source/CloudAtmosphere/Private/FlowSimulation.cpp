@@ -840,7 +840,8 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	// The frame's passes place the perpetual storms at the output's time,
 	// where the resample stamps them.
 	FFlowSimParams FrameParams = Params;
-	FrameParams.PerpetualTime = Params.Time + ((double)NumSubsteps - 1.0 + (double)Params.StateBlend) * Params.DeltaTime;
+	FrameParams.PerpetualTime = Params.TimeAt(Params.StepIndex + NumSubsteps - 1)
+		+ (double)Params.StateBlend * Params.DeltaTime;
 
 	const TRDGUniformBufferRef<FFlowSimUniformParameters> FrameUniforms = CreateUniforms(GraphBuilder, FrameParams);
 
@@ -909,9 +910,9 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	for (int32 Step = 0; Step < NumSubsteps; ++Step)
 	{
 		FFlowSimParams StepParams = Params;
-		StepParams.Time = Params.Time + (double)Step * Params.DeltaTime;
 		StepParams.StepIndex = Params.StepIndex + Step;
-		StepParams.PerpetualTime = StepParams.Time + Params.DeltaTime;
+		StepParams.Time = Params.TimeAt(StepParams.StepIndex);
+		StepParams.PerpetualTime = Params.TimeAt(StepParams.StepIndex + 1);
 
 		AddSubstep(GraphBuilder, StepParams, R);
 	}

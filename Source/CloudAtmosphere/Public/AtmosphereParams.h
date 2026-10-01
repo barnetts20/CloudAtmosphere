@@ -138,8 +138,10 @@ struct CLOUDATMOSPHERE_API FTerrestrialPlanetParams
 	GENERATED_BODY()
 
 	/** Atmosphere top, as a fraction of planet radius above the surface. The
-	 *  ceiling every other shell in the system is expressed against. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001"))
+	 *  ceiling every other shell in the system is expressed against. Floored so
+	 *  the shadow map's no-deck sentinel (1000 thicknesses) lies past every
+	 *  chord with half-float precision to spare. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.005"))
 	float HeightScale = 0.2f;
 
 	/** The field's rotation as a share of the sim's own, PlanetaryVorticity / 2
@@ -398,9 +400,10 @@ struct CLOUDATMOSPHERE_API FTerrestrialStructureLayerParams
 	float Erosion = 0.85f;
 
 	/** Share of the sim's carried noise displacement the layer follows: 1 moves
-	 *  with the weather, 0 stays fixed on the planet. */
+	 *  with the weather, 0 stays fixed on the planet. At 1, high-turnover
+	 *  regions shear the noise into streaks. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float FlowInherit = 1.0f;
+	float FlowInherit = 0.9f;
 
 	/** Mips added to the one the volume is read at from the pixel's footprint:
 	 *  lower is sharper and shimmers more in motion, which the temporal resolve
@@ -437,9 +440,11 @@ struct CLOUDATMOSPHERE_API FTerrestrialDetailLayerParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Erosion = 0.6f;
 
-	/** Share of the sim's carried noise displacement the layer follows. */
+	/** Share of the sim's carried noise displacement the layer follows. Lower
+	 *  than the structure's, so sheared regions turn strandy and keep some
+	 *  rounded detail. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float FlowInherit = 1.0f;
+	float FlowInherit = 0.4f;
 
 	/** Mips added to the one the pixel's footprint reads, as for the
 	 *  structure layer. */
