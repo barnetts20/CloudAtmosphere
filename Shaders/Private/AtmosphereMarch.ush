@@ -22,6 +22,13 @@
 #define ATMO_DEPTH_MIN_OPACITY 0.001f
 #endif
 
+/** Geometry's direct share dimmed by the air toward the sun as well as the
+ *  cloud, and only where the sun is up (1), or by the cloud alone everywhere
+ *  (0). A look change under comparison (FlagAudit). */
+#ifndef ATMO_SURFACE_SUN
+#define ATMO_SURFACE_SUN 1
+#endif
+
 /** A ray leaving through the shell with no cloud depth takes its air's
  *  in-scatter-weighted distance (1) or the sky depth (0). A look change under
  *  comparison (FlagAudit). */
@@ -217,35 +224,10 @@ AtmoLightConstants Atmo_LightConstants(Texture2DArray ShadowMap, AtmoShadowCamer
     return C;
 }
 
-/** Light reaching a sample, as the air's transmittance with the planet shadow
- *  folded in, plus the deck's material-weighted depth toward the light separately.
- *
- *  THE DECK TERM COMES BACK UNEXPONENTIATED, because the multiple-scattering
- *  octaves each attenuate it by their own factor. Single scattering is
- *  AirTransmittance * exp(-cloudAbsBeta * Tint * OutCloudOptDepth), with Tint the
- *  receiver's extinction tint, so storm cloud absorbs as storm cloud does. It
- *  resolves through cloudAbsBeta rather than cloudScatBeta: light scattered out
- *  of this ray is gone either way, but light scattered INTO it is what the
- *  octaves stand in for, and the larger coefficient would count that loss
- *  twice. */
-float3 Atmo_LightMarch(
-	Texture2DArray ShadowMap,
-	SamplerState ShadowSampler,
-	AtmoLightConstants C,
-	Texture2D TransmittanceTable,
-	SamplerState TransmittanceSampler,
-	AtmoMarchParams P,
-	float3 LocalPos,
-	out float OutLobeShadow,
-	out float OutCloudOptDepth)
+/** The planet's shadow at a world point, toward the light: 1 lit, 0 behind
+ *  the planet. */
+float Atmo_PlanetShadow(AtmoMarchParams P, float3 Start, float3 LightDir)
 {
-    OutLobeShadow = 0.0f;
-    OutCloudOptDepth = 0.0f;
-
-    const float3 LightDir = P.Atmo.lightRayParams.lightDir;
-    const float3 Start = P.Atmo.lightRayParams.samplePos;
-
-
 	// PLANET SHADOW, AS A GRADIENT RATHER THAN A TEST.
 	//
 	// PITFALL: returning black on (PlanetHit.x > 0) makes a sample fully lit or
@@ -287,6 +269,69 @@ float3 Atmo_LightMarch(
 
     const float PlanetShadow = lerp(1.0f, RadialShadow, FrontFactor);
 
+    return PlanetShadow;
+}
+
+/** The air's transmittance from a world point toward the light, without the
+ *  planet's shadow. */
+float3 Atmo_SunAir(
+	Texture2D TransmittanceTable,
+	SamplerState TransmittanceSampler,
+	AtmoLightConstants C,
+	AtmoMarchParams P,
+	float3 Start,
+	float3 LightDir)
+{
+	// THE AIR. Density integrals from the table, in thickness units, scaled back
+	// to world units so the betas apply exactly as they do to a marched depth.
+	// Below the horizon the table holds the horizon value: Atmo_PlanetShadow owns
+	// the occlusion and is already fading to zero across the band the clamp
+	// covers.
+    const float3 FromCentre = Start - P.Atmo.planetParams.planetPos;
+    float Dist = length(FromCentre);
+    float Mu = dot(FromCentre, LightDir) / max(Dist, 1e-4f);
+
+	// Air the table does not hold, the field's below its surface.
+    const float3 Buried = Field_AirBuried(FromCentre, LightDir, P.Atmo, Dist, Mu);
+
+    const float3 AtmoOptDepth = AtmoT_Lookup(TransmittanceTable, TransmittanceSampler,
+		Dist / C.Thickness, Mu, C.Radii.x, C.Radii.y) * C.Thickness + Buried;
+
+    return exp(-(P.Atmo.scatteringParams.rayBeta * AtmoOptDepth.x
+		+ P.Atmo.scatteringParams.mieBeta * AtmoOptDepth.y
+		+ P.Atmo.scatteringParams.absBeta * AtmoOptDepth.z));
+}
+
+/** Light reaching a sample, as the air's transmittance with the planet shadow
+ *  folded in, plus the deck's material-weighted depth toward the light separately.
+ *
+ *  THE DECK TERM COMES BACK UNEXPONENTIATED, because the multiple-scattering
+ *  octaves each attenuate it by their own factor. Single scattering is
+ *  AirTransmittance * exp(-cloudAbsBeta * Tint * OutCloudOptDepth), with Tint the
+ *  receiver's extinction tint, so storm cloud absorbs as storm cloud does. It
+ *  resolves through cloudAbsBeta rather than cloudScatBeta: light scattered out
+ *  of this ray is gone either way, but light scattered INTO it is what the
+ *  octaves stand in for, and the larger coefficient would count that loss
+ *  twice. */
+float3 Atmo_LightMarch(
+	Texture2DArray ShadowMap,
+	SamplerState ShadowSampler,
+	AtmoLightConstants C,
+	Texture2D TransmittanceTable,
+	SamplerState TransmittanceSampler,
+	AtmoMarchParams P,
+	float3 LocalPos,
+	out float OutLobeShadow,
+	out float OutCloudOptDepth)
+{
+    OutLobeShadow = 0.0f;
+    OutCloudOptDepth = 0.0f;
+
+    const float3 LightDir = P.Atmo.lightRayParams.lightDir;
+    const float3 Start = P.Atmo.lightRayParams.samplePos;
+
+    const float PlanetShadow = Atmo_PlanetShadow(P, Start, LightDir);
+
     if (PlanetShadow <= 0.0f)
     {
         return float3(0.0f, 0.0f, 0.0f);
@@ -325,29 +370,13 @@ float3 Atmo_LightMarch(
 	// the shadow edge. The deep end is handled by AtmoShadow_Tau's ceiling.
     OutCloudOptDepth = ShadowTau / max(C.Fold.x, 1e-8f);
 
-	// THE AIR. Density integrals from the table, in thickness units, scaled back
-	// to world units so the betas apply exactly as they do to a marched depth.
-	// Below the horizon the table holds the horizon value: PlanetShadow above owns
-	// the occlusion and is already fading to zero across the band the clamp
-	// covers.
-    const float3 FromCentre = Start - P.Atmo.planetParams.planetPos;
-    float Dist = length(FromCentre);
-    float Mu = dot(FromCentre, LightDir) / max(Dist, 1e-4f);
-
-	// Air the table does not hold, the field's below its surface.
-    const float3 Buried = Field_AirBuried(FromCentre, LightDir, P.Atmo, Dist, Mu);
-
-    const float3 AtmoOptDepth = AtmoT_Lookup(TransmittanceTable, TransmittanceSampler,
-		Dist / C.Thickness, Mu, C.Radii.x, C.Radii.y) * C.Thickness + Buried;
-
-    return PlanetShadow * exp(-(P.Atmo.scatteringParams.rayBeta * AtmoOptDepth.x
-		+ P.Atmo.scatteringParams.mieBeta * AtmoOptDepth.y
-		+ P.Atmo.scatteringParams.absBeta * AtmoOptDepth.z));
+    return PlanetShadow * Atmo_SunAir(TransmittanceTable, TransmittanceSampler, C, P, Start, LightDir);
 }
 
 /** Marches the atmosphere and the cloud deck toward the camera.
  *
- *  Returns float4(accumulated light, transmittance). BlueNoise is the tile
+ *  Returns float4(accumulated light, least transmittance channel), with every
+ *  channel in OutTransmittance. BlueNoise is the tile
  *  ATMO_DRAW reads; ShadowCameras is AtmoShadow_MakeCameras of the
  *  ShadowCamera1 and ShadowCamera2 uniforms.
  *
@@ -367,7 +396,8 @@ float4 Atmo_MainMarchDepth(
 	Texture2D TransmittanceTable,
 	SamplerState TransmittanceSampler,
 	AtmoMarchParams P,
-	out float OutDepth)
+	out float OutDepth,
+	out float3 OutTransmittance)
 {
     const float3 RayOrigin = P.Atmo.mainRayParams.cameraPos;
     const float3 RayDir = P.Atmo.mainRayParams.cameraDir;
@@ -408,6 +438,7 @@ float4 Atmo_MainMarchDepth(
 
     if (SegmentCount == 0)
     {
+        OutTransmittance = float3(1.0f, 1.0f, 1.0f);
         return float4(0.0f, 0.0f, 0.0f, 1.0f);
     }
 
@@ -1032,14 +1063,27 @@ float4 Atmo_MainMarchDepth(
 		// Scaling the optical depth instead still runs every channel to black
 		// under a thick deck, which is the hole in the world this dial exists to
 		// prevent -- it only takes more cloud to get there.
-        Transmittance *= lerp(1.0f,
-			exp(-P.Atmo.cloudParams.cloudAbsBeta * LightTint * SurfaceOptDepth),
-			P.Atmo.surfaceShadowParams.directFraction);
+        const float3 CloudSun = exp(-P.Atmo.cloudParams.cloudAbsBeta * LightTint * SurfaceOptDepth);
+
+#if ATMO_SURFACE_SUN
+		// THE AIR DIMS THE SUN TOO, reddening it toward the terminator, and only
+		// where the sun is up: on the night side there is no direct share to
+		// take, and the multiplier would darken the sky's light instead.
+        const float3 SurfaceWorld = RayOrigin + RayDir * P.Atmo.mainRayParams.sceneDepth;
+        const float3 SunDir = P.Atmo.lightRayParams.lightDir;
+
+        const float SunUp = Atmo_PlanetShadow(P, SurfaceWorld, SunDir);
+        const float3 Sun = CloudSun * Atmo_SunAir(
+			TransmittanceTable, TransmittanceSampler, LightConstants, P, SurfaceWorld, SunDir);
+
+        Transmittance *= 1.0f - P.Atmo.surfaceShadowParams.directFraction * SunUp * (1.0f - Sun);
+#else
+        Transmittance *= lerp(1.0f, CloudSun, P.Atmo.surfaceShadowParams.directFraction);
+#endif
     }
 
-	// The MOST opaque channel: the alpha is one value composited against the
-	// scene behind. A coloured surface shadow survives only to here and then
-	// becomes that channel, the same compromise the air's own extinction makes.
+    OutTransmittance = Transmittance;
+
     const float MinTrans = min(Transmittance.x, min(Transmittance.y, Transmittance.z));
 
 #if ATMO_DEBUG_TERM

@@ -477,7 +477,7 @@ static FTerrestrialFieldParameters PackCloudField(const APlanetAtmosphereActor& 
 
     // Free slots stay zero.
     Out.CloudProfile = FVector4f(Shape.CloudBase, Shape.CloudThickness, Shape.SurfaceSoftness, Shape.CeilingFalloff);
-    Out.CloudCurves = FVector4f(Shape.TopCurve, Shape.BottomCurve, A.ActiveCloudSlope(), Warp.WarpStretch);
+    Out.CloudCurves = FVector4f(Shape.TopCurve, Shape.BottomCurve, A.ActiveSlopePerTexel(), Warp.WarpStretch);
     // The deep deck's fill in coverage's spare slot and its floor's relief in
     // the structure layer's; the slab reads neither.
     const bool bDeep = (A.PlanetType == EPlanetAtmosphereType::GasGiant);

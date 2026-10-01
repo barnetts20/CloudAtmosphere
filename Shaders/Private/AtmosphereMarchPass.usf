@@ -126,7 +126,19 @@ float2 OutputSize;
 float JitterShift;
 uint2 NoiseOffset;
 
+/** float4(in-scattered light, green transmittance). */
 RWTexture2D<float4> MarchColor;
+
+/** The transmittance's red and blue, so the composite takes the scene through
+ *  every channel. */
+RWTexture2D<float2> MarchTint;
+
+/** The scene seen through the atmosphere per channel (1), or through its least
+ *  transmissive channel (0), which greys what haze should redden. A look
+ *  change under comparison (FlagAudit). */
+#ifndef ATMO_RGB_TRANSMITTANCE
+#define ATMO_RGB_TRANSMITTANCE 1
+#endif
 
 /** float2(representative depth, view-axis scene depth at the pixel): the
  *  resolve's reprojection and depth guide. */
@@ -155,6 +167,7 @@ void MainMarchCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     if (any(Pixel >= OutputSize))
     {
         MarchColor[DispatchThreadId.xy] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        MarchTint[DispatchThreadId.xy] = float2(1.0f, 1.0f);
         MarchDepth[DispatchThreadId.xy] = float2(ATMO_SKY_DEPTH, 0.0f);
         return;
     }
@@ -177,6 +190,7 @@ void MainMarchCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     P.Atmo.mainRayParams.jitterShift = JitterShift;
 
     float Depth;
+    float3 Transmittance;
 
     const float4 Color = Atmo_MainMarchDepth(
 		FlowTarget, FlowTargetSampler,
@@ -186,15 +200,22 @@ void MainMarchCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		ShadowTarget, ShadowTargetSampler,
 		AtmoShadow_MakeCameras(ShadowCamera1, ShadowCamera2),
 		TransmittanceTable, TransmittanceTableSampler,
-		P, Depth);
+		P, Depth, Transmittance);
+
+#if ATMO_RGB_TRANSMITTANCE
+    const float3 Through = Transmittance;
+#else
+    const float3 Through = Color.aaa;
+#endif
 
 	// PITFALL: ONE NON-FINITE SAMPLE SPREADS. The resolve's moments, clamp and
 	// fill take it into every pixel within two cells, the history carries it,
 	// and it grows by that much each frame. The target is half float and holds
 	// unexposed light, so a value past its range is one too.
-    const bool bFinite = all(isfinite(Color)) && isfinite(Depth);
+    const bool bFinite = all(isfinite(Color)) && isfinite(Depth) && all(isfinite(Through));
 
     MarchColor[DispatchThreadId.xy] = bFinite
-		? float4(min(Color.rgb, ATMO_HALF_MAX), Color.a) : float4(0.0f, 0.0f, 0.0f, 1.0f);
+		? float4(min(Color.rgb, ATMO_HALF_MAX), Through.g) : float4(0.0f, 0.0f, 0.0f, 1.0f);
+    MarchTint[DispatchThreadId.xy] = bFinite ? Through.rb : float2(1.0f, 1.0f);
     MarchDepth[DispatchThreadId.xy] = float2(bFinite ? Depth : ATMO_SKY_DEPTH, GuideDepth);
 }

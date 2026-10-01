@@ -737,6 +737,11 @@ namespace AtmosphereLoad
 			// radians per unit sim time.
 			{ TEXT("TerrestrialPlanet.SpinRate"), TEXT("") },
 			{ TEXT("GasGiantPlanet.SpinRate"), TEXT("") },
+
+			// The cone trace's slope is per flow texel, SlopePerTexel, where it
+			// was per radian: 60 per radian is 1.5 per texel at GridResolution 64.
+			{ TEXT("TerrestrialCloudSlope"), TEXT("") },
+			{ TEXT("GasGiantCloudSlope"), TEXT("") },
 		};
 		return Rows;
 	}

@@ -48,9 +48,11 @@
 // noise; it only adds density, so the cloud above it is untouched. Everything
 // above the base is the slab's.
 //
-// UNITS. CloudBase and CloudThickness are atmosphere fractions; every other
-// height is a multiple of CloudThickness. Space is planet-local, spin axis on
-// Z, positions unit directions except in TR_Density.
+// UNITS. Heights are atmosphere fractions: CloudBase, CloudThickness,
+// CeilingFalloff, DeepFill, SpanTop and every height a function takes or
+// returns. The lift and warp offsets are multiples of CloudThickness, and
+// FloorRelief is in fills. Space is planet-local, spin axis on Z, positions
+// unit directions except in TR_Density.
 
 /** How much of the density the detail layer can erode at full DetailErosion.
  *  Above about a half it eats whole thin clouds rather than their edges. */
@@ -240,8 +242,8 @@ struct TRFieldParams
     float WarpStretch;
     float WarpShift;
 
-	/** Bound on either surface's slope, cloud depths per radian. Read only by
-	 *  the entry search's cone angle. */
+	/** Bound on either surface's slope, cloud depths per flow texel. Read only
+	 *  by the entry search's cone angle. */
     float CloudSlope;
 
 
@@ -872,7 +874,8 @@ float TR_DeepFill(float Height, TRColumn Col, TRFieldParams F)
     return smoothstep(0.0f, F.DeepFill, Col.Base - Height);
 }
 
-/** The fill integrated from Height up to the column's base, in thicknesses:
+/** The fill integrated from Height up to the column's base, an atmosphere
+ *  fraction:
  *  how much full-density deck lies above a sample buried in it. Exact on the
  *  smoothstep, whose integral over [0, T] is T^3 - T^4 / 2. */
 float TR_DeepBuried(float Height, TRColumn Col, TRFieldParams F)
@@ -935,8 +938,10 @@ float TR_SlabEntry(
 	float TopMax,
 	TRFieldParams F)
 {
-
     const float BaseMin = TR_BaseMin(F);
+
+	// A flow texel's angle: the surfaces' slope bound is per texel.
+    const float TexelAngle = Flow_TexelArc(FlowField, 1.0f);
 
     float TSearch = T0;
 
@@ -1015,8 +1020,8 @@ float TR_SlabEntry(
         const float Horizontal = sqrt(max(1.0f - ProbeRate * ProbeRate, 0.0f));
 
         const float ClosingRate = max(Approach, 0.0f)
-			+ Horizontal * max(F.CloudSlope, 0.1f) * F.CloudThickness * F.Thickness
-				/ max(ProbeRadius, 1e-4f);
+			+ Horizontal * max(F.CloudSlope, 1e-3f) * F.CloudThickness * F.Thickness
+				/ max(ProbeRadius * TexelAngle, 1e-4f);
 
         const float Advance = Gap * F.Thickness / max(ClosingRate, 1e-5f);
 

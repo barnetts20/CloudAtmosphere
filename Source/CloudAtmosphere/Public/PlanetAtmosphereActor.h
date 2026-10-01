@@ -265,13 +265,14 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Sampling", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ShowOnlyInnerProperties))
     FAtmosphereSamplingParams TerrestrialSampling;
 
-    /** Bound on either cloud surface's slope, in cloud depths per radian: the
-     *  cone angle for the shadow bake's entry search. Under-declaring it is the
-     *  one way that search steps over cloud, and the symptom is shadow missing
-     *  under steep cloud walls, such as a small storm's eyewall. Raise it
-     *  first. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Advanced", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ClampMin = "0.1"))
-    float TerrestrialCloudSlope = 60.0f;
+    /** Bound on either cloud surface's slope, in cloud depths per flow texel:
+     *  the cone angle for the shadow bake's entry search. Per texel because the
+     *  surfaces are built on the flow, so their steepest walls narrow with the
+     *  grid. Under-declaring it is the one way that search steps over cloud, and
+     *  the symptom is shadow missing under steep cloud walls, such as a small
+     *  storm's eyewall or a sharp CoverageSoftness. Raise it first. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Terrestrial|Advanced", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::Terrestrial", EditConditionHides, ClampMin = "0.001", UIMin = "0.5", UIMax = "8.0"))
+    float TerrestrialSlopePerTexel = 1.5f;
 
     // Gas giant: the terrestrial groups' twins, and the deep deck.
 
@@ -323,9 +324,9 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Sampling", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ShowOnlyInnerProperties))
     FAtmosphereSamplingParams GasGiantSampling;
 
-    /** TerrestrialCloudSlope's twin. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Advanced", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ClampMin = "0.1"))
-    float GasGiantCloudSlope = 60.0f;
+    /** TerrestrialSlopePerTexel's twin. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Gas Giant|Advanced", meta = (EditCondition = "PlanetType == EPlanetAtmosphereType::GasGiant", EditConditionHides, ClampMin = "0.001", UIMin = "0.5", UIMax = "8.0"))
+    float GasGiantSlopePerTexel = 1.5f;
 
     // --- The active model's groups ---
 
@@ -400,9 +401,9 @@ public:
         return bTerrestrial() ? TerrestrialCloudMaterial : GasGiantCloudMaterial;
     }
 
-    float ActiveCloudSlope() const
+    float ActiveSlopePerTexel() const
     {
-        return bTerrestrial() ? TerrestrialCloudSlope : GasGiantCloudSlope;
+        return bTerrestrial() ? TerrestrialSlopePerTexel : GasGiantSlopePerTexel;
     }
 
     const FAtmosphereAirParams& ActiveAir() const

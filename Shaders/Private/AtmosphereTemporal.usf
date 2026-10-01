@@ -2,7 +2,8 @@
 #include "/Engine/Private/Common.ush"
 
 // The atmosphere's resolve and composite, after the march filled the atmosphere
-// buffer: float4(in-scattered light, transmittance).
+// buffers: float4(in-scattered light, green transmittance) and the red and blue
+// transmittance, which every weight, clamp and history below carries alike.
 //
 // MODEL-INDEPENDENT. Neither pass knows what the march sampled; the resolve
 // reads only its colour and its representative depth (Atmo_MainMarchDepth).
@@ -85,6 +86,7 @@ float4 Atmo_Expand(float4 C)
 // -- Resolve ------------------------------------------------------------------
 
 Texture2D<float4> FreshColor;
+Texture2D<float2> FreshTint;
 
 /** float2(representative depth, view-axis scene depth at the sample). */
 Texture2D<float2> FreshDepth;
@@ -93,6 +95,7 @@ uint CellSize;
 uint2 CellOffset;
 
 Texture2D<float4> HistoryColor;
+Texture2D<float2> HistoryTint;
 Texture2D<float2> HistoryAge;
 SamplerState HistorySampler;
 uint HistoryValid;
@@ -110,6 +113,7 @@ float FreshWeight;
 uint TemporalDebug;
 
 RWTexture2D<float4> ResolvedColor;
+RWTexture2D<float2> ResolvedTint;
 
 /** Samples accumulated, fractional, the fill counting at its share; and the
  *  pixel's own samples alone. */
@@ -160,9 +164,13 @@ void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     float BestWeight = 0.0f;
     float BestDepth = ATMO_SKY_DEPTH;
     float4 Own = 0.0f;
+    float2 FillTint = 0.0f;
+    float2 OwnTint = 0.0f;
 
     float4 M1 = 0.0f;
     float4 M2 = 0.0f;
+    float2 T1 = 0.0f;
+    float2 T2 = 0.0f;
     float MomentWeight = 0.0f;
 
     UNROLL
@@ -186,13 +194,16 @@ void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 			? Atmo_GuideWeight(PixelDepth, Depths.y, ATMO_GUIDE_SHARPNESS) + 1e-3f : 0.0f;
 
         const float4 C = FreshColor[K];
+        const float2 E = FreshTint[K];
 
         Own = (Tap == 5) ? C : Own;
+        OwnTint = (Tap == 5) ? E : OwnTint;
 
         const float2 Bilinear = saturate(1.0f - Distance);
         const float FillW = Bilinear.x * Bilinear.y * Guide;
 
         Fill += C * FillW;
+        FillTint += E * FillW;
         FillTotal += FillW;
 
         BestDepth = (FillW > BestWeight) ? Depths.x : BestDepth;
@@ -204,13 +215,18 @@ void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
         M1 += Compressed * MomentW;
         M2 += Compressed * Compressed * MomentW;
+        T1 += E * MomentW;
+        T2 += E * E * MomentW;
         MomentWeight += MomentW;
     }
 
     Fill /= max(FillTotal, 1e-6f);
+    FillTint /= max(FillTotal, 1e-6f);
     M1 /= max(MomentWeight, 1e-6f);
+    T1 /= max(MomentWeight, 1e-6f);
 
     const float4 Sigma = sqrt(max(M2 / max(MomentWeight, 1e-6f) - M1 * M1, 0.0f));
+    const float2 TintSigma = sqrt(max(T2 / max(MomentWeight, 1e-6f) - T1 * T1, 0.0f));
 
 	// THE REPROJECTION, by this pixel's ray at its representative depth: its
 	// own when marched, else the best-weighted neighbour's. A point at a depth
@@ -234,6 +250,7 @@ void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		&& all(PrevUV >= 0.0f) && all(PrevUV <= 1.0f);
 
     float4 History = 0.0f;
+    float2 HistoryTintClamped = 0.0f;
     float Age = 0.0f;
     float OwnAge = 0.0f;
     float Rejection = 1.0f;
@@ -246,8 +263,12 @@ void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
 		// A history the clamp moves by the box's half-width or more no longer
 		// holds what it counted: its samples go with it.
+        const float2 RawTint = HistoryTint.SampleLevel(HistorySampler, PrevUV, 0.0f);
+        HistoryTintClamped = clamp(RawTint, T1 - Gamma * TintSigma, T1 + Gamma * TintSigma);
+
         const float4 Shift = abs(Compressed - Clamped) / (Gamma * Sigma + 0.01f);
-        Rejection = saturate(max(max(Shift.r, Shift.g), max(Shift.b, Shift.a)));
+        const float2 TintShift = abs(RawTint - HistoryTintClamped) / (Gamma * TintSigma + 0.01f);
+        Rejection = saturate(max(max(max(Shift.r, Shift.g), max(Shift.b, Shift.a)), max(TintShift.x, TintShift.y)));
 
 		// Unclamped, the history passes through untouched rather than through
 		// the compression's round trip.
@@ -265,6 +286,7 @@ void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     const float AgeCap = 1.0f / FreshWeight;
 
     float4 Result;
+    float2 ResultTint;
     float NewAge;
     float NewOwnAge;
 
@@ -273,6 +295,7 @@ void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         const float Alpha = bValid ? max(1.0f / (Age + 1.0f), FreshWeight) : 1.0f;
 
         Result = lerp(History, Own, Alpha);
+        ResultTint = lerp(HistoryTintClamped, OwnTint, Alpha);
         NewAge = min(Age + 1.0f, AgeCap);
         NewOwnAge = min(OwnAge + 1.0f, AgeCap);
     }
@@ -287,18 +310,21 @@ void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         const float Share = lerp(ATMO_FILL_WEIGHT * saturate(1.0f - OwnAge), ATMO_FILL_WEIGHT_MOTION, Motion);
 
         Result = lerp(History, Fill, Share);
+        ResultTint = lerp(HistoryTintClamped, FillTint, Share);
         NewAge = min(Age + Share, AgeCap);
         NewOwnAge = OwnAge;
     }
     else
     {
         Result = Fill;
+        ResultTint = FillTint;
         NewAge = 0.0f;
         NewOwnAge = 0.0f;
     }
 
 	// The history is half float: an expanded clamp can pass its range.
     ResolvedColor[P] = float4(min(Result.rgb, 60000.0f), Result.a);
+    ResolvedTint[P] = ResultTint;
     ResolvedAge[P] = float2(NewAge, NewOwnAge);
 
 	// Debug views, opaque so the composite shows them over the scene: 1 the
@@ -331,8 +357,11 @@ void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
 // -- Composite ----------------------------------------------------------------
 
-/** The resolved atmosphere, one texel per output pixel. */
+/** The resolved atmosphere, one texel per output pixel, and its red and blue
+ *  transmittance; TintActive 0 takes the alpha alone, for an opaque debug view. */
 Texture2D<float4> AtmosphereColor;
+Texture2D<float2> AtmosphereTint;
+uint TintActive;
 
 Texture2D<float4> SceneColorTexture;
 uint2 SceneColorMin;
@@ -355,10 +384,13 @@ void MainCompositeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     }
 
     const float4 Atmosphere = AtmosphereColor.Load(int3(P, 0));
+    const float2 Tint = AtmosphereTint.Load(int3(P, 0));
+
+    const float3 Through = (TintActive != 0u) ? float3(Tint.x, Atmosphere.a, Tint.y) : Atmosphere.aaa;
 
     const uint2 Target = P + SceneColorMin;
     const float4 Scene = SceneColorTexture[Target];
 
 	// Scene colour carries the view's pre-exposure; the march's light does not.
-    CompositeOutput[Target] = float4(Atmosphere.rgb * View.PreExposure + Scene.rgb * Atmosphere.a, Scene.a);
+    CompositeOutput[Target] = float4(Atmosphere.rgb * View.PreExposure + Scene.rgb * Through, Scene.a);
 }

@@ -145,11 +145,13 @@ private:
 	FScreenPassTexture Render_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View,
 		const FPostProcessMaterialInputs& Inputs);
 
-	/** One view state's history: the resolved atmosphere and its sample counts,
-	 *  and the model, camera, planet and cell size it was resolved with. */
+	/** One view state's history: the resolved atmosphere, its red and blue
+	 *  transmittance and its sample counts, and the model, camera, planet and
+	 *  cell size it was resolved with. */
 	struct FViewHistory
 	{
 		TRefCountPtr<IPooledRenderTarget> Color;
+		TRefCountPtr<IPooledRenderTarget> Tint;
 		TRefCountPtr<IPooledRenderTarget> Age;
 		bool bGasGiant = false;
 		uint32 CellSize = 0;

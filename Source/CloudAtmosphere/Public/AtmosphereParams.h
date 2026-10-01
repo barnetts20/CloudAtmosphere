@@ -128,8 +128,11 @@ struct CLOUDATMOSPHERE_API FAtmosphereSurfaceShadowParams
 // a few float4 pins, packed in PackCloudField and unpacked once in
 // TR_BuildField; the members here keep their own names.
 //
-// CLOUD THICKNESS IS THE UNIT. Every height below except CloudBase is a
-// multiple or share of it.
+// THREE HEIGHT UNITS, each member stating its own. Atmosphere fractions, of the
+// shell above the surface: CloudBase, CloudThickness, CeilingFalloff, DeepFill
+// and the air's heights. Multiples or shares of CloudThickness: the lift and
+// warp offsets, CeilingPressure, SurfaceSoftness and StratusDepth. Fills, of
+// DeepFill: FloorRelief.
 
 /** The planet the cloud field sits on. */
 USTRUCT(BlueprintType)
@@ -216,11 +219,13 @@ struct CLOUDATMOSPHERE_API FTerrestrialCoverageParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-1", ClampMax = "7"))
 	int32 CloudLayer = -1;
 
-	/** How far down the ranking of cloud coverage reaches. Each column ranks by
-	 *  its cloud amount raised by its storm, so hurricanes rank highest, then
-	 *  storms, then plain cloud. 0 is clear sky, low values keep only
-	 *  hurricanes and large storms, and the rest of the cloud comes in toward
-	 *  1, where every column holding cloud is covered. */
+	/** How far down the ranking of cloud coverage reaches. A column holding
+	 *  any cloud ranks by its storm (TR_CLOUD_FULL: the amount is all but
+	 *  binary), so hurricanes rank highest, then storms, and plain cloud all
+	 *  ranks alike. 0 is clear sky, low values keep only hurricanes and large
+	 *  storms, and plain cloud comes in everywhere at once, centred on
+	 *  1 + CoverageSoftness - 1 / (1 + StormPriority); at 1 every column
+	 *  holding cloud is covered and the noise alone breaks it up. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float CloudCover = 0.8f;
 

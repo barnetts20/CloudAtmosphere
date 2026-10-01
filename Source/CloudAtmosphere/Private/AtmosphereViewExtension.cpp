@@ -117,6 +117,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereMarchParameters, )
 	SHADER_PARAMETER(FUintVector2, NoiseOffset)
 
 	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, MarchColor)
+	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, MarchTint)
 	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, MarchDepth)
 END_SHADER_PARAMETER_STRUCT()
 
@@ -157,12 +158,14 @@ BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereResolveParameters, )
 	SHADER_PARAMETER(FVector2f, OutputSize)
 
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, FreshColor)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, FreshTint)
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, FreshDepth)
 	SHADER_PARAMETER(FUintVector2, FreshSize)
 	SHADER_PARAMETER(uint32, CellSize)
 	SHADER_PARAMETER(FUintVector2, CellOffset)
 
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, HistoryColor)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, HistoryTint)
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, HistoryAge)
 	SHADER_PARAMETER_SAMPLER(SamplerState, HistorySampler)
 	SHADER_PARAMETER(uint32, HistoryValid)
@@ -173,6 +176,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereResolveParameters, )
 	SHADER_PARAMETER(uint32, TemporalDebug)
 
 	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, ResolvedColor)
+	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, ResolvedTint)
 	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, ResolvedAge)
 	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, ResolvedDisplay)
 END_SHADER_PARAMETER_STRUCT()
@@ -182,6 +186,8 @@ BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereCompositeParameters, )
 	SHADER_PARAMETER(FVector2f, OutputSize)
 
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, AtmosphereColor)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, AtmosphereTint)
+	SHADER_PARAMETER(uint32, TintActive)
 
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, SceneColorTexture)
 	SHADER_PARAMETER(FUintVector2, SceneColorMin)
@@ -461,7 +467,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		March.PlanetRotation.X, March.PlanetRotation.Y, March.PlanetRotation.Z, March.PlanetRotation.W).GetNormalized();
 
 	const bool bHistoryValid = History
-		&& History->Color.IsValid() && History->Age.IsValid()
+		&& History->Color.IsValid() && History->Tint.IsValid() && History->Age.IsValid()
 		&& History->LastRendered + 2 >= GFrameCounterRenderThread
 		&& History->bGasGiant == March.bGasGiant
 		&& History->CellSize == CellSize
@@ -508,6 +514,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		FMath::DivideAndRoundUp(OutputSize.Y, (int32)MarchN));
 
 	FRDGTextureRef MarchColor = CreateTarget(GraphBuilder, MarchCells, PF_FloatRGBA, TEXT("CloudAtmosphere.March"));
+	FRDGTextureRef MarchTint = CreateTarget(GraphBuilder, MarchCells, PF_G16R16F, TEXT("CloudAtmosphere.MarchTint"));
 	FRDGTextureRef MarchDepth = CreateTarget(GraphBuilder, MarchCells, PF_G32R32F, TEXT("CloudAtmosphere.MarchDepth"));
 
 	{
@@ -593,6 +600,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 			(uint32)(FMath::Frac(0.5 + Rank * 0.5698402910) * 4096.0));
 
 		P->MarchColor = GraphBuilder.CreateUAV(MarchColor);
+		P->MarchTint = GraphBuilder.CreateUAV(MarchTint);
 		P->MarchDepth = GraphBuilder.CreateUAV(MarchDepth);
 
 		FAtmosphereMarchCS::FPermutationDomain Permutation;
@@ -613,6 +621,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 
 	FRDGTextureRef Atmosphere = nullptr;
 	FRDGTextureRef ResolvedColor = CreateTarget(GraphBuilder, OutputSize, PF_FloatRGBA, TEXT("CloudAtmosphere.History"));
+	FRDGTextureRef ResolvedTint = CreateTarget(GraphBuilder, OutputSize, PF_G16R16F, TEXT("CloudAtmosphere.HistoryTint"));
 	FRDGTextureRef ResolvedAge = CreateTarget(GraphBuilder, OutputSize, PF_G16R16F, TEXT("CloudAtmosphere.HistoryAge"));
 
 	{
@@ -622,20 +631,24 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		Atmosphere = (TemporalDebug != 0u) ? ResolvedDisplay : ResolvedColor;
 
 		FRDGTextureRef HistoryColor;
+		FRDGTextureRef HistoryTint;
 		FRDGTextureRef HistoryAge;
 
 		if (bHistoryValid)
 		{
 			HistoryColor = GraphBuilder.RegisterExternalTexture(History->Color);
+			HistoryTint = GraphBuilder.RegisterExternalTexture(History->Tint);
 			HistoryAge = GraphBuilder.RegisterExternalTexture(History->Age);
 		}
 		else
 		{
 			// Bound but never read: HistoryValid is 0.
 			HistoryColor = CreateTarget(GraphBuilder, FIntPoint(1, 1), PF_FloatRGBA, TEXT("CloudAtmosphere.NoHistory"));
+			HistoryTint = CreateTarget(GraphBuilder, FIntPoint(1, 1), PF_G16R16F, TEXT("CloudAtmosphere.NoHistoryTint"));
 			HistoryAge = CreateTarget(GraphBuilder, FIntPoint(1, 1), PF_G16R16F, TEXT("CloudAtmosphere.NoHistoryAge"));
 
 			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(HistoryColor), 0.0f);
+			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(HistoryTint), 0.0f);
 			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(HistoryAge), 0.0f);
 		}
 
@@ -647,12 +660,14 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		P->OutputSize = FVector2f(OutputSize.X, OutputSize.Y);
 
 		P->FreshColor = MarchColor;
+		P->FreshTint = MarchTint;
 		P->FreshDepth = MarchDepth;
 		P->FreshSize = FUintVector2((uint32)MarchCells.X, (uint32)MarchCells.Y);
 		P->CellSize = MarchN;
 		P->CellOffset = FUintVector2((uint32)Offset.X, (uint32)Offset.Y);
 
 		P->HistoryColor = HistoryColor;
+		P->HistoryTint = HistoryTint;
 		P->HistoryAge = HistoryAge;
 		P->HistorySampler = BilinearClamp;
 		P->HistoryValid = bHistoryValid ? 1u : 0u;
@@ -663,6 +678,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		P->TemporalDebug = TemporalDebug;
 
 		P->ResolvedColor = GraphBuilder.CreateUAV(ResolvedColor);
+		P->ResolvedTint = GraphBuilder.CreateUAV(ResolvedTint);
 		P->ResolvedAge = GraphBuilder.CreateUAV(ResolvedAge);
 		P->ResolvedDisplay = GraphBuilder.CreateUAV(ResolvedDisplay);
 
@@ -674,6 +690,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		if (History)
 		{
 			GraphBuilder.QueueTextureExtraction(ResolvedColor, &History->Color);
+			GraphBuilder.QueueTextureExtraction(ResolvedTint, &History->Tint);
 			GraphBuilder.QueueTextureExtraction(ResolvedAge, &History->Age);
 
 			History->bGasGiant = March.bGasGiant;
@@ -704,6 +721,10 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		P->OutputSize = FVector2f(OutputSize.X, OutputSize.Y);
 
 		P->AtmosphereColor = Atmosphere;
+		P->AtmosphereTint = ResolvedTint;
+
+		// A debug view is opaque: its alpha alone, no tint.
+		P->TintActive = (TemporalDebug != 0u) ? 0u : 1u;
 
 		P->SceneColorTexture = SceneColor.Texture;
 		P->SceneColorMin = FUintVector2((uint32)Rect.Min.X, (uint32)Rect.Min.Y);

@@ -12,10 +12,10 @@
 #define ATMO_TRANSMITTANCE_THREADS 8
 #endif
 
-/** Midpoint samples per texel ray. Priced against accuracy alone, since the bake
- *  runs once per change. At 128 the worst case is the straight-up ray at the
- *  shortest authored scale height, about 0.1% low; rays toward the horizon climb
- *  in altitude so slowly near the start that they are exact to fp32. */
+/** Samples per texel ray, midpoints in U with T = Length * U^3, so the steps
+ *  are finest at the start, where the density is highest. Priced against
+ *  accuracy alone, since the bake runs once per change: within 1e-4 down to a
+ *  scale height of 0.002 thickness, where uniform steps read 40% low. */
 #ifndef ATMO_TRANSMITTANCE_STEPS
 #define ATMO_TRANSMITTANCE_STEPS 128
 #endif
@@ -54,23 +54,25 @@ void MainTransmittanceCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     AtmoT_RMu(XMu, XR, Radii.x, Radii.y, R, Mu);
 
     const float Length = AtmoT_DistanceToTop(R, Mu, Radii.y);
-    const float Step = Length / float(ATMO_TRANSMITTANCE_STEPS);
+    const float DU = 1.0f / float(ATMO_TRANSMITTANCE_STEPS);
 
     float3 Sum = float3(0.0f, 0.0f, 0.0f);
 
     [loop]
     for (int i = 0; i < ATMO_TRANSMITTANCE_STEPS; i++)
     {
-        const float T = (float(i) + 0.5f) * Step;
+        const float U = (float(i) + 0.5f) * DU;
+        const float T = Length * U * U * U;
 
 		// Floored at the surface: a horizon ray touches it at one point, and
 		// rounding can put a sample a hair under, where exp(-h/H) grows.
         const float SampleRadius = sqrt(max(R * R + T * T + 2.0f * R * Mu * T, 0.0f));
         const float Height = max(SampleRadius - Radii.x, 0.0f);
 
-        Sum += Atmo_Density(Height, Profile.x, Profile.y, Profile.z, Profile.w);
+        // dT = 3 Length U^2 dU.
+        Sum += Atmo_Density(Height, Profile.x, Profile.y, Profile.z, Profile.w) * (3.0f * U * U);
     }
 
 	// Alpha is unused; the lookup reads rgb.
-    TransmittanceUAV[Texel] = float4(Sum * Step, 0.0f);
+    TransmittanceUAV[Texel] = float4(Sum * Length * DU, 0.0f);
 }
