@@ -256,10 +256,6 @@
 
 #define SimFilterLatitude FlowSimUB.FilterLatitude
 
-/** 1 to rebuild centre velocities to fourth order, 0 for the two-face average;
- *  see SimCentreComponents. */
-#define SimSharpCentre FlowSimUB.SharpCentre
-
 /** Normalisation for the output channels: x pressure, y vorticity, z divergence. */
 #define SimOutputScales FlowSimUB.OutputScales
 
@@ -1628,9 +1624,8 @@ float SimFaceNorthV(int I, int J, uint Layer)
 }
 
 /** East and north components at the cell centre: fourth order from the two
- *  faces either side along each component's own axis, or with SimSharpCentre
- *  0 the two-face average. The polar faces are zero, and so is anything past
- *  them.
+ *  faces either side along each component's own axis. The polar faces are
+ *  zero, and so is anything past them.
  *
  *  PITFALL: A TWO-FACE AVERAGE DIFFUSES ANISOTROPICALLY. Momentum is advected
  *  from this centre field and read back at the faces, so an average smooths u
@@ -1646,13 +1641,6 @@ float2 SimCentreComponents(int I, int J, uint Layer)
 
     const float VSouth = (J > 0) ? F.y : 0.0f;
     const float VNorth = SimFaceNorthV(I, J, Layer);
-
-    BRANCH
-
-    if (SimSharpCentre == 0)
-    {
-        return 0.5f * float2(UWest + UEast, VSouth + VNorth);
-    }
 
     const float UFarWest = SimFace(I - 1, J, Layer).x;
     const float UFarEast = SimFace(I + 2, J, Layer).x;

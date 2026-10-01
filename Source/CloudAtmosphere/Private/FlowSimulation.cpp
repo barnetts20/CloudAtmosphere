@@ -167,7 +167,6 @@ namespace
 		P.DivergenceDamping = Params.DivergenceDamping;
 		P.FroudeCeiling = Params.FroudeCeiling;
 		P.ShockDamping = Params.ShockDamping;
-		P.SharpCentre = Params.bSharpCentreVelocity ? 1 : 0;
 		P.ThermalRelaxation = Params.ThermalRelaxation;
 		P.ThermalParams = Params.ThermalParams;
 

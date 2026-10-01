@@ -19,7 +19,7 @@ namespace FlowSimShader
 	/** Perpetual storm slots: the uniform arrays' length, and the count
 	 *  MainCellsCS updates on its first threads, so no more than
 	 *  MaxStormCells. */
-	static constexpr int32 MaxPerpetualStorms = 4;
+	static constexpr int32 MaxPerpetualStorms = 8;
 }
 
 BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FFlowSimUniformParameters, )
@@ -67,7 +67,6 @@ SHADER_PARAMETER(float, LayerCoupling)
 SHADER_PARAMETER(float, DivergenceDamping)
 SHADER_PARAMETER(float, FroudeCeiling)
 SHADER_PARAMETER(float, ShockDamping)
-SHADER_PARAMETER(int32, SharpCentre)
 SHADER_PARAMETER(float, ThermalRelaxation)
 SHADER_PARAMETER(FVector4f, ThermalParams)
 

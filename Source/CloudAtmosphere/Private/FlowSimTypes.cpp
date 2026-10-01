@@ -14,7 +14,7 @@ namespace
 		{
 			/** PITFALL: never lower this number. The engine refuses a package
 			 *  saved at a version above Latest. */
-			Current = 8,
+			Current = 9,
 
 			Latest = Current
 		};
@@ -166,7 +166,7 @@ float UFlowSimConfig::GetTurnover() const
 
 float UFlowSimConfig::GetImplicitWeight(float Step) const
 {
-	const float Authored = FMath::Clamp(ImplicitWeight, 0.5f, 1.0f);
+	const float Authored = FlowSimNumerics::ImplicitWeight;
 
 	return (FMath::Clamp(LayerCount, 1, 8) > 1 && Step > FlowSimStep::StackLargeStep)
 		? FMath::Max(Authored, FlowSimStep::StackWeight)
@@ -230,7 +230,7 @@ FFlowSimScales UFlowSimConfig::ResolveScales() const
 	S.CellForcing = FMath::Max(StormCellForcing, 0.0f) * PerTurnover;
 
 	S.CloudLifetime = FMath::Max(CloudLifetime * S.Turnover, 1e-3f);
-	S.AscentSmoothing = FMath::Max(AscentSmoothing, 0.0f) * S.Turnover;
+	S.AscentSmoothing = FlowSimNumerics::AscentSmoothing * S.Turnover;
 	S.StormLifetime = FMath::Max(StormLifetime * S.Turnover, 1e-3f);
 	S.CellLifetime = FMath::Max(StormCellLifetime * S.Turnover, 0.01f);
 	S.ForcingLifetime = FMath::Max(ForcingLifetime * S.Turnover, 0.01f);

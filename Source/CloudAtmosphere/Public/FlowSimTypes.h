@@ -257,6 +257,27 @@ namespace FlowSimStep
 	static constexpr float StackWeight = 0.75f;
 }
 
+/** The solver's numerics, frozen at their tuned values. */
+namespace FlowSimNumerics
+{
+	/** Weight of the implicit half of the gravity-wave terms. 0.5 is neutral;
+	 *  above it gravity waves are damped, by an amount that grows with the
+	 *  step, and that damping counts toward GridDamping. A stack runs at least
+	 *  FlowSimStep::StackWeight at large steps. */
+	static constexpr float ImplicitWeight = 0.6f;
+
+	/** Gain of the compression-activated divergence damping: where a front
+	 *  steepens, the grid-scale divergence a step removes grows by this times
+	 *  the local compression, capped at the explicit scheme's bound. */
+	static constexpr float ShockDamping = 2.0f;
+
+	/** Time constant, in turnovers, of the low-pass the vertical motion takes
+	 *  along the flow before condensation, latent heat and the deck read it:
+	 *  what moves with the air holds, while gravity waves and bores average out
+	 *  instead of drawing travelling lines into the cloud. */
+	static constexpr float AscentSmoothing = 1.527f;
+}
+
 /** The sim's speeds, rates and lengths, resolved from a config's authored
  *  fractions of the speed root, turnovers and deformation radii; see
  *  UFlowSimConfig::ResolveScales. */
@@ -486,18 +507,6 @@ public:
 	 *  StormCellEyeDraft clears the storm cells' eyes. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Moisture", meta = (ClampMin = "0.0"))
 	float EvaporationRate = 0.3f;
-
-	/** Time constant, in turnovers, of the low-pass the vertical motion
-	 *  takes along the flow before anything reads it: condensation, latent heat,
-	 *  the deck. What moves with the air holds; gravity waves and bores, which
-	 *  move through it, average out instead of condensing cloud along their
-	 *  crests and drawing travelling lines into the cloud field. Longer is
-	 *  cleaner and makes cloud respond more slowly to new ascent; condensation
-	 *  from passing waves goes too, so cloud amount falls as it lengthens and
-	 *  the deck's cover wants raising to match. The storm tracer is the most
-	 *  sensitive to it. 0 reads it raw. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Moisture", meta = (ClampMin = "0.0", UIMax = "25.0"))
-	float AscentSmoothing = 3.0f;
 
 	// -- Planet: storms -----------------------------------------------------
 	//
@@ -882,39 +891,14 @@ public:
 
 	// -- Numerics -----------------------------------------------------------
 
-	/** Weight of the implicit half of the gravity-wave terms. 0.5 is neutral;
-	 *  above it gravity waves are damped, by an amount that grows with the
-	 *  step, and that damping counts toward GridDamping. A stack runs at least
-	 *  FlowSimStep::StackWeight at large steps. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Numerics", meta = (ClampMin = "0.5", ClampMax = "1.0"))
-	float ImplicitWeight = 0.6f;
-
 	/** Rate, per turnover, at which grid-scale waves of the first internal
 	 *  mode decay, whatever the step: the implicit scheme's own damping at the
 	 *  step, and divergence damping making up the rest. Smooths W, ripples and
 	 *  bores at the grid scale; longer waves lose less, as their scale squared.
-	 *  Where the implicit scheme alone damps more (a large step, a high
-	 *  ImplicitWeight) that wins, and the start log says so. */
+	 *  Where the implicit scheme alone damps more (a large step) that wins,
+	 *  and the start log says so. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Numerics", meta = (ClampMin = "0.0"))
 	float GridDamping = 2.0f;
-
-	/** Gain of the compression-activated divergence damping: where a front
-	 *  steepens, the grid-scale divergence a step removes grows by this times
-	 *  the local compression per step. Higher widens and softens travelling
-	 *  fronts more; 0 leaves only GridDamping. The total is capped at
-	 *  the explicit scheme's stability bound, so any value is stable. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Numerics", meta = (ClampMin = "0.0", UIMax = "50.0"))
-	float ShockDamping = 2.0f;
-
-	/** Rebuild centre velocities to fourth order from the faces rather than as
-	 *  a two-face average. Keeps a compact vortex from bleeding into a cross
-	 *  along the grid axes. PITFALL: it also damps fast motion far less --
-	 *  about twice the eddy speed, more W and more cloud at the same settings --
-	 *  so the deck's coverage tuning does not carry over, and the faster flow
-	 *  pulls the two noise phases apart until their crossfade reads as density
-	 *  sliding under the clouds. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Numerics")
-	bool bSharpCentreVelocity = true;
 
 	/** Polar longitudinal smoothing: each row is box-filtered over
 	 *  FilterLatitude / cos(latitude) columns, so the filter first acts where
@@ -1063,17 +1047,18 @@ struct FFlowSimStack
 
 /** Flat snapshot handed to the render thread. Captured BY VALUE into a render
  *  command, so it holds no UObject; RHI references are copied on the game
- *  thread. */
+ *  thread. UFlowSimSubsystem::BuildParams sets every member, so the defaults
+ *  are zero rather than a second, stale set of values. */
 struct FFlowSimParams
 {
-	FIntVector GridSize = FIntVector(512, 256, 2);
+	FIntVector GridSize = FIntVector::ZeroValue;
 
-	FVector4f JetParams = FVector4f(3.0f, 1.0f, 0.5f, 0.5f);
+	FVector4f JetParams = FVector4f::Zero();
 	int32 ZonalProfile = 0;
 	float WidthBias = 0.0f;
 
 	/** 45 degrees over JetLatitude. */
-	float JetLatitudeScale = 1.0f;
+	float JetLatitudeScale = 0.0f;
 	FVector4f LayerProfile[8] = {
 		FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(),
 		FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero() };
@@ -1086,10 +1071,10 @@ struct FFlowSimParams
 
 	FFlowSimStack Stack;
 
-	float DeltaTime = 0.0086f;
+	float DeltaTime = 0.0f;
 
 	/** One turnover in sim time: the unit the eye tracer's rates are in. */
-	float Turnover = 1.0f;
+	float Turnover = 0.0f;
 
 	/** Sim time at the start of the step, in double precision; the shader gets
 	 *  it wrapped by each clock's period. */
@@ -1106,42 +1091,41 @@ struct FFlowSimParams
 	{
 		return AnchorTime + (double)(Index - AnchorStep) * (double)DeltaTime;
 	}
-	float PlanetaryVorticity = 24.0f;
-	float ImplicitWeight = 0.6f;
+	float PlanetaryVorticity = 0.0f;
+	float ImplicitWeight = 0.0f;
 
-	int32 ForcingChannel = 1;
+	int32 ForcingChannel = 0;
 
-	float NudgeRate = 1.0f;
-	float ForcingAmplitude = 0.3f;
-	float ForcingFrequency = 0.25f;
-	float ForcingLifetime = 0.5f;
-	float DragRate = 1.5f;
-	float LayerCoupling = 0.1f;
+	float NudgeRate = 0.0f;
+	float ForcingAmplitude = 0.0f;
+	float ForcingFrequency = 0.0f;
+	float ForcingLifetime = 0.0f;
+	float DragRate = 0.0f;
+	float LayerCoupling = 0.0f;
 	/** Fraction of grid-scale divergence removed per step. */
 	float DivergenceDamping = 0.0f;
-	float FroudeCeiling = 0.6f;
-	float ShockDamping = 2.0f;
-	bool bSharpCentreVelocity = false;
+	float FroudeCeiling = 0.0f;
+	float ShockDamping = 0.0f;
 
-	float ThermalRelaxation = 0.5f;
+	float ThermalRelaxation = 0.0f;
 
 	/** x shear, y shape (0 midlatitude, 1 jets), z zone latitude, w zone
 	 *  half-width, radians. */
 	FVector4f ThermalParams = FVector4f::Zero();
 
-	float CondensationRate = 5.0f;
-	float EvaporationRate = 3.0f;
-	float CloudLifetime = 3.0f;
+	float CondensationRate = 0.0f;
+	float EvaporationRate = 0.0f;
+	float CloudLifetime = 0.0f;
 
 	/** x unused, y saturation at the poles as a fraction of the equator's,
 	 *  z condensation onset, w surface evaporation. */
-	FVector4f MoistureParams = FVector4f(0.0f, 0.25f, 0.7f, 2.0f);
-	float WindEvaporation = 1.0f;
-	float LatentHeating = 0.1f;
-	float AscentSmoothing = 0.3f;
+	FVector4f MoistureParams = FVector4f::Zero();
+	float WindEvaporation = 0.0f;
+	float LatentHeating = 0.0f;
+	float AscentSmoothing = 0.0f;
 
 	/** x rate, y threshold, z spin, w decay rate. */
-	FVector4f StormParams = FVector4f(4.0f, 0.1f, 2.0f, 1.0f);
+	FVector4f StormParams = FVector4f::Zero();
 
 	/** See SimCellShape through SimCellGenesis in FlowSim.usf. */
 	FVector4f CellShape = FVector4f::Zero();
@@ -1159,13 +1143,13 @@ struct FFlowSimParams
 	float CellSustain = 0.0f;
 
 	/** Share of the deck's depth a full-intensity eye removes. */
-	float CellEyeDepth = 0.8f;
+	float CellEyeDepth = 0.0f;
 
 	/** Rate a cell is pulled onto its vortex's core. */
-	float CellCoreFollow = 8.0f;
+	float CellCoreFollow = 0.0f;
 
 	/** Share of the low's eye its rim ramps over. */
-	float CellEyeSoftness = 0.75f;
+	float CellEyeSoftness = 0.0f;
 	int32 CellCount = 0;
 
 	/** Steps completed before the frame's first; seeds the cells' spawns. */
@@ -1178,32 +1162,35 @@ struct FFlowSimParams
 	 *  reaches, or the output's outside the steps. */
 	int32 PerpetualCount = 0;
 	float PerpetualForcing = 0.0f;
-	FVector4f PerpetualShape[4] = { FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero() };
-	FVector4f PerpetualLook[4] = { FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero() };
-	FVector4f PerpetualForm[4] = { FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero() };
-	double PerpetualRate[4] = { 0.0, 0.0, 0.0, 0.0 };
+	FVector4f PerpetualShape[8] = { FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(),
+		FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero() };
+	FVector4f PerpetualLook[8] = { FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(),
+		FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero() };
+	FVector4f PerpetualForm[8] = { FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(),
+		FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero() };
+	double PerpetualRate[8] = {};
 	double PerpetualTime = 0.0;
 
 	/** Radians per unit sim time, and sim time. */
 	float NoiseDriftRate = 0.0f;
-	float NoiseResetTime = 1.0f;
+	float NoiseResetTime = 0.0f;
 
 
-	float FilterLatitude = 0.9f;
+	float FilterLatitude = 0.0f;
 
 	/** Where the output sits between the state before the frame's last step
 	 *  (0) and after it (1). */
 	float StateBlend = 1.0f;
 
 	/** Output normalisation: x pressure, y vorticity, z divergence. */
-	FVector3f OutputScales = FVector3f(1.0f, 1.0f, 1.0f);
+	FVector3f OutputScales = FVector3f::ZeroVector;
 
 	/** Face edge of the cube atlas FlowTexture holds, in texels. */
-	int32 AtlasFaceSize = 128;
+	int32 AtlasFaceSize = 0;
 
 	int32 DebugMode = 0;
 	int32 DebugLayer = 0;
-	float DebugScale = 1.0f;
+	float DebugScale = 0.0f;
 	FIntPoint DebugSize = FIntPoint::ZeroValue;
 
 	/** Resources on the game thread, resolved to RHI handles by

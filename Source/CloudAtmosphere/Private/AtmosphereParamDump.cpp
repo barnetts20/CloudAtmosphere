@@ -62,11 +62,12 @@ namespace AtmosphereDump
 		return !Property->HasAnyPropertyFlags(CPF_Deprecated);
 	}
 
-	/** The actor's panel: edited members only, which leaves out internal state
-	 *  and the transient readouts. */
+	/** The actor's panel: edited members only, which leaves out internal state,
+	 *  the transient readouts and the read-only members the loader rejects. */
 	bool Authored(const FProperty* Property)
 	{
-		return Property->HasAnyPropertyFlags(CPF_Edit) && !Property->HasAnyPropertyFlags(CPF_Transient);
+		return Property->HasAnyPropertyFlags(CPF_Edit)
+			&& !Property->HasAnyPropertyFlags(CPF_Transient | CPF_EditConst);
 	}
 
 	TSharedPtr<FJsonValue> ValueOf(FProperty* Property, const void* Value)
@@ -550,7 +551,6 @@ namespace AtmosphereLoad
 			{ TEXT("CondensationRate"), TEXT(""), 7 },
 			{ TEXT("EvaporationRate"), TEXT(""), 7 },
 			{ TEXT("CloudLifetime"), TEXT(""), 7 },
-			{ TEXT("AscentSmoothing"), TEXT(""), 7 },
 			{ TEXT("StormLifetime"), TEXT(""), 7 },
 			{ TEXT("StormCellSpawnRate"), TEXT(""), 7 },
 			{ TEXT("StormCellLifetime"), TEXT(""), 7 },
@@ -566,6 +566,13 @@ namespace AtmosphereLoad
 			// at the spin-up step.
 			{ TEXT("StepSize"), TEXT(""), 8 },
 			{ TEXT("SpinUpSteps"), TEXT("") },
+
+			// The numerics are constants at their tuned values (FlowSimNumerics),
+			// and centre velocities are always fourth order.
+			{ TEXT("ImplicitWeight"), TEXT("") },
+			{ TEXT("ShockDamping"), TEXT("") },
+			{ TEXT("AscentSmoothing"), TEXT("") },
+			{ TEXT("bSharpCentreVelocity"), TEXT("") },
 		};
 		return Rows;
 	}

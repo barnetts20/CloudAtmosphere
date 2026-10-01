@@ -862,7 +862,7 @@ void UFlowSimSubsystem::ReportCourant() const
 	{
 		UE_LOG(LogFlowSim, Log,
 			TEXT("The implicit scheme alone damps %.2f per turnover at this step, past ")
-			TEXT("GridDamping %.2f. Lower ImplicitWeight toward 0.5 or the step for the authored rate."),
+			TEXT("GridDamping %.2f. Lower the step for the authored rate."),
 			Implicit, Config->GridDamping);
 	}
 
@@ -1431,8 +1431,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.LayerCoupling = Scales.LayerCoupling;
 	Out.DivergenceDamping = Config->GetDivergenceDamping(Out.DeltaTime);
 	Out.FroudeCeiling = FMath::Max(Config->SpeedRoot, 0.1f);
-	Out.ShockDamping = FMath::Max(Config->ShockDamping, 0.0f);
-	Out.bSharpCentreVelocity = Config->bSharpCentreVelocity;
+	Out.ShockDamping = FlowSimNumerics::ShockDamping;
 
 	Out.ThermalRelaxation = Scales.ThermalRelaxation;
 	Out.ThermalParams = FVector4f(
