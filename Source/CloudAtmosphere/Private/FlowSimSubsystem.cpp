@@ -785,7 +785,7 @@ void UFlowSimSubsystem::ReportInertSettings() const
 		if (Config->StormCellSustainRatio < 1.0f)
 		{
 			UE_LOG(LogFlowSim, Log,
-				TEXT("StormCellSustainRatio %.2f holds a cell's storm below GenesisStorm, so a cell ")
+				TEXT("StormCellSustainRatio %.2f holds a cell's storm below the genesis storm, so a cell ")
 				TEXT("lives only as long as the storm under it does."),
 				Config->StormCellSustainRatio);
 		}
@@ -1506,7 +1506,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.CellGenesis = FVector4f(
 		Scales.GenesisShear,
 		FMath::Clamp(Config->CondensationOnset + Config->GenesisHumidityMargin, 0.0f, 1.0f),
-		FMath::Clamp(Config->GenesisStorm, 0.01f, 1.0f),
+		Config->GetGenesisStorm(),
 		FMath::Max(Config->GenesisSpin, 0.0f));
 
 	// The lift's rate r that settles a full-intensity eyewall at the cover

@@ -639,7 +639,7 @@ public:
 	float StormCellLifetime = 30.0f;
 
 	/** Storm tracer a mature cell tops its eyewall up toward, as a multiple of
-	 *  GenesisStorm (up to 1), on the stamp's profile, against the storm's
+	 *  the genesis storm (up to 1), on the stamp's profile, against the storm's
 	 *  decay, so the storm settles a little below it. Zero leaves the storm to
 	 *  the weather, so a cell lives only as long as its parent storm does. From
 	 *  about 1.25 the cell keeps its own parent alive, and it ends when the
@@ -703,10 +703,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Dynamics", meta = (UIMin = "0.0", UIMax = "0.5"))
 	float StormCellDryTolerance = 0.15f;
 
-	/** Storm intensity a seed needs beneath it. A cell weakens once the storm
-	 *  within half its radius falls below this. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Dynamics", meta = (ClampMin = "0.01", ClampMax = "1.0"))
-	float GenesisStorm = 0.2f;
+	/** Storm intensity a seed needs beneath it, as a share of the storm a
+	 *  column settles at under full drive, StormAmount / (1 + StormAmount). A
+	 *  cell weakens once the storm within half its radius falls below it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Dynamics", meta = (ClampMin = "0.0", UIMin = "0.05", UIMax = "1.0"))
+	float GenesisStormRatio = 0.25f;
 
 	/** Normalised cyclonic vorticity at which a seed counts fully; below it the
 	 *  seed is weighted down. Zero ignores spin. */
@@ -1032,6 +1033,14 @@ public:
 	 *  updating. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
 	bool bPaused = false;
+
+	/** The storm intensity genesis needs: GenesisStormRatio of the storm
+	 *  tracer's equilibrium under full drive. */
+	float GetGenesisStorm() const
+	{
+		const float Amount = FMath::Max(StormAmount, 0.0f);
+		return FMath::Clamp(GenesisStormRatio * Amount / (1.0f + Amount), 0.01f, 1.0f);
+	}
 
 	/** StepSize held to the solver's range, in sim time. */
 	float GetStepSize() const { return FMath::Clamp(StepSize, FlowSimStep::Min, FlowSimStep::SpinUp) * GetTurnover(); }

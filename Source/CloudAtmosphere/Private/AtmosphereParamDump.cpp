@@ -604,6 +604,10 @@ namespace AtmosphereLoad
 			{ TEXT("bSharpCentreVelocity"), TEXT("") },
 
 			{ TEXT("StormCellSpeed"), TEXT("StormCellWind") },
+
+			// Version 11 sets genesis as a share of the storm's equilibrium,
+			// GenesisStorm * (1 + StormAmount) / StormAmount.
+			{ TEXT("GenesisStorm"), TEXT("") },
 		};
 		return Rows;
 	}

@@ -14,7 +14,7 @@ namespace
 		{
 			/** PITFALL: never lower this number. The engine refuses a package
 			 *  saved at a version above Latest. */
-			Current = 10,
+			Current = 11,
 
 			Latest = Current
 		};
