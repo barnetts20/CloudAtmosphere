@@ -7,8 +7,6 @@
 // depth unit and cascade half-widths it gives the frame. The format, the
 // reconstruction and the cascade walk are AtmosphereShadowMap.ush's.
 
-#define TR_ExtinctionTintRange(Cloud, Storm) AtmoShadow_ExtinctionTintRange(Cloud, Storm)
-
 /** The deep material's share at Depth below a column's base, an atmosphere
  *  fraction: whole DeepMaterial.x below the base. */
 float TR_DeepMaterialWeight(float Depth, float4 DeepMaterial)
@@ -16,12 +14,15 @@ float TR_DeepMaterialWeight(float Depth, float4 DeepMaterial)
     return smoothstep(0.0f, max(DeepMaterial.x, 1e-5f), Depth);
 }
 
-/** TR_ExtinctionTintRange over every material in use, the deep deck's
- *  included. The bake's fold constant and the march's reader both take it
- *  from here. */
-float2 TR_MaterialTintRange(float3 Cloud, float3 Storm, float3 Deep)
+/** AtmoShadow_ExtinctionTintRange over every material in use, the deep deck's
+ *  included. At a StormBalance of 0 no column is storm, at 1 none is
+ *  fair-weather (TR_MaterialFromWeather is exact at both), and the set no
+ *  column uses takes the other's value. The bake's fold constant and the
+ *  march's reader both take it from here. */
+float2 TR_MaterialTintRange(float3 Cloud, float3 Storm, float3 Deep, float StormBalance)
 {
-    const float2 Range = TR_ExtinctionTintRange(Cloud, Storm);
+    const float2 Range = AtmoShadow_ExtinctionTintRange(
+		(StormBalance < 1.0f) ? Cloud : Storm, (StormBalance > 0.0f) ? Storm : Cloud);
 
 #if TR_DEEP_DECK
     return float2(min(Range.x, min(Deep.x, min(Deep.y, Deep.z))), max(Range.y, max(Deep.x, max(Deep.y, Deep.z))));
@@ -30,11 +31,15 @@ float2 TR_MaterialTintRange(float3 Cloud, float3 Storm, float3 Deep)
 #endif
 }
 
-/** The least extinction, tint times amount, across the materials in use: what
- *  the deep terminus counts the light out against. */
-float TR_MaterialLeastExtinction(float4 Cloud, float4 Storm, float4 Deep)
+/** The least extinction, tint times amount, across the materials in use as
+ *  TR_MaterialTintRange counts them: what the deep terminus counts the light
+ *  out against. */
+float TR_MaterialLeastExtinction(float4 Cloud, float4 Storm, float4 Deep, float StormBalance)
 {
-    float3 Low = min(Cloud.rgb * Cloud.a, Storm.rgb * Storm.a);
+    const float3 Fair = Cloud.rgb * Cloud.a;
+    const float3 Stormy = Storm.rgb * Storm.a;
+
+    float3 Low = min((StormBalance < 1.0f) ? Fair : Stormy, (StormBalance > 0.0f) ? Stormy : Fair);
 
 #if TR_DEEP_DECK
     Low = min(Low, Deep.rgb * Deep.a);

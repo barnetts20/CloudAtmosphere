@@ -18,9 +18,9 @@ public:
 	virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
 	virtual FName GetSectionName() const override { return TEXT("Flow Sim"); }
 
-	/** Config started automatically, and the one the console commands act on
-	 *  when given no argument. Soft, so cooks that never touch the sim do not
-	 *  load it and its snapshot. */
+	/** Config started automatically, and the one FlowSim.Start starts when
+	 *  given no argument. Soft, so cooks that never touch the sim do not load
+	 *  it and its snapshot. */
 	UPROPERTY(config, EditAnywhere, Category = "Flow Sim", meta = (AllowedClasses = "/Script/CloudAtmosphere.FlowSimConfig"))
 	TSoftObjectPtr<UFlowSimConfig> DefaultConfig;
 

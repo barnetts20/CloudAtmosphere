@@ -148,11 +148,6 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
 // Lifecycle
 // --------------------------------------------------------------------------
 
-void APlanetAtmosphereActor::BeginPlay()
-{
-    Super::BeginPlay();
-}
-
 void APlanetAtmosphereActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     ReleaseSimulation(false);
@@ -236,8 +231,8 @@ void APlanetAtmosphereActor::PostEditMove(bool bFinished)
 {
     if (bIsPlanetOwned)
     {
-        // Snap location back -- it follows the planet. Rotation is intentionally left alone
-        // (controls light direction). Scale is absolute and planet-driven.
+        // Snap location back -- it follows the planet. Rotation is left alone
+        // (light direction); the transform guard holds the planet-set relative scale.
         if (USceneComponent* Root = GetRootComponent())
         {
             Root->SetRelativeLocation(FVector::ZeroVector);
@@ -257,8 +252,9 @@ void APlanetAtmosphereActor::OnTransformUpdated(USceneComponent* Component, EUpd
 
     if (USceneComponent* Root = GetRootComponent())
     {
-        // Lock location and scale. Rotation is intentionally left alone (light direction).
-        // Using _Direct setters avoids firing TransformUpdated recursively.
+        // Lock location and scale. Rotation is left alone (light direction).
+        // UpdateComponentToWorld broadcasts TransformUpdated again; that pass
+        // finds location and scale clean and stops.
         bool bLocationDirty = !Root->GetRelativeLocation().IsNearlyZero(0.01);
         bool bScaleDirty = !Root->GetRelativeScale3D().Equals(PlanetDrivenScale, 0.01);
 
@@ -996,10 +992,14 @@ bool APlanetAtmosphereActor::FillMarchParams(
     Out.AbsorptionFalloff = AirP.AbsorptionFalloff;
 
     // The air's ambient is a ratio of the light, as the cloud's is in the march.
-    Out.AtmosphereAmbient = FVector3f(
-        AmbientP.AirAmbient.R * Light.R, AmbientP.AirAmbient.G * Light.G, AmbientP.AirAmbient.B * Light.B);
+    // NON-NEGATIVE, as LightProduct is: negative radiance makes the temporal
+    // resolve's compression singular.
+    const FLinearColor AirAmbient = AmbientP.AirAmbient.GetClamped(0.0f, MAX_flt);
+    const FLinearColor CloudAmbient = AmbientP.CloudAmbient.GetClamped(0.0f, MAX_flt);
+
+    Out.AtmosphereAmbient = FVector3f(AirAmbient.R * Light.R, AirAmbient.G * Light.G, AirAmbient.B * Light.B);
     Out.AtmosphereAmbientFloor = AmbientP.AirAmbientFloor;
-    Out.CloudAmbient = ToVector3(AmbientP.CloudAmbient);
+    Out.CloudAmbient = ToVector3(CloudAmbient);
     Out.CloudAmbientFloor = AmbientP.CloudAmbientFloor;
     Out.AmbientTerminator = FMath::Max(AmbientP.AmbientTerminator, 1e-4f);
 
@@ -1054,6 +1054,19 @@ bool APlanetAtmosphereActor::FillMarchParams(
 
     bWarnedBlueNoise = bWarnedBlueNoise && !Noise;
 
+    const bool bNoStructure = HasClouds() && !ActiveStructureVolume();
+
+    if (bNoStructure && !bWarnedStructureVolume)
+    {
+        bWarnedStructureVolume = true;
+
+        UE_LOG(LogCloudAtmosphere, Warning,
+            TEXT("%s: no structure noise volume for the %s model. Its clouds draw as smooth slabs until one is set."),
+            *GetName(), IsDeepDeck() ? TEXT("gas giant") : TEXT("terrestrial"));
+    }
+
+    bWarnedStructureVolume = bWarnedStructureVolume && bNoStructure;
+
     Out.FlowResource = FlowTarget ? FlowTarget->GameThread_GetRenderTargetResource() : nullptr;
     Out.ShadowResource = ShadowTarget ? ShadowTarget->GameThread_GetRenderTargetResource() : nullptr;
     Out.TransmittanceResource = TransmittanceTable ? TransmittanceTable->GameThread_GetRenderTargetResource() : nullptr;
@@ -1092,8 +1105,7 @@ void APlanetAtmosphereActor::UpdateComputeMarch(
         ViewExtension->SetFrame_GameThread(Params);
     }
 
-    // Initialize can push while parked; the extension stays off until woken.
-    ViewExtension->SetEnabled(bWant && bAtmosphereActive);
+    ViewExtension->SetEnabled(bWant);
 }
 
 void APlanetAtmosphereActor::ReleaseViewExtension()
@@ -1158,8 +1170,9 @@ void APlanetAtmosphereActor::ReleaseCloudResources()
 {
     ReleaseSimulation(true);
 
-    ShadowTarget = nullptr;
-    CoverageTarget = nullptr;
+    // THE TARGETS ARE KEPT, for the clouds' return. PITFALL: dropped and
+    // recreated under the same name before GC, NewObject replaces the live
+    // object in place and stalls the game thread on its render resource.
     bShadowPrimed = false;
 }
 
@@ -1298,7 +1311,6 @@ void APlanetAtmosphereActor::ClaimSimulation(const FVector& PlanetCenter, float 
     if (Sim->TakeKeptClock(this, KeptTime, KeptConfig))
     {
         KeptClock.Time = KeptTime;
-        KeptClock.SpinTime = KeptTime;
         KeptClock.Config = KeptConfig;
         KeptAt = Now;
     }

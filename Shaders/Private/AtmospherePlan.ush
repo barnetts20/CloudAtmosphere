@@ -41,13 +41,18 @@ void Atmo_ChordSteps(float Length, float Count, float Spread, out float First, o
     Growth = R - 1.0f;
 }
 
-// The step plan: cloud steps on a lattice anchored at the camera, phase-shifted
+// The step plan: cloud steps on a lattice of camera-centred shells, phase-shifted
 // per pixel and refined at each cloud entry; air steps spread over each ray's air
 // chord by Atmo_ChordSteps.
 //
 // Lattice: step length is a function of distance alone, so rays agree wherever
-// they overlap. A cloud segment widens to the lattice points either side of it;
-// only the terminus trims a cloud step.
+// they overlap. Growth counts from the origin shell: the camera inside the
+// atmosphere, else the shell through the atmosphere's nearest point, so a far
+// camera crosses the planet with the steps of one at the atmosphere top. A cloud
+// segment widens to the lattice points either side of it.
+// After air, the widened span ahead of the shell crossing holds no cloud and is
+// one step of air alone ending at the crossing; cloud steps run from there, and
+// only the terminus trims one.
 // Phase: each pixel's lattice starts a fraction of a step in, so neighbours do not
 // share boundaries; a shared lattice turns jitter noise into rings about the view.
 // Entry refine: ATMO_ENTRY_SPAN lattice steps from the start of the step where a
@@ -64,13 +69,21 @@ void Atmo_ChordSteps(float Length, float Count, float Spread, out float First, o
 // cone-traced entry skips features narrower than the probe spacing.
 
 /** Camera lattice step growth (actor's Sampling group): past the knee each step is
- *  this fraction of its distance from the camera. Costs about
+ *  this fraction of its distance from the origin shell. Costs about
  *  (1 + ln(Distance * x / Floor)) / x steps, up to ATMO_MAX_ITER, mostly in grazing
- *  views from in or near the deck. One value per frame, blended geometrically by
+ *  views. One value per frame, blended geometrically by
  *  camera altitude from LatticeGrowth (in or below the deck) to LatticeGrowthFar
  *  (FAR_ALTITUDE shell depths above it). Equal values disable the blend. */
 float LatticeGrowth;
 float LatticeGrowthFar;
+
+#ifndef ATMO_ENTRY_SUBSTEPS
+#define ATMO_ENTRY_SUBSTEPS 4.0f
+#endif
+
+#ifndef ATMO_ENTRY_SPAN
+#define ATMO_ENTRY_SPAN 2.0f
+#endif
 
 #ifndef ATMO_CAMERA_LATTICE_FAR_ALTITUDE
 #define ATMO_CAMERA_LATTICE_FAR_ALTITUDE 4.0f
@@ -85,12 +98,20 @@ float Atmo_LatticeGrowth(float Altitude)
 		log(max(LatticeGrowthFar, 1e-3f)), Blend));
 }
 
-/** Camera lattice: Floor-length steps (shell depth / CloudSteps) up to Knee =
- *  Floor / Growth, then growing in proportion to distance. Cap bounds a step's
- *  rise through the shell to ChordSpread floors, so a far camera still crosses
- *  the deck in several steps; the step applies it by slope. U counts steps. */
+/** Camera lattice: from Origin (distance to the origin shell), Floor-length steps
+ *  (shell depth / CloudSteps) up to Knee = Floor / Growth past it, then growing in
+ *  proportion to distance past it. Cap bounds a step's rise through the shell to
+ *  ChordSpread floors, so a long step still crosses the deck in several; the step
+ *  applies it by slope. U counts steps.
+ *  PITFALL: where the cap binds, the entry span covers a whole descent through the
+ *  band, which then costs CloudSteps * ATMO_ENTRY_SUBSTEPS / ChordSpread
+ *  substeps; past ATMO_MAX_ITER the loop drops the deck's base. Cap is raised to
+ *  keep one descent 16 under, room for the clear step and a slope that eases
+ *  inside the band. A ray that dips into the band and out again within one
+ *  segment travels up to twice the depth radially and is not covered. */
 struct AtmoCameraLattice
 {
+    float Origin;
     float Floor;
     float Cap;
     float LogRatio;
@@ -98,11 +119,15 @@ struct AtmoCameraLattice
     float UKnee;
 };
 
-AtmoCameraLattice Atmo_CameraLattice(float ShellDepth, float Count, float Spread, float Growth)
+AtmoCameraLattice Atmo_CameraLattice(float ShellDepth, float Count, float Spread, float Growth, float Origin)
 {
     AtmoCameraLattice L;
-    L.Floor = max(ShellDepth, 1e-4f) / max(Count, 1.0f);
-    L.Cap = L.Floor * max(Spread, 1.0f);
+    const float Steps = max(Count, 1.0f);
+
+    L.Origin = Origin;
+    L.Floor = max(ShellDepth, 1e-4f) / Steps;
+    L.Cap = L.Floor * max(max(Spread, 1.0f),
+		Steps * ATMO_ENTRY_SUBSTEPS / float(ATMO_MAX_ITER - 16));
     L.LogRatio = log(1.0f + Growth);
 
     L.Knee = L.Floor / Growth;
@@ -113,18 +138,20 @@ AtmoCameraLattice Atmo_CameraLattice(float ShellDepth, float Count, float Spread
 
 float Atmo_LatticeCoord(AtmoCameraLattice L, float T)
 {
-    return (T < L.Knee) ? T / L.Floor : L.UKnee + log(T / L.Knee) / L.LogRatio;
+    const float D = T - L.Origin;
+
+    return (D < L.Knee) ? D / L.Floor : L.UKnee + log(D / L.Knee) / L.LogRatio;
 }
 
 float Atmo_LatticeDistance(AtmoCameraLattice L, float U)
 {
-    return (U < L.UKnee) ? U * L.Floor : L.Knee * exp((U - L.UKnee) * L.LogRatio);
+    return L.Origin + ((U < L.UKnee) ? U * L.Floor : L.Knee * exp((U - L.UKnee) * L.LogRatio));
 }
 
-/** Lattice point at or before T, shifted by Phase steps; never behind the camera. */
+/** Lattice point at or before T, shifted by Phase steps; never before the origin. */
 float Atmo_LatticeFloor(AtmoCameraLattice L, float T, float Phase)
 {
-    return max(Atmo_LatticeDistance(L, floor(Atmo_LatticeCoord(L, T) - Phase + 1e-3f) + Phase), 0.0f);
+    return max(Atmo_LatticeDistance(L, floor(Atmo_LatticeCoord(L, T) - Phase + 1e-3f) + Phase), L.Origin);
 }
 
 /** Distance from T to the next point of the lattice divided Division times and
@@ -142,14 +169,6 @@ float Atmo_LatticeStep(AtmoCameraLattice L, float T, float Phase, float RadialRa
 
     return min(End - T, L.Cap * Unit / max(RadialRate, 1e-3f));
 }
-
-#ifndef ATMO_ENTRY_SUBSTEPS
-#define ATMO_ENTRY_SUBSTEPS 4.0f
-#endif
-
-#ifndef ATMO_ENTRY_SPAN
-#define ATMO_ENTRY_SPAN 2.0f
-#endif
 
 /** First step of a lattice started Phase in (0, 1] of a step in: the
  *  distribution's chord to fractional step Phase. */

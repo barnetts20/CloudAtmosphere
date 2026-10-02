@@ -306,8 +306,8 @@ TRFieldParams TR_BuildField(
     F.StructureVertical = StructureSampling.x * StructureSampling.y * HeightScale;
     F.DetailVertical = DetailSampling.x * DetailSampling.y * HeightScale;
 
-	// The far edge held above the near one, so a zero span cannot collapse a
-	// cascade onto the one inside it.
+	// The far edge held above the near one: the fade's smoothstep divides by
+	// the span.
     F.DetailFadeNear = max(DetailWarp.z, 0.0f);
     F.DetailFadeFar = F.DetailFadeNear + max(DetailWarp.w, 1e-4f);
 
@@ -732,9 +732,8 @@ float TR_DeepFill(float Height, TRColumn Col, TRFieldParams F)
 }
 
 /** The fill integrated from Height up to the column's base, an atmosphere
- *  fraction:
- *  how much full-density deck lies above a sample buried in it. Exact on the
- *  smoothstep, whose integral over [0, T] is T^3 - T^4 / 2. */
+ *  fraction: how much full-density deck lies above a sample buried in it. Exact
+ *  on the smoothstep, whose integral over [0, T] is T^3 - T^4 / 2. */
 float TR_DeepBuried(float Height, TRColumn Col, TRFieldParams F)
 {
     const float Depth = max(Col.Base - Height, 0.0f);
@@ -889,13 +888,15 @@ float TR_SlabEntry(
 }
 
 /** A layer's frequency at Rise, an atmosphere fraction: noise units per radian
- *  across the shell, which the sample's direction is scaled by. Vertical is
- *  Scale * Aspect * HeightScale. Exponential in Rise, so the vertical to
- *  horizontal ratio is Aspect at every height and the frequency stays
- *  positive below the base. */
+ *  across the shell, scaling the sample's direction. Vertical is Scale *
+ *  Aspect * HeightScale. Exponential in Rise, so the vertical to horizontal
+ *  ratio is Aspect at every height; the rate is taken on magnitudes, so a
+ *  negative Scale mirrors the noise; the exponent is held in float range. */
 float TR_NoiseFrequency(float Scale, float Vertical, float Rise)
 {
-    return Scale * exp(Vertical / max(Scale, 1e-4f) * Rise);
+    const float Rate = abs(Vertical) / max(abs(Scale), 1e-4f);
+
+    return Scale * exp(min(Rate * Rise, 64.0f));
 }
 
 /** The mip a layer reads at: the texels one march pixel spans, as a power of
@@ -916,7 +917,7 @@ float TR_NoiseLod(Texture3D Volume, float UVWScale, float MipBias, TRFieldParams
     uint Width, Height, Depth, Levels;
     Volume.GetDimensions(0, Width, Height, Depth, Levels);
 
-    const float Texels = F.PixelFootprint * UVWScale * (float) Width;
+    const float Texels = F.PixelFootprint * abs(UVWScale) * (float) Width;
 
     return max(log2(max(Texels, 1e-6f)) + MipBias, 0.0f);
 }
@@ -1214,8 +1215,9 @@ float4 TR_DensityInColumn(
 
 	// The eye's floor fades as it thins, scaled after erosion and coverage so
 	// the eyewall keeps its shape. PITFALL: unscaled it stays an opaque sheet;
-	// scaled before erosion the threshold cuts it away abruptly.
-    Density *= pow(saturate(Col.Thinning), F.EyeOpenPower);
+	// scaled before erosion the threshold cuts it away abruptly. PITFALL:
+	// pow(0, 0) is NaN on the GPU, so a zero power skips the factor.
+    Density *= (F.EyeOpenPower > 0.0f) ? pow(saturate(Col.Thinning), F.EyeOpenPower) : 1.0f;
 
 #if TR_DEEP_DECK
     Density = max(Density, TR_DeepFloor(

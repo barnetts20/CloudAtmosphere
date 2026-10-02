@@ -70,7 +70,8 @@ public:
 		UTextureRenderTarget2DArray* Keep);
 
 	/** Moves the running sim from From to To without a restart, when Claimant
-	 *  drives it under From: a config replaced by its runtime copy. */
+	 *  drives it under From, and Claimant's bids this frame from From to To: a
+	 *  config replaced by its runtime copy. */
 	void AdoptConfig(const UObject* Claimant, UFlowSimConfig* From, UFlowSimConfig* To);
 
 	/** Gives up the sim if Claimant drives it, stopping the sim until the next
@@ -104,12 +105,15 @@ public:
 	void ResetSimulation();
 
 	/** Capture the live state into a snapshot asset. BLOCKS on the GPU (flush,
-	 *  readback, a few megabytes copied): an authoring operation, not a runtime one. */
+	 *  readback, a few megabytes copied): an authoring operation, not a runtime one.
+	 *  Refused, and logged, until the sim steps after a start or reset. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	bool SaveSnapshot(UFlowSnapshot* Target);
 
-	/** Queue N substeps, run at up to 64 a frame ahead of the clock's own
-	 *  steps; a paused sim stays paused after them. */
+	/** Queue N substeps, run at up to 64 a frame in place of the clock's own
+	 *  steps; a paused sim stays paused after them. An unpaused spin-up runs
+	 *  first; within a paused one they run at the spin-up step and count toward
+	 *  it, and those past its end run at the running step. A reset drops them. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	void StepOnce(int32 NumSteps = 1);
 
@@ -227,8 +231,8 @@ private:
 	 *  names its own destination, so none is keyed by requester. */
 	TArray<FTerrestrialShadowParams> ShadowRequests;
 
-	/** Builds the flat render-thread snapshot at a step. Returns false if the config is unusable, having
-	 *  already logged why. */
+	/** Builds the flat render-thread snapshot at a step. False without a config
+	 *  or before the flow target exists, and the params then lack its resource. */
 	bool BuildParams(FFlowSimParams& OutParams, float Step) const;
 
 	/** Creates the render targets on first use and sizes them to the grid.
@@ -302,7 +306,8 @@ private:
 	 *  resets the sim, since the state is reallocated either way. */
 	FIntVector RunningGrid = FIntVector::ZeroValue;
 
-	/** Substeps to run before free-running. Set from SpinUpTurnovers at start. */
+	/** Substeps to run before free-running. Set from SpinUpTurnovers at each
+	 *  reset that seeds; zero after a restore. */
 	int32 SpinUpTarget = 0;
 
 	/** Manual steps queued by StepOnce, honoured even while paused. */

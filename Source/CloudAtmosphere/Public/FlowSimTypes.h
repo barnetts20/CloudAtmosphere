@@ -858,7 +858,7 @@ public:
 	float SimSpeed = 0.0025f;
 
 	/** Turnovers to run at the spin-up step before the sim is considered ready.
-	 *  Skipped once InitialState is bound. */
+	 *  Skipped when InitialState restores. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Time", meta = (ClampMin = "0.0", UIMax = "360.0"))
 	float SpinUpTurnovers = 13.0f;
 
@@ -942,7 +942,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline")
 	TObjectPtr<UFlowSnapshot> InitialState;
 
-	/** Spin-up substeps per frame. */
+	/** Spin-up substeps per frame, held to the per-frame hang guard. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline", meta = (ClampMin = "1", UIMax = "64"))
 	int32 MaxSpinUpStepsPerFrame = 8;
 
@@ -983,7 +983,10 @@ public:
 
 	/** The spin-up step in sim time, and the steps SpinUpTurnovers takes. */
 	float GetSpinUpStep() const { return FlowSimStep::SpinUp * GetTurnover(); }
-	int32 GetSpinUpSteps() const { return FMath::CeilToInt(FMath::Max(SpinUpTurnovers, 0.0f) / FlowSimStep::SpinUp); }
+	int32 GetSpinUpSteps() const
+	{
+		return (int32)FMath::Min(FMath::CeilToDouble(FMath::Max((double)SpinUpTurnovers, 0.0) / FlowSimStep::SpinUp), (double)MAX_int32);
+	}
 
 	/** NoiseDriftSpeed as an angular rate, radians per unit sim time. */
 	float GetNoiseDriftRate() const;

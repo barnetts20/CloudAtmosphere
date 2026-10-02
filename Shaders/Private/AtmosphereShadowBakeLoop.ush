@@ -307,8 +307,9 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 	// Unreached thresholds: on the terminus they go to PlanetDepth; otherwise they
 	// extrapolate at the last extinction from the chord exit, where no view sample
 	// lives (the step budget keeps T there), or take the sentinel if no cloud was met.
+	// The extinction's floor is per thickness, so it scales with the shell.
     float TailBase = T;
-    float TailRate = 1.0f / max(LastSigma, 1e-6f);
+    float TailRate = 1.0f / max(LastSigma, 1e-6f / F.Thickness);
 
     if (PlanetDepth >= 0.0f && T >= RayLength)
     {

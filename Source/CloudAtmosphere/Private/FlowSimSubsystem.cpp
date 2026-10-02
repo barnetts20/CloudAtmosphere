@@ -119,7 +119,8 @@ static FAutoConsoleCommandWithWorldAndArgs GFlowSimStartCmd(
 
 static FAutoConsoleCommandWithWorldAndArgs GFlowSimStopCmd(
 	TEXT("FlowSim.Stop"),
-	TEXT("Stop stepping. The state is kept for the debug view; FlowSim.Start reseeds or restores."),
+	TEXT("Stop stepping. The state is kept, but the output and debug view stop updating (a pause keeps ")
+	TEXT("them live); FlowSim.Start reseeds or restores."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
 		[](const TArray<FString>&, UWorld* World)
 		{
@@ -143,7 +144,8 @@ static FAutoConsoleCommandWithWorldAndArgs GFlowSimResetCmd(
 
 static FAutoConsoleCommandWithWorldAndArgs GFlowSimStepCmd(
 	TEXT("FlowSim.Step"),
-	TEXT("Advance N substeps while paused. Default 1."),
+	TEXT("Run N substeps (default 1), up to 64 a frame, in place of the clock's own steps. ")
+	TEXT("During spin-up they run at the spin-up step; an unpaused spin-up runs first."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
 		[](const TArray<FString>& Args, UWorld* World)
 		{
@@ -707,11 +709,6 @@ void UFlowSimSubsystem::StartSimulation(UFlowSimConfig* InConfig)
 	Config = InConfig;
 	bRunning = true;
 
-	SimulatedTime = 0.0f;
-	StepsCompleted = 0;
-	ClockStep = 0.0f;
-	PendingManualSteps = 0;
-
 	ReportCourant();
 	ReportStack();
 	ReportInertSettings();
@@ -808,14 +805,6 @@ void UFlowSimSubsystem::ReportInertSettings() const
 				TEXT("lives only as long as the storm under it does."),
 				Config->StormCellSustainRatio);
 		}
-	}
-
-	if (Config->InitialState && Config->SpinUpTurnovers > 0.0f)
-	{
-		UE_LOG(LogFlowSim, Log,
-			TEXT("InitialState is bound, so SpinUpTurnovers (%.1f) is skipped. It still ")
-			TEXT("matters when CREATING snapshots."),
-			Config->SpinUpTurnovers);
 	}
 
 	if (Config->FilterLatitude <= 0.0f)
@@ -1112,6 +1101,8 @@ void UFlowSimSubsystem::ResetSimulation()
 	SimulatedTime = 0.0f;
 	StepsCompleted = 0;
 	ClockStep = 0.0f;
+	PendingManualSteps = 0;
+	StepLoadLevel = 0;
 	CurrentStep = Config ? Config->GetStepSize() : 1e-5f;
 	PendingTime = CurrentStep;
 	StateBlend = 1.0f;
@@ -1160,6 +1151,14 @@ void UFlowSimSubsystem::ResetSimulation()
 
 	if (bRestored)
 	{
+		if (Config->SpinUpTurnovers > 0.0f)
+		{
+			UE_LOG(LogFlowSim, Log,
+				TEXT("InitialState restores, so SpinUpTurnovers (%.1f) is skipped. It still ")
+				TEXT("matters when CREATING snapshots."),
+				Config->SpinUpTurnovers);
+		}
+
 		SimulatedTime = Config->InitialState->SimulatedTime;
 		StepsCompleted = Config->InitialState->StepsCompleted;
 		ClockStep = 0.0f;
@@ -1236,11 +1235,9 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 		return false;
 	}
 
+	// False only without the flow target, which the capture does not read.
 	FFlowSimParams Params;
-	if (!BuildParams(Params, CurrentStep))
-	{
-		return false;
-	}
+	BuildParams(Params, CurrentStep);
 
 	FFlowSimulation* Sim = Simulation;
 
@@ -1252,10 +1249,19 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 	TArray<float> Result;
 	FIntVector Grid = FIntVector::ZeroValue;
 	bool bSucceeded = false;
+	bool bNoState = false;
 
 	ENQUEUE_RENDER_COMMAND(FlowSimCapture)(
-		[Sim, Params, &Result, &Grid, &bSucceeded](FRHICommandListImmediate& RHICmdList) mutable
+		[Sim, Params, &Result, &Grid, &bSucceeded, &bNoState](FRHICommandListImmediate& RHICmdList) mutable
 		{
+			// PITFALL: between a start or reset and the next step the pooled
+			// state is the previous config's, or none.
+			if (!Sim->HasState_RenderThread())
+			{
+				bNoState = true;
+				return;
+			}
+
 			Params.ResolveTextures_RenderThread();
 
 			FRHIGPUBufferReadback Readback(TEXT("FlowSim.SnapshotReadback"));
@@ -1298,6 +1304,15 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 
 	FlushRenderingCommands();
 
+	if (bNoState)
+	{
+		UE_LOG(LogFlowSim, Error,
+			TEXT("SaveSnapshot: '%s' has not stepped since it started or reset, so there is no state of it ")
+			TEXT("to capture. Start it if stopped, let it run a step, then save."),
+			*Config->GetName());
+		return false;
+	}
+
 	if (!bSucceeded)
 	{
 		UE_LOG(LogFlowSim, Error,
@@ -1336,7 +1351,7 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 
 void UFlowSimSubsystem::StepOnce(int32 NumSteps)
 {
-	PendingManualSteps += FMath::Max(NumSteps, 1);
+	PendingManualSteps = (int32)FMath::Min<int64>((int64)PendingManualSteps + FMath::Max(NumSteps, 1), MAX_int32);
 }
 
 bool UFlowSimSubsystem::PrepareTargets()
@@ -1856,21 +1871,24 @@ void UFlowSimSubsystem::ClaimSimulation(const UObject* Claimant, UFlowSimConfig*
 
 void UFlowSimSubsystem::AdoptConfig(const UObject* Claimant, UFlowSimConfig* From, UFlowSimConfig* To)
 {
-	if (!To || Config != From || !IsOwner(Claimant))
+	if (!To || !From)
 	{
 		return;
 	}
 
-	Config = To;
-
-	// A bid this frame already made names the old config, and would restart
-	// the sim on it.
+	// A bid this frame already made names the old config, and would start or
+	// restart the sim on it, whether or not Claimant owns it yet.
 	for (FSimClaim& Bid : Claims)
 	{
 		if (Bid.Claimant.Get() == Claimant && Bid.Config.Get() == From)
 		{
 			Bid.Config = To;
 		}
+	}
+
+	if (Config == From && IsOwner(Claimant))
+	{
+		Config = To;
 	}
 }
 
@@ -1913,10 +1931,6 @@ void UFlowSimSubsystem::ResolveClaims()
 		{
 			Owner.Reset();
 			StopSimulation();
-		}
-		else if (!Owner.IsValid())
-		{
-			Owner.Reset();
 		}
 
 		return;
@@ -2089,7 +2103,7 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 		// Spread over frames: one graph of hundreds of substeps hitches, and a
 		// watchable spin-up says more than the converged state.
 		Substeps = (int32)FMath::Min<int64>(
-			FMath::Max(Config->MaxSpinUpStepsPerFrame, 1),
+			FMath::Clamp(Config->MaxSpinUpStepsPerFrame, 1, FlowSimStep::MaxPerFrame),
 			SpinUpTarget - StepsCompleted);
 
 		Step = Config->GetSpinUpStep();
@@ -2099,6 +2113,15 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 	else if (PendingManualSteps > 0)
 	{
 		Substeps = FMath::Min(PendingManualSteps, FlowSimStep::WarnPerFrame);
+
+		// Manual steps within a paused spin-up are spin-up steps: at its step,
+		// and none past its end, so the rest run at the running step.
+		if (StepsCompleted < SpinUpTarget)
+		{
+			Substeps = (int32)FMath::Min<int64>(Substeps, SpinUpTarget - StepsCompleted);
+			Step = Config->GetSpinUpStep();
+		}
+
 		PendingManualSteps -= Substeps;
 		PendingTime = RunStep;
 		Blend = 1.0f;

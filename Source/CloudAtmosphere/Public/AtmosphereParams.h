@@ -56,15 +56,12 @@ struct CLOUDATMOSPHERE_API FAtmosphereSimulationParams
 	bool bClaimSimulation = true;
 };
 
-/** Cloud and deck shadows falling on whatever opaque geometry the depth buffer
- *  holds: terrain, meshes, a mesh inner surface, other actors.
- *
- *  A READ-SIDE FEATURE ENTIRELY. The map's optical depth is valid anywhere
- *  inside the shell, so a point on terrain reads the whole column above it as a
- *  deck sample reads its own. Nothing here changes the bake and no pass is
- *  added; the march evaluates it once, where the view ray stopped.
- *
- *  Both models reach the map through one reader.
+/** The sun's direct share on whatever opaque geometry the depth buffer holds:
+ *  terrain, meshes, a mesh inner surface, other actors, evaluated once where
+ *  the view ray stopped. The air dims and reddens it toward the terminator on
+ *  every model. The cloud models also take the cloud and deck shadow there
+ *  from the shadow map, whose depth is valid anywhere in the shell. The bake
+ *  reads only CascadeRadii; Air Only reads neither it nor Strength.
  *
  *  OUT OF SCOPE: translucent receivers, which write no depth, and the engine's
  *  lighting as opposed to its output -- this multiplies the lit result, so
@@ -90,7 +87,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereSurfaceShadowParams
 	float DirectFraction = 0.7f;
 
 	/** Final multiplier on the optical depth read from the map, for art control
-	 *  independent of the physical terms. */
+	 *  independent of the physical terms. Not read on Air Only. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bEnabled", ClampMin = "0.0"))
 	float Strength = 1.0f;
 
@@ -99,8 +96,10 @@ struct CLOUDATMOSPHERE_API FAtmosphereSurfaceShadowParams
 	 *  held inside the one outside it. They size the map the clouds are lit
 	 *  through as well as the one surfaces read. Narrower is sharper near the
 	 *  camera and hands over to the coarser level sooner; wider spans lose
-	 *  resolution. Zero collapses a level. Only the near field carries the
-	 *  detail layer's grain; match Y to the detail layer's FadeFar. */
+	 *  resolution. Zero collapses a level; X at 0 collapses the near field too,
+	 *  since it is held inside the mid field. Only the near field carries the
+	 *  detail layer's grain; match Y to the detail layer's FadeFar. Not read on
+	 *  Air Only. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	FVector2D CascadeRadii = FVector2D(0.6, 0.3);
 
@@ -500,14 +499,15 @@ struct CLOUDATMOSPHERE_API FCloudDetailLayerParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "-2.0", UIMax = "4.0"))
 	float MipBias = 0.0f;
 
-	/** Where the grain starts fading to the mean, and where it reaches it, in
-	 *  planet radii from the camera: the unit of the shadow cascades'
-	 *  CascadeRadii. The fetch is skipped beyond FadeFar. Only the near shadow
-	 *  cascade carries the grain, so keep CascadeRadii.Y at or past FadeFar for
-	 *  the shadows to show it wherever the clouds do. */
+	/** Where the grain starts fading to the mean, in planet radii from the
+	 *  camera: the unit of the shadow cascades' CascadeRadii. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float FadeNear = 0.0f;
 
+	/** Where the grain reaches the mean, in planet radii; the fetch is skipped
+	 *  beyond it. Only the near shadow cascade carries the grain, so keep
+	 *  CascadeRadii.Y at or past this for the shadows to show it wherever the
+	 *  clouds do. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float FadeFar = 0.3f;
 
@@ -618,8 +618,9 @@ struct CLOUDATMOSPHERE_API FCloudDeepParams
 	/** How far the floor rises into the fill, in fills: full-density mounds
 	 *  shaped by the structure noise, from where the fill completes up to
 	 *  FloorRelief fills above it at the highest noise; 1 reaches the base.
-	 *  The floor only adds density, so the cloud above is unchanged. 0 is no
-	 *  floor. */
+	 *  The floor only adds density, so the cloud above is unchanged. 0 leaves
+	 *  no mounds but still a flat floor where the fill completes, so the deck
+	 *  reaches full density there even where its top ramp has not. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float FloorRelief = 0.5f;
 
@@ -864,18 +865,19 @@ struct CLOUDATMOSPHERE_API FAtmosphereRaymarchParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "2", ClampMax = "256"))
 	int32 AtmosphereSteps = 64;
 
-	/** Cloud steps near the camera: the marched band's depth over this is the
-	 *  base step, which grows with distance by Sampling's LatticeGrowth, so the
-	 *  count a ray takes varies. Capped by ATMO_MAX_ITER per segment. */
+	/** Cloud steps at the lattice origin (the camera, or from outside the
+	 *  atmosphere its near edge): the band's depth over this is the base step,
+	 *  growing with distance past the origin by Sampling's LatticeGrowth, so a
+	 *  ray's count varies. Capped by ATMO_MAX_ITER per segment. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "2", ClampMax = "256"))
 	int32 CloudSteps = 128;
 
 	/** Air: how much longer the last step is than the first, AtmosphereSteps
 	 *  spread geometrically over the air the ray crosses; 1 is uniform, and the
 	 *  count is exact, so this redistributes rather than adds. Cloud: the most a
-	 *  step may rise through the band, in base steps, so a far camera still
-	 *  crosses the deck in several steps; higher is cheaper and coarser far
-	 *  away. */
+	 *  step may rise through the band, in base steps, so a long step still
+	 *  crosses the deck in several; higher is cheaper and coarser where steps
+	 *  are long. Raised as needed so one crossing fits ATMO_MAX_ITER. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0", UIMax = "64.0"))
 	float ChordSpread = 8.0f;
 

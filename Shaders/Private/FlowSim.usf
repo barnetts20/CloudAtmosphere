@@ -1089,7 +1089,7 @@ struct SimTraits
     float Aspect;
     float Wind;
 
-	/** 0 takes the hemisphere's sense; otherwise the sign it turns with. */
+	/** 0 takes SimSpinSense's; otherwise the sign it turns with. */
     float Sense;
     float Storm;
     float Cloud;
@@ -1179,8 +1179,9 @@ float4 SimCellControl(uint Slot, uint K)
     return SimCellSRV[SIM_CELL_CONTROL_BASE + SIM_CELL_CONTROL_STRIDE * Slot + K];
 }
 
-/** A slot's reach at N: centre, rotation sense (MainCellsCS's this step, or a
- *  perpetual storm's own), intensity, and distance in radii across its ellipse;
+/** A slot's reach at N: centre, rotation sense (a perpetual storm's own, the
+ *  hemisphere's at the centre on a three-cell profile, otherwise MainCellsCS's
+ *  this step), intensity, and distance in radii across its ellipse;
  *  false outside. bDisplay reads the displayed centre, otherwise the latest. */
 bool SimCellReach(uint Slot, float3 N, bool bDisplay,
 	out float3 Axis, out float Sense, out float Intensity, out float R)
@@ -1360,8 +1361,8 @@ float SimCellStream(float3 P, uint Layer)
     return Psi;
 }
 
-/** The streamfunction at the corner west of column I on face row J. Zero on
- *  the polar faces. */
+/** The streamfunction at the corner west of column I on face row J. One value
+ *  on the polar faces. */
 float SimCellCornerPsi(int I, int J, uint Layer)
 {
 	// A polar corner is the pole for every column, so one value.
@@ -2338,8 +2339,6 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
     if (Cell.w <= 0.0f)
     {
 		// ONE SPAWN A STEP, by the first free slot at every free slot's chance.
-		// Spacing is judged against the cells the step began with, so a second
-		// spawn in the same step could land inside the first's radius.
         uint Free = 0u;
         uint FirstFree = (uint) Active;
 
@@ -3817,8 +3816,9 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
     {
 		// What a seed here is judged on, each against its gate: red the genesis
 		// window, green humidity, blue the storm or the share of it humidity
-		// stands in for. Bright where all three pass,
-		// dim where any fails, dimmer within SimCellSpacing radii of a live cell or
+		// stands in for. Bright where spawning's gates pass (blue's is
+		// SimCellSeedScore, which also weighs cyclonic spin), dim where any
+		// fails, dimmer within SimCellSpacing radii of a live cell or
 		// SimPerpetualClearance of a perpetual storm, where no seed may spawn.
         const float3 N = SimDirection(SimColumnToLon((float) C.x), Mu);
         const float2 Conditions = SimCellConditions(N, 0.0f);
@@ -3841,7 +3841,8 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
             bExcluded = bExcluded || (Cell.w > 0.0f && dot(Cell.xyz, N) > Spacing);
         }
 
-        const bool bPasses = Gate.x > 1.0f && Gate.y > 1.0f && Gate.z >= 1.0f;
+        const bool bPasses = Conditions.x > SIM_GENESIS_WINDOW_GATE && Conditions.y > SimCellGenesis.y
+			&& SimCellSeedScore(N) > 0.0f;
         const float Level = bExcluded ? 0.15f : (bPasses ? 1.0f : 0.4f);
 
         SimDebugUAV[int2(Id.xy)] = float4(saturate(Gate) * Level, 1.0f);

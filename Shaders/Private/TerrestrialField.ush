@@ -180,6 +180,7 @@ TRScatterParams TR_BuildScatter(
 	float4 CloudExtinction,
 	float3 StormScatter,
 	float4 StormExtinction,
+	float StormBalance,
 	float3 DeepScatter,
 	float4 DeepExtinction,
 	float4 DeepMaterial,
@@ -202,7 +203,8 @@ TRScatterParams TR_BuildScatter(
     S.DeepScatter = DeepScatter;
     S.DeepExtinction = DeepExtinction;
     S.DeepMaterial = DeepMaterial;
-    S.TintRange = TR_MaterialTintRange(CloudExtinction.rgb, StormExtinction.rgb, DeepExtinction.rgb);
+    S.TintRange = TR_MaterialTintRange(
+		CloudExtinction.rgb, StormExtinction.rgb, DeepExtinction.rgb, StormBalance);
 
     S.ForwardG = ForwardG;
     S.BackwardG = BackwardG;
@@ -219,9 +221,10 @@ TRScatterParams TR_BuildScatter(
     return S;
 }
 
-/** TR_BuildScatter from the pass's uniforms, which carry exactly these names. */
+/** TR_BuildScatter from the pass's uniforms, which carry exactly these names;
+ *  StormBalance is CloudResponse.z, as TR_BuildField unpacks it. */
 #define TR_BUILD_SCATTER() TR_BuildScatter( \
-	CloudScatter, CloudExtinction, StormScatter, StormExtinction, \
+	CloudScatter, CloudExtinction, StormScatter, StormExtinction, CloudResponse.z, \
 	DeepScatter, DeepExtinction, DeepMaterial, \
 	ForwardG, BackwardG, ForwardWeight, \
 	OctaveCount, OctaveAttenuation, OctaveEccentricity, \
@@ -363,9 +366,9 @@ void Field_Terminus(
 
 #if TR_DEEP_DECK
 	// Counted down from where the deck is full, against the least extinction
-	// any material has, in atmosphere thicknesses.
+	// any material in use has, in atmosphere thicknesses.
     const float BetaMin = Atmo.cloudParams.cloudScatBeta.x * F.Thickness
-		* TR_MaterialLeastExtinction(S.CloudExtinction, S.StormExtinction, S.DeepExtinction);
+		* TR_MaterialLeastExtinction(S.CloudExtinction, S.StormExtinction, S.DeepExtinction, F.StormBalance);
 
     const float Radius = TR_DeepTerminusRadius(F, BetaMin);
 

@@ -525,14 +525,15 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 	const uint32 MarchN = !History ? 1u : (bHistoryValid ? CellSize : FMath::Min(CellSize, 2u));
 	const uint32 CellPixels = MarchN * MarchN;
 
-	// The rank marched this frame, rotated each cycle so a pixel's revisits are
-	// an odd number of frames apart: by one for an even N^2, by two for an odd
-	// one. PITFALL: a pixel revisited a multiple of the engine's jitter period
-	// apart (8) lands on the same sub-pixel jitter each visit. A gap of N^2 is
-	// one for N a multiple of 4 (other even N alternate two jitters), and
-	// N^2 - 1 is one for every odd N.
+	// The rank marched this frame, rotated each cycle so no revisit gap is a
+	// multiple of 4: by one for an even N^2 (gaps N^2 - 1 and 2N^2 - 1, both
+	// odd), by four for an odd one (N^2 - 4, odd, and 2(N^2 - 2), twice an odd).
+	// PITFALL: a pixel revisited a multiple of the engine's jitter period apart
+	// (8) lands on the same sub-pixel jitter each visit. A gap of N^2 is one for
+	// N a multiple of 4 (other even N alternate two jitters); for every odd N so
+	// are N^2 - 1 and 2(N^2 - 1), the gaps of a rotation by one or two.
 	const uint32 Frame = bHistoryValid ? History->Frame : 0u;
-	const uint32 Rotation = (CellPixels & 1u) ? 2u : 1u;
+	const uint32 Rotation = (CellPixels & 1u) ? 4u : 1u;
 	const uint32 Rank = (Frame + Rotation * (Frame / CellPixels)) % CellPixels;
 	const FIntPoint Offset = CellPixel(Rank, MarchN);
 

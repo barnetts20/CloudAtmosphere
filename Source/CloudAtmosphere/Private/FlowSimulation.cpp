@@ -150,7 +150,7 @@ namespace
 		// so the fraction keeps full precision however many cycles have run; the
 		// noise clock wrapped in double, since the reset test needs only the
 		// phase.
-		const double ForcingCycles = Params.Time / FMath::Max((double)Params.ForcingLifetime, 1e-3);
+		const double ForcingCycles = Params.Time / (double)Params.ForcingLifetime;
 		const double ForcingWhole = FMath::FloorToDouble(ForcingCycles);
 
 		P.ForcingCycle = (uint32)FMath::Fmod(ForcingWhole, 4294967296.0);
@@ -177,7 +177,7 @@ namespace
 
 		P.CondensationRate = Params.CondensationRate;
 		P.EvaporationRate = Params.EvaporationRate;
-		P.CloudDecay = 1.0f / FMath::Max(Params.CloudLifetime, 1e-3f);
+		P.CloudDecay = 1.0f / Params.CloudLifetime;
 		P.MoistureParams = Params.MoistureParams;
 		P.LatentHeating = Params.LatentHeating;
 		P.AscentSmoothing = Params.AscentSmoothing;
@@ -536,7 +536,7 @@ bool FFlowSimulation::AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, con
 
 	OutGrid = AllocatedGrid;
 
-	if (!Readback || !PooledPhi.IsValid())
+	if (!Readback || !HasState_RenderThread())
 	{
 		return false;
 	}
@@ -659,9 +659,9 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 	AddReconstructPass(GraphBuilder, Params, R, false);
 	AddCellsPass(GraphBuilder, Params, R);
 
-	// Without cells or perpetual storms Predict reads none of the fields, so
-	// they are left stale.
-	if (Params.CellCount > 0 || Params.PerpetualCount > 0)
+	// Without cells or perpetual storms (CellCount counts both) Predict reads
+	// none of the fields, so they are left stale.
+	if (Params.CellCount > 0)
 	{
 		AddCellFieldPass(GraphBuilder, Params, R);
 	}

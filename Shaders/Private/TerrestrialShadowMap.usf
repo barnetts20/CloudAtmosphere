@@ -188,7 +188,7 @@ float BakeField_TerminusRadius(BakeFieldParams F)
 {
 #if TR_DEEP_DECK
     return TR_DeepTerminusRadius(F, TR_CloudBeta(F, CloudOpticalDepth) * LightExtinctionFraction
-		* TR_MaterialLeastExtinction(CloudExtinction, StormExtinction, DeepExtinction));
+		* TR_MaterialLeastExtinction(CloudExtinction, StormExtinction, DeepExtinction, F.StormBalance));
 #else
     return F.PlanetRadius;
 #endif
@@ -223,7 +223,7 @@ float BakeField_LateralArc(float Radius)
 float BakeField_FoldConstant(BakeFieldParams F)
 {
     return TR_CloudBeta(F, CloudOpticalDepth) * LightExtinctionFraction / F.Thickness
-		* TR_MaterialTintRange(CloudExtinction.rgb, StormExtinction.rgb, DeepExtinction.rgb).y;
+		* TR_MaterialTintRange(CloudExtinction.rgb, StormExtinction.rgb, DeepExtinction.rgb, F.StormBalance).y;
 }
 
 float BakeField_Sigma(float3 Pos, float3 BasisU, float3 BasisV, float TexelWorld,

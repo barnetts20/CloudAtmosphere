@@ -284,13 +284,16 @@ float3 Atmo_LightMarch(
  *  cameras' and lights' uniforms.
  *
  *  OutDepth is the ray distance a reprojection moves the result by: where the
- *  cloud's own transmittance crosses 0.5, else the cloud's opacity-weighted mean
- *  distance, else the surface the ray stops on, else the air's in-scatter-
- *  weighted distance, else ATMO_SKY_DEPTH. Air sets no half-transmittance
- *  depth: along the limb it alone can fall below half ahead of the cloud, and
- *  the first wisp would take the depth. PITFALL: a limb ray given the sky
- *  depth reprojects as a direction and trails behind a moving planet.
- *  OutCloudDepth: the depth is the field's, which turns with its spin. */
+ *  cloud's own transmittance crosses 0.5, else the terminus of a ray clipped
+ *  opaque, else the cloud's opacity-weighted mean distance, else the surface the
+ *  ray stops on, else the air's in-scatter-weighted distance, else
+ *  ATMO_SKY_DEPTH. Air sets no half-transmittance depth: along the limb it alone
+ *  can fall below half ahead of the cloud, and the first wisp would take the
+ *  depth. PITFALL: a limb ray given the sky depth reprojects as a direction and
+ *  trails behind a moving planet.
+ *  OutCloudDepth: the depth is the field's, which turns with its spin: the
+ *  cloud's transmittance crossed half, its opacity passed
+ *  ATMO_DEPTH_MIN_OPACITY, or the field's own terminus clipped the ray. */
 float4 Atmo_MainMarchDepth(
 	FIELD_TEXTURE_DECL,
 	Texture2D BlueNoise,
@@ -463,19 +466,21 @@ float4 Atmo_MainMarchDepth(
     const float ShellDepth = max(
 		P.Atmo.planetParams.cloudOuterRadius - P.Atmo.planetParams.cloudInnerRadius, 1e-4f);
 
-    const float CameraAltitude = (length(RayOrigin - P.Atmo.planetParams.planetPos)
-		- P.Atmo.planetParams.cloudOuterRadius) / ShellDepth;
+    const float CameraRadius = length(RayOrigin - P.Atmo.planetParams.planetPos);
+    const float CameraAltitude = (CameraRadius - P.Atmo.planetParams.cloudOuterRadius) / ShellDepth;
 
     const AtmoCameraLattice CloudLattice = Atmo_CameraLattice(ShellDepth,
 		float(P.Atmo.mainRayParams.cloudSteps), P.Atmo.mainRayParams.chordSpread,
-		Atmo_LatticeGrowth(CameraAltitude));
+		Atmo_LatticeGrowth(CameraAltitude), max(CameraRadius - P.Atmo.planetParams.atmoRadius, 0.0f));
 
     const float CloudPhase = LatticePhase;
 
     const AtmoLightConstants LightConstants = Atmo_LightConstants(ShadowMap, ShadowCameras, P);
 
-	// Where the previous segment's last step ended, which may be past its end.
-    float CarryPos = 0.0f;
+	// Where the previous segment's last step ended, which may be past its end;
+	// the atmosphere entry before the first, so no step starts outside it.
+    float CarryPos = Segments[0].x;
+    bool PrevIsCloud = false;
 
     for (int s = 0; s < SegmentCount; s++)
     {
@@ -486,8 +491,10 @@ float4 Atmo_MainMarchDepth(
 			RayOrigin, RayDir, Segments[s], P.Atmo.planetParams);
 
 		// Cloud starts at the lattice point before its shell crossing, and air
-		// ahead of cloud stops there. The widened part holds no cloud, so the
-		// full step's sample is unbiased.
+		// ahead of cloud stops there. Unless cloud precedes it, the widened part
+		// holds no cloud and is one step of air alone up to the crossing
+		// (ClearUntil). PITFALL: a deck sample there integrates its profile
+		// window into the band, which the steps after it count again.
         if (IsCloud)
         {
             SegStart = Atmo_LatticeFloor(CloudLattice, SegStart, CloudPhase);
@@ -500,6 +507,11 @@ float4 Atmo_MainMarchDepth(
 
         SegStart = max(SegStart, CarryPos);
 
+        const float ClearUntil = (IsCloud && !PrevIsCloud) ? Segments[s].x : 0.0f;
+
+		// Air takes one more: its lead step makes a lone segment's count N + 1.
+        const int IterLimit = IsCloud ? ATMO_MAX_ITER : ATMO_MAX_ITER + 1;
+
 		// Substeps run to RefineUntil; a clear coarse sample arms the next entry.
         float RefineUntil = -1.0f;
         bool RefineArmed = true;
@@ -507,11 +519,14 @@ float4 Atmo_MainMarchDepth(
         float Pos = SegStart;
 
         int Iter = 0;
-        while (Pos < SegEnd && Iter < ATMO_MAX_ITER)
+        while (Pos < SegEnd && Iter < IterLimit)
         {
             Iter++;
 
             float CurrentStep;
+
+            const bool bClear = IsCloud && Pos < ClearUntil;
+            const bool bCloudSample = IsCloud && !bClear;
 
             if (IsCloud)
             {
@@ -519,8 +534,8 @@ float4 Atmo_MainMarchDepth(
 
                 const float Division = (Pos < RefineUntil) ? ATMO_ENTRY_SUBSTEPS : 1.0f;
 
-                CurrentStep = min(max(Atmo_LatticeStep(
-					CloudLattice, Pos, CloudPhase, abs(dot(RayDir, StepUp)), Division), 1e-4f), MaxDist - Pos);
+                CurrentStep = min(max(bClear ? ClearUntil - Pos : Atmo_LatticeStep(CloudLattice, Pos,
+					CloudPhase, abs(dot(RayDir, StepUp)), Division), 1e-4f), MaxDist - Pos);
             }
             else
             {
@@ -606,7 +621,7 @@ float4 Atmo_MainMarchDepth(
 				// material coordinate is the tint's input can supply both.
                 float4 Sample = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-                if (IsCloud)
+                if (bCloudSample)
                 {
                     const float3 LocalUp = LocalPos / max(DistFromCentre, 1e-4f);
 
@@ -652,7 +667,7 @@ float4 Atmo_MainMarchDepth(
 
                 if (CloudOptDepth > 0.0f)
                 {
-                    if (IsCloud)
+                    if (bCloudSample)
                     {
                         LightTint = Field_SampleLightTint(Sample, P.Scatter);
                     }
@@ -727,7 +742,7 @@ float4 Atmo_MainMarchDepth(
 
                 Transmittance *= exp(-Extinction);
 
-                if (IsCloud)
+                if (bCloudSample)
                 {
                     if (Sample.x > 0.0f)
                     {
@@ -846,11 +861,12 @@ float4 Atmo_MainMarchDepth(
                 break;
             }
 
-            Pos += CurrentStep;
+            Pos = bClear ? ClearUntil : Pos + CurrentStep;
             StepIndex++;
         }
 
         CarryPos = Pos;
+        PrevIsCloud = IsCloud;
 
         if (max(Transmittance.x, max(Transmittance.y, Transmittance.z))
 			< ATMO_OPAQUE_TRANSMITTANCE)
@@ -925,8 +941,9 @@ float4 Atmo_MainMarchDepth(
 
         const float3 LightLocal = mul(P.WorldToLocal, P.Atmo.lightRayParams.lightDir);
 
-		// The fold constant and the ceiling scale as the light march builds
-		// them, minus the octave term: a surface receives single scattering.
+		// The fold constant and the tau scale as the light march builds them,
+		// minus the octave term: a surface receives single scattering. The
+		// ceiling is the slab's ATMO_SHADOW_SATURATION under either deck.
         const float2 Fold = Field_FoldConstant(P.Atmo, P.Scatter);
 
         const float TauScale = max(Fold.y, ATMO_SHADOW_MIN_TAU_SCALE);

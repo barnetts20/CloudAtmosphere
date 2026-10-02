@@ -87,9 +87,9 @@ public:
     void SetPlanetType(EPlanetAtmosphereType InType);
 
     /** The star's colour. Only its hue is read: the brightest channel counts as
-     *  1. The march and the directional light both derive from LightProduct, so
-     *  they cannot disagree about the star; light DIRECTION comes from the
-     *  actor's rotation. */
+     *  1 and a negative one as 0. The march and the directional light both
+     *  derive from LightProduct, so they cannot disagree about the star; light
+     *  DIRECTION comes from the actor's rotation. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Atmosphere", meta = (HideAlphaChannel))
     FLinearColor LightColor = FLinearColor(1.0f, 0.95f, 0.9f, 1.0f);
 
@@ -101,13 +101,15 @@ public:
     float LightIntensity = 4.0f;
 
     /** LightColor's hue at LightIntensity: the light the march and the
-     *  directional light take. */
+     *  directional light take. Non-negative: negative radiance makes the
+     *  temporal resolve's compression singular. */
     FLinearColor LightProduct() const
     {
-        const float Peak = FMath::Max3(LightColor.R, LightColor.G, LightColor.B);
+        const FLinearColor Hue = LightColor.GetClamped(0.0f, MAX_flt);
+        const float Peak = FMath::Max3(Hue.R, Hue.G, Hue.B);
         const float Scale = (Peak > 0.0f) ? FMath::Max(LightIntensity, 0.0f) / Peak : 0.0f;
 
-        return FLinearColor(LightColor.R * Scale, LightColor.G * Scale, LightColor.B * Scale, 1.0f);
+        return FLinearColor(Hue.R * Scale, Hue.G * Scale, Hue.B * Scale, 1.0f);
     }
 
     /** Parks or wakes the passes, the light and the per-tick updates. THE ONLY
@@ -262,7 +264,6 @@ public:
     // --- Lifecycle ---
 
     virtual void OnConstruction(const FTransform& Transform) override;
-    virtual void BeginPlay() override;
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
     virtual void Destroyed() override;
     virtual void BeginDestroy() override;
@@ -280,7 +281,8 @@ public:
 
     /** Called by PlanetActor after spawn and attach. Sets bIsPlanetOwned, binds
      *  the transform guard and runs Initialize, with InScale applied first.
-     *  Skips the deferred OnConstruction path. */
+     *  Skips the deferred OnConstruction path. InAttachParent is unread: the
+     *  caller attaches. */
     UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
     void InitializeFromPlanet(USceneComponent* InAttachParent,
         FVector InScale = FVector::ZeroVector);
@@ -317,7 +319,8 @@ private:
     /** Sets each bundle's transient flags for which groups the panel shows. */
     void SyncModelFlags();
 
-    /** Frees what only the clouds use: shadow and coverage targets, sim claim. */
+    /** Gives up the sim claim, keeping the field, and unprimes the shadow map.
+     *  The shadow and coverage targets are kept for the clouds' return. */
     void ReleaseCloudResources();
 
     /** The model the shadow map was last baked for; a change rebakes every level. */
@@ -374,8 +377,10 @@ private:
      *  render thread. */
     TSharedPtr<FAtmosphereViewExtension, ESPMode::ThreadSafe> ViewExtension;
 
-    /** Suppresses the per-tick repeat of the missing blue noise warning. */
+    /** Suppress the per-tick repeat of the missing blue noise and structure
+     *  volume warnings; each clears once its asset is set. */
     bool bWarnedBlueNoise = false;
+    bool bWarnedStructureVolume = false;
 
     /** Hands the view extension this frame's march while its resources are
      *  set, and enables it to match. */

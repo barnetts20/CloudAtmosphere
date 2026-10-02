@@ -3,23 +3,23 @@
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereShadowMap.ush"
 
 // Field-independent parts of a shadow bake: step sizing, the threshold crossing
-// within a step, and the history blend. The march loop stays with each model,
-// since its entry, step bounds and exit depend on the field. The output is
-// declared here because the map format owns it; a model declares only its own
-// field uniforms.
+// within a step, and the history blend. The march loop, shared by every model,
+// is AtmosphereShadowBakeLoop.ush's; the field enters it only through the
+// BakeField_ hooks. The output is declared here because the map format owns it;
+// a model declares only its own field uniforms.
 
 #ifndef ATMO_BAKE_THREADS
 #define ATMO_BAKE_THREADS 8
 #endif
 
-/** Radial advances per gradient depth. Combined in quadrature with one flow
+/** Radial advances per gradient depth. Combined in quadrature with half a flow
  *  texel of arc; min() would kink at a fixed obliquity, which on a sphere is a ring. */
 #ifndef ATMO_BAKE_STEPS_PER_GRADIENT
 #define ATMO_BAKE_STEPS_PER_GRADIENT 16.0f
 #endif
 
-/** Most optical depth one step may accumulate at zero accumulated depth; 0.15
- *  keeps at least two steps below the first threshold.
+/** Most optical depth one step may accumulate at zero accumulated depth, on the
+ *  last step's extinction. Never halves a step below the budget, which outranks it.
  *  PITFALL: gradient-sized steps alone let a dense deck put every threshold in one
  *  step, giving blockiness that grows with density rather than distance. */
 #ifndef ATMO_BAKE_MAX_DTAU

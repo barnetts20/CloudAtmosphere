@@ -60,9 +60,12 @@ public:
 	 *  FFlowSimParams, which is copied into a render command every frame. */
 	void QueueRestore_RenderThread(TArray<float>&& InData);
 
+	/** True when the state is the latest reset's: an Enqueue has run since. */
+	bool HasState_RenderThread() const { return bInitialised && !bResetRequested && PooledPhi.IsValid(); }
+
 	/** Adds a pass copying the live state into a buffer and enqueues a readback
-	 *  for the caller to flush and read. False, with nothing enqueued, when there is
-	 *  no state. OutGrid is the allocated grid the capture's layout follows. */
+	 *  for the caller to flush and read. False, with nothing enqueued, without
+	 *  HasState_RenderThread. OutGrid is the allocated grid the capture's layout follows. */
 	bool AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, class FRHIGPUBufferReadback* Readback, FIntVector& OutGrid);
 
 	/** Adds this frame's passes to the graph. Zero substeps is legal: the output
