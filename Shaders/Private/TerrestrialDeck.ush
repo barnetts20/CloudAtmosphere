@@ -328,11 +328,14 @@ TRFieldParams TR_BuildField(
     return F;
 }
 
-/** The call both consumers make, expanded from one definition beside the
+/** The call every consumer makes, expanded from one definition beside the
  *  signature it has to match. Requires a variable of each name in scope:
  *  AtmosphereMarchPass.usf's and TerrestrialShadowMap.usf's uniforms carry
- *  exactly these names. A missing one is an undeclared identifier naming it. */
-#define TR_BUILD_FIELD() TR_BuildField( \
+ *  exactly these names. A missing one is an undeclared identifier naming it.
+ *  The coverage pass solves the threshold, so it passes its own in place of
+ *  the CoverageThreshold texture, which it does not bind. */
+#define TR_BUILD_FIELD() TR_BUILD_FIELD_AT(CoverageThreshold.Load(int3(0, 0, 0)))
+#define TR_BUILD_FIELD_AT(Threshold) TR_BuildField( \
 	PlanetRadius, HeightScale, \
 	CloudProfile, CloudCurves, CloudCoverage, CloudType, \
 	CloudLid, CloudLift, CloudMotion, \
@@ -340,7 +343,7 @@ TRFieldParams TR_BuildField(
 	DetailSampling, DetailWarp, \
 	CloudGenusStratus, CloudGenusStratocumulus, CloudGenusCumulus, CloudGenusCirrus, \
 	ShadowCascades, CloudResponse, DeepMaterial, \
-	CoverageThreshold.Load(int3(0, 0, 0)))
+	Threshold)
 
 /** The shell's ceiling: 1 below the falloff band, 0 at the atmosphere top,
  *  smoothstep between, so a tower that would cross it softens into a cap. */

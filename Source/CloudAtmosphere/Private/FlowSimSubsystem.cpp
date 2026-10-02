@@ -643,7 +643,7 @@ static float StackPeakWind(const UFlowSimConfig& Config, const FFlowSimScales& S
 
 
 /** Output scales against the speed root's physical scales: the constants the
- *  terrestrial baseline (Design/Baseline.json) keeps its scales at. */
+ *  terrestrial tunes are calibrated against. */
 namespace FlowSimOutput
 {
 	constexpr float Vorticity = 1.276773f;
@@ -911,13 +911,17 @@ void UFlowSimSubsystem::ReportCourant() const
 		}
 	}
 
-	if (Froude > 0.5f)
+	// Winds are fractions of the root, so the Froude number they reach is their
+	// fraction times SpeedRoot: only SpeedRoot sets how close the ceiling lets
+	// the flow come to bores.
+	constexpr float BoreSpeedRoot = 0.85f;
+
+	if (Config->SpeedRoot > BoreSpeedRoot)
 	{
 		UE_LOG(LogFlowSim, Warning,
-			TEXT("Froude %.2f: the peak flow is too fast for the gravity-wave speed ")
-			TEXT("and will form hydraulic jumps. Raise DeformationRadius or ")
-			TEXT("PlanetaryVorticity, or lower JetSpeed or ShearSpeed."),
-			Froude);
+			TEXT("SpeedRoot %.2f: the speed ceiling lets the fastest flow reach that Froude number, ")
+			TEXT("close enough to the gravity-wave speed to form hydraulic jumps. Lower SpeedRoot."),
+			Config->SpeedRoot);
 	}
 
 	if (RotationPerStep > 0.5f)
@@ -1456,7 +1460,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.DragRate = Scales.DragRate;
 	Out.LayerCoupling = Scales.LayerCoupling;
 	Out.DivergenceDamping = Config->GetDivergenceDamping(Out.DeltaTime);
-	Out.FroudeCeiling = FMath::Max(Config->SpeedRoot, 0.1f);
+	Out.SpeedRoot = FMath::Max(Config->SpeedRoot, 0.1f);
 	Out.ShockDamping = FlowSimNumerics::ShockDamping;
 
 	Out.ThermalRelaxation = Scales.ThermalRelaxation;

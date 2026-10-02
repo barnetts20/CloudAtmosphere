@@ -1123,7 +1123,8 @@ struct FFlowSimParams
 	float LayerCoupling = 0.0f;
 	/** Fraction of grid-scale divergence removed per step. */
 	float DivergenceDamping = 0.0f;
-	float FroudeCeiling = 0.0f;
+	/** The speed root in Froude number: the speed ceiling's cap. */
+	float SpeedRoot = 0.0f;
 	float ShockDamping = 0.0f;
 
 	float ThermalRelaxation = 0.0f;

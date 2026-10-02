@@ -268,7 +268,7 @@ void MainCoverageCS(uint Thread : SV_GroupIndex)
 
     GroupMemoryBarrierWithGroupSync();
 
-    const TRFieldParams F = TR_BUILD_FIELD();
+    const TRFieldParams F = TR_BUILD_FIELD_AT(0.0f);
 
     for (uint i = Thread; i < TR_COVERAGE_SAMPLES; i += TR_COVERAGE_THREADS)
     {

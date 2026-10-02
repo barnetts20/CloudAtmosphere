@@ -170,7 +170,7 @@ namespace
 		P.DragRate = Params.DragRate;
 		P.LayerCoupling = Params.LayerCoupling;
 		P.DivergenceDamping = Params.DivergenceDamping;
-		P.FroudeCeiling = Params.FroudeCeiling;
+		P.SpeedRoot = Params.SpeedRoot;
 		P.ShockDamping = Params.ShockDamping;
 		P.ThermalRelaxation = Params.ThermalRelaxation;
 		P.ThermalParams = Params.ThermalParams;

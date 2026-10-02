@@ -415,7 +415,7 @@ The field travels as float4 pins, packed once in `PackCloudField` (one packer fo
 
 `PlanetRadius`, `HeightScale` and the `CoverageThreshold` texture arrive beside the struct. `DeepMaterial` is shared with `TR_BUILD_SCATTER`.
 
-PITFALL: `TR_BUILD_FIELD` loads `CoverageThreshold`, but the coverage pass's parameters (`FTerrestrialCoverageParameters`) bind no such texture. `MainCoverageCS` compiles and binds cleanly only because nothing it calls (`TR_ReadColumn`, `TR_Priority`) reads `CoverThreshold`, so the load is stripped. A coverage-pass change that reads the field's threshold needs the texture bound, or a separate path.
+The coverage pass solves the threshold, so it builds the field with `TR_BUILD_FIELD_AT(0.0f)` in place of the texture load and binds no `CoverageThreshold`; every other consumer uses `TR_BUILD_FIELD()`.
 
 | Pin | x | y | z | w |
 |---|---|---|---|---|

@@ -405,7 +405,7 @@ This is the plugin's flag register, render and sim alike. Every switch in produc
 - Thread counts, table size and `FLOWSIM_*` values pushed from C++; `ATMO_SHADOW_CASCADES` and `FLOW_ATLAS_BLEND`, plain defines.
 - `ATMO_FIELD_INCLUDED`: the march's include contract, an `#error` without the field.
 - Compile-time checks: `FLOWSIM_ATLAS_GUTTER` against `FLOW_ATLAS_GUTTER` (`FlowField.ush`), `FLOWSIM_MAX_PERPETUAL` against `FLOWSIM_MAX_CELLS` (`FlowSim.usf`), `CascadeCount == 3` (`AtmosphereShadowBake.h`).
-- Values whose zero is the end of a continuous range (`FroudeCeiling`, `LayerCoupling`, `StormCellSustainRatio`, an empty `PerpetualStorms`): settings.
+- Values whose zero is the end of a continuous range (`SpeedRoot`, `LayerCoupling`, `StormCellSustainRatio`, an empty `PerpetualStorms`): settings.
 
 ### Constants
 
@@ -507,7 +507,7 @@ Fixed per frame: the coverage pass (4096 column reads, one group); the entry ref
 - **Gradient-sized bake steps alone** let a dense deck put every threshold in one step; the optical-depth allowance prevents it. A constant-density crossing leaves rings where the subdivision changes; solve in optical depth per step.
 - **`T / Step` can round just below a multiple,** cutting a zero step that spins the loop to its cap; the bias in the cut prevents it.
 - **An under-declared slope steps over cloud** and leaves shadow holes under steep walls: raise `SlopePerTexel`.
-- **The coverage pass binds no `CoverageThreshold`.** It builds the field through `TR_BUILD_FIELD`, which loads it; the priority path must not read `CoverThreshold`.
+- **The coverage pass binds no `CoverageThreshold`.** It builds the field with `TR_BUILD_FIELD_AT(0.0f)`; a new field pin read by the priority path must not depend on the threshold.
 
 ### Transmittance, light and actor
 

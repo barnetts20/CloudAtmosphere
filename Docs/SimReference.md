@@ -261,7 +261,7 @@ A shallow-water flow near its wave speed steepens into bores that travel as shar
   s′ = k + (U − k) tanh((s − k)/(U − k))   above
   ```
 
-  applied as the factor `s′/s`, C1 at the knee. The uniform is named `FroudeCeiling` and holds `SpeedRoot`; the cap is `SpeedRoot · c = U`.
+  applied as the factor `s′/s`, C1 at the knee. The uniform `SpeedRoot` carries the setting; the cap is `SpeedRoot · c = U`.
 - **Compression damping** (`SimFaceDamping`): the face's damping fraction is `min(fraction + ShockDamping · max(−min(δ₁, δ₂), 0) · Δt, 0.45)`, von Neumann–Richtmyer style: it engages only where a front compresses, in proportion. `ShockDamping` is `FlowSimNumerics::ShockDamping` (2).
 
 The ascent low-pass (section 6) keeps whatever gravity waves remain out of the cloud.
@@ -642,7 +642,7 @@ Also stored: `Grid`, `SimulatedTime` (float), `StepsCompleted` (int32), and `Pro
 
 **Start log** (`ReportCourant`, `ReportStack`, `ReportInertSettings` on start; `ReportCourant` and `ReportStack` again on a grid change):
 
-- Steps per frame at 60 fps; advective Courant (peak angular rate · `Δt · N_lon / 2π`), gravity-wave Courant (implicit), Froude (the stack's peak prescribed wind over `c`, warning above 0.5), Coriolis rotation per step (`PlanetaryVorticity · Δt`, warning above 0.5 rad), wave speed.
+- Steps per frame at 60 fps; advective Courant (peak angular rate · `Δt · N_lon / 2π`), gravity-wave Courant (implicit), Froude (the stack's peak prescribed wind over `c`); a warning when `SpeedRoot` exceeds 0.85, since a wind's Froude number is its fraction of the root times `SpeedRoot`, Coriolis rotation per step (`PlanetaryVorticity · Δt`, warning above 0.5 rad), wave speed.
 - Grid damping: the implicit scheme's share per turnover and the divergence damping fraction per step; notes when the implicit scheme alone exceeds `GridDamping`, warns when the 0.45 cap binds.
 - The storm cell inflow cut, when a full-strength cell's inflow target does not fit under `0.9 U`.
 - Speed root and turnover; the budget against the knee (section 2) with its warning.

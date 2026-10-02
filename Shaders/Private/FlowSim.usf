@@ -117,7 +117,7 @@
 
 /** Bore suppression: the speed ceiling in Froude number, and the gain of the
  *  compression-activated damping. See SimSpeedCeiling and SimFaceDamping. */
-#define SimFroudeCeiling FlowSimUB.FroudeCeiling
+#define SimSpeedRoot FlowSimUB.SpeedRoot
 #define SimShockDamping FlowSimUB.ShockDamping
 
 /** Rate interfaces relax toward the profile's balanced heights. */
@@ -1656,7 +1656,7 @@ float SimRowStiffness(int Row)
 // jumps that travel through the field as sharp lines. Two structural guards
 // keep any combination of forcing, jets and storm cells clear of them, each
 // set by one dimensionless value rather than tuned against the others:
-// SimFroudeCeiling and SimShockDamping.
+// SimSpeedRoot and SimShockDamping.
 
 /** Share of the ceiling below which the flow is untouched. */
 #define SIM_FROUDE_KNEE FLOWSIM_FROUDE_KNEE
@@ -1665,17 +1665,17 @@ float SimRowStiffness(int Row)
 #define SIM_DAMPING_MAX FLOWSIM_DAMPING_MAX
 
 /** Factor on a face velocity of the given speed: 1 below the knee, then a
- *  tanh approach to SimFroudeCeiling times the first internal mode's wave
+ *  tanh approach to SimSpeedRoot times the first internal mode's wave
  *  speed, C1 at the knee. Acts after all forcing, so whatever pushes the flow
  *  saturates smoothly short of critical. Zero is no ceiling. */
 float SimSpeedCeiling(float Speed)
 {
-    if (SimFroudeCeiling <= 0.0f)
+    if (SimSpeedRoot <= 0.0f)
     {
         return 1.0f;
     }
 
-    const float Cap = SimFroudeCeiling * sqrt(max(SimWaveSpeedSq, 1e-8f));
+    const float Cap = SimSpeedRoot * sqrt(max(SimWaveSpeedSq, 1e-8f));
     const float Knee = SIM_FROUDE_KNEE * Cap;
 
     if (Speed <= Knee)
@@ -2190,9 +2190,9 @@ void SimCellWriteControl(uint Slot, float3 P, float Intensity, SimTraits T, floa
     const float InflowUnit = max(T.Wind * SimCellProfile(Ring), 1e-4f);
     float InflowTarget = T.Inflow * Strength * WindUnit[0];
 
-    if (SimFroudeCeiling > 0.0f)
+    if (SimSpeedRoot > 0.0f)
     {
-        const float Room = SIM_CELL_TARGET_CEILING * SimFroudeCeiling * sqrt(max(SimWaveSpeedSq, 1e-8f));
+        const float Room = SIM_CELL_TARGET_CEILING * SimSpeedRoot * sqrt(max(SimWaveSpeedSq, 1e-8f));
 
         InflowTarget = sign(InflowTarget)
 			* min(abs(InflowTarget), sqrt(max(Room * Room - Strength * Strength * WindUnit[0] * WindUnit[0], 0.0f)));
