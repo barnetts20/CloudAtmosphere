@@ -801,7 +801,8 @@ public:
 	float StormCellEyeTrail = 1.2739f;
 
 	/** Storm intensity the eyewall band adds over StormCellStorm, up to 1: the
-	 *  band runs from 40% of peak vector strength inward to the eyewall. */
+	 *  band runs from StormCellBandFloor of peak vector strength inward to the
+	 *  eyewall. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Look", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float StormCellBandExcess = 0.0f;
 

@@ -947,9 +947,9 @@ void UFlowSimSubsystem::ReportCourant() const
 		TEXT("its eddies %.2f, storm cells %.2f; the ceiling eases in from %.2f."),
 		Speeds.Root, Speeds.Turnover, TopWind, TopEddies, Config->MaxStormCells > 0 ? Cells : 0.0f, Knee);
 
-	// The turnover-authored lifetimes in days, 2 pi / PlanetaryVorticity, to
-	// check against real weather.
-	const float Day = 2.0f * UE_PI / Config->GetPlanetaryVorticity();
+	// The turnover-authored lifetimes in days, one rotation, 4 pi /
+	// PlanetaryVorticity (which is 2 Omega), to check against real weather.
+	const float Day = 4.0f * UE_PI / Config->GetPlanetaryVorticity();
 
 	UE_LOG(LogFlowSim, Log,
 		TEXT("A turnover is %.3f of a day; %.2f turnovers a second at SimSpeed %.4f. In days: cloud %.2f, ")

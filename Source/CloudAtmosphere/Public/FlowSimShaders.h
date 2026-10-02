@@ -228,7 +228,7 @@ namespace FlowSimShader
 	static_assert(MaxGridLatitude % ThreadGroupSizeLine == 0, "The column solve splits a column evenly across its group.");
 
 	/** Storm cell slots, and the thread group of the pass that advances them.
-	 *  PITFALL: UFlowSnapshot::CellFloats is sized from this too. */
+	 *  PITFALL: UFlowSnapshot::TrailingFloats is sized from this too. */
 	static constexpr int32 MaxStormCells = 32;
 
 	static_assert(MaxPerpetualStorms <= MaxStormCells, "MainCellsCS updates the perpetual storms on its cell threads.");

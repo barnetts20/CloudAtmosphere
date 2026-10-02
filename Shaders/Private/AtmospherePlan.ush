@@ -50,10 +50,11 @@ void Atmo_ChordSteps(float Length, float Count, float Spread, out float First, o
 // only the terminus trims a cloud step.
 // Phase: each pixel's lattice starts a fraction of a step in, so neighbours do not
 // share boundaries; a shared lattice turns jitter noise into rings about the view.
-// Entry refine: the step where a ray first meets cloud and the ATMO_ENTRY_SPAN
-// steps after it (again on re-entry after a clear sample) are re-marched with
-// ATMO_ENTRY_SUBSTEPS substeps on the divided lattice. This divides the bias from
-// where the surface falls in a step without moving any step boundary.
+// Entry refine: ATMO_ENTRY_SPAN lattice steps from the start of the step where a
+// ray first meets cloud, that step and the next (again on re-entry after a clear
+// sample), are re-marched with ATMO_ENTRY_SUBSTEPS substeps on the divided
+// lattice. This divides the bias from where the surface falls in a step without
+// moving any step boundary.
 //
 // PITFALL: a step cut at a shell is a sawtooth across the screen; its biases show
 // as rings about the camera.
@@ -62,7 +63,7 @@ void Atmo_ChordSteps(float Length, float Count, float Spread, out float First, o
 // PITFALL: steps placed by the field move with the weather, and a split at a
 // cone-traced entry skips features narrower than the probe spacing.
 
-/** Camera lattice step growth (model Sampling group): past the knee each step is
+/** Camera lattice step growth (actor's Sampling group): past the knee each step is
  *  this fraction of its distance from the camera. Costs about
  *  (1 + ln(Distance * x / Floor)) / x steps, up to ATMO_MAX_ITER, mostly in grazing
  *  views from in or near the deck. One value per frame, blended geometrically by

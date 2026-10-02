@@ -277,7 +277,7 @@ struct CLOUDATMOSPHERE_API FCloudCoverageParams
 /** The noise each genus draws: weights over the structure volume's four
  *  channels as the deck reads them, R smooth (Perlin), G billow (inverted
  *  Worley F1), B cellular (Worley F2 - F1), A fibrous (ridged Perlin); see
- *  Design/TerrestrialClouds.md for the bake. Each column blends the four by
+ *  Design/FieldReference.md for the bake. Each column blends the four by
  *  its type and altitude, and layered cloud turns cellular where the air
  *  sinks. Weights need not sum to one: the blend keeps the noise's contrast
  *  whatever their total. */
@@ -431,8 +431,8 @@ struct CLOUDATMOSPHERE_API FCloudStructureLayerParams
 
 	/** How far the noise breaks the cloud up. Below 1 some of each column fills
 	 *  whatever the noise; past 1 the shaping extrapolates, holes open that
-	 *  survive any coverage, and from about half up a fully covered column is
-	 *  cut clear as readily as a thin one. 0 leaves smooth sheets. */
+	 *  survive any coverage, and from 1 / (1 + Breakup) up a fully covered
+	 *  column is cut clear as readily as a thin one. 0 leaves smooth sheets. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", UIMax = "2.0"))
 	float Erosion = 0.85f;
 

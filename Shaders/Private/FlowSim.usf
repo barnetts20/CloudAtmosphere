@@ -111,7 +111,8 @@
 #define SimForcingLifetime FlowSimUB.ForcingLifetime
 #define SimDragRate FlowSimUB.DragRate
 #define SimLayerCoupling FlowSimUB.LayerCoupling
-/** Fraction of grid-scale divergence removed per substep, in [0, 0.5]. */
+/** Fraction of grid-scale divergence removed per substep, in [0, 0.45]
+ *  (FlowSimShader::DampingMax). */
 #define SimDivergenceDamping FlowSimUB.DivergenceDamping
 
 /** Bore suppression: the speed ceiling in Froude number, and the gain of the
@@ -1797,8 +1798,9 @@ float3 SimAdvectVelocity(float3 P, float3 VArrival, uint Layer)
  *  nothing to adjust. Each layer balances its own rate, so the vertical shear
  *  lands in the interfaces through the inverse of the coupling.
  *
- *  Run every frame, so the thermal relaxation target follows a live profile
- *  edit. Two passes over the rows: the mean, then the values less it. */
+ *  Rerun whenever its inputs change (BalanceKeyOf), so the thermal relaxation
+ *  target follows a live profile edit. Two passes over the rows: the mean,
+ *  then the values less it. */
 [numthreads(FLOWSIM_THREADS_LAYERS, 1, 1)]
 void MainInitBalanceCS(uint3 Id : SV_DispatchThreadID)
 {
@@ -2258,23 +2260,27 @@ void SimCellWriteControl(uint Slot, float3 P, float Intensity, SimTraits T, floa
  *  SimPerpetualClearance of its own.
  *
  *  A LIVE CELL moves with the layers' flow, each weighed by its share of the
- *  vortex, a drift poleward and west, and a pull toward the storm-weighted centre of a ring half its radius
- *  out, which keeps it on its parent storm. Its intensity relaxes toward 1
+ *  vortex, a drift poleward and west, a pull toward the storm-weighted centre
+ *  of a ring half its radius out, which keeps it on its parent storm, and a
+ *  pull onto the bottom layer's vortex core (StormCellCoreFollow). Its
+ *  intensity relaxes toward 1
  *  while the window, the humidity and the parent storm hold -- the strongest
  *  storm at the centre, on that ring or on the eyewall, where the cell's own
  *  inflow converges -- toward 0 once any fails or its lifetime is past, and
  *  toward 0 inside the radius of a stronger cell or a perpetual storm, so two
  *  that meet merge. Below SIM_CELL_FREE the slot frees.
  *
- *  THE GAINS (SIM_CELL_CONTROL_BASE): a live cell reads each layer's cyclonic
- *  wind on a ring at the eyewall, or as close in as the grid resolves, and on
- *  a ring out in the band; the full rings cancel the cell's own motion. Each
- *  vortex gain is the larger gap to the layer's share of the target wind
- *  times the cell's strength, one-sided, in units of the vortex the push adds
- *  at gain 1 (SimCellTowardTarget). Each inflow gain is the same for the
- *  eyewall ring's inflow against the inflow fraction of the target, inward
- *  on the bottom layer and outward on top. Every other slot's gains are
- *  zero (SimCellWriteControl).
+ *  THE LOW AND THE GAINS (SIM_CELL_CONTROL_BASE): a live cell takes its low as
+ *  the bottom layer's mean pressure on the eyewall ring and the least sample
+ *  out to it, and reads each layer's cyclonic wind on a ring at the eyewall,
+ *  or as close in as the grid resolves, and on a ring out in the band; the
+ *  full rings cancel the cell's own motion. Each vortex gain is the larger gap
+ *  to the layer's share of the target wind times the cell's strength,
+ *  one-sided, in units of the vortex the push adds at gain 1
+ *  (SimCellTowardTarget). Each inflow gain is the same for the eyewall ring's
+ *  inflow against the inflow fraction of the target, inward on the bottom
+ *  layer and outward on top. Every other slot's gains are zero
+ *  (SimCellWriteControl).
  *
  *  THE FIRST SimPerpetualCount SLOTS ARE PERPETUAL STORMS, placed from their
  *  uniforms at full intensity, never spawned, moved, merged or freed; no cell
@@ -2332,8 +2338,8 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
     if (Cell.w <= 0.0f)
     {
 		// ONE SPAWN A STEP, by the first free slot at every free slot's chance.
-		// Spacing is judged against the cells the step began with, so two
-		// slots spawning in one step could land inside each other's radius.
+		// Spacing is judged against the cells the step began with, so a second
+		// spawn in the same step could land inside the first's radius.
         uint Free = 0u;
         uint FirstFree = (uint) Active;
 
@@ -3609,8 +3615,9 @@ float4 SimResampleOutput(SimMeridianTaps Taps, uint Slice)
  *
  *  THE ATLAS'S NOISE B w IS THE DECK'S DEPTH FACTOR, not the humidity the
  *  lat-lon output carries there for the cells: 1, falling across each cell's
- *  eye tracer. The deck thins its columns by it, so the eye is a bowl of
- *  thinning cloud the flow shapes; cover is left as the sim has it. */
+ *  eye tracer. The deck scales its columns' depth and density by it, so the
+ *  eye is cloud thinned where the flow carries the tracer; cover is left as
+ *  the sim has it. */
 [numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
 void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 {

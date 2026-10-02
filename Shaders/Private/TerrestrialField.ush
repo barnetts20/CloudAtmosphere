@@ -172,9 +172,9 @@ bool Field_SegmentIsCloud(float3 Origin, float3 Dir, float3 Segment, PlanetParam
 #endif
 }
 
-/** Fills TRScatterParams from the Cloud Material, Phase, Multiple Scattering
- *  and Terminator groups, in panel order. Set both sets equal for a single
- *  material. */
+/** Fills TRScatterParams from the Material, Deep, Phase and Multiple
+ *  Scattering groups, Ambient's AmbientTerminator and Air's MieLobeDecay. Set
+ *  the cloud and storm sets equal for a single material. */
 TRScatterParams TR_BuildScatter(
 	float3 CloudScatter,
 	float4 CloudExtinction,

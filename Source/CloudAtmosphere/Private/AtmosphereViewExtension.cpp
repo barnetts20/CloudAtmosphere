@@ -528,8 +528,9 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 	// The rank marched this frame, rotated each cycle so a pixel's revisits are
 	// an odd number of frames apart: by one for an even N^2, by two for an odd
 	// one. PITFALL: a pixel revisited a multiple of the engine's jitter period
-	// apart (8) lands on the same sub-pixel jitter each visit, as N^2 does, and
-	// N^2 - 1 does for every odd N.
+	// apart (8) lands on the same sub-pixel jitter each visit. A gap of N^2 is
+	// one for N a multiple of 4 (other even N alternate two jitters), and
+	// N^2 - 1 is one for every odd N.
 	const uint32 Frame = bHistoryValid ? History->Frame : 0u;
 	const uint32 Rotation = (CellPixels & 1u) ? 2u : 1u;
 	const uint32 Rank = (Frame + Rotation * (Frame / CellPixels)) % CellPixels;

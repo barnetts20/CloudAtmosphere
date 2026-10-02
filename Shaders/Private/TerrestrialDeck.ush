@@ -114,8 +114,8 @@ struct TRFieldParams
     float WarpStretch;
     float WarpShift;
 
-	/** Bound on either surface's slope, cloud depths per flow texel: the entry
-	 *  search's cone angle. */
+	/** SlopePerTexel: bound on either surface's slope, cloud depths per flow
+	 *  texel, the entry search's cone angle. */
     float CloudSlope;
 
 	/** The noise's drift about the spin axis, radians, and phase A's position
@@ -202,6 +202,7 @@ struct TRFieldParams
  *                      CoverageFray
  *    CloudGenus<Name>  structure channel weights for that genus
  *    CloudResponse     DeepDarkening, TypeCurve, StormBalance, StormBlend
+ *    DeepMaterial      MaterialDepth * DeepFill, FloorSoftness
  *
  *  CoverThreshold arrives apart, read from the coverage pass's texel.
  *
@@ -462,7 +463,8 @@ float TR_CloudBeta(TRFieldParams F, float CloudOpticalDepth)
 		/ max(MeanTop * F.SpanTop + MeanBase * F.SpanBase + Plateau, 1e-4f);
 }
 
-/** The column's weather, from one flow tap and one weather tap. */
+/** The column's weather, from one flow tap, one weather tap and noise B's
+ *  depth factor. */
 struct TRColumn
 {
 	/** How much of the shape noise survives, [0, 1]. */
@@ -489,8 +491,9 @@ struct TRColumn
     float4 Genus;
     float Cirrus;
 
-	/** How deeply the structure noise erodes the profile, and from about half
-	 *  of it up, how much of a fully covered column it cuts clear. */
+	/** How deeply the structure noise erodes the profile, and from
+	 *  1 / (1 + StructureBreakup) up, how much of a fully covered column it
+	 *  cuts clear. */
     float Erosion;
 
 	/** The slab, atmosphere fractions. Exact: nothing outside moves them. */
@@ -572,9 +575,9 @@ float TR_Priority(float4 Weather, TRFieldParams F)
  *  The base is the condensation level from tropicality and pressure, plus the
  *  formation altitude for all but towers, so outflow becomes high layered
  *  cloud; no noise keeps it exact. Depth ramps in over CoverageDepthRamp, so
- *  clear sky has no slab, and the sim's depth factor scales it, so an eye is a
- *  bowl. PITFALL: relief steepens the top; if shadow goes missing under
- *  steep cloud walls, raise SlopePerTexel. */
+ *  clear sky has no slab, and the sim's depth factor scales it, thinning the
+ *  column across an eye. PITFALL: relief steepens the top; if shadow goes
+ *  missing under steep cloud walls, raise SlopePerTexel. */
 TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
 {
     TRColumn Col;
@@ -779,9 +782,10 @@ float TR_DeepFloorDetail(float Modifier, TRFieldParams F)
 
 /** Distance along a normalized ray at which it first reaches a slab, or T1:
  *  the shadow bake's entry. A ray climbing clear of TopMax, or below every base
- *  and descending, skips by geometry; the rest is a cone trace on CloudSlope,
- *  since a grazing chord at the field's step size exhausts the cap. PITFALL: an
- *  under-declared slope steps over cloud and leaves shadow holes. */
+ *  and descending, skips by geometry; the rest is a cone trace on
+ *  SlopePerTexel, since a grazing chord at the field's step size exhausts the
+ *  cap. PITFALL: an under-declared slope steps over cloud and leaves shadow
+ *  holes. */
 float TR_SlabEntry(
 	Texture2DArray FlowField,
 	SamplerState FlowSampler,
@@ -859,8 +863,9 @@ float TR_SlabEntry(
         }
 
 		// Closing rate: the ray's approach, receding counted as still, plus the
-		// surface's slope over the ground covered. PITFALL: CloudSlope must bound
-		// the steeper surface, the top collapsing onto the base at a coverage edge.
+		// surface's slope over the ground covered. PITFALL: SlopePerTexel must
+		// bound the steeper surface, the top collapsing onto the base at a
+		// coverage edge.
         const float Horizontal = sqrt(max(1.0f - ProbeRate * ProbeRate, 0.0f));
 
         const float ClosingRate = max(Approach, 0.0f)

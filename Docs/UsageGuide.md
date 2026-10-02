@@ -210,7 +210,7 @@ How steep a cloud wall the shadow bake allows for. If shadow goes missing under 
 
 **`SolvedBaseMin`**
 
-**Read-only.** The lowest a column's base can fall. On the gas giant the finely sampled band runs further down, by the deep fill.
+**Read-only.** The lowest a column's base can fall. On the gas giant the finely sampled band runs further down, by the larger of `DeepFill` and the top ramp (`SurfaceSoftness` × `CloudThickness`).
 
 #### Coverage
 

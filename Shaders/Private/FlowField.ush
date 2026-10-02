@@ -28,7 +28,7 @@
 // column from the top of the stack down to it, so the lowest layer's is the
 // whole sky seen from above. Phase A's w is unused; phase B's is the deck
 // depth factor, 1 - StormCellEyeDepth times the eye tracer, which a deck
-// scales its columns by so an eye is a bowl sloping to its floor.
+// scales its columns' depth and density by, thinning them across an eye.
 
 /** Texels either side of a face edge over which neighbouring faces cross-fade.
  *  Each face resamples the sim on its own lattice, so their reconstructions
