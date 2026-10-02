@@ -13,14 +13,18 @@ class APlanetAtmosphereActor;
 class UFlowSimConfig;
 
 /** One model's bundle and the sim it bids with: what a cooked build applies in
- *  place of a tune file. To make one in the editor, copy a model's row on an
- *  actor and paste it onto Model. */
+ *  place of a tune file. To make one in the editor, set PlanetType, then copy
+ *  a model's row on an actor and paste it onto Model. */
 UCLASS(BlueprintType)
 class CLOUDATMOSPHERE_API UAtmospherePreset : public UDataAsset
 {
 	GENERATED_BODY()
 
 public:
+	/** The model the bundle is for, which decides the groups Model shows. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset")
+	EPlanetAtmosphereType PlanetType = EPlanetAtmosphereType::Terrestrial;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset")
 	FAtmosphereModelParams Model;
 
@@ -28,6 +32,17 @@ public:
 	 *  runtime changes go through the actor's GetWritableSimConfig. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Preset")
 	TObjectPtr<UFlowSimConfig> SimConfig = nullptr;
+
+	virtual void PostInitProperties() override;
+	virtual void PostLoad() override;
+
+#if WITH_EDITOR
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
+
+private:
+	/** Model's transient bClouds and bDeepDeck from PlanetType. */
+	void SyncModelFlags();
 };
 
 /** What ApplyTune applies of a tune. */

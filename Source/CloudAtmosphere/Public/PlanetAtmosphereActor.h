@@ -55,14 +55,12 @@ struct FAtmosphereFieldClock
 };
 
 /** Renders a volumetric atmosphere and cloud layer. A scene view extension runs
- *  the march, its temporal resolve and the composite as compute passes, fed a
- *  params snapshot of the active model's groups every tick by UpdateAtmosphere,
- *  with the shadow bake and the transmittance table. Owns a directional light
- *  component, synced from the actor's rotation and LightColor. When
- *  planet-owned, location and scale are locked and rotation stays editable.
- *  Its panel shows CloudAtmosphere first after the transform (the module's
- *  details customization), its groups in declaration order: Atmosphere,
- *  Model, Pipeline. */
+ *  the march, temporal resolve and composite as compute passes, fed every tick
+ *  by UpdateAtmosphere with the active model's params, the shadow bake and the
+ *  transmittance table. Owns a directional light synced from the actor's rotation
+ *  and LightColor. When planet-owned, location and scale are locked. The details
+ *  panel shows CloudAtmosphere first after the transform, its groups in
+ *  declaration order: Atmosphere, Model, Pipeline. */
 UCLASS()
 class CLOUDATMOSPHERE_API APlanetAtmosphereActor : public AActor
 {
@@ -152,12 +150,11 @@ public:
     UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
     void SetModelParams(EPlanetAtmosphereType InModel, const FAtmosphereModelParams& InParams);
 
-    /** A model's sim config to change at runtime. In a game world the first
-     *  call replaces the slot's shared asset with a transient copy owned by
-     *  this actor, which a sim running the active model's slot carries on
-     *  under, so no other planet
-     *  and no asset sees the change. In an editor world it is the asset,
-     *  which is how tuning saves. Null when the slot is empty. */
+    /** A model's sim config to change at runtime. In a game world the first call
+     *  replaces the slot's shared asset with a transient copy owned by this actor,
+     *  which a running sim carries on under, so no other planet or asset sees the
+     *  change. In an editor world it is the asset, so tuning saves. Null when the
+     *  slot is empty. */
     UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
     UFlowSimConfig* GetWritableSimConfig(EPlanetAtmosphereType InModel);
 
@@ -298,8 +295,7 @@ private:
     UPROPERTY(VisibleAnywhere, Category = "CloudAtmosphere|Pipeline")
     TObjectPtr<UDirectionalLightComponent> SunLightComponent;
 
-    /** Legacy child actors a saved level can still hold, destroyed on
-     *  Initialize. */
+    /** Legacy child actors a saved level can still hold, destroyed on Initialize. */
     UPROPERTY()
     TObjectPtr<APostProcessVolume> PostProcessVolume_DEPRECATED = nullptr;
 
@@ -313,22 +309,18 @@ private:
     /** Inputs of the last enqueued bake; reset when the table is recreated. */
     FAtmosphereTransmittanceParams TransmittanceBaked;
 
-    /** A model's bundle and sim config slot: air only shares the
-     *  terrestrial model's. */
+    /** A model's bundle and sim config slot; air only shares the terrestrial's. */
     const FAtmosphereModelParams& ModelOf(EPlanetAtmosphereType InModel) const;
     FAtmosphereModelParams& ModelOf(EPlanetAtmosphereType InModel);
     TObjectPtr<UFlowSimConfig>& SimConfigSlot(EPlanetAtmosphereType InModel);
 
-    /** Sets each bundle's transient flags from the model: which groups the
-     *  panel shows. */
+    /** Sets each bundle's transient flags for which groups the panel shows. */
     void SyncModelFlags();
 
-    /** Frees what only the clouds use: the shadow and coverage targets, and
-     *  the sim claim. */
+    /** Frees what only the clouds use: shadow and coverage targets, sim claim. */
     void ReleaseCloudResources();
 
-    /** The model the shadow map was last baked for: a change rebakes every
-     *  level. */
+    /** The model the shadow map was last baked for; a change rebakes every level. */
     EPlanetAtmosphereType ShadowType = EPlanetAtmosphereType::Terrestrial;
 
     bool bInitialized = false;
@@ -340,8 +332,7 @@ private:
     /** False while parked by SetAtmosphereActive. */
     bool bAtmosphereActive = true;
 
-    /** True while this actor bids for the sim, so it releases the sim when it
-     *  stops or goes. */
+    /** True while this actor bids for the sim, so it releases it when it goes. */
     bool bClaimedSimulation = false;
 
     FAtmosphereFieldClock FieldClock;
@@ -366,8 +357,7 @@ private:
     /** Destroys legacy objects, pushes every parameter and syncs the light. */
     void Initialize();
 
-    /** Destroys the legacy child actors and components a saved level can still
-     *  hold. */
+    /** Destroys the legacy child actors and components a saved level can hold. */
     void DestroyLegacyChildActors();
 
     /** Withdraws this actor's bid, stopping the sim if it drives it;

@@ -2,47 +2,29 @@
 
 // Grid, topology and operators for the flow sim.
 //
-// THE GRID IS A CYLINDER, NOT A TORUS. Longitude wraps with period exactly
-// 2 pi; latitude does not. The top and bottom rows are adjacent to the POLES,
-// not to each other, and treating this as a torus joins the north pole to the
-// south so material advected out of the arctic arrives in the antarctic. Every
-// read here is an explicit Load through SimWrapCoord, because the pole is a
-// topological fold no address mode expresses. The output the fields sample is
-// resampled onto a cube atlas and has no fold; see FlowField.ush.
+// The grid is a cylinder, not a torus: longitude wraps with period 2 pi; the top
+// and bottom rows border the POLES, not each other. Every read is an explicit Load
+// through SimWrapCoord, since no address mode expresses the polar fold. The output
+// fields sample is resampled onto a cube atlas with no fold; see FlowField.ush.
 //
-// THE LATITUDE COORDINATE IS MU = sin(latitude). The spherical Laplacian in
-// (lambda, mu) has two closed-form coefficients and no cross terms; cells are
-// equal AREA, so a zonal mean is a plain row mean and the global mean a plain
-// mean of those.
+// The latitude coordinate is mu = sin(latitude): equal-area cells (a zonal mean is
+// a plain row mean) and a Laplacian with no cross terms. Cell-centred, so the poles
+// are cell FACES, where every flux carries a factor (1 - mu^2) that is exactly
+// zero; no operator needs a polar boundary condition.
 //
-// TEXEL CENTRES SIT BETWEEN THE POLES, NOT ON THEM. Cell-centred, so mu runs
-// over [-1 + dmu/2, 1 - dmu/2] and the poles are cell FACES. Every flux across a
-// polar face carries a factor (1 - mu^2) or cos(latitude) that is EXACTLY ZERO
-// there, so no operator needs a polar boundary condition.
+// Staggering: scalars at cell centres; u on the WEST face and v on the SOUTH face.
+// Row 0's v is the south pole and identically zero; the north pole face is not stored.
 //
-// THE STAGGERING. Scalars sit at cell centres. Face velocities sit on the WEST
-// face (east component u) and the SOUTH face (north component v) of their cell,
-// so row 0's v is the south polar face and is identically zero, and the north
-// face of the last row is the north pole and is never stored.
+// PITFALL: face components must never be read through the fold, since east and
+// north reverse across a pole. Face operators wrap longitude only and treat
+// out-of-range rows as the zero-flux polar face.
 //
-// The fold survives in one place: INTERPOLATION of centre fields. A departure
-// point can land past the pole, and crossing it means lambda -> lambda + pi.
-// SimWrapCoord is the only function that knows this.
-//
-// PITFALL: FACE COMPONENTS MUST NEVER BE READ THROUGH THE FOLD. East and north
-// both reverse across a pole, so a folded face value arrives with its sign
-// flipped. Face operators wrap longitude only and treat out-of-range rows as the
-// zero-flux polar face; only scalars and Cartesian vectors cross the fold.
-//
-// THE SIM'S SCALARS ARE ONE UNIFORM BUFFER, FlowSimUB (FFlowSimUniformParameters
-// in FlowSimShaders.h), built once per substep and shared by its passes. Each
-// SimName defined as FlowSimUB.Name here and in FlowSim.usf is an alias for
-// its member. PITFALL: the aliases are macros, so no local, parameter or struct
-// member may reuse one of those names.
+// Sim scalars come from FlowSimUB (FFlowSimUniformParameters in FlowSimShaders.h).
+// PITFALL: each SimName alias here and in FlowSim.usf is a macro, so no local,
+// parameter or struct member may reuse one of those names.
 
-/** Grid dimensions. x = longitude columns, y = latitude rows, z = layer count.
- *  Longitude must be even: the polar fold offsets by N_lon/2 columns, and an odd
- *  width lands the reflection half a texel off. */
+/** Grid dimensions: x = longitude columns, y = latitude rows, z = layer count.
+ *  Longitude must be even: the polar fold offsets by N_lon/2 columns. */
 #define SimGridSize FlowSimUB.GridSize
 
 /** (1/N_lon, 1/N_lat). */
@@ -60,8 +42,7 @@ float SimDMu()
     return 2.0f * SimInvGridSize.y;
 }
 
-/** Longitude of column i, in radians, at the texel CENTRE. i - 0.5 is the
- *  column's west face. */
+/** Longitude of column I's centre, in radians; I - 0.5 is its west face. */
 float SimColumnToLon(float I)
 {
     return (I + 0.5f) * SimInvGridSize.x * (2.0f * PI);
@@ -73,8 +54,7 @@ float SimRowToMu(float J)
     return -1.0f + 2.0f * (J + 0.5f) * SimInvGridSize.y;
 }
 
-/** mu at the FACE between row J-1 and row J. Reaches exactly -1 at J = 0 and
- *  exactly +1 at J = N_lat, which is what zeroes the polar flux. */
+/** mu at the face between rows J-1 and J: exactly -1 at J = 0, +1 at J = N_lat. */
 float SimFaceToMu(float J)
 {
     return -1.0f + 2.0f * J * SimInvGridSize.y;
@@ -96,8 +76,7 @@ float SimFaceCos(int J)
     return sqrt(max(1.0f - Mu * Mu, 0.0f));
 }
 
-/** Unit direction from grid coordinates. Right-handed, Z along the rotation
- *  axis, matching the field's planet-local space. */
+/** Unit direction from grid coordinates; right-handed, Z along the rotation axis. */
 float3 SimDirection(float Lon, float Mu)
 {
     const float C = sqrt(max(1.0f - Mu * Mu, 0.0f));
@@ -108,8 +87,7 @@ float3 SimDirection(float Lon, float Mu)
     return float3(C * CosL, C * SinL, Mu);
 }
 
-/** Local east and north unit vectors at a direction. Undefined exactly on a
- *  pole, which no texel centre or stored face reaches. */
+/** Local east and north unit vectors; undefined exactly on a pole, never sampled. */
 float3 SimEast(float3 N)
 {
     const float C = max(length(N.xy), 1e-6f);
@@ -124,8 +102,7 @@ float3 SimNorth(float3 N)
     return float3(-N.z * N.x / C, -N.z * N.y / C, C);
 }
 
-/** Continuous grid coordinates from a unit direction. The inverse of
- *  SimDirection, in texel-index space so integer values land on centres. */
+/** Inverse of SimDirection, in texel-index space (integers land on centres). */
 float2 SimDirectionToGrid(float3 N)
 {
     float Lon = atan2(N.y, N.x);
@@ -141,20 +118,16 @@ float2 SimDirectionToGrid(float3 N)
 
 // -- Topology ---------------------------------------------------------------
 
-/** Fold an arbitrary integer texel coordinate onto the grid. THE ONE PLACE THE
- *  SPHERE'S TOPOLOGY LIVES, and valid for scalars and Cartesian vectors only.
- *
- *  Latitude is a MIRROR with a half-turn in longitude, because stepping north
- *  past the pole comes back down the far side: row -1 is row 0 at longitude +
- *  pi. A clamp instead would duplicate the polar row and give the interpolator a
- *  flat spot exactly where the flow crosses the pole. */
+/** Folds an integer texel coordinate onto the grid: the one place the sphere's
+ *  topology lives, valid for scalars and Cartesian vectors only. Latitude mirrors
+ *  with a half-turn in longitude (row -1 is row 0 at lon + pi); a clamp would
+ *  duplicate the polar row and flatten interpolation across the pole. */
 int2 SimWrapCoord(int2 C)
 {
     const int NLon = SimGridSize.x;
     const int NLat = SimGridSize.y;
 
-	// Handles ONE crossing exactly. A departure point cannot travel more than a
-	// fraction of the grid in a step, so a second crossing does not arise.
+	// Handles one crossing; a departure point never travels far enough for two.
     if (C.y < 0)
     {
         C.y = -1 - C.y;
@@ -166,8 +139,7 @@ int2 SimWrapCoord(int2 C)
         C.x += NLon / 2;
     }
 
-	// Two-step modulo so negative inputs land correctly; HLSL % keeps the sign
-	// of the dividend.
+	// Two-step modulo: HLSL % keeps the sign of the dividend.
     C.x = ((C.x % NLon) + NLon) % NLon;
 
     return C;
@@ -210,28 +182,15 @@ void SimCubicWeights(float F, out float W0, out float W1, out float W2, out floa
     W3 = 0.5f * (F3 - F2);
 }
 
-/** Bicubic (Catmull-Rom) interpolation at continuous grid coordinates. Sixteen
- *  taps, all through SimWrapCoord, so it is correct across the longitude seam
- *  and across the poles; hardware bilinear cannot be used because no address
- *  mode expresses the polar fold.
- *
- *  PITFALL: BILINEAR HERE WOULD KILL THE INVERSE CASCADE. Semi-Lagrangian
- *  advection is not conservative, and its error is a numerical diffusion whose
- *  magnitude the interpolator sets. Bilinear diffuses at about the grid scale
- *  per step, the eddies starve, and the planet relaxes to perfect bands with no
- *  weather -- which reads as weak forcing and is not.
- *
- *  Catmull-Rom overshoots at sharp gradients: the anti-diffusion that keeps
- *  filaments sharp, and unacceptable for a quantity that must stay positive.
- *
- *  INDEX SPACE, NOT UV SPACE: texel centres sit on INTEGERS, because that is what
- *  SimDirectionToGrid produces. PITFALL: the half-integer form
- *  floor(G - 0.5) + 0.5 is for UV*Size coordinates, and used here it samples at
- *  G - 0.5 in both axes -- a constant half-texel drift per step that reads as a
- *  mysterious current.
- *
- *  Four channels: the Cartesian velocity crosses the fold correctly because a
- *  3D vector does not change sign there. */
+/** Bicubic (Catmull-Rom) interpolation at continuous grid coordinates. All 16
+ *  taps go through SimWrapCoord, so it is correct across the seam and the poles.
+ *  Overshoots at sharp gradients, so unsuitable for quantities that must stay
+ *  positive. Four channels: Cartesian velocity keeps its sign across the fold.
+ *  PITFALL: bilinear here diffuses at grid scale per step; the eddies starve and
+ *  the planet relaxes to plain bands, which looks like weak forcing.
+ *  PITFALL: index space, centres on integers (as SimDirectionToGrid produces). The
+ *  UV-space form floor(G - 0.5) + 0.5 samples half a texel off, a constant drift
+ *  that reads as a spurious current. */
 float4 SimSampleCubic4(Texture2DArray<float4> Field, float2 Grid, uint Layer)
 {
     const float2 Base = floor(Grid);
@@ -275,10 +234,9 @@ struct SimTrajectory
     float CosT;
 };
 
-/** EXACT GREAT-CIRCLE BACKTRACE, not normalize(P - V dt). Displacing along the
- *  tangent and renormalizing moves along a CHORD, short by cos(theta), which
- *  accumulates over hundreds of steps into a slow poleward or equatorward creep
- *  of everything the flow carries. V must be tangent at P. */
+/** Exact great-circle backtrace. normalize(P - V dt) moves along a chord, short
+ *  by cos(theta), which accumulates into a slow meridional creep of everything
+ *  advected. V must be tangent at P. */
 SimTrajectory SimBacktrace(float3 P, float3 V, float Dt)
 {
     SimTrajectory T;
@@ -297,17 +255,15 @@ SimTrajectory SimBacktrace(float3 P, float3 V, float Dt)
 
         T.Departure = normalize(P * T.CosT - UHat * T.SinT);
 
-		// Departure x P = sin(theta) (P x UHat), so this is the axis that
-		// rotates the departure point forward onto P.
+		// Axis that rotates the departure point forward onto P.
         T.Axis = normalize(cross(P, UHat));
     }
 
     return T;
 }
 
-/** A vector sampled at the departure point, carried to the arrival point by the
- *  trajectory's rotation (Rodrigues). This is the parallel transport that
- *  supplies the sphere's metric terms, so nothing else adds them. */
+/** Carries a vector sampled at the departure point to the arrival point
+ *  (Rodrigues). This parallel transport supplies the sphere's metric terms. */
 float3 SimTransport(float3 V, SimTrajectory T)
 {
     return V * T.CosT
@@ -317,14 +273,11 @@ float3 SimTransport(float3 V, SimTrajectory T)
 
 // -- Operators --------------------------------------------------------------
 
-/** The five-point spherical Laplacian in (lambda, mu), FLUX FORM, which is why
- *  the polar boundary condition disappears: the latitude coefficients sit at
- *  cell faces, where (1 - mu^2) is exactly zero at a pole. It is also exactly
- *  div(grad) of the C-grid operators in FlowSim.usf, which is what makes the
- *  Helmholtz solve consistent with the velocity correction.
- *
- *  Returns the operator and the DIAGONAL coefficient together: the solver needs
- *  both, and computing them separately is how the two drift apart. */
+/** Five-point spherical Laplacian in (lambda, mu), flux form: the latitude
+ *  coefficients sit on faces and vanish at the poles. Exactly div(grad) of the
+ *  C-grid operators in FlowSim.usf, keeping the Helmholtz solve consistent with
+ *  the velocity correction. One source for the operator and its diagonal, so the
+ *  solver's two cannot drift apart. */
 void SimLaplacianCoeffs(int Row, out float CLon, out float ALo, out float AHi)
 {
     const float DLon = SimDLon();
@@ -338,8 +291,7 @@ void SimLaplacianCoeffs(int Row, out float CLon, out float ALo, out float AHi)
     ALo = (1.0f - MuLo * MuLo) / (DMu * DMu);
     AHi = (1.0f - MuHi * MuHi) / (DMu * DMu);
 
-	// Finite on a cell-centred grid. The polar row's coefficient exceeds the
-	// equator's by about N_lat/2: stiff but bounded.
+	// Finite on a cell-centred grid; the polar row's is ~N_lat/2 times the equator's.
     CLon = 1.0f / ((1.0f - Mu * Mu) * DLon * DLon);
 }
 
@@ -376,18 +328,10 @@ float SimLaplacian(Texture2DArray<float> Field, int2 C, uint Layer, out float Ou
 		OutDiagonal);
 }
 
-/** Half-width, in texels, of the longitudinal box filter at this latitude,
- *  held within the row.
- *
- *  THE POLE PROBLEM. Physical longitudinal spacing is cos(phi) * dlambda, which
- *  goes to zero at the poles: grid-scale longitudinal modes there are far finer
- *  than anywhere else and the Laplacian's 1/(1-mu^2) coefficient makes them the
- *  stiffest in the solve. A running mean over 1/cos(phi) texels removes exactly
- *  the wavenumbers the grid carries but the physical spacing cannot support.
- *
- *  What it costs is polar detail. Discrete long-lived polar vortex clusters
- *  would not emerge from a solve at this resolution anyway and belong on an
- *  authored path. */
+/** Half-width, in texels, of the longitudinal box filter at this latitude, held
+ *  within the row. Physical spacing cos(phi) dlambda vanishes at the poles; a
+ *  running mean over 1/cos(phi) texels removes the modes that spacing cannot
+ *  support, which are also the stiffest in the solve. Costs polar detail. */
 int SimFilterHalfWidth(float Mu, float FilterLatitude)
 {
     const float CosPhi = sqrt(max(1.0f - Mu * Mu, 0.0f));

@@ -2,54 +2,33 @@
 
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereShadowMap.ush"
 
-// The parts of a shadow bake that no cloud field appears in: how finely a ray is
-// stepped, where a threshold is crossed inside a step, and the history blend.
-//
-// NOT THE MARCH ITSELF. A bake's loop is shaped by the field it walks -- where
-// it enters, what bounds a step, when it may stop -- so that stays with the
-// model. What is here would be identical in any bake writing this format, and
-// duplicating it would mean two copies of a quadratic root solve and of a
-// lattice the reader has to agree with exactly.
-//
-// THE OUTPUT IS DECLARED HERE, not by the model, because the map's format owns
-// it: the same slices whatever field was baked into them. A model declares only
-// the uniforms describing its own field.
+// Field-independent parts of a shadow bake: step sizing, the threshold crossing
+// within a step, and the history blend. The march loop stays with each model,
+// since its entry, step bounds and exit depend on the field. The output is
+// declared here because the map format owns it; a model declares only its own
+// field uniforms.
 
 #ifndef ATMO_BAKE_THREADS
 #define ATMO_BAKE_THREADS 8
 #endif
 
-/** Radial advances per gradient depth. The step is sized against this and one
- *  flow texel of arc, combined in quadrature since a step moves in height and
- *  sideways at once. min would be continuous but not smooth, and its kink sits
- *  at a fixed obliquity, which on a sphere is a ring. */
+/** Radial advances per gradient depth. Combined in quadrature with one flow
+ *  texel of arc; min() would kink at a fixed obliquity, which on a sphere is a ring. */
 #ifndef ATMO_BAKE_STEPS_PER_GRADIENT
 #define ATMO_BAKE_STEPS_PER_GRADIENT 16.0f
 #endif
 
-/** Most optical depth a single step may accumulate, at zero accumulated depth.
- *  0.15 puts at least two steps below the first threshold at any density.
- *
- *  GEOMETRY ALONE DOES NOT BOUND THIS: a step sized to the gradient carries
- *  whatever extinction the deck happens to have, so at a high authored optical
- *  depth all four thresholds fall inside one step, their crossings collapse to
- *  one interpolation across it, and the reconstruction inherits a lattice at the
- *  step spacing. The symptom is blockiness appearing with density rather than
- *  with distance, which reads as a resolution problem and is not. */
+/** Most optical depth one step may accumulate at zero accumulated depth; 0.15
+ *  keeps at least two steps below the first threshold.
+ *  PITFALL: gradient-sized steps alone let a dense deck put every threshold in one
+ *  step, giving blockiness that grows with density rather than distance. */
 #ifndef ATMO_BAKE_MAX_DTAU
 #define ATMO_BAKE_MAX_DTAU 0.15f
 #endif
 
-/** How fast the allowance opens up as optical depth accumulates. 0 is flat.
- *
- *  A CONSTANT ALLOWANCE RESOLVES THE DEEP MARCH FAR MORE FINELY THAN ITS NODES
- *  NEED. The thresholds roughly quadruple each time (0.02, 0.25, 1.0, 3.0), so
- *  flat Delta-tau spends most of the budget between the last two, where the
- *  sample is already 63% extinguished before the segment starts. Opening in
- *  proportion to accumulated depth keeps every node's RELATIVE accuracy about
- *  equal, which is what the piecewise reconstruction cares about. The lattice is
- *  unaffected: this changes the demand, and the demand only selects how far a
- *  fixed cell is halved. */
+/** Rate the Delta-tau allowance grows with accumulated depth; 0 is flat. With
+ *  thresholds spaced roughly 4x apart, this keeps each node's relative accuracy
+ *  about equal. It only selects how far a fixed lattice cell is halved. */
 #ifndef ATMO_BAKE_DTAU_GROWTH
 #define ATMO_BAKE_DTAU_GROWTH 1.0f
 #endif
@@ -59,43 +38,28 @@
 #define ATMO_BAKE_MAX_HALVINGS 6
 #endif
 
-/** Iteration cap. A grazing chord is long and the cone trace only skips the air
- *  above the deck, not the deck itself.
- *
- *  A COUNT AGAINST TWO LENGTHS. ATMO_BAKE_MAX_DTAU shortens steps exactly where
- *  the deck is densest, so this is what stops a dense column running out of
- *  iterations before the last threshold, where the unreached nodes extrapolate
- *  and the column reads darker than it is. Optical depth alone would clear 3.0
- *  in about ten steps (tau follows 1.15^n - 1 at the defaults); geometry forces
- *  more, and the rest is the approach. */
+/** Iteration cap. Grazing chords are long and ATMO_BAKE_MAX_DTAU shortens steps
+ *  in dense deck; a column that runs out before the last threshold extrapolates
+ *  its remaining nodes and reads too dark. */
 #ifndef ATMO_BAKE_MAX_STEPS
 #define ATMO_BAKE_MAX_STEPS 256
 #endif
 
-/** Lateral samples per march step, 1 or 4.
- *
- *  BAND-LIMITING, NOT SMOOTHING. One ray per texel makes the map a point sample
- *  of a field that varies within the texel, carrying texel-scale variance no
- *  interpolation can remove. Blurring the stored nodes cannot fix it either:
- *  reconstruction is nonlinear in them and ATMO_SHADOW_NO_DECK sits in the same
- *  channels, so any kernel crossing the silhouette drags its neighbourhood
- *  toward no-deck. Averaging extinction across the footprint makes each texel
- *  represent its AREA rather than its centre, and four subsamples at half
- *  resolution is the same fetch count as one at full. */
+/** Lateral samples per march step, 1 or 4. Averages extinction over the texel
+ *  footprint so a texel represents its area, not its centre. Blurring stored
+ *  nodes is no substitute: reconstruction is nonlinear in them and
+ *  ATMO_SHADOW_NO_DECK shares their channels. */
 #ifndef ATMO_BAKE_SUBSAMPLES
 #define ATMO_BAKE_SUBSAMPLES 4
 #endif
 
-/** How far the entry is backed off, in texel footprints. The cone trace runs on
- *  the centre ray only, so neighbouring columns inside the texel can stand
- *  higher and a march starting at the centre's entry would miss them. Starting
- *  early costs steps through empty air, where density is zero. */
+/** Entry back-off in texel footprints. The cone trace uses only the centre ray,
+ *  so neighbouring columns inside the texel may stand higher. */
 #ifndef ATMO_BAKE_ENTRY_BACKOFF
 #define ATMO_BAKE_ENTRY_BACKOFF 1.5f
 #endif
 
-/** Rotated grid: one subsample per row and per column of the texel, which
- *  resolves an edge at any orientation better than an axis-aligned quad. */
+/** Rotated grid: one subsample per row and per column of the texel. */
 static const float2 AtmoBake_SubOffsets[4] =
 {
     float2(-0.375f, -0.125f),
@@ -109,42 +73,30 @@ RWTexture2DArray<float4> ShadowMapUAV;
 int2 ShadowMapSize;
 float2 ShadowInvMapSize;
 
-/** Planet-local, pointing TOWARD the light -- the same convention as
- *  lightRayParams.lightDir, so sun elevation stays dot(up, lightDir). The basis
- *  and the extent are derived from it and from the field, not passed: see
- *  TerrestrialShadow.ush. */
+/** Planet-local, pointing toward the light, as lightRayParams.lightDir. Basis and
+ *  extent derive from it and the field: see TerrestrialShadow.ush. */
 float3 ShadowLightDir;
 
-/** Camera position, planet-local: the inner cascades' centres. The detail fade
- *  is per cascade, not per sample (TRShadow_Field). One camera per planet, so a
- *  second viewport shares the cascades. */
+/** Camera position, planet-local: the inner cascades' centre. The detail fade is
+ *  per cascade (TRShadow_Field); all viewports of a planet share the cascades. */
 float3 ShadowCameraLocal;
 
-/** The cascade this dispatch's first Z slice writes. Levels bake on their own
- *  frames, each around the camera it was baked with. */
+/** Cascade written by this dispatch's first Z slice. */
 int ShadowFirstLevel;
 
-/** The level's previous bake: a one-slice copy of it taken before this pass, the
- *  light and camera it was baked with, and the share of it this bake keeps. A
- *  weight of 0 skips the history entirely. */
+/** The level's previous bake (a one-slice copy), the light and camera it was
+ *  baked with, and the share of it kept. A weight of 0 skips history. */
 Texture2DArray<float4> ShadowHistory;
 float3 ShadowHistoryLightDir;
 float3 ShadowHistoryCameraLocal;
 float ShadowHistoryWeight;
 
-/** How far into a step optical depth reaches Target, in step lengths.
- *
- *  SIGMA IS LINEAR ACROSS THE STEP, so optical depth is quadratic and the
- *  crossing is a root rather than a ratio. Constant density instead makes the
- *  crossing first-order, and the residual moves whenever the subdivision level
- *  changes -- which it does at fixed radii from the sub-light point, obliquity
- *  being radially symmetric there, so the result is concentric rings. The root
- *  is taken in its rationalised form, which stays conditioned as the ends
- *  agree and reduces to the linear solve there.
- *
- *  PITFALL: SOLVE IN OPTICAL DEPTH PER STEP. Sigma is per world unit and a
- *  step spans thousands of them, so any absolute threshold on the curvature
- *  in world units picks the wrong form everywhere. */
+/** Fraction of the step at which optical depth reaches Target. Sigma is linear
+ *  across the step, so tau is quadratic and the crossing is its root, in the
+ *  rationalised form that stays conditioned as the ends agree. A constant-density
+ *  crossing leaves concentric rings where the subdivision level changes.
+ *  PITFALL: solve in optical depth per step; any absolute curvature threshold in
+ *  world units picks the wrong form everywhere. */
 float AtmoBake_Crossing(float Target, float Tau, float SigmaA, float SigmaB, float Step)
 {
 	// tau(x) = A x + (B - A) x^2 / 2 over the step fraction x.
@@ -157,20 +109,12 @@ float AtmoBake_Crossing(float Target, float Tau, float SigmaA, float SigmaB, flo
     return saturate(2.0f * Remaining / max(A + sqrt(max(Disc, 0.0f)), 1e-8f));
 }
 
-/** Blends a texel's fresh crossing depths with the level's previous bake along
- *  the same ray, so a rebake fades in rather than stepping. Nodes in thicknesses;
- *  Offset is the ray's closest approach to the planet centre; ChordEnd is the
- *  ray's exit depth.
- *
- *  REPROJECTED, NOT READ AT THE SAME TEXEL. The previous bake sat around another
- *  camera, and under another light: the ray is found in that bake's own map
- *  and its nodes interpolated from the four texels around it.
- *
- *  ONLY NODES CROSSED INSIDE THE CHORD BLEND, in the new bake and in every tap
- *  with weight. A node past the exit is an extrapolation or the no-deck sentinel,
- *  and blending one in slides a crossing across the whole chord over several
- *  bakes instead of fading it. Those take the new value, then the nodes are
- *  re-sorted, which the reconstruction needs. */
+/** Blends fresh crossing depths (in thicknesses) with the level's previous bake,
+ *  found by reprojecting the ray into that bake's map and interpolating its four
+ *  surrounding texels. Offset is the ray's closest approach to the planet centre;
+ *  ChordEnd is its exit depth. Nodes blend only if crossed inside the chord in the
+ *  new bake and every weighted tap; a node past the exit (extrapolation or
+ *  sentinel) would slide a crossing across the chord. Output is re-sorted. */
 float4 AtmoBake_History(
 	float4 Nodes, int Level, float3 Offset, float ChordEnd, float HalfWidth, float Extent0)
 {

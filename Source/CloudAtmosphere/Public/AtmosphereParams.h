@@ -1,18 +1,14 @@
 // The parameter sets the atmosphere's passes are driven by, and the
 // derivations that keep them consistent.
 //
-// ONE BUNDLE PER MODEL. Both models run one cloud field, so they share every
-// group's member list, and an actor carries one FAtmosphereModelParams per
-// model: a type change swaps the whole authored set rather than reinterpreting
-// one, a terrestrial tune and a gas giant tune sit side by side, and a bundle's
-// values apply to any model. The actor's pipeline and quality groups
-// (Simulation, Raymarch, Sampling) are one instance, and Simulation holds a
-// config per model.
+// ONE BUNDLE PER MODEL. Both models share every group's member list, and an
+// actor carries one FAtmosphereModelParams per model, so a type change swaps the
+// whole authored set. The pipeline and quality groups (Simulation, Raymarch,
+// Sampling) are one instance; Simulation holds a config per model.
 //
-// RATIOS, NOT ABSOLUTES, WHEREVER ONE VALUE IS BOUNDED BY ANOTHER. A parameter
-// expressed against the thing that constrains it stays valid when that thing is
-// retuned; expressed absolutely it silently goes out of range, and the failure
-// shows up as a geometry or sampling artifact rather than as a bad value.
+// RATIOS, NOT ABSOLUTES, WHEREVER ONE VALUE IS BOUNDED BY ANOTHER, so a value
+// stays valid when its bound is retuned; an absolute one silently goes out of
+// range, showing as a geometry or sampling artifact rather than a bad value.
 
 #pragma once
 
@@ -108,25 +104,22 @@ struct CLOUDATMOSPHERE_API FAtmosphereSurfaceShadowParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	FVector2D CascadeRadii = FVector2D(0.6, 0.3);
 
-	/** The surface shadow pin the march unpacks: the group's scalars, Z
-	 *  free. */
+	/** The surface shadow pin the march unpacks: the group's scalars, Z free. */
 	FLinearColor Pack() const
 	{
 		return FLinearColor(bEnabled ? 1.0f : 0.0f, FMath::Clamp(DirectFraction, 0.0f, 1.0f), 0.0f, FMath::Max(Strength, 0.0f));
 	}
 };
 
-// Cloud field parameter groups, both models'. The gas giant adds its deep
-// deck.
+// Cloud field parameter groups, both models'. The gas giant adds its deep deck.
 //
 // THE SIM IS THE WEATHER MAP, THE NOISE IS THE CLOUD. Coverage, cloud type and
 // the pressure lid come from the sim per column; the structure layer's noise,
 // shaped by a height profile, is what coverage erodes into individual clouds,
 // and the detail layer erodes their edges. See TerrestrialDeck.ush.
 //
-// PACKED ON THE WAY OUT. Each group travels to the compute march and the bake as
-// a few float4 pins, packed in PackCloudField and unpacked once in
-// TR_BuildField; the members here keep their own names.
+// PACKED ON THE WAY OUT: each group reaches the march and the bake as a few
+// float4 pins, packed in PackCloudField and unpacked once in TR_BuildField.
 //
 // THREE HEIGHT UNITS, each member stating its own. Atmosphere fractions, of the
 // shell above the surface: CloudBase, CloudThickness, CeilingFalloff, DeepFill
@@ -652,12 +645,10 @@ struct CLOUDATMOSPHERE_API FCloudDeepParams
 	FLinearColor Extinction = FLinearColor(1.0f, 1.0f, 1.0f, 1.0f);
 };
 
-// The air, the cloud's lighting and the march's budget.
-//
-// THESE STRUCTS ARE DATA in authoring units; the helpers below and the field's
-// builders, which the march and the shadow bake share, derive what the shaders
-// take. PITFALL: give no member a category. Members display in declaration
-// order, and one that names a category sorts apart from its group.
+// The air, the cloud's lighting and the march's budget. THESE STRUCTS ARE DATA
+// in authoring units; the helpers below and the field's builders derive what the
+// shaders take. PITFALL: give no member a category. Members display in
+// declaration order, and one that names a category sorts apart from its group.
 
 /** The air: how much of it there is, its colour, and how it scatters.
  *
@@ -726,10 +717,9 @@ private:
 		return H * -FMath::Exp(-1.0f / H) + H;
 	}
 
-	/** The column of Atmo_Density's absorber over the shell, by Simpson's rule
-	 *  on 64 intervals: a Lorentzian of half-width AbsorptionFalloff, floored as
-	 *  AtmoT_Profile floors it, about AbsorptionAltitude, times the Rayleigh
-	 *  profile. */
+	/** The column of Atmo_Density's absorber over the shell, by Simpson's rule on
+	 *  64 intervals: a Lorentzian about AbsorptionAltitude, its half-width floored
+	 *  as AtmoT_Profile floors it, times the Rayleigh profile. */
 	float AbsorberColumn() const
 	{
 		constexpr int32 Intervals = 64;
@@ -848,8 +838,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereMultipleScatteringParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1", ClampMax = "4"))
 	int32 OctaveCount = 3;
 
-	/** The light ray's extinction as a fraction of the view ray's: the value the
-	 *  march and the bake read. */
+	/** The light ray's extinction as a fraction of the view ray's, for march and bake. */
 	float LightExtinctionFraction() const
 	{
 		return 1.0f - FMath::Clamp(SunlightPenetration, 0.0f, 1.0f);

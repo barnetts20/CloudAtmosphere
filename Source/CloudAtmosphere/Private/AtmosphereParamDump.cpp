@@ -31,6 +31,12 @@
 // with both values, so the tuned assets can be told apart from the class
 // defaults and read back as the source of new defaults and presets.
 //
+// CloudAtmosphere.DumpSchema [FileName]
+//
+// Writes every member the actor, sim config and sim settings panels show, with
+// its editor metadata, class default and the values in the world: the source
+// of the usage guide.
+//
 // CloudAtmosphere.LoadParams FileName [Sim|Atmospheres] [Pipeline] [Quality]
 //
 // Reads a file in the same layout back into the world's atmosphere actors and
@@ -408,6 +414,29 @@ namespace AtmosphereDump
 		}
 	}
 
+	/** Writes Root to Saved/CloudAtmosphere/Name(.json). */
+	bool Save(const TSharedRef<FJsonObject>& Root, FString Name, FString& OutPath)
+	{
+		if (!Name.EndsWith(TEXT(".json")))
+		{
+			Name += TEXT(".json");
+		}
+
+		OutPath = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CloudAtmosphere"), Name));
+
+		FString Text;
+		Write(MakeShared<FJsonValueObject>(Root), 0, Text);
+		Text += TEXT("\n");
+
+		if (FFileHelper::SaveStringToFile(Text, *OutPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+		{
+			return true;
+		}
+
+		UE_LOG(LogAtmosphereDump, Error, TEXT("Could not write %s"), *OutPath);
+		return false;
+	}
+
 	void Dump(const TArray<FString>& Args, UWorld* World)
 	{
 		const UFlowSimSubsystem* Sub = World ? World->GetSubsystem<UFlowSimSubsystem>() : nullptr;
@@ -435,57 +464,16 @@ namespace AtmosphereDump
 
 		Root->SetArrayField(TEXT("Atmospheres"), Actors);
 
-		FString Name = Args.Num() > 0
+		const FString Name = Args.Num() > 0
 			? Args[0]
 			: FString::Printf(TEXT("AtmosphereParams_%s"), *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S")));
+		FString Path;
 
-		if (!Name.EndsWith(TEXT(".json")))
-		{
-			Name += TEXT(".json");
-		}
-
-		const FString Path = FPaths::ConvertRelativePathToFull(
-			FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CloudAtmosphere"), Name));
-
-		FString Text;
-		Write(MakeShared<FJsonValueObject>(Root), 0, Text);
-		Text += TEXT("\n");
-
-		if (FFileHelper::SaveStringToFile(Text, *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+		if (Save(Root, Name, Path))
 		{
 			UE_LOG(LogAtmosphereDump, Display, TEXT("Wrote %d atmosphere(s) and the sim config to %s"), Actors.Num(), *Path);
 		}
-		else
-		{
-			UE_LOG(LogAtmosphereDump, Error, TEXT("Could not write %s"), *Path);
-		}
 	}
-}
-
-namespace AtmosphereLoad
-{
-	using AtmosphereDump::IsGroup;
-
-	struct FReport
-	{
-		int32 Applied = 0;
-		int32 Unchanged = 0;
-		TArray<FString> Skipped;
-		TArray<FString> Clamped;
-
-		/** Top-level members left alone unless the scope includes them. */
-		const TSet<FName>* Pipeline = nullptr;
-		const TSet<FName>* Quality = nullptr;
-	};
-
-	/** What a load applies; FAtmosphereTuneScope's fields. */
-	struct FScope
-	{
-		bool bAtmospheres = true;
-		bool bSim = true;
-		bool bPipeline = false;
-		bool bQuality = false;
-	};
 
 	/** Start state, spin-up cost, debug views and pause: what a machine or a
 	 *  session owns rather than what a tune is, so a preset does not repoint
@@ -513,6 +501,318 @@ namespace AtmosphereLoad
 			TEXT("ShadowLevelsPerFrame"), TEXT("ShadowTemporalSmoothing") };
 		return Names;
 	}
+
+	// -- Schema ---------------------------------------------------------------
+	//
+	// Every member the panels show, flattened to dotted paths in declaration
+	// order: its type, flags, editor metadata (tooltip, category, limits, edit
+	// condition), enumerators, the class default and each live object's value.
+	// "Path[]." members describe the elements of an array of groups.
+
+	/** Where a member's values are read: a named object and its memory. */
+	struct FSource
+	{
+		FString Name;
+		const void* Data = nullptr;
+	};
+
+	/** Edited and read-only members alike, but none kept only for old data. */
+	bool Shown(const FProperty* Property)
+	{
+		return Property->HasAnyPropertyFlags(CPF_Edit) && !Property->HasAnyPropertyFlags(CPF_Deprecated);
+	}
+
+	const UEnum* EnumOf(const FProperty* Property)
+	{
+		if (const FEnumProperty* Enum = CastField<FEnumProperty>(Property))
+		{
+			return Enum->GetEnum();
+		}
+
+		const FByteProperty* Byte = CastField<FByteProperty>(Property);
+		return Byte ? Byte->Enum : nullptr;
+	}
+
+	TSharedRef<FJsonValue> EnumeratorsOf(const UEnum& Enum)
+	{
+		TArray<TSharedPtr<FJsonValue>> Items;
+		const int32 Count = Enum.NumEnums() - (Enum.ContainsExistingMax() ? 1 : 0);
+
+		for (int32 i = 0; i < Count; ++i)
+		{
+			const FString DisplayName = Enum.GetDisplayNameTextByIndex(i).ToString();
+			TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
+			Item->SetStringField(TEXT("Name"), Enum.GetNameStringByIndex(i));
+			Item->SetStringField(TEXT("DisplayName"), DisplayName);
+
+#if WITH_EDITOR
+			if (Enum.HasMetaData(TEXT("Hidden"), i))
+			{
+				continue;
+			}
+
+			const FString Tip = Enum.GetToolTipTextByIndex(i).ToString();
+
+			if (!Tip.IsEmpty() && Tip != DisplayName)
+			{
+				Item->SetStringField(TEXT("ToolTip"), Tip);
+			}
+#endif
+
+			Items.Add(MakeShared<FJsonValueObject>(Item));
+		}
+
+		return MakeShared<FJsonValueArray>(Items);
+	}
+
+	/** A type's own doc comment; empty outside the editor. */
+	FString DocOf(const UStruct* Type)
+	{
+#if WITH_EDITOR
+		return Type->GetMetaData(TEXT("ToolTip"));
+#else
+		return FString();
+#endif
+	}
+
+	TSharedRef<FJsonObject> EntryOf(const FProperty* Property, const FString& Scope)
+	{
+		TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+		Out->SetStringField(TEXT("Type"), Property->GetCPPType());
+
+		TArray<TSharedPtr<FJsonValue>> Flags;
+		const auto Flag = [&Flags](const FString& Name) { Flags.Add(MakeShared<FJsonValueString>(Name)); };
+
+		if (Property->HasAnyPropertyFlags(CPF_EditConst))
+		{
+			Flag(TEXT("ReadOnly"));
+		}
+
+		if (Property->HasAnyPropertyFlags(CPF_Transient))
+		{
+			Flag(TEXT("Transient"));
+		}
+
+		if (Property->HasAnyPropertyFlags(CPF_Config))
+		{
+			Flag(TEXT("Config"));
+		}
+
+		if (Property->HasAnyPropertyFlags(CPF_DisableEditOnTemplate))
+		{
+			Flag(TEXT("InstanceOnly"));
+		}
+
+		if (Property->HasAnyPropertyFlags(CPF_DisableEditOnInstance))
+		{
+			Flag(TEXT("DefaultsOnly"));
+		}
+
+		if (!Scope.IsEmpty())
+		{
+			Flag(Scope);
+		}
+
+		if (Flags.Num() > 0)
+		{
+			Out->SetArrayField(TEXT("Flags"), Flags);
+		}
+
+#if WITH_EDITOR
+		if (const TMap<FName, FString>* Meta = Property->GetMetaDataMap())
+		{
+			TSharedRef<FJsonObject> Fields = MakeShared<FJsonObject>();
+
+			for (const TPair<FName, FString>& Pair : *Meta)
+			{
+				Fields->SetStringField(Pair.Key.ToString(), Pair.Value);
+			}
+
+			Out->SetObjectField(TEXT("Meta"), Fields);
+		}
+#endif
+
+		if (const UEnum* Enum = EnumOf(Property))
+		{
+			Out->SetField(TEXT("Enumerators"), EnumeratorsOf(*Enum));
+		}
+
+		return Out;
+	}
+
+	/** Pipeline and Quality name the top-level members a load leaves alone
+	 *  without that scope; their members inherit the tag. */
+	void Schema(const UStruct* Type, const FString& Prefix, const void* Default, TConstArrayView<FSource> Sources,
+		const FString& InheritedScope, const TSet<FName>* Pipeline, const TSet<FName>* Quality, FJsonObject& Out)
+	{
+		const EFieldIteratorFlags::SuperClassFlags SuperFlags = Type->IsA<UClass>()
+			? EFieldIteratorFlags::ExcludeSuper : EFieldIteratorFlags::IncludeSuper;
+
+		for (TFieldIterator<FProperty> It(Type, SuperFlags); It; ++It)
+		{
+			FProperty* Property = *It;
+
+			if (!Shown(Property))
+			{
+				continue;
+			}
+
+			FString Scope = InheritedScope;
+
+			if (Pipeline && Pipeline->Contains(Property->GetFName()))
+			{
+				Scope = TEXT("Pipeline");
+			}
+			else if (Quality && Quality->Contains(Property->GetFName()))
+			{
+				Scope = TEXT("Quality");
+			}
+
+			const FString Path = Prefix + Property->GetName();
+			TSharedRef<FJsonObject> Entry = EntryOf(Property, Scope);
+			Out.SetObjectField(Path, Entry);
+
+			if (IsGroup(Property) && Property->ArrayDim == 1)
+			{
+				const UScriptStruct* Struct = CastFieldChecked<FStructProperty>(Property)->Struct;
+				Entry->SetBoolField(TEXT("Group"), true);
+				Entry->SetStringField(TEXT("GroupDoc"), DocOf(Struct));
+
+				TArray<FSource> Inner;
+
+				for (const FSource& Source : Sources)
+				{
+					Inner.Add({ Source.Name, Property->ContainerPtrToValuePtr<void>(Source.Data) });
+				}
+
+				Schema(Struct, Path + TEXT("."), Default ? Property->ContainerPtrToValuePtr<void>(Default) : nullptr,
+					Inner, Scope, nullptr, nullptr, Out);
+				continue;
+			}
+
+			if (Default)
+			{
+				Entry->SetField(TEXT("Default"), ValueOf(Property, Property->ContainerPtrToValuePtr<void>(Default)));
+			}
+
+			if (Sources.Num() > 0)
+			{
+				TSharedRef<FJsonObject> PerSource = MakeShared<FJsonObject>();
+
+				for (const FSource& Source : Sources)
+				{
+					PerSource->SetField(Source.Name, ValueOf(Property, Property->ContainerPtrToValuePtr<void>(Source.Data)));
+				}
+
+				Entry->SetObjectField(TEXT("Values"), PerSource);
+			}
+
+			const FArrayProperty* Array = CastField<FArrayProperty>(Property);
+
+			if (Array && IsGroup(Array->Inner))
+			{
+				const UScriptStruct* Struct = CastFieldChecked<FStructProperty>(Array->Inner)->Struct;
+				Entry->SetStringField(TEXT("GroupDoc"), DocOf(Struct));
+				Schema(Struct, Path + TEXT("[]."), nullptr, {}, Scope, nullptr, nullptr, Out);
+			}
+		}
+	}
+
+	TSharedRef<FJsonObject> SchemaSection(const UClass* Class, const UObject* Default, TConstArrayView<FSource> Sources,
+		const TSet<FName>* Pipeline, const TSet<FName>* Quality)
+	{
+		TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+		Out->SetStringField(TEXT("Class"), Class->GetName());
+		Out->SetStringField(TEXT("Doc"), DocOf(Class));
+
+		TSharedRef<FJsonObject> Members = MakeShared<FJsonObject>();
+		Schema(Class, FString(), Default, Sources, FString(), Pipeline, Quality, *Members);
+		Out->SetObjectField(TEXT("Members"), Members);
+		return Out;
+	}
+
+	void DumpSchema(const TArray<FString>& Args, UWorld* World)
+	{
+		TArray<FSource> Actors;
+		TArray<const UFlowSimConfig*> Configs;
+		const UFlowSimSubsystem* Sub = World ? World->GetSubsystem<UFlowSimSubsystem>() : nullptr;
+
+		if (Sub && Sub->GetConfig())
+		{
+			Configs.Add(Sub->GetConfig());
+		}
+
+		if (World)
+		{
+			for (TActorIterator<APlanetAtmosphereActor> It(World); It; ++It)
+			{
+				Actors.Add({ It->GetActorNameOrLabel(), *It });
+				Configs.AddUnique(It->Simulation.TerrestrialConfig.Get());
+				Configs.AddUnique(It->Simulation.GasGiantConfig.Get());
+			}
+		}
+
+		TArray<FSource> ConfigSources;
+
+		for (const UFlowSimConfig* Config : Configs)
+		{
+			if (Config)
+			{
+				ConfigSources.Add({ Config->GetName(), Config });
+			}
+		}
+
+		TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+		Root->SetStringField(TEXT("World"), World ? World->GetName() : FString(TEXT("None")));
+		Root->SetStringField(TEXT("Written"), FDateTime::Now().ToIso8601());
+		Root->SetStringField(TEXT("RunningConfig"), Sub && Sub->GetConfig() ? Sub->GetConfig()->GetName() : FString(TEXT("None")));
+		Root->SetObjectField(TEXT("Actor"), SchemaSection(APlanetAtmosphereActor::StaticClass(),
+			APlanetAtmosphereActor::StaticClass()->GetDefaultObject(), Actors,
+			&ActorPipeline(), &ActorQuality()));
+		Root->SetObjectField(TEXT("SimConfig"), SchemaSection(UFlowSimConfig::StaticClass(),
+			GetDefault<UFlowSimConfig>(), ConfigSources, &SimPipeline(), nullptr));
+
+		// The settings' class default carries the project's config values.
+		Root->SetObjectField(TEXT("Settings"), SchemaSection(UFlowSimSettings::StaticClass(),
+			GetDefault<UFlowSimSettings>(), {}, nullptr, nullptr));
+
+		FString Path;
+
+		if (Save(Root, Args.Num() > 0 ? Args[0] : FString(TEXT("AtmosphereSchema")), Path))
+		{
+			UE_LOG(LogAtmosphereDump, Display, TEXT("Wrote the schema of %d atmosphere(s) and %d sim config(s) to %s"),
+				Actors.Num(), ConfigSources.Num(), *Path);
+		}
+	}
+}
+
+namespace AtmosphereLoad
+{
+	using AtmosphereDump::IsGroup;
+	using AtmosphereDump::SimPipeline;
+	using AtmosphereDump::ActorPipeline;
+	using AtmosphereDump::ActorQuality;
+
+	struct FReport
+	{
+		int32 Applied = 0;
+		int32 Unchanged = 0;
+		TArray<FString> Skipped;
+		TArray<FString> Clamped;
+
+		/** Top-level members left alone unless the scope includes them. */
+		const TSet<FName>* Pipeline = nullptr;
+		const TSet<FName>* Quality = nullptr;
+	};
+
+	/** What a load applies; FAtmosphereTuneScope's fields. */
+	struct FScope
+	{
+		bool bAtmospheres = true;
+		bool bSim = true;
+		bool bPipeline = false;
+		bool bQuality = false;
+	};
 
 	// -- Renamed members ------------------------------------------------------
 	//
@@ -1547,6 +1847,32 @@ namespace AtmosphereLoad
 	}
 }
 
+void UAtmospherePreset::PostInitProperties()
+{
+	Super::PostInitProperties();
+	SyncModelFlags();
+}
+
+void UAtmospherePreset::PostLoad()
+{
+	Super::PostLoad();
+	SyncModelFlags();
+}
+
+#if WITH_EDITOR
+void UAtmospherePreset::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+	SyncModelFlags();
+}
+#endif
+
+void UAtmospherePreset::SyncModelFlags()
+{
+	Model.bClouds = PlanetType != EPlanetAtmosphereType::AirOnly;
+	Model.bDeepDeck = PlanetType == EPlanetAtmosphereType::GasGiant;
+}
+
 void UAtmosphereTuneLibrary::ApplyPreset(APlanetAtmosphereActor* Actor, const UAtmospherePreset* Preset, EPlanetAtmosphereType InModel)
 {
 	if (!Actor || !Preset)
@@ -1593,6 +1919,13 @@ static FAutoConsoleCommandWithWorldAndArgs GAtmosphereDumpParamsCmd(
 	TEXT("Write the running sim config, the sim settings and every atmosphere actor's parameters, ")
 	TEXT("each with its overrides of the C++ defaults, to Saved/CloudAtmosphere. Optional argument is the file name."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AtmosphereDump::Dump));
+
+static FAutoConsoleCommandWithWorldAndArgs GAtmosphereDumpSchemaCmd(
+	TEXT("CloudAtmosphere.DumpSchema"),
+	TEXT("Write every member the actor, sim config and sim settings panels show to Saved/CloudAtmosphere: type, ")
+	TEXT("flags, editor metadata, enumerators, the class default and the value on each actor and sim config in ")
+	TEXT("the world. Optional argument is the file name (default AtmosphereSchema)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&AtmosphereDump::DumpSchema));
 
 static FAutoConsoleCommandWithWorldAndArgs GAtmosphereLoadParamsCmd(
 	TEXT("CloudAtmosphere.LoadParams"),

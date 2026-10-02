@@ -2,57 +2,43 @@
 // through their pressure, on a longitude by sin(latitude) grid.
 //
 // SEMI-LAGRANGIAN, SEMI-IMPLICIT. Advection is an exact great-circle backtrace.
-// The two linear gravity-wave terms -- the pressure gradient and the layer
-// depth times the mass divergence -- are implicit with off-centring weight
-// alpha. Coriolis is explicit, as an exact rotation of the velocity about the
-// local vertical.
+// The pressure gradient and the layer depth times the mass divergence are
+// implicit with off-centring weight alpha. Coriolis is an explicit exact
+// rotation of the velocity about the local vertical.
 //
-// THE STACK. Layer 0 is on top. Each layer carries its own faces, thickness
-// anomaly phi and tracers, and feels the Montgomery potential M = A phi, where
-// A holds the density step at every interface above it. The implicit system
-// couples the layers, and diagonalises in the stack's vertical modes: the
-// right-hand side is projected onto them, each mode solves its own Helmholtz
-// problem at its own wave speed, and the correction projects back. One layer
-// is one mode, and reduces exactly to single-layer shallow water.
+// THE STACK. Layer 0 is on top. Each layer feels the Montgomery potential
+// M = A phi. The implicit system diagonalises in the stack's vertical modes:
+// each mode solves its own Helmholtz problem at its own wave speed. One layer
+// is one mode, exactly single-layer shallow water.
 //
 // THE STEP ORDER.
-//
 //   Reduce       Zonal means of u and phi, then the global mean of phi.
-//   Reconstruct  Faces -> centre Cartesian velocity and divergence, and the
-//                explicit half of the step as a field. Also writes the output
-//                on the grid, which Predict reads for vertical motion and
-//                vorticity.
+//   Reconstruct  Faces -> centre Cartesian velocity and divergence, the
+//                explicit half of the step, and the output on the grid.
 //   Cells        Moves, grows and spawns the storm cells.
-//   Predict      The explicit field sampled at departure points, plus forcing:
-//                V* on faces, phi* at centres. Advances the tracers.
+//   Predict      Explicit field at departure points plus forcing: V* on
+//                faces, phi* at centres. Advances the tracers.
 //   Filter       Longitudinal box filter in the polar rows.
 //   Rhs          phi* - alpha dt depth div V*, projected onto the modes.
-//   Helmholtz    Direct solve per mode: FFT along rows, tridiagonal in
-//                latitude per wavenumber, inverse FFT into PhiStar.
+//   Helmholtz    Per mode: FFT along rows, tridiagonal in latitude per
+//                wavenumber, inverse FFT into PhiStar.
 //   Correct      Back to layers: V^{n+1} = V* - alpha dt grad M^{n+1}, and phi.
 //
 // C-GRID FOR THE GRAVITY STEP, CARTESIAN FOR ADVECTION. u on west faces, v on
 // south faces, phi at centres, so div(grad) is exactly SimLaplacian. Advection
-// samples the reconstructed centre velocity as a 3D vector, which crosses the
-// poles without the sign reversal east/north components take there.
+// samples the centre velocity as a 3D vector, which crosses the poles without
+// the sign reversal of east/north components.
 //
-// THE EXPLICIT HALF TRAVELS WITH THE PARCEL. The (1-alpha) gravity terms are
-// built as a field at time n and sampled at the departure point. PITFALL:
-// evaluated at the arrival point instead, the scheme amplifies gravity waves
-// whenever the flow is faster than about (2 alpha - 1) / (2 (1 - alpha)) of the
-// wave speed. Across layers the same mismatch remains, since a layer's pressure
-// includes the layers above and below it moving at their own speed; that is
-// why the subsystem raises alpha at large steps on a stack.
+// PITFALL: the (1-alpha) explicit terms must be sampled at the departure
+// point. At the arrival point the scheme amplifies gravity waves once the flow
+// exceeds about (2 alpha - 1) / (2 (1 - alpha)) of the wave speed. On a stack
+// the mismatch remains across layers, hence the raised alpha at large steps.
+// PITFALL: a collocated gravity step has a checkerboard mode: phi decouples
+// into two interleaved grids.
 //
-// PITFALL: A COLLOCATED GRAVITY STEP HAS A CHECKERBOARD MODE. Centred gradient
-// and divergence at cell centres compose into a Laplacian of spacing 2 dx that
-// cannot see red-black alternation, and phi decouples into two interleaved
-// grids.
-//
-// NON-DIMENSIONAL ON A UNIT SPHERE. Velocities are physical speeds on that
-// sphere, so the east component of a zonal flow of angular rate R is
-// R cos(latitude). phi is a layer's thickness anomaly in geopotential units
-// and SimLayerState.x its mean, so the layer is x + phi deep.
+// NON-DIMENSIONAL ON A UNIT SPHERE. Velocities are physical speeds on it. phi
+// is a layer's thickness anomaly in geopotential units; the layer is
+// SimLayerState.x + phi deep.
 
 #include "/Engine/Public/Platform.ush"
 #include "/Engine/Private/Common.ush"
@@ -62,9 +48,8 @@
 // The atlas layout, gutter and face basis the resample writes the output in.
 #include "/Plugin/CloudAtmosphere/Private/FlowField.ush"
 
-// Group sizes arrive as defines from FlowSimShaders.cpp, which FlowSimulation.cpp
-// also sizes every dispatch from. PITFALL: a literal here instead leaves the two
-// linked only by coincidence, and a mismatch under-covers the grid silently.
+// Group sizes come as defines from FlowSimShaders.cpp, which also sizes every
+// dispatch. PITFALL: a literal here under-covers the grid silently on mismatch.
 
 // -- Parameters -------------------------------------------------------------
 
@@ -87,13 +72,11 @@
 #define SimLayerProfile FlowSimUB.LayerProfile
 
 /** Per layer: x mean geopotential (the layer's depth), y Helmholtz scale
- *  (alpha dt)^2 c^2 of the vertical mode in this slice, z saturation factor;
- *  w unused. */
+ *  (alpha dt)^2 c^2 of this slice's vertical mode, z saturation factor. */
 #define SimLayerState FlowSimUB.LayerState
 
-/** The stack's vertical coupling, each an 8 x 8 row-major matrix in 16 float4s:
- *  layers to Montgomery potential and back, modes to layers and back, and modes
- *  straight to Montgomery potential. */
+/** 8 x 8 row-major coupling matrices in 16 float4s: layers <-> Montgomery
+ *  potential, modes <-> layers, and modes -> Montgomery potential. */
 #define SimMatMontgomery FlowSimUB.MatMontgomery
 #define SimMatMontgomeryInverse FlowSimUB.MatMontgomeryInverse
 #define SimMatModeToLayer FlowSimUB.MatModeToLayer
@@ -105,11 +88,9 @@
 /** One turnover in sim time. */
 #define SimTurnover FlowSimUB.Turnover
 
-/** The step's start in forcing lifetimes, as a whole cycle and a fraction,
- *  and in noise reset periods, wrapped in double precision on the CPU.
- *  PITFALL: AN ABSOLUTE TIME IN FLOAT32 STOPS RESOLVING THE STEP after a few
- *  hundred time units at small steps: resets stop firing and the forcing's
- *  phases quantise. */
+/** Step start in forcing lifetimes (whole cycle and fraction) and in noise
+ *  reset periods, wrapped in double on the CPU. PITFALL: an absolute float32
+ *  time stops resolving the step: resets stop firing and phases quantise. */
 #define SimForcingCycle FlowSimUB.ForcingCycle
 #define SimForcingFraction FlowSimUB.ForcingFraction
 #define SimNoiseClock FlowSimUB.NoiseClock
@@ -117,12 +98,10 @@
 /** 2 * Omega; f = SimPlanetaryVorticity * mu. */
 #define SimPlanetaryVorticity FlowSimUB.PlanetaryVorticity
 
-/** Square of the wave speed the deformation radius sets: the stack's first
- *  internal mode, or the one layer's. */
+/** Squared deformation wave speed: the first internal mode's, or the layer's. */
 #define SimWaveSpeedSq FlowSimUB.WaveSpeedSq
 
-/** Off-centring of the implicit terms. 0.5 is Crank-Nicolson; above it the
- *  scheme damps gravity waves, and below it is unstable. */
+/** Implicit off-centring: 0.5 Crank-Nicolson, above damps, below unstable. */
 #define SimImplicitWeight FlowSimUB.ImplicitWeight
 
 #define SimNudgeRate FlowSimUB.NudgeRate
@@ -147,9 +126,8 @@
  *  midlatitude zone, 1 the jets; z zone latitude, w zone half-width, radians. */
 #define SimThermalParams FlowSimUB.ThermalParams
 
-/** Cloud rates, per unit time, against normalised vertical motion W in (-1, 1):
- *  condensation in rising saturated air, evaporation in sinking air, and the
- *  inverse lifetime every cloud rains out at. */
+/** Cloud rates per unit time against vertical motion W in (-1, 1): condensation
+ *  rising, evaporation sinking, and the inverse rain-out lifetime. */
 #define SimCondensationRate FlowSimUB.CondensationRate
 #define SimEvaporationRate FlowSimUB.EvaporationRate
 #define SimCloudDecay FlowSimUB.CloudDecay
@@ -163,8 +141,7 @@
  *  of vapour condensed. */
 #define SimLatentHeating FlowSimUB.LatentHeating
 
-/** Time constant of the vertical motion's low-pass along the flow; zero reads
- *  it raw. See MainReconstructCS. */
+/** Along-flow low-pass time constant of vertical motion; zero reads it raw. */
 #define SimAscentSmoothing FlowSimUB.AscentSmoothing
 
 /** x formation rate, y intensity threshold, z vorticity gain, w decay rate. */
@@ -174,26 +151,22 @@
 #define SimWindEvaporation FlowSimUB.WindEvaporation
 
 /** Storm cells; see MainCellsCS and SimCellStamp.
- *    Shape    x radius (radians), y the vectors' inner ramp and z eyewall
- *             radius as fractions of it, w vector strength at the ramp's edge
- *             as a fraction of the eyewall's.
- *    Vortex   x falloff exponent past the eyewall, y rate the flow relaxes
- *             toward the target vortex, z the top layer's share of the target
- *             (the bottom's is 1), w target eyewall wind at full intensity.
- *    Draft    x draft at full strength, y draft in the eye, both W units;
- *             z storm raised in the intense band, w pressure drop through
- *             the eyewall, easing to none at the radius, in the output's
- *             normalised units.
- *    Life     x spawn attempts per unit time, y growth rate, z decay rate,
- *             w lifetime.
+ *    Shape    x radius (radians); y eye ramp and z eyewall radius as fractions
+ *             of it; w vector strength at the ramp's edge over the eyewall's.
+ *    Vortex   x falloff exponent past the eyewall, y relax rate toward the
+ *             target vortex, z top layer's share of the target (bottom 1),
+ *             w target eyewall wind at full intensity.
+ *    Draft    x draft at full strength, y in the eye, both W units; z storm
+ *             raised in the intense band; w pressure drop through the eyewall,
+ *             easing to none at the radius, normalised output units.
+ *    Life     x spawn attempts per unit time, y growth, z decay, w lifetime.
  *    Motion   x poleward-west drift speed, y pull toward the parent storm,
  *             z and w genesis latitudes, radians.
  *    Genesis  x shear limit, y humidity threshold, z storm a seed needs,
  *             w cyclonic vorticity at which a seed counts fully.
- *    Cloud    x rate each layer's cloud is lifted toward full cover at the
- *             eyewall, y unused, z inflow below and outflow above at the
- *             eyewall as a fraction of the target wind, w storm raised
- *             across the whole storm. */
+ *    Cloud    x eyewall cloud lift rate per layer, y unused, z inflow below
+ *             and outflow above at the eyewall as a fraction of target wind,
+ *             w storm raised across the whole storm. */
 #define SimCellShape FlowSimUB.CellShape
 #define SimCellVortex FlowSimUB.CellVortex
 #define SimCellDraft FlowSimUB.CellDraft
@@ -218,16 +191,13 @@
 /** Share of the low's eye its rim ramps over; see SimCellEyeSource. */
 #define SimCellEyeSoftness FlowSimUB.CellEyeSoftness
 
-/** Vector strength, as a share of the eyewall's, where the intense band
- *  begins; and the width of the smooth max joining a cell's storm to the
- *  sim's, so storms within it blend rather than meeting at a crease. */
+/** Vector strength (share of the eyewall's) where the intense band begins;
+ *  width of the smooth max blending a cell's storm with the sim's. */
 #define SimCellBandFloor FlowSimUB.CellBandFloor
 #define SimCellStormBlend FlowSimUB.CellStormBlend
 
-/** Rates, per turnover, at which the eye tracer rises toward its source and
- *  falls back where the source has moved on. The fall against the eye's spin
- *  sets how far the flow winds it, so in turnovers it winds as far at any
- *  rotation and speed. */
+/** Rates per turnover the eye tracer rises toward its source and falls back;
+ *  in turnovers, the winding is the same at any rotation and speed. */
 #define SimCellEyeRate FlowSimUB.CellEyeRate
 #define SimCellEyeDecay FlowSimUB.CellEyeDecay
 
@@ -245,13 +215,12 @@
 /** Live cell slots, up to FLOWSIM_MAX_CELLS. */
 #define SimCellCount FlowSimUB.CellCount
 
-/** Perpetual storms: the first PerpetualCount cell slots, pinned. Their centres
- *  and traits come from here each step rather than from spawns and the flow.
- *    Shape  x latitude, y longitude at this step, z radius across latitude,
- *           all radians; w the longitude axis over the latitude axis.
- *    Look   x target wind, signed by rotation sense (positive
- *           counterclockwise seen from outside); y storm across the whole
- *           storm; z pressure drop; w cloud lift rate.
+/** Perpetual storms: the first PerpetualCount cell slots, pinned, with centres
+ *  and traits set here each step.
+ *    Shape  x latitude, y longitude this step, z radius across latitude, all
+ *           radians; w longitude axis over latitude axis.
+ *    Look   x target wind, signed by sense (+ counterclockwise from outside);
+ *           y storm across the storm; z pressure drop; w cloud lift rate.
  *    Form   x inflow, a signed share of the target wind; y share of the eye.
  *  SimPerpetualForcing is the rate the flow relaxes toward their pushes. */
 #define SimPerpetualCount FlowSimUB.PerpetualCount
@@ -347,10 +316,8 @@ RWTexture2D<float> SimMontgomeryEqUAV;
 Texture2D<float> SimGlobalMeanSRV;
 RWTexture2D<float> SimGlobalMeanUAV;
 
-/** The output on the sim's own grid. Slices [0, L) are flow, [L, 2L)
- *  weather, [2L, 3L) noise phase A with the eye tracer in w, which the
- *  resample blends between states as it does the rest, and [3L, 4L) noise
- *  phase B with the humidity in w. */
+/** Output on the sim grid. Slices [0, L) flow, [L, 2L) weather, [2L, 3L) noise
+ *  phase A with the eye tracer in w, [3L, 4L) noise phase B with humidity in w. */
 Texture2DArray<float4> SimLatLonSRV;
 RWTexture2DArray<float4> SimLatLonUAV;
 
@@ -361,8 +328,7 @@ Texture2DArray<float4> SimCentreLatestSRV;
 Texture2DArray<float4> SimLatLonLatestSRV;
 #define SimStateBlend FlowSimUB.StateBlend
 
-/** Nonzero when Reconstruct writes the latest pair for the resample, which
- *  reads no explicit field, so it skips that one. */
+/** Nonzero when Reconstruct writes the latest pair; skips the explicit field. */
 int SimReconstructLatest;
 
 /** The flow atlas the field reads: SimLatLon's slices resampled onto the
@@ -508,9 +474,8 @@ float SimThermalShape(float Mu)
     return exp(-Offset * Offset);
 }
 
-/** Angular rate of the prescribed zonal flow for a layer: the jet profile
- *  plus the layer's share of the thermal shear. The nudge, the balance and so
- *  the thermal relaxation all target it. */
+/** Angular rate of a layer's prescribed zonal flow: the jet profile plus its
+ *  share of the thermal shear. Target of the nudge, balance and relaxation. */
 float SimZonalRate(float Mu, uint Layer)
 {
     float BandCount, JetStrength, Boost, Asymmetry;
@@ -572,11 +537,10 @@ float SimBackgroundVorticity(float Mu)
     return (2.0f * Mu * Rate - (1.0f - Mu * Mu) * Slope) / (float) max(L, 1u);
 }
 
-/** The sense a storm cell turns with at P, easing through zero. On a banded
- *  planet, the shear of the band it sits in: a vortex against its band's
- *  shear is torn apart, so the sense alternates band to band. On a three-cell
- *  planet, the hemisphere's over 1 / Sharpness: a hurricane is a low, and the
- *  planet's rotation turns its inflow cyclonic whatever the shear. */
+/** Rotation sense a storm cell turns with at P, easing through zero. Banded:
+ *  its band's shear sense, since a vortex against it is torn apart. Three-cell:
+ *  the hemisphere's over 1 / Sharpness, since rotation turns a low's inflow
+ *  cyclonic whatever the shear. */
 float SimSpinSense(float3 P, float Sharpness)
 {
     if (SimZonalProfile == SIM_PROFILE_THREE_CELL)
@@ -619,10 +583,9 @@ float3 SimHash3(uint X)
     return float3(SimHash(X), SimHash(X ^ 0x68E31DA4u), SimHash(X ^ 0xB5297A4Du)) * (1.0f / 4294967296.0f);
 }
 
-/** One forcing phase's slope along Dir at P: the noise at a random offset for
- *  this cycle, carried east at the local zonal-mean angular rate for the
- *  cycle's age. Divided by the forcing scale so the amplitude reads as a
- *  velocity whatever the noise frequency. */
+/** One forcing phase's slope along Dir at P: noise at this cycle's random
+ *  offset, carried east at the row's angular rate for the cycle's age, divided
+ *  by the forcing scale so the amplitude reads as a velocity. */
 float SimForcingPhase(float3 P, float3 Dir, uint Layer, float Rate, uint Cycle, float Fraction, uint Phase)
 {
     const float Age = Fraction * SimForcingLifetime;
@@ -635,9 +598,8 @@ float SimForcingPhase(float3 P, float3 Dir, uint Layer, float Rate, uint Cycle, 
     const float3 Q = float3(CosA * P.x - SinA * P.y, SinA * P.x + CosA * P.y, P.z);
     const float3 D = float3(CosA * Dir.x - SinA * Dir.y, SinA * Dir.x + CosA * Dir.y, Dir.z);
 
-	// ONE VOLUME TEXEL EITHER SIDE. A trilinear field is piecewise linear, so
-	// a difference narrower than a texel returns its piecewise-constant
-	// gradient, which jumps on every texel face: the volume's lattice is drawn
+	// ONE VOLUME TEXEL EITHER SIDE. PITFALL: a narrower difference of a trilinear
+	// field returns its piecewise-constant gradient, drawing the volume's lattice
 	// into the flow as arcs and herringbone.
     uint VolumeW, VolumeH, VolumeD;
     SimForcingNoise.GetDimensions(VolumeW, VolumeH, VolumeD);
@@ -652,14 +614,11 @@ float SimForcingPhase(float3 P, float3 Dir, uint Layer, float Rate, uint Cycle, 
 }
 
 /** Slope of the forcing streamfunction along Dir at P. The forcing velocity is
- *  Up x grad(psi): east is -slope along north, north is +slope along east,
- *  which keeps it divergence-free. Rate is the row's zonal-mean angular rate.
- *
- *  SHORT-LIVED AND CARRIED WITH THE FLOW. Two phases half a lifetime apart,
- *  each a fresh random pattern that drifts east with the jets and fades out
- *  before it resets. PITFALL: a pattern fixed in space, or one that changes
- *  slowly, pins every eddy it makes to one spot. Renormalised by the weights
- *  so the crossfade does not dip the variance. */
+ *  Up x grad(psi), divergence-free: east is -slope along north, north is +slope
+ *  along east. Two phases half a lifetime apart, each a fresh random pattern
+ *  drifting east with the jets and fading before it resets, renormalised so
+ *  the crossfade keeps the variance. PITFALL: a fixed or slowly changing
+ *  pattern pins every eddy it makes to one spot. */
 float SimForcingSlope(float3 P, float3 Dir, uint Layer, float Rate)
 {
     if (SimHasForcing == 0)
@@ -681,9 +640,8 @@ float SimForcingSlope(float3 P, float3 Dir, uint Layer, float Rate)
 		* rsqrt(WeightA * WeightA + WeightB * WeightB);
 }
 
-/** Cubic sample clamped to the range of the four nearest centres. Keeps a
- *  bounded tracer bounded: Catmull-Rom overshoots at sharp edges, and an
- *  overshoot below zero is negative cloud. */
+/** Cubic sample clamped to the four nearest centres' range: Catmull-Rom
+ *  overshoot at sharp edges would make negative cloud. */
 float4 SimSampleBounded4(Texture2DArray<float4> Field, float2 Grid, uint Layer)
 {
     const int2 Base = (int2) floor(Grid);
@@ -705,8 +663,7 @@ float3 SimRotateZ(float3 V, float Angle)
     return float3(V.x * C - V.y * S, V.x * S + V.y * C, V.z);
 }
 
-/** Whether a noise phase resets during the step. Phase 1 runs half a period
- *  behind phase 0. */
+/** Whether a noise phase resets this step; phase 1 lags half a period. */
 bool SimNoiseResets(uint Phase)
 {
     const float Before = SimNoiseClock + 0.5f * (float) Phase;
@@ -759,13 +716,10 @@ float SimCondensedAt(int2 C, uint Layer, float Mu)
     return SimCondensation(Vapour, Saturation, W) * Saturation;
 }
 
-/** SimCondensedAt smoothed over the centre and its four neighbours, half and
- *  an eighth each: no response to the grid-scale checkerboard.
- *
- *  PITFALL: UNSMOOTHED, LATENT HEAT FEEDS GRID-SCALE CONVECTION. A single cell
- *  condensing lifts mass, converges more air, condenses more, and the
- *  vertical motion breaks into checkerboard columns and fronts sweeping out
- *  from any strong updraught. */
+/** SimCondensedAt smoothed over the centre (1/2) and its four neighbours (1/8
+ *  each), blind to the grid-scale checkerboard. PITFALL: unsmoothed, latent
+ *  heat feeds grid-scale convection: vertical motion breaks into checkerboard
+ *  columns and fronts sweeping out from strong updraughts. */
 float SimCondensedSmooth(int2 C, uint Layer)
 {
     float Sum = 0.5f * SimCondensedAt(C, Layer, SimRowToMu((float) C.y));
@@ -782,10 +736,9 @@ float SimCondensedSmooth(int2 C, uint Layer)
     return Sum;
 }
 
-/** Diabatic mass flux up across interface I, the top of layer I, at a centre:
- *  relaxation of the interface toward its balanced height, plus the latent
- *  heat of what layer I condenses. Moves mass from layer I into layer I - 1,
- *  so each column's total is untouched. */
+/** Diabatic mass flux up across interface I (top of layer I) at a centre:
+ *  relaxation toward the balanced height plus layer I's latent heat. Moves
+ *  mass from layer I into I - 1, so each column's total is untouched. */
 float SimInterfaceFlux(int2 C, uint Interface)
 {
     float Height = 0.0f;
@@ -805,13 +758,10 @@ float SimInterfaceFlux(int2 C, uint Interface)
 
 // -- Storm cells ------------------------------------------------------------
 //
-// A small set of tracked storm centres riding on the sim's own storms. Each
-// spawns on a storm with cyclonic spin in the genesis band, follows it with the
-// stack's mean flow, and fades once the storm beneath it is gone. While alive
-// it pushes the flow around it toward a vortex (SimCellStream), which the flow
-// then carries its cloud, storm and noise around, and on the output it raises
-// the storm across the whole storm, most in its eyewall band, deepening the
-// cloud already there (SimCellStamp).
+// Tracked storm centres. Each spawns on a cyclonic storm in the genesis band,
+// follows the stack's mean flow, and fades once its storm is gone. While alive
+// it pushes the flow toward a vortex (SimCellStream) and raises storm on the
+// output, most in its eyewall band (SimCellStamp).
 
 /** Latitude, radians, over which the genesis band fades out equatorward and
  *  poleward of its limits. */
@@ -868,19 +818,14 @@ float SimGenesisWindow(float3 P, float3 VTop, float3 VBottom)
     return Band * saturate(1.0f - length(VTop - VBottom) / max(SimCellGenesis.x, 1e-4f));
 }
 
-/** The genesis window and the bottom layer's relative humidity about P, from
- *  the state Reconstruct wrote this step, as means over a six-point ring Ring
- *  radians out. A live cell reads them at half its radius, which cancels its
- *  own vortex and inflow; a seed reads them at its point (Ring 0), where no
- *  vortex exists yet.
- *
- *  PITFALL: READ AT THE CENTRE, A LIVE CELL JUDGES ITSELF. Wherever the centre
- *  sits between grid points its own vortex leaks into the sample, and the top
- *  layer's counter-spin and outflow against the bottom's read as shear that
- *  closes the window under a healthy storm.
- *  PITFALL: READ ON THE RING, A SEED SEES ONLY THE ZONAL SHEAR. The ring
- *  averages away the local eddy winds that open the window in places, and
- *  under a strong thermal shear no seed passes. */
+/** Genesis window and the bottom layer's relative humidity about P, from this
+ *  step's Reconstruct output, as means over a six-point ring Ring radians out.
+ *  A live cell reads at half its radius, cancelling its own vortex and inflow;
+ *  a seed reads at its point (Ring 0).
+ *  PITFALL: read at the centre, a live cell's own vortex leaks into the sample
+ *  and its layers' counter-spin reads as shear that closes its window.
+ *  PITFALL: read on the ring, a seed sees only the zonal shear; the local eddy
+ *  winds that open the window average away. */
 float2 SimCellConditions(float3 P, float Ring)
 {
     const uint L = (uint) SimGridSize.z;
@@ -962,10 +907,9 @@ float SimCellPressure(float3 P)
     return SimSampleBilinear4(SimLatLonSRV, SimDirectionToGrid(P), (uint) SimGridSize.z - 1u).z;
 }
 
-/** How good a seed P is: its storm weighted by cyclonic spin, zero below the
- *  storm a seed needs; or, as a storm of that share of the genesis storm, the
- *  part of a parent its humidity stands in for, which needs no spin since the
- *  cell spins up its own vortex. */
+/** A seed's score: its storm weighted by cyclonic spin, zero below the storm a
+ *  seed needs; or the share of the genesis storm its humidity stands in for,
+ *  which needs no spin since the cell spins up its own vortex. */
 float SimCellSeedScore(float3 P)
 {
     const float2 Parent = SimCellParent(P);
@@ -986,38 +930,25 @@ float SimCellSeedScore(float3 P)
 
 // -- Storm vortex -----------------------------------------------------------
 //
-// A cell's vortex is a field of vectors tangent to circles about its centre,
-// cyclonic in sense, whose strength runs up from zero at the centre to the
-// eye's edge, peaks at the eyewall, holds its peak across SimCellWindBreadth
-// and falls to zero at the radius. The flow
-// is pushed along it as the curl of its streamfunction taken at the cell
-// corners, which on the C-grid is exactly divergence-free: it spins the flow
-// without raising or lowering the surface, and the flow's own advection winds
-// the weather under the cell into spiral bands.
+// A cell's vortex: vectors tangent to circles about its centre, rising from
+// zero at the centre to a peak at the eyewall, held across SimCellWindBreadth,
+// falling to zero at the radius. The push is the curl of its streamfunction at
+// the cell corners, exactly divergence-free on the C-grid.
 //
-// The push is closed-loop. MainCellsCS measures each layer's cyclonic wind on
-// a ring about the centre and stores a per-layer gain, the gap to the target
-// as a share of the target wind; the push is that gain times the vortex, so
-// the flow relaxes toward the target, and a storm already at or past it is
-// left alone (SimCellTowardTarget).
+// Both pushes are closed-loop. MainCellsCS measures each layer's cyclonic wind
+// and inflow on a ring and stores per-layer gains, the gap to the target as a
+// share of the target wind (SimCellTowardTarget). The secondary circulation is
+// inflow below and outflow above along a potential on the stamp's profile
+// (SimCellPotential); its inflow fraction sets the spiral's pitch, and its
+// convergence condenses and lifts mass through latent heat.
 //
-// The secondary circulation is closed-loop the same way: inflow below and
-// outflow above along the gradient of a potential on the stamp's profile
-// (SimCellPotential), its gain the gap between the eyewall ring's measured
-// inflow and a fixed fraction of the target wind. That fraction sets the
-// spiral's pitch. Its convergence across the core condenses, and the latent
-// heat lifts the mass across the interfaces: the storm's own chimney.
-//
-// PITFALL: CONVERGENCE CONFINED TO THE EYEWALL STARVES THE CELL. The storm
-// tracer under the whole core is what keeps a cell alive; an inflow that
-// converges only in a thin eyewall band, with the mass vented by a separate
-// flux, leaves the core's storm to decay and the cell with it.
+// PITFALL: convergence confined to a thin eyewall band starves the cell: the
+// storm tracer under the whole core is what keeps a cell alive.
 
-/** The control block follows the cells' 2 FLOWSIM_MAX_CELLS state entries, six
- *  float4 per slot: two of vortex gains and two of inflow gains, one component
- *  per layer each, the cell's health (SIM_CELL_HEALTH), then its low's pressure
- *  at the eyewall, its least, the ring it was measured on and its eased
- *  rotation sense (SIM_CELL_CORE). */
+/** Control block after the 2 FLOWSIM_MAX_CELLS state entries, six float4 per
+ *  slot: two of vortex gains, two of inflow gains (one component per layer),
+ *  health (SIM_CELL_HEALTH), then the low's pressure at the eyewall, its least,
+ *  the ring it was measured on and the eased rotation sense (SIM_CELL_CORE). */
 #define SIM_CELL_CONTROL_BASE (2 * FLOWSIM_MAX_CELLS)
 #define SIM_CELL_CONTROL_STRIDE FLOWSIM_CELL_CONTROL_STRIDE
 #define SIM_CELL_HEALTH 4u
@@ -1034,23 +965,18 @@ float SimCellSeedScore(float3 P)
  *  the target. */
 #define SIM_CELL_GAIN_LIMIT 2.0f
 
-/** The push ramps up to full at SimCellMaturity rather than scaling with
- *  intensity throughout, so a young cell spins up its parent storm while it
- *  still has one to grow on. */
+/** Push strength, full from SimCellMaturity, so a young cell spins up its
+ *  parent storm while it still has one to grow on. */
 float SimCellStrength(float Intensity)
 {
     return saturate(Intensity / SimCellMaturity);
 }
 
-/** A push's gain toward Target from Measured, in units of what the push adds
- *  at gain 1. One-sided: it only ever pushes toward the target's sign, so flow
- *  already past the target is left alone.
- *
- *  PITFALL: A TWO-SIDED LOOP BRAKES THE STORM A CELL SPAWNS ON. A young cell's
- *  targets scale with its low intensity, far below the parent storm's own
- *  spin and convergence, so it spins the storm down and pushes its air
- *  outward: the parent dies, the cell with it, and the outflow's sinking air
- *  cuts holes in the cloud. */
+/** A push's gain toward Target from Measured, in units of the push at gain 1.
+ *  One-sided: flow already past the target is left alone. PITFALL: a two-sided
+ *  loop brakes the parent storm, whose spin and convergence exceed a young
+ *  cell's targets: the parent dies, the cell with it, and outflow holes the
+ *  cloud. */
 float SimCellTowardTarget(float Target, float Measured, float Unit)
 {
     const float Gain = clamp((Target - Measured) / Unit, -SIM_CELL_GAIN_LIMIT, SIM_CELL_GAIN_LIMIT);
@@ -1111,9 +1037,8 @@ float SimCellProfile(float R)
     return SimCellProfileHeld(R, SimCellWall());
 }
 
-/** SimCellProfileHeld integrated from the centre to R, in closed form piece
- *  by piece: what the vortex's streamfunction and the inflow's potential are
- *  built from. */
+/** SimCellProfileHeld integrated from the centre to R in closed form: the
+ *  basis of the vortex's streamfunction and the inflow's potential. */
 float SimCellIntegralHeld(float R, float Hold)
 {
     const float Eye = SimCellShape.y;
@@ -1231,10 +1156,9 @@ float3 SimCellEastOf(float3 P)
     return (dot(East, East) > 1e-8f) ? normalize(East) : float3(1.0f, 0.0f, 0.0f);
 }
 
-/** Radius, in a slot's radii, where its vortex's wind starts to fall: the
- *  eyewall plus SimCellWindBreadth of the span beyond it. The fall-off keeps
- *  SIM_CELL_RING_CELLS grid cells at least, or the rim is a grid-scale shear
- *  sheet. */
+/** Radius, in slot radii, where its vortex's wind starts to fall: the eyewall
+ *  plus SimCellWindBreadth of the span beyond. The fall-off keeps at least
+ *  SIM_CELL_RING_CELLS grid cells, or the rim is a grid-scale shear sheet. */
 float SimCellWindHoldFor(float Radius)
 {
     const float Wall = SimCellWall();
@@ -1243,12 +1167,9 @@ float SimCellWindHoldFor(float Radius)
     return min(lerp(Wall, 1.0f, saturate(SimCellWindBreadth)), min(Cap, 0.999f));
 }
 
-/** How sharply a cell's rotation sense turns over at the equator: the push
- *  is 0.8 of full 2 degrees out, 0.96 at 5.
- *
- *  PITFALL: A HARD SIGN FLIPS A CELL DRIFTING ALONG THE EQUATOR BETWEEN SPIN
- *  DIRECTIONS AT FULL STRENGTH, step after step, and every reversal sends a
- *  wave through the whole layer. */
+/** Sharpness of a cell's rotation-sense turnover at the equator: 0.8 of full
+ *  at 2 degrees, 0.96 at 5. PITFALL: a hard sign flips a cell drifting along
+ *  the equator at full strength, each reversal sending a wave through the layer. */
 #define SIM_CELL_HEMISPHERE_SHARPNESS 40.0f
 
 /** A cell's control entry K, written by MainCellsCS this step. */
@@ -1257,10 +1178,9 @@ float4 SimCellControl(uint Slot, uint K)
     return SimCellSRV[SIM_CELL_CONTROL_BASE + SIM_CELL_CONTROL_STRIDE * Slot + K];
 }
 
-/** A slot's reach at N: its centre, its rotation sense (a storm cell's as
- *  MainCellsCS measured it this step, a perpetual storm's own), its intensity and the
- *  distance in radii, stretched across its ellipse. False outside it. The sim
- *  reads the latest centre; the output reads the displayed one. */
+/** A slot's reach at N: centre, rotation sense (MainCellsCS's this step, or a
+ *  perpetual storm's own), intensity, and distance in radii across its ellipse;
+ *  false outside. bDisplay reads the displayed centre, otherwise the latest. */
 bool SimCellReach(uint Slot, float3 N, bool bDisplay,
 	out float3 Axis, out float Sense, out float Intensity, out float R)
 {
@@ -1330,16 +1250,13 @@ float SimCellInflowGain(uint Slot, uint Layer)
     return SimCellControl(Slot, 2u + (Layer >> 2))[Layer & 3u];
 }
 
-/** Share of the speed ceiling's cap a cell's combined vortex and inflow
- *  targets stay under. The inflow's target gives way to the vortex's, so the
- *  loop never asks for what the ceiling cannot deliver. */
+/** Share of the speed ceiling's cap a cell's combined vortex and inflow targets
+ *  stay under; the inflow's target gives way to the vortex's. */
 #define SIM_CELL_TARGET_CEILING 0.9f
 
-/** The storm tracer the live cells top up toward at P: SimCellSustain times
- *  the strongest cell's strength times the stamp's profile, so it peaks
- *  along the eyewall and leaves the eye to the flow. Relaxed toward at the
- *  formation rate against the storm's decay, so the storm settles near
- *  rate / (rate + decay) of it. */
+/** Storm tracer the live cells top up toward at P: SimCellSustain times the
+ *  strongest cell's strength times the stamp's profile. Relaxed at the formation
+ *  rate against decay, it settles near rate / (rate + decay) of it. */
 float SimCellStormFloor(float3 P)
 {
     float Floor = 0.0f;
@@ -1373,37 +1290,19 @@ float SimSmootherstep(float A, float B, float X)
 
 /** Where the cells' cores feed the eye tracer at P, [0, 1], given the bottom
  *  layer's pressure there: each cell's strength over its low's core. The
- *  tracer settles on this profile, so it is the eye's cross-section: a rounded
- *  shoulder at the rim and a rounded floor.
+ *  tracer settles on this profile, so it is the eye's cross-section.
  *
- *  THE LOW'S CORE IS THE FLOW'S EYE. A balanced vortex turns about its
- *  pressure minimum, whatever the shape of its vorticity. MainCellsCS reads the
- *  low's pressure on the eyewall ring and its least inside (SIM_CELL_CORE),
- *  and the eye is what the eyewall's isobar encloses, at the cell's strength.
- *  It follows the isobars wherever the low's centre is, so it sits on the
- *  centre of rotation the cloud spirals into, and deepens toward it.
+ *  The eye is what the eyewall's isobar encloses (SIM_CELL_CORE), so it sits
+ *  on the low's centre of rotation. Depth below that isobar is read back as an
+ *  equivalent radius (a low deepens about as r^2), 1 on the isobar and 0 at
+ *  the minimum, and the eye ramps in over its outer SimCellEyeSoftness on a
+ *  quintic. The flow carries the eye tracer (MainPredictCS, noise phase B's
+ *  w), so its shape is the flow's and it cannot blink out between steps.
  *
- *  THE RIM RAMPS IN RADIUS, NOT PRESSURE. A low deepens about as the square
- *  of the distance in, so the depth below the eyewall's isobar, as a share of
- *  the low's, is read back as an equivalent radius, 1 on the isobar and 0 at
- *  the minimum. The eye ramps in over the outer SimCellEyeSoftness of it on a
- *  quintic S curve, full inside. PITFALL: A RAMP IN PRESSURE, or a cubic one,
- *  starts at the rim with a jump in curvature that the deck's lighting draws
- *  as a ridge around the eye.
- *
- *  PITFALL: AN EYE FROM THE VORTICITY LEANS OFF THE CENTRE. A storm's
- *  vorticity peaks in a ring or hook that is often open on one side, and what
- *  it encloses runs out through the gap.
- *
- *  THE EYE IS A TRACER THE FLOW CARRIES, fed at each core and fading back
- *  (MainPredictCS, noise phase B's w). The flow deforms it, drags it with the
- *  storm's motion and winds it into streaks at its edge, so its shape is the
- *  flow's, and having memory it cannot blink out between steps.
- *
- *  PITFALL: AN EYE MEASURED FROM THE CALM AIR EACH STEP IS NOT A STABLE THING.
- *  The eye's calm core is a grid cell or two across: judged against any
- *  estimate of the storm's motion it slides into a crescent, and a centre
- *  found from it wanders and loses it. */
+ *  PITFALL: a ramp in pressure, or a cubic, draws a ridge at the rim in the
+ *  deck's lighting. PITFALL: an eye from the vorticity leans off centre, since
+ *  vorticity peaks in an often-open ring. PITFALL: an eye measured from calm
+ *  air each step slides into a crescent and its centre wanders. */
 float SimCellEyeSource(float3 P, float Pressure)
 {
     float Source = 0.0f;
@@ -1419,10 +1318,9 @@ float SimCellEyeSource(float3 P, float Pressure)
             const float4 Low = SimCellControl((uint) Slot, SIM_CELL_CORE);
             const float Depth = Low.x - Low.y;
 
-			// Out over one to two of the ring the low was measured on, which the
-			// grid floors at two cells, on a quintic. PITFALL: faded over the
-			// eyewall radius instead, an eyewall under a cell clips the eye
-			// inside its isobar and one past half the radius is cut at the edge.
+			// Fades over one to two of the low's measuring ring, floored at two cells.
+			// PITFALL: faded over the eyewall radius, an eyewall under a cell clips the eye
+			// inside its isobar, and one past half the radius cuts it at the edge.
             const float Near = 1.0f - SimSmootherstep(Low.z, min(2.0f * Low.z, 1.0f), R);
             const float Rim = sqrt(max(1.0f - (Low.x - Pressure) / max(Depth, 1e-5f), 0.0f));
             const float Core = (Depth > 1e-5f) ? 1.0f - SimSmootherstep(1.0f - SimCellEyeSoftness, 1.0f, Rim) : 0.0f;
@@ -1435,11 +1333,9 @@ float SimCellEyeSource(float3 P, float Pressure)
 }
 
 /** Every live slot's streamfunction at P on a layer, times the share of the
- *  gap its push closes this step: its target wind times its radius times the
- *  wind profile's integral out to P, less the whole integral, times the
- *  layer's gain. It is zero outside the slot, and its curl runs gain times
- *  target wind times the wind profile along the slot's sense, as |grad R|
- *  across an ellipse: Wind / Aspect at the ends of its long axis. */
+ *  gap its push closes this step: target wind times radius times the layer's
+ *  gain times the wind profile's integral to P less the whole. Zero outside the
+ *  slot; its curl follows the wind profile, Wind / Aspect at the long axis ends. */
 float SimCellStream(float3 P, uint Layer)
 {
     float Psi = 0.0f;
@@ -1471,9 +1367,8 @@ float SimCellCornerPsi(int I, int J, uint Layer)
     return SimCellStream(SimDirection(SimColumnToLon((float) I - 0.5f), SimFaceToMu((float) clamp(J, 0, SimGridSize.y))), Layer);
 }
 
-/** Whether any live slot is within its reach and two grid cells of P: the
- *  gate on the cells' reads. The cells are two rows tall where the rows,
- *  even in mu, stretch toward the poles. */
+/** Whether any live slot is within its reach plus two grid cells of P (two rows
+ *  where the even-in-mu rows stretch poleward): gates the cells' reads. */
 bool SimCellNear(float3 P)
 {
     const float RowMu = 2.0f / (float) SimGridSize.y;
@@ -1499,12 +1394,10 @@ float2 SimCellFlow(int I, int J, uint Layer)
     return SimCellFlowSRV.Load(int4(SimWrapColumn(I), J, Layer, 0));
 }
 
-/** Every live slot's velocity potential at P on a layer, times the share of
- *  the gap its push closes this step: its gradient runs the layer's inflow
- *  gain times the target wind toward the centre, on the stamp's profile.
- *  Inward below and outward above, it is the storm's secondary circulation,
- *  which draws what the vortex would wind into rings into trailing spiral
- *  bands and converges under the core. */
+/** Every live slot's velocity potential at P on a layer, times its closing
+ *  share: its gradient is the layer's inflow gain times the target wind toward
+ *  the centre, on the stamp's profile. Inward below and outward above, it winds
+ *  the weather into trailing spiral bands and converges under the core. */
 float SimCellPotential(float3 P, uint Layer)
 {
     const float Whole = SimCellIntegral(1.0f);
@@ -1529,22 +1422,14 @@ float SimCellPotential(float3 P, uint Layer)
 }
 
 /** The rate the cells lift each layer's cloud toward full cover, before the
- *  eye's share: MainPredictCS scales it by one less the eye tracer.
- *
- *  THE STAMP CARRIES ITS OWN CLOUD, on the same ramp as its vectors: none at
- *  the centre, the most at the eyewall, none at the radius, and less where
- *  the eye tracer is clear. A lift toward full rather than a fixed
- *  target, so it adds to whatever weather is there and a hurricane always
- *  holds more cloud than its surroundings: the last feature cover or erosion
- *  removes. PITFALL: a fixed target below the ambient cloud does nothing, and
- *  the hurricane culls with, or before, the cloud around it. EVERY LAYER, so
- *  the hurricane holds its cloud whichever layer the deck reads, and its upper
- *  cloud spreads with the outflow as a canopy. The flow winds the lifted
- *  cloud, and the deck's noise breaks it up.
- *
- *  THE EYE IS NOT CLEARED HERE: the deck thins it by depth. PITFALL: a
- *  clearing that takes cloud to zero draws an edge along the contour where it
- *  does, in any deck that saturates the cloud amount. */
+ *  eye's share (MainPredictCS scales it by one less the eye tracer). Same ramp
+ *  as the vectors: none at the centre, most at the eyewall, none at the radius.
+ *  A lift toward full on every layer, so a hurricane always holds more cloud
+ *  than its surroundings whichever layer the deck reads.
+ *  PITFALL: a fixed target below the ambient cloud does nothing, and the
+ *  hurricane culls with the cloud around it.
+ *  PITFALL: clearing the eye to zero here draws an edge in any deck that
+ *  saturates the cloud amount; the deck thins the eye by depth instead. */
 float SimCellCloudFeed(float3 P)
 {
     float Target = 0.0f;
@@ -1566,25 +1451,15 @@ float SimCellCloudFeed(float3 P)
     return Target;
 }
 
-/** What the cells add to the output at N, each the strongest overlapping
- *  slot's: the draft; the storm, over the whole storm and highest across the
- *  intense band, so the deck builds the cloud there deepest and darkest; the
- *  low, full through the eyewall and easing to none at the radius; and the
- *  presence that gates the eye. Strength is the largest vector strength, for
- *  the debug view.
- *
- *  THE EYE IS THE ADVECTED EYE TRACER (SimCellEyeSource), which the resample
- *  carries into the deck as depth, not cover, with its sinking draft. Storm is
- *  not cut: the cloud lining the eye is storm cloud.
- *
- *  PITFALL: A DRAWN EYE READS AS A GEOMETRIC CUTOUT OF AN ORGANIC SYSTEM. A
- *  circle, however soft or wobbled, is a shape the flow did not make; cut in
- *  cover, a deck that saturates the cloud amount turns it into a hole punch.
- *
- *  THE WHOLE STORM IS STORM: full from the centre through the eyewall, easing
- *  to none at the radius. PITFALL: raised across the band alone, the rest of a
- *  hurricane takes whatever storm the sim has under it and reads as part storm
- *  and part fair-weather cloud. */
+/** What the cells add to the output at N, each from the strongest overlapping
+ *  slot: the draft; the storm, across the whole storm and highest in the
+ *  intense band; the low, full through the eyewall easing to none at the
+ *  radius; and the presence that gates the eye. Strength is the largest vector
+ *  strength, for the debug view. The eye itself is the advected eye tracer,
+ *  carried into the deck as depth; storm is not cut there.
+ *  PITFALL: a drawn eye reads as a geometric cutout, and as a hole punch in a
+ *  deck that saturates cloud. PITFALL: storm raised across the band alone
+ *  leaves the rest of a hurricane reading as part fair-weather cloud. */
 struct SimStamp
 {
     float Draft;
@@ -1599,12 +1474,9 @@ struct SimStamp
     float Presence;
 };
 
-/** max(A, B) with its crease rounded over a width K, the rounding fading out
- *  as the smaller input falls to zero.
- *
- *  PITFALL: THE PLAIN POLYNOMIAL ROUNDING ADDS K/4 WHERE THE INPUTS ARE EQUAL,
- *  zero and zero included, which puts a storm floor of K/4 under every texel of
- *  the planet. */
+/** max(A, B) with its crease rounded over width K, the rounding fading as the
+ *  smaller input falls to zero. PITFALL: plain polynomial rounding adds K/4
+ *  where the inputs are equal, zeros included: a storm floor under every texel. */
 float SimSmoothMax(float A, float B, float K)
 {
     const float Width = max(K, 1e-4f);

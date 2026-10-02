@@ -15,30 +15,21 @@ class UWorld;
 
 /** Game-thread driver for the flow sim.
  *
- *  A WORLD SUBSYSTEM AND NOT A SCENE VIEW EXTENSION. A view extension runs once
- *  per view, and a planet's weather is world state: one planet has one flow
- *  field however many viewports, reflection captures or PIE windows are looking
- *  at it, so a view extension would step the sim once for each and the sim's
- *  rate would depend on how many things are rendering. The cost is that the work
- *  is enqueued from the game tick rather than scheduled inside the render graph
- *  the scene is already building, landing in its own command list.
+ *  A WORLD SUBSYSTEM, NOT A SCENE VIEW EXTENSION: a planet's weather is world
+ *  state, and a view extension would step the sim once per viewport, reflection
+ *  capture or PIE window. The work is enqueued from the game tick in its own
+ *  command list rather than inside the scene's render graph.
  *
- *  THE CONFIG IS RE-READ EVERY TICK, so every value takes effect on the next
- *  frame and the asset can be tuned live beside the debug target. Only the grid
- *  dimensions are latched; changing those reallocates and re-seeds.
+ *  THE CONFIG IS RE-READ EVERY TICK, so the asset can be tuned live. Only the
+ *  grid dimensions are latched; changing those reallocates and re-seeds.
  *
- *  ONE SIM, MANY PLANETS. Atmospheres claim the sim every tick with their
- *  active config; the nearest drives it, and the others draw the copy of the
- *  field they kept when they last did. Planets are assumed far enough apart
- *  that only one on screen needs live weather.
- *
- *  THE RENDER TARGETS ARE THIS SUBSYSTEM'S, created at run time and sized to
- *  the running config's grid, so no asset has to match the sim.
+ *  ONE SIM, MANY PLANETS. Atmospheres claim the sim every tick; the nearest
+ *  drives it, and the others draw the field copy they kept when they last did.
+ *  The render targets are created at run time, sized to the running grid.
  *
  *  PITFALL: BlueprintType is load-bearing. K2Node_GetSubsystem only offers
- *  classes marked with it, so without it the "Get Flow Sim Subsystem" node
- *  never appears in the palette and every BlueprintCallable member below is
- *  unreachable -- present in the class, impossible to call. */
+ *  classes marked with it; without it every BlueprintCallable member below is
+ *  unreachable. */
 UCLASS(BlueprintType)
 class CLOUDATMOSPHERE_API UFlowSimSubsystem : public UTickableWorldSubsystem
 {
@@ -60,29 +51,21 @@ public:
 	// -- Shadow bake --------------------------------------------------------
 
 	/** Queue one cloud shadow map for this frame. Called by each planet every
-	 *  tick; the request is consumed by the next Tick and not retained. False
-	 *  when it is unusable and dropped.
-	 *
-	 *  HOSTED HERE FOR ORDERING, NOT BECAUSE IT IS SIM STATE. The bake reads the
-	 *  flow texture this subsystem writes, and sharing a tick is what puts the
-	 *  write before the read. It holds no state across frames, has no substeps,
-	 *  and runs whether or not the sim is running.
-	 *
-	 *  ONE MAP PER PLANET, NOT PER VIEW: it is baked once a frame, so a second
-	 *  viewport shares the first's camera-derived layer fades. */
+	 *  tick; consumed by the next Tick and not retained. False when unusable.
+	 *  HOSTED HERE FOR ORDERING: sharing the tick puts the flow texture's write
+	 *  before the bake's read. It holds no state and runs whether or not the sim
+	 *  runs. ONE MAP PER PLANET, NOT PER VIEW: a second viewport shares the
+	 *  first's camera-derived layer fades. */
 	bool RequestShadowBake(const FTerrestrialShadowParams& InParams);
 
 	// -- Ownership ----------------------------------------------------------
 
-	/** Bids for the sim this frame with the claimant's active config. Called by
-	 *  each claiming atmosphere every tick; the bids are resolved as the next
-	 *  frame starts. The nearest claimant drives the sim, and keeps it until
-	 *  another is nearer by a margin. A new owner, or the owner's config
-	 *  changing, restarts the sim from that config's InitialState, after the
-	 *  outgoing owner's field is copied into the Keep target it bid with.
-	 *
-	 *  AN OWNER'S CONFIG WINS: FlowSim.Start is overridden on the next frame
-	 *  while an atmosphere claims the sim. */
+	/** Bids for the sim this frame with the claimant's active config; called by
+	 *  each claiming atmosphere every tick and resolved as the next frame starts.
+	 *  The nearest claimant drives the sim until another is nearer by a margin. A
+	 *  new owner or config restarts the sim from that config's InitialState, after
+	 *  the outgoing owner's field is copied into the Keep target it bid with.
+	 *  AN OWNER'S CONFIG WINS: it overrides FlowSim.Start on the next frame. */
 	void ClaimSimulation(const UObject* Claimant, UFlowSimConfig* InConfig, double Distance,
 		UTextureRenderTarget2DArray* Keep);
 
@@ -96,17 +79,14 @@ public:
 
 	bool IsOwner(const UObject* Claimant) const { return Claimant && Owner.Get() == Claimant; }
 
-	/** The atlas the sim writes and the field reads; null before the first
-	 *  frame the sim steps. */
+	/** The atlas the sim writes and the field reads; null until the sim first steps. */
 	UTextureRenderTarget2DArray* GetFlowTarget() const { return FlowTarget; }
 
-	/** The debug view, one texel per cell, while the config's bDebugView is on;
-	 *  null otherwise. */
+	/** The debug view, one texel per cell, while bDebugView is on; null otherwise. */
 	UTextureRenderTarget2D* GetDebugTarget() const;
 
-	/** The clock a claimant's field was kept at, once, after the copy: the
-	 *  display time and the config it was simulated under. False when nothing
-	 *  was kept for it since the last call. */
+	/** Takes, once, the display time and config a claimant's kept field was at.
+	 *  False when nothing was kept for it since the last call. */
 	bool TakeKeptClock(const UObject* Claimant, double& OutTime, UFlowSimConfig*& OutConfig);
 
 	// -- Control ------------------------------------------------------------
@@ -123,9 +103,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	void ResetSimulation();
 
-	/** Capture the live state into a snapshot asset. BLOCKS on the GPU: it flushes
-	 *  rendering, waits for the readback and copies a few megabytes. An authoring
-	 *  operation, not a runtime one. */
+	/** Capture the live state into a snapshot asset. BLOCKS on the GPU (flush,
+	 *  readback, a few megabytes copied): an authoring operation, not a runtime one. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	bool SaveSnapshot(UFlowSnapshot* Target);
 
@@ -149,14 +128,11 @@ public:
 	float GetSimulatedTime() const { return (float)SimulatedTime; }
 
 	/** Sim time of the state the output shows, one step or less behind
-	 *  GetSimulatedTime. Anything animated alongside the field clocks off this.
-	 *  The sim steps before actors tick, so an actor reads the state this frame
-	 *  renders.
-	 *  PITFALL: READ BEFORE THE STEP, IT LAGS THE RENDERED FIELD BY A FRAME. At a
-	 *  high SimSpeed the noise phases the renderer weights then no longer reach
-	 *  zero where the sim resets them, and the whole field snaps.
-	 *  Double: a float stops resolving a frame's advance within days of sim
-	 *  time, so reduce any phase from it before narrowing. */
+	 *  GetSimulatedTime; anything animated alongside the field clocks off this.
+	 *  The sim steps before actors tick, so actors read the state this frame renders.
+	 *  PITFALL: READ BEFORE THE STEP, IT LAGS THE RENDERED FIELD BY A FRAME, and at
+	 *  high SimSpeed the noise phases miss zero where the sim resets them, snapping
+	 *  the field. Double: reduce any phase from it before narrowing to float. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	double GetDisplayTime() const { return SimulatedTime - (1.0 - StateBlend) * CurrentStep; }
 
@@ -173,9 +149,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	float GetCourant() const;
 
-	/** The params the next frame builds at the last frame's step, derived
-	 *  values included: output scales, stack, implicit weight. False with no
-	 *  config. For inspection; the render thread gets its own copy. */
+	/** The params, derived values included, the next frame builds at the last
+	 *  frame's step. False with no config. For inspection only. */
 	bool GetRunningParams(FFlowSimParams& OutParams) const
 	{
 		if (!Config)
@@ -192,8 +167,7 @@ private:
 	 *  that has no actor ticks. */
 	void OnPreActorTick(UWorld* InWorld, ELevelTick TickType, float DeltaTime);
 
-	/** Resolves the claims, auto-starts if nobody claims, then StepSimulation.
-	 *  Once per frame. */
+	/** Once per frame: resolves claims, auto-starts if unclaimed, then StepSimulation. */
 	void Advance(float DeltaTime);
 
 	/** One atmosphere's bid; see ClaimSimulation. */
@@ -208,8 +182,7 @@ private:
 	/** The bids made since the last frame started. */
 	TArray<FSimClaim> Claims;
 
-	/** The atmosphere driving the sim, and where its field is kept when it
-	 *  stops. */
+	/** The atmosphere driving the sim, and where its field is kept when it stops. */
 	TWeakObjectPtr<const UObject> Owner;
 	TWeakObjectPtr<UTextureRenderTarget2DArray> OwnerKeep;
 
@@ -249,9 +222,8 @@ private:
 	/** Drains ShadowRequests into one render command each. */
 	void BakeShadowMap();
 
-	/** This frame's bakes, one per planet. Cleared on consumption rather than keyed
-	 *  by requester: each request names its own destination, so there is nothing to
-	 *  match up and nothing to leave stale. */
+	/** This frame's bakes, one per planet, cleared on consumption; each request
+	 *  names its own destination, so none is keyed by requester. */
 	TArray<FTerrestrialShadowParams> ShadowRequests;
 
 	/** Builds the flat render-thread snapshot at a step. Returns false if the config is unusable, having
@@ -275,21 +247,17 @@ private:
 
 	FFlowSimulation* Simulation = nullptr;
 
-	/** Hands the render thread the InitialState payload, if there is one worth
-	 *  handing over. Returns true when a restore was queued, so the caller can
-	 *  skip spin-up. */
+	/** Hands the render thread the InitialState payload, if usable. True when a
+	 *  restore was queued, so the caller can skip spin-up. */
 	bool QueueInitialState();
 
-	/** Consults UFlowSimSettings and starts if this world type wants it. Run
-	 *  from the second frame rather than Initialize: the world is not reliably
-	 *  ready to resolve a soft object reference that early, and the first
-	 *  frame's atmospheres have bid by then. */
+	/** Consults UFlowSimSettings and starts if this world type wants it. Runs from
+	 *  the second frame: Initialize is too early to resolve soft references
+	 *  reliably, and by then the first frame's atmospheres have bid. */
 	void TryAutoStart();
 
-	/** Logs any setting that is authored but currently has no effect. An inert
-	 *  parameter is the failure mode this system hides best: nothing errors, the
-	 *  value sits in the details panel looking applied, and the only symptom is
-	 *  that changing it does nothing. */
+	/** Logs any setting that is authored but currently has no effect: an inert
+	 *  parameter raises no error and looks applied in the details panel. */
 	void ReportInertSettings() const;
 
 	/** Logs the speed, the steps it takes per frame at 60 fps, and the Courant
@@ -303,15 +271,13 @@ private:
 
 	bool bTriedAutoStart = false;
 
-	/** The step the last frame took, which the Courant number and a snapshot's
-	 *  parameters are read at. */
+	/** The last frame's step, at which the Courant number and params are read. */
 	float CurrentStep = 1e-5f;
 
 	/** Sim time owed past the latest state, under one step. */
 	float PendingTime = 0.0f;
 
-	/** Where the output sits between the last two states; see
-	 *  FFlowSimParams::StateBlend. */
+	/** Output blend between the last two states; see FFlowSimParams::StateBlend. */
 	float StateBlend = 1.0f;
 
 	int32 LastSubsteps = 0;

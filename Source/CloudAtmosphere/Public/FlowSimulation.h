@@ -6,28 +6,23 @@
 
 class FRDGBuilder;
 
-/** The sim's log channel, shared by the solver and the subsystem that drives it.
- *  Defined in FlowSimulation.cpp. */
+/** The sim's log channel, shared by the solver and the subsystem that drives it. */
 DECLARE_LOG_CATEGORY_EXTERN(LogFlowSim, Log, All);
 
 /** The sim's persistent GPU state and the passes that advance it. Render thread
- *  only: everything arrives through FFlowSimParams, and this class never touches
- *  a UObject.
+ *  only: everything arrives through FFlowSimParams; it never touches a UObject.
  *
- *  POOLED RATHER THAN TRANSIENT, because RDG resources live for one graph and a
- *  simulation is defined by state that survives between them.
+ *  POOLED RATHER THAN TRANSIENT: RDG resources live for one graph, and the sim's
+ *  state must survive between graphs.
  *
- *  THE STATE is the face velocities, the layer thicknesses, the tracers, the
- *  noise displacements and the storm cells. Everything else is rebuilt within a substep.
+ *  THE STATE is the face velocities, layer thicknesses, tracers, noise
+ *  displacements and storm cells. Everything else is rebuilt within a substep.
  *
- *  THE FACE PING-PONG IS TRACKED RATHER THAN INFERRED. Predict, Filter and
- *  Correct each read every face and write every face, so the faces are two
- *  textures with an index that flips three times per substep. An ODD number of
- *  flips means the live buffer alternates between substeps, which is why the
- *  index is a member and every early-out path has to leave it consistent.
- *
- *  The thicknesses need no ping-pong: Correct writes them once per substep from
- *  the modal amplitudes the solve leaves in PhiStar. */
+ *  THE FACE PING-PONG IS TRACKED, NOT INFERRED. Predict, Filter and Correct each
+ *  read and write every face, flipping the index three times per substep, so the
+ *  live buffer alternates between substeps and every early-out path must leave
+ *  the index consistent. The thicknesses need no ping-pong: Correct writes them
+ *  once per substep from the modal amplitudes the solve leaves in PhiStar. */
 class CLOUDATMOSPHERE_API FFlowSimulation
 {
 public:
@@ -60,16 +55,14 @@ public:
 	/** Discard all state. The next Enqueue rebuilds and re-seeds. */
 	void RequestReset();
 
-	/** Hand the next initialisation a captured state to upload instead of
-	 *  seeding. Consumed once; an empty array cancels a pending one. Not routed
-	 *  through FFlowSimParams, which is copied into a render command every
-	 *  frame. */
+	/** Hand the next initialisation a captured state to upload instead of seeding.
+	 *  Consumed once; an empty array cancels a pending one. Kept out of
+	 *  FFlowSimParams, which is copied into a render command every frame. */
 	void QueueRestore_RenderThread(TArray<float>&& InData);
 
-	/** Adds a pass copying the live state into a buffer, and enqueues a
-	 *  readback. Editor-side capture path; the caller flushes and reads.
-	 *  Returns false, with nothing enqueued, when there is no state. OutGrid is
-	 *  the grid the state is allocated at, which the capture's layout follows. */
+	/** Adds a pass copying the live state into a buffer and enqueues a readback
+	 *  for the caller to flush and read. False, with nothing enqueued, when there is
+	 *  no state. OutGrid is the allocated grid the capture's layout follows. */
 	bool AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, class FRHIGPUBufferReadback* Readback, FIntVector& OutGrid);
 
 	/** Adds this frame's passes to the graph. Zero substeps is legal: the output
@@ -122,8 +115,7 @@ private:
 	TRefCountPtr<IPooledRenderTarget> PooledCellFlow;
 	TRefCountPtr<IPooledRenderTarget> PooledCellColumn;
 
-	/** Noise displacements, phase A slices then phase B. Flips with the
-	 *  tracers. */
+	/** Noise displacements, phase A slices then phase B; flips with the tracers. */
 	TRefCountPtr<IPooledRenderTarget> PooledNoise[2];
 
 	/** The output on the sim's own grid, before the resample onto the atlas.
@@ -146,8 +138,7 @@ private:
 	 *  per substep. */
 	int32 CurrentTracer = 0;
 
-	/** Grid the pooled state was allocated for. A change reallocates and
-	 *  re-seeds. */
+	/** Grid the pooled state was allocated for; a change reallocates and re-seeds. */
 	FIntVector AllocatedGrid = FIntVector::ZeroValue;
 
 	/** Consumed by the next initialisation, then emptied. */

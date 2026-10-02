@@ -2,21 +2,19 @@
 
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
 
-// Air transmittance table: density integrals from a point to the top of the
-// atmosphere, indexed by altitude and the cosine toward the light. rgb are the
-// Rayleigh, Mie and absorber integrals -- geometry alone, so any spectrum reads
-// the table without a rebake and the betas turn it into optical depth. Radii are
-// in atmosphere thicknesses. The mapping, its inverse and the profile derivation
-// are shared by the bake and the march; a second copy fails silently, the air
-// keeping its colour and taking the wrong depth.
+// Air transmittance table: density integrals from a point to the atmosphere top,
+// indexed by altitude and the cosine toward the light. rgb are the Rayleigh, Mie
+// and absorber integrals -- geometry alone, so any spectrum reads the table without
+// a rebake and the betas turn it into optical depth. Radii are in atmosphere
+// thicknesses. The bake and the march share the mapping, its inverse and the
+// profile derivation here; a second copy fails silently with the wrong depth.
 //
 // PITFALL: the mapping saturates at the horizon, so rays below it read the
-// horizon's integral. Occlusion is the analytic planet shadow's, and a table
+// horizon's integral. Occlusion comes from the analytic planet shadow; a table
 // that represented it too would darken those samples twice.
 
 /** Table size, pushed by the bake and the march from AtmosphereTransmittance's
- *  Width and Height. The defaults serve passes that include this header
- *  without reading the table. */
+ *  Width and Height. Defaults serve passes that never read the table. */
 #ifndef ATMO_TRANSMITTANCE_WIDTH
 #define ATMO_TRANSMITTANCE_WIDTH 256
 #endif
@@ -25,12 +23,10 @@
 #define ATMO_TRANSMITTANCE_HEIGHT 64
 #endif
 
-/** Air profile in thickness units from the authored pins, as (Rayleigh scale
- *  height, Mie scale height, absorber altitude, absorber half-width). The one
- *  derivation: the march scales it by thickness, the bake takes it as it comes.
- *  Pitfall: the clamps belong here, not in Atmo_Density, which sees the march's
- *  scaled copy and the bake's unscaled one -- floored there, an authored zero
- *  means a different altitude on each path. */
+/** Air profile in thickness units from the authored pins: (Rayleigh scale height,
+ *  Mie scale height, absorber altitude, absorber half-width). The march scales it
+ *  by thickness; the bake uses it as is. Pitfall: the clamps belong here, not in
+ *  Atmo_Density, which sees both copies, so a floor there differs between paths. */
 float4 AtmoT_Profile(float RayleighA, float MieA, float AbsorptionA, float AbsorptionFalloff)
 {
     return float4(max(RayleighA, 1e-4f), max(MieA, 1e-4f), AbsorptionA, max(AbsorptionFalloff, 1e-4f));

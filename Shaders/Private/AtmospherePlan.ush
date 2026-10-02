@@ -2,38 +2,27 @@
 
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTypes.ush"
 
-// Ray planning: the segment list a march walks, and the bounds on it.
-//
-// MODEL-INDEPENDENT. It cuts a ray at the shell boundaries and sizes each piece;
-// nothing here knows what fills them.
+// Ray planning: the segment list a march walks and the step plan over it.
+// Model-independent: it cuts a ray at the shell boundaries and sizes each piece.
 
-/** Slots in the segment array. Six boundaries give at most five spans: atmo
- *  entry, cloud outer near, cloud inner near, cloud inner far, cloud outer far,
- *  atmo exit. */
+/** Slots in the segment array: six boundaries (atmo, cloud outer, cloud inner,
+ *  each near and far) give at most five spans. */
 #ifndef ATMO_MAX_SEGMENTS
 #define ATMO_MAX_SEGMENTS 5
 #endif
 
-/** Safety bound on a march loop. The loops are while() on distance, so this is
- *  what stops a degenerate step size from hanging the shader. It is also what
- *  catches a grazing ray that is dense enough to keep stepping and thin enough
- *  never to reach the transmittance early-out: such a ray stops with whatever
- *  transmittance it had, which reads as a hard edge at the limb. */
+/** Iteration cap for the distance-driven march loops; stops a degenerate step
+ *  size hanging the shader. A grazing ray dense enough to keep stepping but too
+ *  thin to reach the transmittance early-out stops here: a hard edge at the limb. */
 #ifndef ATMO_MAX_ITER
 #define ATMO_MAX_ITER 256
 #endif
 
-/** Geometric step distribution over a class's total chord: the first step and
- *  the growth per unit of chord already consumed, so step(x) = First + Growth*x.
- *
- *  AFFINE IN CONSUMED LENGTH, WHICH IS WHY THERE IS NO STEP INDEX. Step k is
- *  d0*r^k and the sum to k is x, so r^k = 1 + x(r-1)/d0 and the size collapses
- *  to d0 + (r-1)x. One accumulator per class then carries the distribution
- *  across every segment of that class on the ray, continuous over the
- *  boundaries between them.
- *
- *  Spread is the LAST step over the FIRST, which is the authored handle: 1 is
- *  uniform, and raising it front-loads the budget. */
+/** Geometric step distribution over a class's total chord: step(x) = First +
+ *  Growth*x, x the chord already consumed (sum of d0*r^k collapses to d0 + (r-1)x),
+ *  so one accumulator per class carries it continuously across that class's
+ *  segments without a step index. Spread is the last step over the first: 1 is
+ *  uniform, higher front-loads the budget. */
 void Atmo_ChordSteps(float Length, float Count, float Spread, out float First, out float Growth)
 {
     const float N = max(Count, 2.0f);
@@ -52,50 +41,33 @@ void Atmo_ChordSteps(float Length, float Count, float Spread, out float First, o
     Growth = R - 1.0f;
 }
 
-// THE STEP PLAN: cloud steps on a lattice anchored at the camera, each
-// pixel's lattice phase-shifted and each cloud entry refined; air steps spread
-// over each ray's air chord by Atmo_ChordSteps.
+// The step plan: cloud steps on a lattice anchored at the camera, phase-shifted
+// per pixel and refined at each cloud entry; air steps spread over each ray's air
+// chord by Atmo_ChordSteps.
 //
-// THE LATTICE. Step length is a function of distance alone, so every ray's
-// steps agree wherever the rays agree, whatever their chords. A cloud segment
-// widens to the lattice points either side of it, so no cloud step is cut
-// short by a shell; only the terminus trims one.
+// Lattice: step length is a function of distance alone, so rays agree wherever
+// they overlap. A cloud segment widens to the lattice points either side of it;
+// only the terminus trims a cloud step.
+// Phase: each pixel's lattice starts a fraction of a step in, so neighbours do not
+// share boundaries; a shared lattice turns jitter noise into rings about the view.
+// Entry refine: the step where a ray first meets cloud and the ATMO_ENTRY_SPAN
+// steps after it (again on re-entry after a clear sample) are re-marched with
+// ATMO_ENTRY_SUBSTEPS substeps on the divided lattice. This divides the bias from
+// where the surface falls in a step without moving any step boundary.
 //
-// THE PHASE. Each pixel's lattice starts a fraction of a step into its first
-// step, so neighbouring pixels do not share step boundaries: the noise the
-// sample jitter leaves follows where features fall inside a step, and forms
-// rings about the view centre wherever the lattice is shared.
-//
-// THE ENTRY REFINE. The step in which a ray first meets cloud, and the
-// ATMO_ENTRY_SPAN steps after it, are re-marched at ATMO_ENTRY_SUBSTEPS
-// substeps each, again at every re-entry after a clear sample. A step's
-// single sample decides its whole transmittance, and near the cloud's surface
-// that decision carries a bias that follows where the surface falls in the
-// step: rings about the camera. Substeps divide the bias, and they lie on the
-// divided lattice, so the entry moves no step boundary.
-//
-// PITFALL: A STEP CUT AT A SHELL IS A SAWTOOTH ACROSS THE SCREEN. Its length
-// runs from zero to a full step each time the shell crossing passes a lattice
-// point, every step-length bias follows it, and the lattice's spheres show as
-// rings about the camera.
-// PITFALL: A CHORD BUDGET STEPS DIFFERENTLY WHEREVER THE CHORD JUMPS. The
-// chord ends at the planet on one side of the limb and runs on to the far
-// shell on the other, so neighbouring rays through the same cloud step at
-// different lengths and the limb shows through opaque deck.
-// PITFALL: STEPS PLACED BY THE FIELD DRAW THE FIELD INTO THE LATTICE. They
-// move as the weather does, and a split at a cone-traced entry steps over
-// features narrower than the probe spacing.
+// PITFALL: a step cut at a shell is a sawtooth across the screen; its biases show
+// as rings about the camera.
+// PITFALL: a per-chord budget jumps at the limb (planet on one side, far shell on
+// the other), showing the limb through opaque deck.
+// PITFALL: steps placed by the field move with the weather, and a split at a
+// cone-traced entry skips features narrower than the probe spacing.
 
-/** Camera lattice step growth, the model's Sampling group: each step past the
- *  knee is this fraction of its distance from the camera. Smaller is finer
- *  and costs about 1/x steps per e-fold of distance, so the cost is in grazing
- *  views from in or near the deck, where a ray starts close and runs far:
- *  about (1 + ln(Distance * x / Floor)) / x steps, ending at ATMO_MAX_ITER.
- *
- *  ONE VALUE PER FRAME, FROM THE CAMERA'S ALTITUDE: LatticeGrowth in or below
- *  the deck, LatticeGrowthFar from FAR_ALTITUDE cloud shell depths above it,
- *  blended geometrically between. A camera above the deck starts its rays far
- *  from it and pays little for fine steps. Equal values disable the blend. */
+/** Camera lattice step growth (model Sampling group): past the knee each step is
+ *  this fraction of its distance from the camera. Costs about
+ *  (1 + ln(Distance * x / Floor)) / x steps, up to ATMO_MAX_ITER, mostly in grazing
+ *  views from in or near the deck. One value per frame, blended geometrically by
+ *  camera altitude from LatticeGrowth (in or below the deck) to LatticeGrowthFar
+ *  (FAR_ALTITUDE shell depths above it). Equal values disable the blend. */
 float LatticeGrowth;
 float LatticeGrowthFar;
 
@@ -103,8 +75,7 @@ float LatticeGrowthFar;
 #define ATMO_CAMERA_LATTICE_FAR_ALTITUDE 4.0f
 #endif
 
-/** The lattice growth for a camera Altitude shell depths above the cloud
- *  shell's top. */
+/** Lattice growth for a camera Altitude shell depths above the cloud shell top. */
 float Atmo_LatticeGrowth(float Altitude)
 {
     const float Blend = smoothstep(0.0f, ATMO_CAMERA_LATTICE_FAR_ALTITUDE, Altitude);
@@ -113,12 +84,10 @@ float Atmo_LatticeGrowth(float Altitude)
 		log(max(LatticeGrowthFar, 1e-3f)), Blend));
 }
 
-/** The camera lattice: Floor-length steps near the camera, then steps
- *  growing in proportion to distance from Knee = Floor / Growth. Floor is the
- *  shell depth over CloudSteps. Cap bounds a step's rise through the shell to
- *  ChordSpread floors, so a far camera still crosses the deck in several
- *  steps; it depends on the ray's slope, so the step applies it. U counts
- *  steps from the camera. */
+/** Camera lattice: Floor-length steps (shell depth / CloudSteps) up to Knee =
+ *  Floor / Growth, then growing in proportion to distance. Cap bounds a step's
+ *  rise through the shell to ChordSpread floors, so a far camera still crosses
+ *  the deck in several steps; the step applies it by slope. U counts steps. */
 struct AtmoCameraLattice
 {
     float Floor;
@@ -151,17 +120,15 @@ float Atmo_LatticeDistance(AtmoCameraLattice L, float U)
     return (U < L.UKnee) ? U * L.Floor : L.Knee * exp((U - L.UKnee) * L.LogRatio);
 }
 
-/** The lattice point at or before distance T, the lattice shifted by Phase
- *  steps; never behind the camera. */
+/** Lattice point at or before T, shifted by Phase steps; never behind the camera. */
 float Atmo_LatticeFloor(AtmoCameraLattice L, float T, float Phase)
 {
     return max(Atmo_LatticeDistance(L, floor(Atmo_LatticeCoord(L, T) - Phase + 1e-3f) + Phase), 0.0f);
 }
 
-/** From distance T to the next point of the lattice divided Division times,
- *  shifted by Phase steps, no longer than Cap over RadialRate, divided alike.
- *  A point closer than half a step, as after a capped step, is passed for the
- *  one beyond it, so the cap leaves no slivers. */
+/** Distance from T to the next point of the lattice divided Division times and
+ *  shifted by Phase, capped at Cap / RadialRate (divided alike). A point under half
+ *  a step away is skipped for the one beyond, so the cap leaves no slivers. */
 float Atmo_LatticeStep(AtmoCameraLattice L, float T, float Phase, float RadialRate, float Division)
 {
     const float Unit = 1.0f / Division;
@@ -183,9 +150,8 @@ float Atmo_LatticeStep(AtmoCameraLattice L, float T, float Phase, float RadialRa
 #define ATMO_ENTRY_SPAN 2.0f
 #endif
 
-/** The first step of a lattice started Phase of a step in, Phase in (0, 1]: the
- *  distribution's chord to fractional step Phase, after which the steps run as
- *  Atmo_ChordSteps sizes them from the chord consumed. */
+/** First step of a lattice started Phase in (0, 1] of a step in: the
+ *  distribution's chord to fractional step Phase. */
 float Atmo_LeadStep(float First, float Growth, float Phase)
 {
     return (Growth > 1e-6f)
@@ -195,18 +161,10 @@ float Atmo_LeadStep(float First, float Growth, float Phase)
 
 /** Builds the segment list for a ray, cut at the atmosphere and cloud shells.
  *  Returns the count; each segment is (start, end, 1 inside the cloud band).
- *  The march sizes the steps: cloud on the camera lattice, air over its chord.
- *
- *  The boundary list is built in ORDER and never sorted, which works only
- *  because the guards enforce the ordering as they go: each candidate is
- *  admitted only if it lies beyond the previous one. A sort would be more
- *  obviously correct and would cost more than the guards do.
- *
- *  PITFALL: THE OUTER SHELL DECIDES WHETHER THERE IS CLOUD AT ALL. Failing to
- *  find it returns one coarse segment for the whole ray, so any test added to
- *  that crossing suppresses the cloud rather than a boundary -- a thin bright
- *  line at the limb, where a tangential chord is most easily mistaken for a
- *  degenerate one. */
+ *  Boundaries are admitted in order by guards, so no sort is needed.
+ *  PITFALL: the outer-shell crossing decides whether there is cloud at all; any
+ *  extra test on it suppresses the cloud, showing as a thin bright line at the
+ *  limb where a tangential chord looks degenerate. */
 int Atmo_Plan(
 	float3 origin,
 	float3 dir,
@@ -268,8 +226,7 @@ int Atmo_Plan(
         boundaries[bCount++] = co_far;
     boundaries[bCount++] = atmoEnd;
 
-	// A segment is in the band if its MIDPOINT is, which the boundaries make
-	// exact: the band's crossings are boundaries, so no segment straddles one.
+	// In the band if the midpoint is; exact, since band crossings are boundaries.
     for (int j = 0; j < bCount - 1; j++)
     {
         float segStart = boundaries[j];

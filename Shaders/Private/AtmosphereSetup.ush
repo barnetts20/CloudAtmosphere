@@ -4,13 +4,11 @@
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereTransmittance.ush"
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereDepth.ush"
 
-// Setup: everything between a pass's uniforms and a filled CompositeParams --
-// the unit conversions and the ray reconstruction. Nothing here is
-// model-specific, so both fields build their params through it.
+// Setup: unit conversions and ray reconstruction between a pass's uniforms and a
+// filled CompositeParams. Model-independent; both fields build their params here.
 
-/** The projection rays are built from, bound by each pass: the march takes the
- *  jittered one, so its rays land on the pixels the jittered depth buffer
- *  holds, and the resolve the unjittered one its history is kept in. */
+/** Projection rays are built from, bound per pass: jittered for the march, to match
+ *  the jittered depth buffer; unjittered for the resolve, whose history uses it. */
 float4x4 RayViewToClip;
 
 /** World ray direction through a viewport UV, from RayViewToClip, inverted in
@@ -30,8 +28,7 @@ float3 Atmo_RayDirection(float2 viewportUV)
     return normalize(mul(ViewDir, (float3x3) View.ViewToTranslatedWorld));
 }
 
-/** The angle one pixel subtends at the view centre, from the unjittered
- *  projection and the internal resolution. */
+/** Angle one pixel subtends at the view centre (unjittered projection, internal resolution). */
 float Atmo_PixelAngle()
 {
     return 2.0f / max(View.ViewToClipNoAA[1][1] * View.ViewSizeAndInvSize.y, 1e-4f);
@@ -39,28 +36,19 @@ float Atmo_PixelAngle()
 
 /** Fills CompositeParams from a field's uniforms.
  *
- *  PITFALL: sceneDepth is a TRUE RAY DISTANCE, from Atmo_SceneRayDistance. The
- *  march spends it as a bound on the ray parameter, so it has to be measured
- *  along the ray rather than along the view axis, and it has to be exact at
- *  range; either error reads as geometry sinking into the deck as the camera
- *  recedes.
+ *  PITFALL: sceneDepth is a true ray distance (Atmo_SceneRayDistance), exact at
+ *  range. Measured along the view axis or imprecise, it shows as geometry sinking
+ *  into the deck as the camera recedes.
  *
- *  SCALED BY ATMOSPHERE THICKNESS ON THE WAY IN. Every coefficient and scale
- *  height arrives as a fraction of the atmosphere's depth rather than in world
- *  units, so a planet can be resized without retuning its air. The betas divide
- *  because an extinction coefficient is a reciprocal length: a thicker
- *  atmosphere at the same total opacity has a smaller coefficient.
+ *  Coefficients and scale heights arrive as fractions of the atmosphere's depth so
+ *  a planet can be resized without retuning; betas divide by thickness since an
+ *  extinction coefficient is a reciprocal length.
  *
- *  CAMERA AT THE ORIGIN. The march runs camera-relative, which raises the
- *  precision floor enormously at planetary scale -- planet-relative positions
- *  are millions of units and float32 has about seven digits. The fields sample
- *  their noise in planet-local space, never world space.
- *
- *  planetOffset is the planet's centre less the camera's position, formed in
- *  double precision before it arrives. PITFALL: formed here from two absolute
- *  float positions it carries their rounding, centimetres to metres at
- *  planetary coordinates, and as the camera creeps the whole atmosphere steps
- *  against the scene. */
+ *  The camera is at the origin for float32 precision at planetary scale; fields
+ *  sample noise in planet-local space. planetOffset is planet centre minus camera,
+ *  formed in double precision. PITFALL: formed here from two absolute float
+ *  positions, it carries their rounding and the atmosphere steps against the scene
+ *  as the camera moves. */
 CompositeParams Atmo_BuildParams(
 	float2 svPosition,
 	float3 rayDir,
@@ -99,10 +87,8 @@ CompositeParams Atmo_BuildParams(
 
     params.scatteringParams.cosTheta = cosTheta;
 
-	// EACH BETA CARRIES ITS OWN SCALE HEIGHT IN a: the two are only authored
-	// together and mean nothing apart, since a coefficient without the profile it
-	// applies to is not a quantity. AtmoT_Profile derives it, as it does for the
-	// transmittance bake.
+	// Each beta carries its own scale height in .a; AtmoT_Profile derives the profile,
+	// as it does for the transmittance bake.
     params.scatteringParams.rayBeta = rayleighBeta.rgb / atmoThickness;
     params.scatteringParams.mieBeta = mieBeta.rgb / atmoThickness;
     params.scatteringParams.absBeta = absorptionBeta.rgb / atmoThickness;
@@ -134,15 +120,13 @@ CompositeParams Atmo_BuildParams(
 
     params.lightRayParams.lightDir = lightDirection;
 
-	// Filled per step by the main march. Initialised so the struct is complete
-	// before it is passed, since HLSL will not warn about a member that is only
-	// written on some paths.
+	// Filled per step by the main march; initialised so the struct is complete, as
+	// HLSL does not warn about a member written on only some paths.
     params.lightRayParams.samplePos = float3(0, 0, 0);
     params.lightRayParams.parentStepIndex = 0;
 
-	// OFF UNLESS A MODEL TURNS IT ON. Surface shadows are read from a shadow
-	// map, which this function knows nothing about, so the default has to be the
-	// one a march without a map can honour.
+	// Off unless a model enables it: surface shadows need a shadow map this function
+	// knows nothing about.
     params.surfaceShadowParams.enabled = 0.0;
     params.surfaceShadowParams.directFraction = 0.0;
     params.surfaceShadowParams.strength = 0.0;

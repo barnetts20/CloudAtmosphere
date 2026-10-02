@@ -3,21 +3,14 @@
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereShadowBake.ush"
 
 // The bake's march: one texel of one cascade, from the shell entry to the last
-// threshold crossed.
+// threshold crossed. Ray setup, step lattice, optical-depth allowance and
+// crossing accumulation belong to the map format; everything about the field
+// comes through hooks. A model defines the hooks over its own uniforms BEFORE
+// including this file; included too early, it fails with an undeclared-identifier
+// error naming the missing hook.
 //
-// A MODEL DEFINES THE HOOKS BELOW AND INCLUDES THIS. The ray setup, the dyadic step
-// lattice, the optical-depth allowance and the crossing accumulation are the
-// FORMAT's, and a second field changes none of them -- it changes what sigma is
-// at a point, where the ray enters and how wide a cascade reaches.
-//
-// INCLUDED AFTER THE HOOKS, NOT BEFORE. The hooks close over the model's own
-// uniforms and textures, which is why none of them appear in a signature here; a
-// model that includes this file too early gets an undeclared-identifier error
-// naming the hook it has not written yet.
-//
-// The interface:
-//
-//   BakeFieldParams                         the model's field struct
+//   BakeFieldParams                         the model's field struct; must expose
+//                                           Thickness, the unit of every stored depth
 //   BakeField_Params()                      built from its uniforms
 //   BakeField_CullRadius(F)                 the shell the map covers
 //   BakeField_CascadeExtent(F, Level)       half-width, 0 to collapse a level
@@ -29,23 +22,11 @@
 //   BakeField_FoldConstant(F)               folded into every stored depth
 //   BakeField_Sigma(...)                    extinction over the texel footprint,
 //                                           given as two world vectors per texel
-//
-// plus a Thickness member on BakeFieldParams, the one field the loop reads
-// directly, since every stored depth is expressed in it.
 
 /** Most a budgeted step grows past the cell: 2^8 cells. */
 #define ATMO_BAKE_MAX_DOUBLINGS 8
 
-/** Bakes one texel of one cascade: the four crossing depths.
- *
- *  EVERY FIELD QUESTION GOES THROUGH A BakeField_ CALL. What is left is the ray
- *  setup, the step lattice and the crossing accumulation, none of which depend
- *  on what fills the shell. A model defines the hooks over its own uniforms
- *  BEFORE including this file, so they close over those uniforms and no texture
- *  has to travel through the signature.
- *
- *  THE PARAMS STRUCT MUST EXPOSE Thickness, the one member read directly here.
- *  Everything else about the field arrives through a hook. */
+/** Bakes the four crossing depths of one texel of one cascade. */
 void AtmoBake_Texel(uint3 DispatchThreadId)
 {
     const int Level = int(DispatchThreadId.z) + ShadowFirstLevel;
@@ -56,15 +37,13 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
         return;
     }
 
-	// One slice per cascade. Only the level index crosses from the CPU: extent
-	// and centre are derived here by the same functions the reconstruction
-	// calls, so the two cannot disagree about where a slice is.
+	// One slice per cascade. Extent and centre derive from the same functions the
+	// reconstruction calls, so the two cannot disagree about where a slice is.
     const uint3 Texel = uint3(DispatchThreadId.xy, uint(Level));
 
     BakeFieldParams F = BakeField_Params();
 
-	// The unconditional bound: the map is shared by every pixel, so the shell it
-	// covers cannot be narrowed by any one camera's fades.
+	// Unconditional bound: the map is shared by every pixel, so no camera's fades may narrow it.
     const float TopMax = BakeField_TopBound(F);
 
     const float CloudOuter = BakeField_CullRadius(F);
@@ -75,8 +54,7 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
     const float ShadowExtent = BakeField_CascadeExtent(F, Level);
     const float Extent0 = BakeField_CascadeExtent(F, 0);
 
-	// A collapsed level, a zero cascade radius, writes the sentinel and is
-	// skipped by the walk that reads it.
+	// A collapsed level writes the sentinel, which the reader's walk skips.
     if (ShadowExtent <= 0.0f)
     {
         ShadowMapUAV[Texel] = ATMO_SHADOW_NO_DECK;
@@ -89,10 +67,9 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 		Level, ShadowCameraLocal, ShadowBasisU, ShadowBasisV,
 		HalfWidth, Extent0, float2(ShadowMapSize));
 
-	// EVERY CASCADE IS A WINDOW OF THE WARPED DISC, mapped to the plane by the
-	// same functions the reader inverts. Texels are then ellipses on the plane,
-	// so the footprint the subsamples cover is carried as the two vectors one
-	// texel moves along each map axis.
+	// Each cascade is a window of the warped disc, mapped to the plane by the same
+	// functions the reader inverts. Texels are ellipses on the plane, so the footprint
+	// is carried as the two vectors one texel moves along each map axis.
     const float2 Disc = ShadowCentre
 		+ ((float2(Texel.xy) + 0.5f) * ShadowInvMapSize * 2.0f - 1.0f) * HalfWidth;
 
@@ -101,15 +78,12 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
     float2 JacobianX, JacobianY;
     AtmoShadow_DiscJacobian(Disc, JacobianX, JacobianY);
 
-	// Still the ray's closest approach to the planet centre: the map plane moved
-	// but the shell did not, so the intersection below is unchanged.
+	// The ray's closest approach to the planet centre.
     const float3 Offset = ShadowBasisU * Plane.x + ShadowBasisV * Plane.y;
 
     const float3 Dir = -ShadowLightDir;
 
-	// Offset is perpendicular to Dir by construction, so |Offset + Dir*d| is
-	// PerpSq + d*d and the shell crossing is a square root rather than a
-	// quadratic.
+	// Offset is perpendicular to Dir, so the shell crossing is a square root.
     const float PerpSq = dot(Offset, Offset);
     const float HalfChordSq = CloudOuter * CloudOuter - PerpSq;
 
@@ -121,20 +95,16 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
         return;
     }
 
-	// Everything below is parameterised by distance from the shell entry, which
-	// IS the stored depth: Dir is the depth axis, so an advance along the ray is
-	// an advance in depth one for one.
+	// Distance from the shell entry along Dir is the stored depth, one for one.
     const float HalfChord = sqrt(HalfChordSq);
 
     const float3 Origin = Offset - Dir * HalfChord;
 
     float RayLength = 2.0f * HalfChord;
 
-	// THE CHORD ENDS AT THE TERMINUS: no light reaches past it, and the step
-	// budget spread over the planet's interior would coarsen every step before
-	// it. Unreached thresholds then go to the chord's closest approach to the
-	// centre, the terminator plane: everything behind the planet is in its
-	// shadow, and lit ground below the terminus sphere is not.
+	// The chord ends at the terminus: no light reaches past it, and budgeting steps
+	// over the planet interior would coarsen every step before it. Unreached
+	// thresholds then go to the terminator plane (the chord's closest approach).
     float PlanetDepth = -1.0f;
 
     {
@@ -150,9 +120,8 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 
     const float TexelScale = 2.0f * HalfWidth * Extent0 / float(max(ShadowMapSize.x, 1));
 
-	// The footprint, world vectors per texel along each map axis. The field's
-	// Sigma offsets along them with a unit TexelWorld, so the subsamples cover
-	// the warped texel and not a square of the planar one.
+	// World vectors per texel along each map axis. Sigma offsets along them with a
+	// unit TexelWorld, so the subsamples cover the warped texel.
     const float3 FootprintU = (ShadowBasisU * JacobianX.x + ShadowBasisV * JacobianX.y) * TexelScale;
     const float3 FootprintV = (ShadowBasisU * JacobianY.x + ShadowBasisV * JacobianY.y) * TexelScale;
 
@@ -161,15 +130,11 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 
     float TEntry = BakeField_Entry(Origin, Dir, RayLength, TopMax, F);
 
-	// WHERE TO START MARCHING, NOT WHAT TO STORE. The traced entry is the centre
-	// column's deck top, a point sample that would snap by a texel as the deck
-	// advects; nothing is written from it, since the silhouette comes out of the
-	// accumulation as ATMO_SHADOW_TAU_ENTRY's crossing like the other three. So it
-	// only has to be EARLY ENOUGH: backing off by a texel footprint covers
-	// neighbouring columns standing higher than the centre, and starting in empty
-	// air costs steps and changes nothing. Converted from a lateral distance by
-	// the rate the ray descends, so it grows with obliquity -- which is where
-	// columns inside one texel differ most.
+	// Where to start marching, never what to store: the silhouette comes from the
+	// ATMO_SHADOW_TAU_ENTRY crossing, so the traced entry (a point sample that snaps
+	// as the deck advects) only has to be early enough. Backing off a texel footprint
+	// covers neighbouring columns standing higher; dividing by the descent rate grows
+	// the back-off with obliquity, where columns inside a texel differ most.
     {
         const float3 EntryPos = Origin + Dir * TEntry;
         const float EntryRadius = max(length(EntryPos), 1e-4f);
@@ -178,46 +143,34 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
         TEntry = max(0.0f, TEntry - TexelWorld * ATMO_BAKE_ENTRY_BACKOFF / max(EntryRate, 0.1f));
     }
 
-	// THE FOLD CONSTANT, per WORLD unit. What the field reports here is folded
-	// into every stored depth so the thresholds mean transmittance on the fastest
-	// channel the material can have, and the reader divides it back out.
-	//
-	// PITFALL: it has to carry the same thickness conversion the march applies on
-	// its own side. Skipping the divide leaves every reconstructed optical depth
-	// too large by a whole thickness in world units, and the field reads as opaque
-	// everywhere -- which looks like a bad extinction value, not a units error.
+	// Fold constant, per world unit: folded into every stored depth so thresholds
+	// mean transmittance on the material's fastest channel; the reader divides it out.
+	// PITFALL: it must carry the same thickness conversion the march applies, or every
+	// reconstructed optical depth is too large and the field reads opaque everywhere.
     const float AbsMax = BakeField_FoldConstant(F);
 
-	// The radial advance a step is allowed. The gradient is the only part of the
-	// profile that varies, so it is what the budget is spent on.
+	// Radial advance a step may take; the budget is spent on the profile's gradient.
     const float HeightStep = BakeField_HeightStep(F);
 
-	// The outer lattice: fixed multiples of this from t = 0. Constant along the
-	// ray, so a boundary is a property of the geometry alone and cannot move
-	// when the field changes.
+	// Outer lattice: fixed multiples from t = 0, so boundaries depend on geometry alone.
     const float CellSize = max(HeightStep, 1e-4f);
 
     float Tau = 0.0f;
     float LastSigma = 0.0f;
 
-	// Negative until crossed. Named rather than an array: a dynamically indexed
-	// local forces scratch memory for four values that unroll for free.
+	// Negative until crossed. Scalars, not an array, to avoid scratch memory.
     float NodeEntry = -1.0f;
     float Node0 = -1.0f;
     float Node1 = -1.0f;
     float Node2 = -1.0f;
 
-	// ANCHORED AT THE SHELL ENTRY, NOT AT THE DECK'S. Snapping the start to the
-	// lattice means the sample positions do not slide when the cone trace flips
-	// from one column's top to the next -- which it does discontinuously as the
-	// deck advects, moving every crossing depth on that ray together.
+	// Snapped to a lattice anchored at the shell entry, not the deck's, so sample
+	// positions do not slide when the cone-traced entry jumps between columns.
     float T = floor(TEntry / CellSize) * CellSize;
 
-	// Extinction at the march start. Each step samples only its FAR boundary and
-	// inherits the near one, so the boundary scheme costs the same one evaluation
-	// per step the midpoint scheme did, plus this seed. Its integration window
-	// carries the same obliquity factor as the loop's -- the first step's length
-	// is not known yet, so the cell stands in for it.
+	// Seed extinction at the march start: each step samples only its far boundary.
+	// The seed's window carries the loop's obliquity factor, with the cell standing
+	// in for the unknown first step length.
     const float3 SeedPos = Origin + Dir * T;
     const float SeedRate = abs(dot(Dir, SeedPos / max(length(SeedPos), 1e-4f)));
 
@@ -243,10 +196,8 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 
         float Demand = rsqrt(max(HeightCost * HeightCost + LateralCost * LateralCost, 1e-12f));
 
-		// The extinction the last step found, the only estimate available before
-		// this one is taken. Self-correcting: a step overshooting into dense deck
-		// shortens the next, so the error is bounded by one step rather than
-		// carried.
+		// The last step's extinction is the only estimate available; a step overshooting
+		// into dense deck shortens the next, so the error is bounded to one step.
         if (LastSigma > 0.0f)
         {
             const float Allowance = ATMO_BAKE_MAX_DTAU * (1.0f + ATMO_BAKE_DTAU_GROWTH * Tau);
@@ -254,18 +205,14 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
             Demand = min(Demand, Allowance / LastSigma);
         }
 
-		// DYADIC SUBDIVISION, NOT RESIZING. The demand halves the cell rather than
-		// setting the step directly, so a density change splits a boundary instead
-		// of shifting every boundary after it. Existing boundaries persisting is
-		// what makes the quadrature converge frame to frame rather than dance:
-		// crossings are interpolated inside a step, so a lattice that re-phases
-		// moves the silhouette even when the deck has barely moved.
+		// Dyadic subdivision: the demand halves the cell rather than sizing the step, so a
+		// density change splits a boundary instead of shifting all later ones. A lattice
+		// that re-phases moves the interpolated silhouette even when the deck barely moves.
         float Step = CellSize;
 
-		// THE STEP BUDGET: the mean step the rest of the chord needs from the
-		// steps left, grown into a power of two of cells. It outranks the demand:
-		// a coarse step through the deck costs accuracy, a ray stopped short by
-		// ATMO_BAKE_MAX_STEPS costs the shadow behind it.
+		// Step budget: the mean step the rest of the chord needs, grown to a power of two
+		// of cells. It outranks the demand: a ray stopped by ATMO_BAKE_MAX_STEPS loses the
+		// shadow behind it.
         const float Budget = (RayLength - T) / float(max(ATMO_BAKE_MAX_STEPS - Iter, 1));
 
         UNROLL
@@ -292,35 +239,27 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
             Step *= 0.5f;
         }
 
-		// REALIGNED WHEN THE STEP GROWS. A coarsening step taken from inside a
-		// finer cell lands off the coarse lattice and stays off it, which is the
-		// drift the dyadic scheme exists to prevent. Cutting the step at the next
-		// multiple of its own length restores alignment, and since the cell over
-		// the step is a power of two, that also lands on every cell boundary.
-        // PITFALL: T sits on a lattice multiple, and T / Step can round just
-        // below it, which makes the cut zero and the loop spin to its cap. The
-        // small bias rounds it onto the multiple.
+		// Cut at the next multiple of the step's own length, so a coarsening step taken
+		// inside a finer cell lands back on the lattice and every cell boundary.
+		// PITFALL: T / Step can round just below a multiple, making the cut zero and
+		// spinning the loop to its cap; the small bias prevents it.
         Step = min(Step, (floor(T / Step + 1e-3f) + 1.0f) * Step - T);
 
 		// Trims the final partial step at the ray's end.
         Step = min(Step, RayLength - T);
 
-		// NO JITTER. A stochastic offset is what a per-pixel march needs to hide
-		// its lattice under a blur; this lattice is in the map, shared by every
-		// pixel reading it, so jitter prints as fixed noise -- grain that sits
-		// still while the deck moves past.
+		// No jitter: the lattice is stored in a map shared by every pixel, so jitter
+		// would print as fixed grain while the deck moves past.
         const float3 Far = Origin + Dir * (T + Step);
 
-		// Half the step along the RADIUS, in atmosphere fractions, which is the
-		// axis the profile varies on.
+		// Half the step along the radius, in atmosphere fractions.
         const float StepHalfHeight = RadialRate * Step * 0.5f / F.Thickness;
 
         const float SigmaNext = BakeField_Sigma(
 			Far, FootprintU, FootprintV, 1.0f, StepHalfHeight, AbsMax, F);
 
-		// TRAPEZOID, NOT MIDPOINT. Sampling the boundaries makes sigma linear
-		// across the step, which makes optical depth quadratic and the crossings
-		// below solvable to second order. Same number of density evaluations.
+		// Trapezoid: boundary samples make sigma linear across the step, so tau is
+		// quadratic and AtmoBake_Crossing solves to second order.
         const float TauNext = Tau + 0.5f * (SigmaPrev + SigmaNext) * Step;
 
         if (NodeEntry < 0.0f && TauNext >= ATMO_SHADOW_TAU_ENTRY)
@@ -349,8 +288,7 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 
         Tau = TauNext;
 
-		// The far boundary's extinction, which is exact at the next step's start
-		// rather than an average over the last one.
+		// Far-boundary extinction, exact at the next step's start.
         if (SigmaNext > 0.0f)
         {
             LastSigma = SigmaNext;
@@ -366,11 +304,9 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
         }
     }
 
-	// Thresholds the ray never reached. On the terminus they go to PlanetDepth.
-	// Otherwise they extrapolate at the last extinction seen, from the chord's
-	// exit to past the shell, where no view sample lives; a ray that met no
-	// cloud writes the sentinel. The step budget is what keeps T at the exit: a
-	// ray stopped inside the chord would extrapolate where view samples do live.
+	// Unreached thresholds: on the terminus they go to PlanetDepth; otherwise they
+	// extrapolate at the last extinction from the chord exit, where no view sample
+	// lives (the step budget keeps T there), or take the sentinel if no cloud was met.
     float TailBase = T;
     float TailRate = 1.0f / max(LastSigma, 1e-6f);
 
@@ -408,10 +344,8 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
     Out = AtmoBake_History(Out, Level, Offset, max(RayLength, PlanetDepth) / F.Thickness,
 		HalfWidth, Extent0);
 
-	// NO DEBUG REMAP HERE. The march reads this map, so a define rescaling what
-	// is written rescales the lighting with it, and the symptom -- a fully
-	// shadowed planet with a lit sliver at the terminator -- reads as a
-	// reconstruction bug rather than a units mismatch. Scale where the map is
-	// visualised instead.
+	// PITFALL: no debug remap here. The march reads this map, so rescaling what is
+	// written rescales the lighting (a shadowed planet with a lit terminator sliver)
+	// and looks like a reconstruction bug. Scale where the map is visualised.
     ShadowMapUAV[Texel] = Out;
 }
