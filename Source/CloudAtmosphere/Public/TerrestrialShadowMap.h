@@ -43,8 +43,9 @@ SHADER_PARAMETER(FVector4f, ShadowCascades)
 SHADER_PARAMETER(FVector4f, CloudResponse)
 
 // The material sets' rgb tint and amount in a, and what TR_CloudBeta solves
-// the cloud's coefficient from. DeepMaterial: the deep material's share and
-// the buried depth it is reached at, in atmosphere fractions.
+// the cloud's coefficient from. DeepMaterial: the depth below the base the
+// deep material takes over across, in atmosphere fractions, and the deep
+// floor's softness in fills.
 SHADER_PARAMETER(FVector4f, CloudExtinction)
 SHADER_PARAMETER(FVector4f, StormExtinction)
 SHADER_PARAMETER(FVector4f, DeepExtinction)
@@ -71,7 +72,7 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	// SQUARE. Cascade support is isotropic, so non-square texels would put the
 	// bake's footprint and its entry back-off on the wrong scale along one axis.
 
-	FIntPoint MapSize = FIntPoint(512, 512);
+	FIntPoint MapSize = FIntPoint::ZeroValue;
 
 	/** The map's slices, one per cascade. */
 	int32 MapSlices = 0;

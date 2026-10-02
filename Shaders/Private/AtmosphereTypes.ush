@@ -68,9 +68,9 @@ struct LightRayParams
     int parentStepIndex; // salts the light ray's jitter
 };
 
-/** Cloud shadows cast onto the opaque geometry a view ray stops on, evaluated
- *  once per pixel from the shadow map. A march with no map to read leaves
- *  enabled at zero and pays one scalar branch. */
+/** Sunlight on the opaque geometry a view ray stops on, evaluated once per
+ *  pixel: the cloud's shadow from the shadow map and the air's dimming. Zero
+ *  enabled skips it for one scalar branch. */
 struct SurfaceShadowParams
 {
     float enabled;

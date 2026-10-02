@@ -23,7 +23,8 @@ namespace AtmosphereMarchModel
 
 /** The march's inputs, flattened for the render thread: the active model's
  *  field, from the packer the shadow bake shares, and its lighting, air,
- *  pipeline and sampling groups. */
+ *  pipeline and sampling groups. The actor's FillMarchParams sets every member,
+ *  so the defaults are zero rather than a second set of values. */
 struct CLOUDATMOSPHERE_API FAtmosphereMarchParams
 {
 	/** AtmosphereMarchModel: the slab, the gas giant's deep deck, or air alone. */
@@ -53,7 +54,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereMarchParams
 	FVector3f CloudAmbient = FVector3f::ZeroVector;
 	float CloudAmbientFloor = 0.0f;
 
-	float OctaveCount = 1.0f;
+	float OctaveCount = 0.0f;
 	float OctaveAttenuation = 0.0f;
 	float OctaveEccentricity = 0.0f;
 
@@ -73,18 +74,20 @@ struct CLOUDATMOSPHERE_API FAtmosphereMarchParams
 
 	float AtmosphereSteps = 0.0f;
 	float CloudSteps = 0.0f;
-	float ChordSpread = 1.0f;
+	float ChordSpread = 0.0f;
 	FVector4f SurfaceShadow = FVector4f::Zero();
 
-	/** The cameras shadow levels 1 and 2 were baked around, planet-local. */
+	/** The cameras shadow levels 1 and 2 were baked around, and the light each
+	 *  level was baked under, planet-local. */
 	FVector3f ShadowCamera1 = FVector3f::ZeroVector;
 	FVector3f ShadowCamera2 = FVector3f::ZeroVector;
+	FVector3f ShadowLight[AtmoShadowBake::CascadeCount] = { FVector3f::ZeroVector, FVector3f::ZeroVector, FVector3f::ZeroVector };
 
 	// FAtmosphereSamplingParams.
-	int32 CellSize = 3;
-	float FreshWeight = 0.15f;
-	float LatticeGrowth = 0.2f;
-	float LatticeGrowthFar = 0.02f;
+	int32 CellSize = 0;
+	float FreshWeight = 0.0f;
+	float LatticeGrowth = 0.0f;
+	float LatticeGrowthFar = 0.0f;
 
 	// -- Resources: game-thread objects, resolved to RHI handles on the render
 	// thread, as the shadow bake does.
@@ -124,7 +127,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereMarchParams
  *  leaves, and bloom and eye adaptation see the atmosphere.
  *
  *  A VIEW EXTENSION BECAUSE THE RESOLVE KEEPS HISTORY: one per view state,
- *  keyed by its view key, dropped when unused for a few seconds. A view without
+ *  keyed by its view key, dropped when unused for HistoryLifetime frames. A view without
  *  a state, such as a scene capture, resolves each frame without history.
  *
  *  ONE PER ATMOSPHERE. The actor creates it, feeds it a params snapshot every

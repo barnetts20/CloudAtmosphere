@@ -23,8 +23,9 @@
 float TransmittancePlanetRadius;
 float TransmittanceAtmosphereRadius;
 
-/** Authored pins, unconverted: (RayleighBeta.a, MieBeta.a, AbsorptionBeta.a,
- *  AbsorptionFalloff). AtmoT_Profile converts them, as it does for the march. */
+/** Authored pins, unconverted: (RayleighScaleHeight, MieScaleHeight,
+ *  AbsorptionAltitude, AbsorptionFalloff). AtmoT_Profile converts them, as it
+ *  does for the march. */
 float4 TransmittanceProfilePins;
 
 RWTexture2D<float4> TransmittanceUAV;

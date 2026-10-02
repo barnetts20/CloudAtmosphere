@@ -49,10 +49,9 @@
 
 /** Written where a threshold is never reached or the ray misses the shell:
  *  past the longest chord down to a HeightScale of 1e-4, inside half float, so
- *  reconstruction reads zero without a validity test. */
-#ifndef ATMO_SHADOW_NO_DECK
+ *  reconstruction reads zero without a validity test. The actor clears the
+ *  shadow target to the same value (ShadowNoDeck). */
 #define ATMO_SHADOW_NO_DECK 60000.0f
-#endif
 
 /** The map's reach past the cull radius, so the limb, where the depths vary
  *  fastest, has texels outside it to blend toward. Applied by the model. */
@@ -205,22 +204,28 @@ void AtmoShadow_DiscJacobian(float2 Q, out float2 OutX, out float2 OutY)
     OutY = float2(Cross * N.x * N.y, Tangential + Cross * N.y * N.y);
 }
 
-/** The camera each cascade was baked around, planet-local: levels bake on
- *  different frames, and a centre snapped from another camera can land a texel
- *  off. Level 0 is planet-centred. */
+/** The camera and light each cascade was baked with, planet-local: levels bake
+ *  on different frames, and a level read against another frame's camera or
+ *  light lands its centre, basis and depths off. Level 0 is planet-centred. A
+ *  zero light, a level never baked, reads with the current one. */
 struct AtmoShadowCameras
 {
     float3 Level[ATMO_SHADOW_CASCADES];
+    float3 Light[ATMO_SHADOW_CASCADES];
 };
 
-/** The cameras from the march's two uniforms. */
-AtmoShadowCameras AtmoShadow_MakeCameras(float3 Camera1, float3 Camera2)
+/** The cameras and lights from the march's uniforms. */
+AtmoShadowCameras AtmoShadow_MakeCameras(float3 Camera1, float3 Camera2, float3 Light0, float3 Light1, float3 Light2)
 {
     AtmoShadowCameras Cameras;
 
     Cameras.Level[0] = float3(0.0f, 0.0f, 0.0f);
     Cameras.Level[1] = Camera1;
     Cameras.Level[2] = Camera2;
+
+    Cameras.Light[0] = Light0;
+    Cameras.Light[1] = Light1;
+    Cameras.Light[2] = Light2;
 
     return Cameras;
 }
@@ -340,13 +345,15 @@ float AtmoShadow_TauSlice(
     return lerp(lerp(T00, T10, Frac.x), lerp(T01, T11, Frac.x), Frac.y);
 }
 
-/** What a lookup derives from the light, cameras and frame: built once per
- *  pixel. A zero half-width skips its level. */
+/** What a lookup derives from the lights, cameras and frame: built once per
+ *  pixel. L is the current light; each level reads in the basis it was baked
+ *  in. A zero half-width skips its level. */
 struct AtmoShadowReader
 {
     float3 L;
-    float3 U;
-    float3 V;
+    float3 LevelL[ATMO_SHADOW_CASCADES];
+    float3 LevelU[ATMO_SHADOW_CASCADES];
+    float3 LevelV[ATMO_SHADOW_CASCADES];
     float2 MapSize;
     float Extent0;
     float CullRadius;
@@ -364,7 +371,16 @@ AtmoShadowReader AtmoShadow_MakeReader(
     AtmoShadowReader R;
 
     R.L = normalize(LightLocal);
-    AtmoShadow_Basis(R.L, R.U, R.V);
+
+    UNROLL
+
+    for (int Baked = 0; Baked < ATMO_SHADOW_CASCADES; Baked++)
+    {
+        const float3 Light = Cameras.Light[Baked];
+
+        R.LevelL[Baked] = (dot(Light, Light) > 1e-8f) ? normalize(Light) : R.L;
+        AtmoShadow_Basis(R.LevelL[Baked], R.LevelU[Baked], R.LevelV[Baked]);
+    }
 
     uint MapWidth, MapHeight, MapSlices;
     ShadowMap.GetDimensions(MapWidth, MapHeight, MapSlices);
@@ -386,11 +402,27 @@ AtmoShadowReader AtmoShadow_MakeReader(
         R.HalfWidth[Level] = (Extent > 0.0f) ? AtmoShadow_CascadeHalfWidth(Level, Extent, R.Extent0) : 0.0f;
 
         R.Centre[Level] = (Extent > 0.0f)
-			? AtmoShadow_CascadeCentre(Level, Cameras.Level[Level], R.U, R.V, R.HalfWidth[Level], R.Extent0, R.MapSize)
+			? AtmoShadow_CascadeCentre(Level, Cameras.Level[Level], R.LevelU[Level], R.LevelV[Level],
+				R.HalfWidth[Level], R.Extent0, R.MapSize)
 			: float2(0.0f, 0.0f);
     }
 
     return R;
+}
+
+/** A point's disc coordinate and depth from the shell entry in a level's
+ *  basis, as the bake marched it; false where its ray misses the shell. */
+bool AtmoShadow_LevelCoords(AtmoShadowReader R, int Level, float3 LocalPos, out float2 Disc, out float Depth)
+{
+    const float2 Plane = float2(dot(LocalPos, R.LevelU[Level]), dot(LocalPos, R.LevelV[Level]));
+
+	// The in-plane offset is the ray's closest approach to the centre.
+    const float HalfChordSq = R.CullRadius * R.CullRadius - dot(Plane, Plane);
+
+    Depth = (dot(LocalPos, -R.LevelL[Level]) + sqrt(max(HalfChordSq, 0.0f))) / R.Thickness;
+    Disc = AtmoShadow_PlaneToDisc(Plane / R.Extent0);
+
+    return HalfChordSq > 0.0f;
 }
 
 /** Optical depth between a planet-local position and the light, on the fastest
@@ -413,20 +445,13 @@ float AtmoShadow_ReadTau(
         return 0.0f;
     }
 
-    const float2 Plane = float2(dot(LocalPos, R.U), dot(LocalPos, R.V));
+    float2 Disc;
+    float Depth;
 
-	// The in-plane offset is the ray's closest approach to the centre.
-    const float HalfChordSq = R.CullRadius * R.CullRadius - dot(Plane, Plane);
-
-    if (HalfChordSq <= 0.0f)
+    if (!AtmoShadow_LevelCoords(R, 0, LocalPos, Disc, Depth))
     {
         return 0.0f;
     }
-
-	// Depth from the shell entry, as the bake marched; shared by every cascade.
-    const float Depth = (dot(LocalPos, -R.L) + sqrt(HalfChordSq)) / R.Thickness;
-
-    const float2 Disc = AtmoShadow_PlaneToDisc(Plane / R.Extent0);
 
     float Tau = AtmoShadow_TauSlice(
 		ShadowMap, ShadowSampler, 0, Disc, float2(0.0f, 0.0f), 1.0f,
@@ -438,13 +463,16 @@ float AtmoShadow_ReadTau(
     {
         const float HalfWidth = R.HalfWidth[Level];
 
-        if (HalfWidth <= 0.0f)
+        float2 LevelDisc;
+        float LevelDepth;
+
+        if (HalfWidth <= 0.0f || !AtmoShadow_LevelCoords(R, Level, LocalPos, LevelDisc, LevelDepth))
         {
             continue;
         }
 
 		// Square support, so the edge measure is the larger axis.
-        const float2 Relative = (Disc - R.Centre[Level]) / HalfWidth;
+        const float2 Relative = (LevelDisc - R.Centre[Level]) / HalfWidth;
         const float Edge = max(abs(Relative.x), abs(Relative.y));
 
         if (Edge >= 1.0f)
@@ -453,7 +481,7 @@ float AtmoShadow_ReadTau(
         }
 
         const float Finer = AtmoShadow_TauSlice(
-			ShadowMap, ShadowSampler, Level, Disc, R.Centre[Level], HalfWidth, Depth,
+			ShadowMap, ShadowSampler, Level, LevelDisc, R.Centre[Level], HalfWidth, LevelDepth,
 			JitterTexels, R.MapSize, Ceiling);
 
         Tau = lerp(Finer, Tau, smoothstep(ATMO_SHADOW_NEAR_BLEND, 1.0f, Edge));

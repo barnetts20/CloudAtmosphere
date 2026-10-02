@@ -53,10 +53,6 @@
 #define TR_DEEP_DECK 0
 #endif
 
-/** Depth of the deep floor's edge ramp, in fills. */
-#ifndef TR_DEEP_FLOOR_SOFTNESS
-#define TR_DEEP_FLOOR_SOFTNESS 0.25f
-#endif
 
 /** The sim layer every column read comes from: CloudLayer, negative for the
  *  bottom of the stack, clamped to the stack. */
@@ -96,6 +92,7 @@ struct TRFieldParams
 
     float DeepFill;
     float FloorRelief;
+    float FloorSoftness;
     float DeepDarkening;
 
     float TypeCurve;
@@ -154,7 +151,9 @@ struct TRFieldParams
     float Thickness;
 
 	/** Each end's ramp depth, at most half CloudThickness, so a full column's
-	 *  ramps never overlap and TR_CloudBeta is exact. */
+	 *  ramps never overlap. TR_CloudBeta takes them at this length; the fit in
+	 *  TR_SlabRamps shortens them a little, a full column then reading a few
+	 *  percent over CloudOpticalDepth, alike in march and bake. */
     float SpanTop;
     float SpanBase;
 
@@ -229,6 +228,7 @@ TRFieldParams TR_BuildField(
 	float4 CloudGenusCirrus,
 	float4 ShadowCascades,
 	float4 CloudResponse,
+	float4 DeepMaterial,
 	float CoverThreshold)
 {
     TRFieldParams F;
@@ -279,6 +279,7 @@ TRFieldParams TR_BuildField(
     F.StructureFlowInherit = StructureWarp.x;
     F.GenusSubsidence = max(StructureWarp.y, 0.0f);
     F.FloorRelief = saturate(StructureWarp.z);
+    F.FloorSoftness = max(DeepMaterial.y, 1e-3f);
     F.StructureBreakup = saturate(StructureWarp.w);
 
     F.GenusStratus = CloudGenusStratus;
@@ -337,7 +338,7 @@ TRFieldParams TR_BuildField(
 	NoiseLevels, StructureSampling, StructureWarp, \
 	DetailSampling, DetailWarp, \
 	CloudGenusStratus, CloudGenusStratocumulus, CloudGenusCumulus, CloudGenusCirrus, \
-	ShadowCascades, CloudResponse, \
+	ShadowCascades, CloudResponse, DeepMaterial, \
 	CoverageThreshold.Load(int3(0, 0, 0)))
 
 /** The shell's ceiling: 1 below the falloff band, 0 at the atmosphere top,
@@ -747,7 +748,7 @@ float TR_DeepFloorRamp(float U)
 /** The deep deck's floor, as the step's mean density: full under a surface
  *  that rises FloorRelief fills above where the fill completes at the highest
  *  structure noise and sits there at the lowest, moved by Offset (the detail
- *  layer's erosion, TR_DeepFloorDetail), over a ramp TR_DEEP_FLOOR_SOFTNESS
+ *  layer's erosion, TR_DeepFloorDetail), over a ramp FloorSoftness
  *  fills deep. Exact on the ramp, like the profile.
  *
  *  THE FLOOR ONLY ADDS DENSITY: the caller takes the larger of it and the
@@ -755,8 +756,9 @@ float TR_DeepFloorRamp(float U)
  *  above it, whose erosion and coverage the fill drives. */
 float TR_DeepFloor(float Height, float HalfStep, TRColumn Col, float Noise, float Offset, TRFieldParams F)
 {
-    const float Top = Col.Base - F.DeepFill * (1.0f - F.FloorRelief * Noise) + Offset;
-    const float Soft = F.DeepFill * TR_DEEP_FLOOR_SOFTNESS;
+	// Held under the base, above which the deep deck is missed.
+    const float Top = min(Col.Base - F.DeepFill * (1.0f - F.FloorRelief * Noise) + Offset, Col.Base);
+    const float Soft = F.DeepFill * F.FloorSoftness;
 
     if (HalfStep <= 1e-5f)
     {
@@ -979,8 +981,8 @@ bool TR_SlabMissed(TRColumn Col, float Height, float HalfStep)
  *  Returns:
  *    x  Density in [0, 1]. Multiply by an extinction coefficient in the march.
  *    y  Material coordinate, [0, 1]: fair-weather to storm.
- *    z  Pressure, lows positive.
- *    w  The column's top. */
+ *    z  Pressure, lows positive; under the deep deck TR_DeepBuried.
+ *    w  Depth below the column's base, an atmosphere fraction, 0 above it. */
 float4 TR_DensityInColumn(
 	Texture3D DetailVolume,
 	SamplerState DetailSampler,
@@ -1065,14 +1067,21 @@ float4 TR_DensityInColumn(
     float Shape = Profile;
 
 #if TR_DEEP_DECK
-	// The floor reads the same noise; 0 where it is unread leaves the floor at
-	// the fill's completion, where the deck is already full.
+	// The floor reads the same noise, wherever a step reaches its band: from
+	// below its lowest ramp to its highest top, the detail's reach included.
+	// Unread, the floor sits at the fill's completion.
     float StructureNoise = 0.0f;
+
+    const float FloorHigh = Col.Base - F.DeepFill * (1.0f - F.FloorRelief - F.DetailErosion);
+    const float FloorLow = Col.Base - F.DeepFill * (1.0f + F.FloorSoftness + F.DetailErosion);
+    const bool bFloorBand = F.FloorRelief > 0.0f && Height - HalfStep < FloorHigh && Height + HalfStep > FloorLow;
+#else
+    const bool bFloorBand = false;
 #endif
 
     BRANCH
 
-    if (F.StructureActive && Fill < 1.0f)
+    if (F.StructureActive && (Fill < 1.0f || bFloorBand))
     {
         const float UVWScale = TR_NoiseFrequency(F.StructureScale, F.StructureVertical, Rise);
 
@@ -1112,7 +1121,7 @@ float4 TR_DensityInColumn(
 	// The floor's surface, which the detail erodes wherever a step reaches its
 	// ramp. Its offset settles to 0 as the detail fades.
     const float FloorTop = Col.Base - F.DeepFill * (1.0f - F.FloorRelief * StructureNoise);
-    const float FloorReach = F.DeepFill * (TR_DEEP_FLOOR_SOFTNESS + F.DetailErosion) + HalfStep;
+    const float FloorReach = F.DeepFill * (F.FloorSoftness + F.DetailErosion) + HalfStep;
     const bool bFloorDetail = F.FloorRelief > 0.0f && abs(Height - FloorTop) < FloorReach;
 #else
     const bool bFloorDetail = false;
@@ -1204,14 +1213,14 @@ float4 TR_DensityInColumn(
     Density = max(Density, TR_DeepFloor(
 		Height, HalfStep, Col, StructureNoise, TR_DeepFloorDetail(FloorModifier, F), F));
 
-    return float4(Density, Col.Material, TR_DeepBuried(Height, Col, F), Col.Top);
+    return float4(Density, Col.Material, TR_DeepBuried(Height, Col, F), max(Col.Base - Height, 0.0f));
 #else
-    return float4(Density, Col.Material, Col.Pressure, Col.Top);
+    return float4(Density, Col.Material, Col.Pressure, max(Col.Base - Height, 0.0f));
 #endif
 }
 
-/** (density, material, pressure, top) at a planet-local point, the column read
- *  where the sample stands; the deep deck returns TR_DeepBuried for pressure.
+/** TR_DensityInColumn's (density, material, pressure or buried deck, depth
+ *  below the base) at a planet-local point, the column read where it stands.
  *  PITFALL: columns keyframed along each ray and interpolated draw rings
  *  concentric with the disc and a pinwheel at the nadir. */
 float4 TR_Density(
@@ -1240,7 +1249,7 @@ float4 TR_Density(
 
     if (TR_SlabMissed(Col, Height, HalfStep))
     {
-        return float4(0.0f, Col.Material, TR_DEEP_DECK ? 0.0f : Col.Pressure, Col.Top);
+        return float4(0.0f, Col.Material, TR_DEEP_DECK ? 0.0f : Col.Pressure, 0.0f);
     }
 
     return TR_DensityInColumn(

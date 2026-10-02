@@ -365,7 +365,7 @@ Texture2DArray<float4> SimLatLonLatestSRV;
  *  reads no explicit field, so it skips that one. */
 int SimReconstructLatest;
 
-/** The texture the material samples: SimLatLon's slices resampled onto the
+/** The flow atlas the field reads: SimLatLon's slices resampled onto the
  *  cube atlas; see FlowField.ush. */
 RWTexture2DArray<float4> SimOutputUAV;
 
@@ -2077,7 +2077,7 @@ void MainReduceGlobalCS(uint3 Group : SV_GroupID, uint Thread : SV_GroupIndex)
 }
 
 // ---------------------------------------------------------------------------
-// Reconstruct, and the texture the material reads
+// Reconstruct, and the atlas the field reads
 // ---------------------------------------------------------------------------
 
 /** Centre velocity and divergence, the explicit field, and the output on the
@@ -2100,7 +2100,7 @@ void MainReduceGlobalCS(uint3 Group : SV_GroupID, uint Thread : SV_GroupIndex)
  *  ascent it condensed at. One layer gives the formation ascent itself.
  *
  *  NOISE SLICES: phase A's displacement, then phase B's, xyz, in radians.
- *  Phase A's w is unused and zero; phase B's carries the layer's relative
+ *  Phase A's w carries the eye tracer, phase B's the layer's relative
  *  humidity. */
 [numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
 void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
@@ -2225,7 +2225,7 @@ void MainReconstructCS(uint3 Id : SV_DispatchThreadID)
 // ---------------------------------------------------------------------------
 
 /** A live slot's low and push gains about its new centre P, into its control
- *  block. Its rings are ellipses of its aspect.
+ *  block. Its push rings are ellipses of its aspect; the low's are circles.
  *
  *  THE LOW: the bottom layer's mean pressure on the eyewall ring, and the least
  *  of it at the centre and on every ring out to it (SimCellEyeSource).
@@ -3466,7 +3466,7 @@ void MainCorrectCS(uint3 Id : SV_DispatchThreadID)
 // layer-major, then row, then column:
 //
 //   0 u   1 v   2 phi   3 cloud   4 cloud ascent   5 vapour   6 storm
-//   7-9 noise A xyz   10-12 noise B xyz
+//   7-9 noise A xyz   10-12 noise B xyz   13 low-passed ascent   14 eye tracer
 //
 // then the storm cells, eight floats a slot, after every plane.
 // ---------------------------------------------------------------------------

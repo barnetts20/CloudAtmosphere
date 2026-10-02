@@ -168,7 +168,7 @@ struct FFlowPerpetualStorm
 
 	/** East-west half-length over the half-height: 1 is round. The wind falls
 	 *  to 1 / Aspect of Wind at its east and west ends. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm", meta = (ClampMin = "1.0", ClampMax = "4.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm", meta = (ClampMin = "1.0", UIMax = "4.0"))
 	float Aspect = 1.8f;
 
 	/** Eyewall wind the flow is pushed toward, a fraction of the speed root, as
@@ -205,7 +205,7 @@ struct FFlowPerpetualStorm
 
 	/** Pressure drop across the whole storm, as StormCellPressure: the deck
 	 *  raises its cloud top over it. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm", meta = (ClampMin = "0.0", UIMax = "2.0"))
 	float Lift = 0.5f;
 
 	/** Share of a hurricane's eye it opens: 0 a calm core with no hole, 1 an
@@ -251,10 +251,11 @@ namespace FlowSimStep
 	 *  per step. Past it the sim runs slower than asked. */
 	static constexpr int32 MaxPerFrame = 2048;
 
-	/** Step above which a stack of layers runs at no less than StackWeight: its
-	 *  layers' explicit pressure terms move at each other's speeds, and at
-	 *  large steps that amplifies polar grid-scale noise below it. */
-	static constexpr float StackLargeStep = 1e-3f;
+	/** Step, in turnovers, above which a stack of layers runs at no less than
+	 *  StackWeight: its layers' explicit pressure terms move at each other's
+	 *  speeds, and at large steps that amplifies polar grid-scale noise below
+	 *  it. */
+	static constexpr float StackLargeStep = 0.0102f;
 	static constexpr float StackWeight = 0.75f;
 }
 
@@ -839,7 +840,7 @@ public:
 	 *  deck raises the lid and lowers the base under lows. Joined to the sim's
 	 *  pressure before the output's soft saturation, so a deep drop rounds off
 	 *  toward -1 rather than flattening into a plateau. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Look", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Look", meta = (ClampMin = "0.0", UIMax = "2.0"))
 	float StormCellPressure = 0.5f;
 
 	/** Share of the deck's column depth a full-intensity eye removes at its
@@ -994,20 +995,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Numerics", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float FilterLatitude = 0.9f;
 
-	// -- Pipeline -----------------------------------------------------------
-	//
-	// Assets and start state: what a machine or a session owns rather than what
-	// a tune is. The render targets are the subsystem's, created at run time.
-
-	/** Band-limited tiling noise, read as a forcing streamfunction. Optional:
-	 *  with none bound the forcing is exactly zero. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline")
+	/** Band-limited tiling noise, read as a forcing streamfunction: part of a
+	 *  tune, since its channel sets the eddies' scale. Optional: with none bound
+	 *  the forcing is exactly zero. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Stirring")
 	TObjectPtr<UVolumeTexture> ForcingVolume;
 
 	/** The channel read, decoded from [0, 1] to [-1, 1]. Each channel is a
 	 *  different noise octave, so the choice changes the eddies' scale. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline", meta = (ClampMin = "0", ClampMax = "3"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Stirring", meta = (ClampMin = "0", ClampMax = "3"))
 	int32 ForcingChannel = 1;
+
+	// -- Pipeline -----------------------------------------------------------
+	//
+	// Start state and cost: what a machine or a session owns rather than what
+	// a tune is. The render targets are the subsystem's, created at run time.
 
 	/** A captured state to start from, restored whenever this config starts
 	 *  or an atmosphere swaps to it. Empty means seed and spin up. A grid or
@@ -1068,6 +1070,9 @@ public:
 
 	/** One turnover in sim time: DeformationRadius over the speed root. */
 	float GetTurnover() const;
+
+	/** PlanetaryVorticity as the sim and the field's spin read it, floored. */
+	float GetPlanetaryVorticity() const { return FMath::Max(PlanetaryVorticity, 0.1f); }
 
 	/** The speed root: SpeedRoot times the first internal mode's wave
 	 *  speed. */
@@ -1154,8 +1159,9 @@ struct FFlowSimStack
 
 /** Flat snapshot handed to the render thread. Captured BY VALUE into a render
  *  command, so it holds no UObject; RHI references are copied on the game
- *  thread. UFlowSimSubsystem::BuildParams sets every member, so the defaults
- *  are zero rather than a second, stale set of values. */
+ *  thread. UFlowSimSubsystem::BuildParams sets every member and its callers
+ *  the per-frame and per-step ones, so the defaults are zero rather than a
+ *  second, stale set of values: StateBlend's 1 is a whole state. */
 struct FFlowSimParams
 {
 	FIntVector GridSize = FIntVector::ZeroValue;
@@ -1193,10 +1199,10 @@ struct FFlowSimParams
 	 *  DeltaTime on. A step's time depends on its index alone, not on how
 	 *  frames grouped the steps, which replay needs. */
 	double AnchorTime = 0.0;
-	int32 AnchorStep = 0;
+	int64 AnchorStep = 0;
 
 	/** Sim time at the start of step Index. */
-	double TimeAt(int32 Index) const
+	double TimeAt(int64 Index) const
 	{
 		return AnchorTime + (double)(Index - AnchorStep) * (double)DeltaTime;
 	}
@@ -1276,14 +1282,15 @@ struct FFlowSimParams
 	float PerpetualClearance = 0.0f;
 	int32 CellCount = 0;
 
-	/** Steps completed before the frame's first; seeds the cells' spawns. */
-	int32 StepIndex = 0;
+	/** Steps completed before the frame's first; seeds the cells' spawns, which
+	 *  read it wrapped to 32 bits. */
+	int64 StepIndex = 0;
 
 	/** Perpetual storms, up to FlowSimShader::MaxPerpetualStorms: see
 	 *  SimPerpetualShape, SimPerpetualLook and SimPerpetualForm in FlowSim.usf, with Shape's y
 	 *  the longitude at time zero; PerpetualRate is each longitude's angular
-	 *  rate. PerpetualTime is the time they are placed at: the time a step
-	 *  reaches, or the output's outside the steps. */
+	 *  rate. PerpetualTime is the time a step places them at, the time it
+	 *  reaches. */
 	int32 PerpetualCount = 0;
 	float PerpetualForcing = 0.0f;
 	FVector4f PerpetualShape[8] = { FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(), FVector4f::Zero(),

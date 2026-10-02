@@ -74,7 +74,7 @@ struct TRScatterParams
     float3 DeepScatter;
     float4 DeepExtinction;
 
-	/** The deep share's ceiling and the buried depth it is reached at. */
+	/** The depth below the base the deep material takes over across. */
     float4 DeepMaterial;
 
 	/** TR_MaterialTintRange of the tints: (smallest, largest). */
@@ -101,11 +101,11 @@ struct TRScatterParams
 };
 
 /** A sample's material: its coordinate, and under the deep deck the deep
- *  share its buried depth (Sample.z) gives. */
+ *  share its depth below the base (Sample.w) gives. */
 float2 TR_SampleMaterial(float4 Sample, TRScatterParams S)
 {
 #if TR_DEEP_DECK
-    return float2(Sample.y, TR_DeepMaterialWeight(Sample.z, S.DeepMaterial));
+    return float2(Sample.y, TR_DeepMaterialWeight(Sample.w, S.DeepMaterial));
 #else
     return float2(Sample.y, 0.0f);
 #endif
@@ -202,8 +202,7 @@ TRScatterParams TR_BuildScatter(
     S.DeepScatter = DeepScatter;
     S.DeepExtinction = DeepExtinction;
     S.DeepMaterial = DeepMaterial;
-    S.TintRange = TR_MaterialTintRange(
-		CloudExtinction.rgb, StormExtinction.rgb, DeepExtinction.rgb, DeepMaterial.x);
+    S.TintRange = TR_MaterialTintRange(CloudExtinction.rgb, StormExtinction.rgb, DeepExtinction.rgb);
 
     S.ForwardG = ForwardG;
     S.BackwardG = BackwardG;
@@ -261,10 +260,10 @@ CompositeParams TR_BuildAtmo(
 	float4 SurfaceShadow,
 	TRFieldParams F)
 {
-	// The field-wide reach, not this camera's, or the step lattice moves with it.
+	// The field-wide reach, not this camera's, or the step lattice moves with it:
+	// the radius the shadow map covers.
 #if ATMO_FIELD_CLOUDS
-    const float CloudOuter =
-		F.PlanetRadius + F.Thickness * TR_TopMax(F);
+    const float CloudOuter = TR_ShadowCullRadius(F);
 #else
     const float CloudOuter = F.PlanetRadius;
 #endif
@@ -334,6 +333,13 @@ CompositeParams TR_BuildAtmo(
 // The march's hooks
 // ---------------------------------------------------------------------------
 
+/** Whether an opaque terminus is the field itself, moving with it: the deep
+ *  deck's is; the slab's is the planet. */
+bool Field_TerminusIsField()
+{
+    return TR_DEEP_DECK != 0;
+}
+
 /** Where the view ray stops, and whether it is opaque there. The slab's planet
  *  is a surface, so the sphere clips the ray, but only over sky. PITFALL:
  *  clipped where geometry was drawn, geometry below the sphere (a crater, a sea
@@ -358,8 +364,8 @@ void Field_Terminus(
 #if TR_DEEP_DECK
 	// Counted down from where the deck is full, against the least extinction
 	// any material has, in atmosphere thicknesses.
-    const float BetaMin = Atmo.cloudParams.cloudScatBeta.x * F.Thickness * TR_MaterialLeastExtinction(
-		S.CloudExtinction, S.StormExtinction, S.DeepExtinction, S.DeepMaterial.x);
+    const float BetaMin = Atmo.cloudParams.cloudScatBeta.x * F.Thickness
+		* TR_MaterialLeastExtinction(S.CloudExtinction, S.StormExtinction, S.DeepExtinction);
 
     const float Radius = TR_DeepTerminusRadius(F, BetaMin);
 
@@ -386,7 +392,7 @@ void Field_Terminus(
 }
 
 /** Density and material at a planet-local point, as (density, material,
- *  pressure or buried depth, top); see TR_Density. StepHalfHeight is the sample's own
+ *  pressure or buried deck, depth below the base); see TR_Density. StepHalfHeight is the sample's own
  *  half-extent along the radius, which the field integrates its height profile
  *  across.
  *

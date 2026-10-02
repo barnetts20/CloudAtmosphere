@@ -35,7 +35,8 @@
 //
 // Reads a file in the same layout back into the world's atmosphere actors and
 // the active model's sim config of the one that ran the sim when dumped (else
-// the first), or into the running config when no atmosphere is loaded.
+// the first), or otherwise into the running config: in a game world through
+// its owner's writable copy, so the asset is left alone.
 // UAtmosphereTuneLibrary::ApplyTune does the same for one actor at runtime.
 
 DEFINE_LOG_CATEGORY_STATIC(LogAtmosphereDump, Log, All);
@@ -176,7 +177,7 @@ namespace AtmosphereDump
 		Out->SetNumberField(TEXT("ConfigVersion"), ConfigVersion());
 		Out->SetNumberField(TEXT("SimulatedTime"), Sub.GetSimulatedTime());
 		Out->SetNumberField(TEXT("DisplayTime"), Sub.GetDisplayTime());
-		Out->SetNumberField(TEXT("StepsCompleted"), Sub.GetStepsCompleted());
+		Out->SetNumberField(TEXT("StepsCompleted"), (double)Sub.GetStepsCompleted());
 		Out->SetNumberField(TEXT("StepsLastFrame"), Sub.GetStepsLastFrame());
 		Out->SetNumberField(TEXT("Courant"), Sub.GetCourant());
 
@@ -486,13 +487,13 @@ namespace AtmosphereLoad
 		bool bQuality = false;
 	};
 
-	/** Assets, targets, debug views and start state: what a machine or a
+	/** Start state, spin-up cost, debug views and pause: what a machine or a
 	 *  session owns rather than what a tune is, so a preset does not repoint
 	 *  them. */
 	const TSet<FName>& SimPipeline()
 	{
 		static const TSet<FName> Names = {
-			TEXT("InitialState"), TEXT("bDebugView"),
+			TEXT("InitialState"), TEXT("MaxSpinUpStepsPerFrame"), TEXT("bDebugView"),
 			TEXT("DebugMode"), TEXT("DebugLayer"), TEXT("DebugScale"), TEXT("bPaused") };
 		return Names;
 	}
@@ -535,6 +536,7 @@ namespace AtmosphereLoad
 	{
 		static const FRename Rows[] = {
 			{ TEXT("ForcingScale"), TEXT("ForcingFrequency") },
+			{ TEXT("GridLongitude"), TEXT("") },
 			{ TEXT("SaturationPole"), TEXT("SaturationPoleRatio") },
 			{ TEXT("FroudeCeiling"), TEXT("SpeedRoot") },
 
@@ -727,7 +729,6 @@ namespace AtmosphereLoad
 			{ TEXT("TerrestrialAmbient.AtmosphereAmbientFloor"), TEXT("TerrestrialAmbient.AirAmbientFloor") },
 			{ TEXT("Ambient.AtmosphereAmbient"), TEXT("") },
 			{ TEXT("Ambient.AtmosphereAmbientFloor"), TEXT("Ambient.AirAmbientFloor") },
-			{ TEXT("TerrestrialDetailLayer.FadeNear"), TEXT("") },
 			{ TEXT("TerrestrialDetailLayer.FadeSpan"), TEXT("") },
 
 			// Tower depth is CloudThickness alone. Exact where CeilingDepth was 1;
@@ -829,6 +830,10 @@ namespace AtmosphereLoad
 			{ TEXT("GasGiant.Type.Stratocumulus"), TEXT("GasGiant.Type.Genus.Stratocumulus") },
 			{ TEXT("GasGiant.Type.Cumulus"), TEXT("GasGiant.Type.Genus.Cumulus") },
 			{ TEXT("GasGiant.Type.Cirrus"), TEXT("GasGiant.Type.Genus.Cirrus") },
+
+			// The deep material applies under every deep deck.
+			{ TEXT("Terrestrial.Deep.MaterialShare"), TEXT("") },
+			{ TEXT("GasGiant.Deep.MaterialShare"), TEXT("") },
 
 			// Sampling is one quality group per actor. A file carrying both models'
 			// keeps the terrestrial members where the two differ.
@@ -1167,7 +1172,7 @@ namespace AtmosphereLoad
 	{
 		FProperty* Property = FindFProperty<FProperty>(Type, *Key);
 
-		if (!Property || (bTop ? !Loadable(Property) : Property->HasAnyPropertyFlags(CPF_Deprecated)))
+		if (!Property || (bTop ? !Loadable(Property) : Property->HasAnyPropertyFlags(CPF_Deprecated | CPF_Transient)))
 		{
 			Report.Skipped.Add(Name + (Property ? TEXT(" (not editable)") : TEXT(" (unknown)")));
 			return nullptr;
@@ -1486,9 +1491,15 @@ namespace AtmosphereLoad
 			{
 				Scope.bQuality = true;
 			}
-			else
+			else if (Args[i].Equals(TEXT("Sim"), ESearchCase::IgnoreCase) || Args[i].Equals(TEXT("Atmospheres"), ESearchCase::IgnoreCase))
 			{
 				Only = Args[i];
+			}
+			else
+			{
+				UE_LOG(LogAtmosphereDump, Error,
+					TEXT("Unknown scope '%s'. Usage: CloudAtmosphere.LoadParams FileName [Sim|Atmospheres] [Pipeline] [Quality]"), *Args[i]);
+				return;
 			}
 		}
 
@@ -1511,8 +1522,26 @@ namespace AtmosphereLoad
 			Actors.Add(*It);
 		}
 
+		// The running config, through its owner's writable copy in a game world
+		// so a PIE load leaves the asset alone.
 		const UFlowSimSubsystem* Sub = World->GetSubsystem<UFlowSimSubsystem>();
-		ApplyRoot(*Root, Actors, nullptr, Sub ? Sub->GetConfig() : nullptr, Scope);
+		UFlowSimConfig* Fallback = Sub ? Sub->GetConfig() : nullptr;
+
+		if (World->IsGameWorld())
+		{
+			Fallback = nullptr;
+
+			for (APlanetAtmosphereActor* Actor : Actors)
+			{
+				if (Sub && Sub->IsOwner(Actor))
+				{
+					Fallback = Actor->GetWritableSimConfig(Actor->PlanetType);
+					break;
+				}
+			}
+		}
+
+		ApplyRoot(*Root, Actors, nullptr, Fallback, Scope);
 
 		UE_LOG(LogAtmosphereDump, Display, TEXT("Loaded %s. Save the changed assets to keep the values."), *Path);
 	}
@@ -1529,6 +1558,10 @@ void UAtmosphereTuneLibrary::ApplyPreset(APlanetAtmosphereActor* Actor, const UA
 
 	if (Preset->SimConfig)
 	{
+#if WITH_EDITOR
+		Actor->Modify();
+#endif
+
 		TObjectPtr<UFlowSimConfig>& Slot = (InModel == EPlanetAtmosphereType::GasGiant)
 			? Actor->Simulation.GasGiantConfig : Actor->Simulation.TerrestrialConfig;
 		Slot = Preset->SimConfig;
@@ -1539,7 +1572,7 @@ bool UAtmosphereTuneLibrary::ApplyTune(APlanetAtmosphereActor* Actor, const FStr
 {
 	const TSharedPtr<FJsonObject> Root = Actor ? AtmosphereLoad::Parse(TuneJson) : nullptr;
 
-	if (!Root.IsValid())
+	if (!Root.IsValid() || !(Root->HasField(TEXT("Atmospheres")) || Root->HasField(TEXT("Sim"))))
 	{
 		UE_LOG(LogAtmosphereDump, Warning, TEXT("ApplyTune: no actor, or the text is not a tune."));
 		return false;

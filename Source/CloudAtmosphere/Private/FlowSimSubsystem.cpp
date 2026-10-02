@@ -207,8 +207,8 @@ static FAutoConsoleCommandWithWorldAndArgs GFlowSimStatusCmd(
 			if (UFlowSimSubsystem* Sub = FindSubsystem(World))
 			{
 				UE_LOG(LogFlowSim, Display,
-					TEXT("steps %d (%d last frame), simulated time %.4f, Courant %.3f, %s"),
-					Sub->GetStepsCompleted(),
+					TEXT("steps %lld (%d last frame), simulated time %.4f, Courant %.3f, %s"),
+					(long long)Sub->GetStepsCompleted(),
 					Sub->GetStepsLastFrame(),
 					Sub->GetSimulatedTime(),
 					Sub->GetCourant(),
@@ -949,7 +949,7 @@ void UFlowSimSubsystem::ReportCourant() const
 
 	// The turnover-authored lifetimes in days, 2 pi / PlanetaryVorticity, to
 	// check against real weather.
-	const float Day = 2.0f * UE_PI / FMath::Max(Config->PlanetaryVorticity, 0.1f);
+	const float Day = 2.0f * UE_PI / Config->GetPlanetaryVorticity();
 
 	UE_LOG(LogFlowSim, Log,
 		TEXT("A turnover is %.3f of a day; %.2f turnovers a second at SimSpeed %.4f. In days: cloud %.2f, ")
@@ -1318,14 +1318,14 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 	Target->Provenance.PlanetaryVorticity = Config->PlanetaryVorticity;
 	Target->Provenance.ThermalShear = Speeds.ThermalShear;
 	Target->SimulatedTime = (float)SimulatedTime;
-	Target->StepsCompleted = StepsCompleted;
+	Target->StepsCompleted = (int32)FMath::Min<int64>(StepsCompleted, MAX_int32);
 
 	Target->MarkPackageDirty();
 
 	UE_LOG(LogFlowSim, Display,
-		TEXT("Saved snapshot '%s': %dx%dx%d, %d steps, simulated time %.2f."),
+		TEXT("Saved snapshot '%s': %dx%dx%d, %lld steps, simulated time %.2f."),
 		*Target->GetName(), Target->Grid.X, Target->Grid.Y, Target->Grid.Z,
-		StepsCompleted, SimulatedTime);
+		(long long)StepsCompleted, SimulatedTime);
 
 	return true;
 }
@@ -1442,7 +1442,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	const bool bOnClock = (Step == ClockStep);
 	Out.AnchorTime = bOnClock ? ClockAnchorTime : SimulatedTime;
 	Out.AnchorStep = bOnClock ? ClockAnchorStep : StepsCompleted;
-	Out.PlanetaryVorticity = FMath::Max(Config->PlanetaryVorticity, 0.1f);
+	Out.PlanetaryVorticity = Config->GetPlanetaryVorticity();
 	Out.ImplicitWeight = Config->GetImplicitWeight(Out.DeltaTime);
 
 	// -- Forcing ------------------------------------------------------------
@@ -1516,7 +1516,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 		FMath::Clamp(Config->StormCellDraft, -1.0f, 1.0f),
 		FMath::Clamp(Config->StormCellEyeDraft, -1.0f, 1.0f),
 		FMath::Clamp(Config->StormCellStorm + FMath::Max(Config->StormCellBandExcess, 0.0f), 0.0f, 1.0f),
-		FMath::Clamp(Config->StormCellPressure, 0.0f, 2.0f));
+		FMath::Max(Config->StormCellPressure, 0.0f));
 
 	Out.CellLife = FVector4f(
 		Scales.CellSpawnRate,
@@ -1595,14 +1595,14 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 			Lat,
 			FMath::DegreesToRadians(Entry.Longitude),
 			HalfHeight,
-			FMath::Clamp(Entry.Aspect, 1.0f, 4.0f));
+			FMath::Max(Entry.Aspect, 1.0f));
 
 		// Cover as a lift rate against the cloud's decay, as CellCloud.x; Lift
 		// as the pressure drop, as CellDraft.w.
 		Out.PerpetualLook[i] = FVector4f(
 			Sense * FMath::Clamp(Entry.Wind, 0.0f, 0.9f) * Scales.Root,
 			FMath::Clamp(Entry.Storm, 0.0f, 1.0f),
-			FMath::Clamp(Entry.Lift, 0.0f, 2.0f),
+			FMath::Max(Entry.Lift, 0.0f),
 			Cover / (1.0f - Cover) / Out.CloudLifetime);
 
 		Out.PerpetualForm[i] = FVector4f(
@@ -1852,9 +1852,21 @@ void UFlowSimSubsystem::ClaimSimulation(const UObject* Claimant, UFlowSimConfig*
 
 void UFlowSimSubsystem::AdoptConfig(const UObject* Claimant, UFlowSimConfig* From, UFlowSimConfig* To)
 {
-	if (To && Config == From && IsOwner(Claimant))
+	if (!To || Config != From || !IsOwner(Claimant))
 	{
-		Config = To;
+		return;
+	}
+
+	Config = To;
+
+	// A bid this frame already made names the old config, and would restart
+	// the sim on it.
+	for (FSimClaim& Bid : Claims)
+	{
+		if (Bid.Claimant.Get() == Claimant && Bid.Config.Get() == From)
+		{
+			Bid.Config = To;
+		}
 	}
 }
 
@@ -1888,11 +1900,17 @@ void UFlowSimSubsystem::ResolveClaims()
 
 	Bids.RemoveAll([](const FSimClaim& Bid) { return !Bid.Claimant.IsValid() || !Bid.Config.IsValid(); });
 
-	// NOBODY BID: the sim runs on as it is. An owner that went away is
-	// forgotten, and the next bid takes over.
+	// NOBODY BID: the sim runs on as it is. An owner destroyed without
+	// releasing it, as by a level unloading in the editor, stops it: nothing
+	// draws it, and the next bid starts it again.
 	if (Bids.Num() == 0)
 	{
-		if (!Owner.IsValid())
+		if (Owner.IsStale())
+		{
+			Owner.Reset();
+			StopSimulation();
+		}
+		else if (!Owner.IsValid())
 		{
 			Owner.Reset();
 		}
@@ -2066,7 +2084,7 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 	{
 		// Spread over frames: one graph of hundreds of substeps hitches, and a
 		// watchable spin-up says more than the converged state.
-		Substeps = FMath::Min(
+		Substeps = (int32)FMath::Min<int64>(
 			FMath::Max(Config->MaxSpinUpStepsPerFrame, 1),
 			SpinUpTarget - StepsCompleted);
 
@@ -2087,10 +2105,13 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 		// for no more than a tenth of a second's worth.
 		PendingTime += Config->SimSpeed * FMath::Min(DeltaTime, 0.1f);
 
-		// A frame at the hang guard drops the excess rather than owing it.
-		Due = FMath::FloorToInt(PendingTime / Step);
+		// A frame at the hang guard drops the excess rather than owing it. The
+		// ratio is held in float before it becomes an integer.
+		const float Owed = PendingTime / Step;
+
+		Due = (Owed > (float)FlowSimStep::MaxPerFrame) ? FlowSimStep::MaxPerFrame + 1 : FMath::FloorToInt(Owed);
 		Substeps = FMath::Min(Due, FlowSimStep::MaxPerFrame);
-		PendingTime -= Due * Step;
+		PendingTime = (Due > FlowSimStep::MaxPerFrame) ? FMath::Fmod(PendingTime, Step) : PendingTime - Due * Step;
 		Blend = FMath::Clamp(PendingTime / Step, 0.0f, 1.0f);
 	}
 

@@ -280,8 +280,8 @@ float3 Atmo_LightMarch(
  *
  *  Returns float4(accumulated light, least transmittance channel), with every
  *  channel in OutTransmittance. BlueNoise is the tile
- *  ATMO_DRAW reads; ShadowCameras is AtmoShadow_MakeCameras of the
- *  ShadowCamera1 and ShadowCamera2 uniforms.
+ *  ATMO_DRAW reads; ShadowCameras is AtmoShadow_MakeCameras of the shadow
+ *  cameras' and lights' uniforms.
  *
  *  OutDepth is the ray distance a reprojection moves the result by: where the
  *  cloud's own transmittance crosses 0.5, else the cloud's opacity-weighted mean
@@ -289,7 +289,8 @@ float3 Atmo_LightMarch(
  *  weighted distance, else ATMO_SKY_DEPTH. Air sets no half-transmittance
  *  depth: along the limb it alone can fall below half ahead of the cloud, and
  *  the first wisp would take the depth. PITFALL: a limb ray given the sky
- *  depth reprojects as a direction and trails behind a moving planet. */
+ *  depth reprojects as a direction and trails behind a moving planet.
+ *  OutCloudDepth: the depth is the field's, which turns with its spin. */
 float4 Atmo_MainMarchDepth(
 	FIELD_TEXTURE_DECL,
 	Texture2D BlueNoise,
@@ -300,6 +301,7 @@ float4 Atmo_MainMarchDepth(
 	SamplerState TransmittanceSampler,
 	AtmoMarchParams P,
 	out float OutDepth,
+	out bool OutCloudDepth,
 	out float3 OutTransmittance)
 {
     const float3 RayOrigin = P.Atmo.mainRayParams.cameraPos;
@@ -319,6 +321,7 @@ float4 Atmo_MainMarchDepth(
 	// surface's distance; one that leaves through the shell reads as sky.
     const float SurfaceDepth = (MaxDist < max(AtmoHit.y, 0.0f)) ? MaxDist : ATMO_SKY_DEPTH;
     OutDepth = SurfaceDepth;
+    OutCloudDepth = false;
 
 	// Mie is consumed by the deck in front of it (MieLobeDecay), through
 	// CloudDepthAhead, which the lobe spends faster than the light. PITFALL: a
@@ -580,8 +583,9 @@ float4 Atmo_MainMarchDepth(
 
 				// THE FADE BELONGS TO THE SAMPLE, NOT TO THE PATH. The field's build
 				// leaves it at 1 and the march sets it per sample; the light march
-				// does not read it, since the bake applies its own per cascade. Measured to THIS SAMPLE, so a grazing ray's
-				// near end stays detailed while its far end fades.
+				// does not read it, since the bake applies its own per cascade.
+				// Measured to THIS SAMPLE, so a grazing ray's near end stays
+				// detailed while its far end fades.
 				//
 				// THE JITTERED POSITION, LIKE EVERYTHING ELSE IN THE LOOP. Read at
 				// the step centre the fade takes one value per step, and since
@@ -763,10 +767,10 @@ float4 Atmo_MainMarchDepth(
 						// The material scales the shared base rather than
 						// replacing it, so the deck stays on the same
 						// thickness-relative footing as the air around it.
-                        const float3 CloudExtinction = Sample.x * Field_Extinction(Sample, P.Scatter)
+                        const float3 StepExtinction = Sample.x * Field_Extinction(Sample, P.Scatter)
 							* P.Atmo.cloudParams.cloudScatBeta * CurrentStep;
 
-                        const float3 CloudStepTransmittance = exp(-CloudExtinction);
+                        const float3 CloudStepTransmittance = exp(-StepExtinction);
 
 						// Energy-conserving: what the step scatters IN is what
 						// it takes OUT, scaled by albedo, so the deck cannot
@@ -830,7 +834,7 @@ float4 Atmo_MainMarchDepth(
 						// Mean of the three channels: the lobe is a single
 						// scalar weight, and a per-channel decay would tint the
 						// glow as it faded rather than just dimming it.
-                        CloudDepthAhead += dot(CloudExtinction, (1.0f / 3.0f).xxx);
+                        CloudDepthAhead += dot(StepExtinction, (1.0f / 3.0f).xxx);
                     }
                 }
             }
@@ -867,6 +871,9 @@ float4 Atmo_MainMarchDepth(
 
 	// A clipped ray is opaque at its terminus: thin cloud ahead of it does not
 	// set its depth.
+    OutCloudDepth = (HalfDepth >= 0.0f) || (bClippedOpaque && Field_TerminusIsField())
+		|| (DepthWeight > ATMO_DEPTH_MIN_OPACITY);
+
     HalfDepth = (bClippedOpaque && HalfDepth < 0.0f) ? MaxDist : HalfDepth;
 
     OutDepth = (HalfDepth >= 0.0f) ? HalfDepth

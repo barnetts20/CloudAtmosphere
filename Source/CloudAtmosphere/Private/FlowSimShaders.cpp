@@ -25,6 +25,7 @@ namespace FlowSimShader
 		OutEnvironment.SetDefine(TEXT("FLOWSIM_MAX_PERPETUAL"), MaxPerpetualStorms);
 		OutEnvironment.SetDefine(TEXT("FLOWSIM_CELL_CONTROL_STRIDE"), CellControlStride);
 		OutEnvironment.SetDefine(TEXT("FLOWSIM_SNAPSHOT_PLANES"), SnapshotPlanes);
+		OutEnvironment.SetDefine(TEXT("FLOWSIM_ATLAS_GUTTER"), AtlasGutter);
 		OutEnvironment.SetDefine(TEXT("FLOWSIM_FROUDE_KNEE"), *FString::Printf(TEXT("%.9gf"), FroudeKnee));
 		OutEnvironment.SetDefine(TEXT("FLOWSIM_DAMPING_MAX"), *FString::Printf(TEXT("%.9gf"), DampingMax));
 

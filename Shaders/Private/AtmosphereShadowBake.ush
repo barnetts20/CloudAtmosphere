@@ -115,13 +115,9 @@ float2 ShadowInvMapSize;
  *  TerrestrialShadow.ush. */
 float3 ShadowLightDir;
 
-/** Camera position, planet-local. The layer fades are a function of camera and
- *  sample position, both of which this pass has, so they are evaluated per march
- *  sample rather than pinned to full strength.
- *
- *  ONE CAMERA PER PLANET: the map is baked once a frame for the planet, not
- *  per view, so a second viewport shares these fade distances. An LOD mismatch in the secondary view, not a wrong shadow, and a
- *  property of the delivery rather than of this pass. */
+/** Camera position, planet-local: the inner cascades' centres. The detail fade
+ *  is per cascade, not per sample (TRShadow_Field). One camera per planet, so a
+ *  second viewport shares the cascades. */
 float3 ShadowCameraLocal;
 
 /** The cascade this dispatch's first Z slice writes. Levels bake on their own

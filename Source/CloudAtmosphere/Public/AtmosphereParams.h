@@ -5,8 +5,9 @@
 // group's member list, and an actor carries one FAtmosphereModelParams per
 // model: a type change swaps the whole authored set rather than reinterpreting
 // one, a terrestrial tune and a gas giant tune sit side by side, and a bundle's
-// values apply to any model. Only the pipeline groups (Simulation, Raymarch)
-// are one instance, and Simulation holds a config per model.
+// values apply to any model. The actor's pipeline and quality groups
+// (Simulation, Raymarch, Sampling) are one instance, and Simulation holds a
+// config per model.
 //
 // RATIOS, NOT ABSOLUTES, WHEREVER ONE VALUE IS BOUNDED BY ANOTHER. A parameter
 // expressed against the thing that constrains it stays valid when that thing is
@@ -324,8 +325,9 @@ struct CLOUDATMOSPHERE_API FCloudTypeParams
 	float TypeTropical = 0.3f;
 
 	/** How far the sim's storm raises type toward towering cloud. The storm
-	 *  material is StormBalance's, not this. A term rather than a floor, so storm grades into the cloud around it instead of turning every
-	 *  stormy column into a full tower. */
+	 *  material is StormBalance's, not this. A term rather than a floor, so
+	 *  storm grades into the cloud around it instead of turning every stormy
+	 *  column into a full tower. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float TypeStorm = 0.5f;
 
@@ -624,20 +626,20 @@ struct CLOUDATMOSPHERE_API FCloudDeepParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float FloorRelief = 0.5f;
 
+	/** Depth of the floor's edge ramp, in fills: lower is harder mound edges. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", UIMin = "0.01", UIMax = "1.0"))
+	float FloorSoftness = 0.25f;
+
 	/** Least share of light the deck absorbs per scattering, whatever its
 	 *  albedo: higher darkens the interior sooner below the cloud tops. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0", UIMax = "0.2"))
 	float Darkening = 0.01f;
 
-	/** How much of the buried deck turns to the deep material: 0 none, leaving
-	 *  it cloud and storm; 1 all of it past MaterialDepth. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float MaterialShare = 0.0f;
-
-	/** Full-density deck above a sample, in fills, at which the deep material
-	 *  has fully taken over; it blends in from the base down to there. */
+	/** Depth below a column's base, in fills, over which the deck turns from
+	 *  the cloud and storm material to the deep material: 0 switches at the
+	 *  base. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", UIMax = "4.0"))
-	float MaterialDepth = 1.0f;
+	float MaterialDepth = 0.25f;
 
 	/** The deep material's single-scattering albedo, per channel, held to
 	 *  [0, 1]. */

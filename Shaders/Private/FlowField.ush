@@ -37,10 +37,14 @@
 #define FLOW_ATLAS_BLEND 2
 
 /** Gutter texels around each face in the atlas: the blend band plus the cubic
- *  B-spline read's two-texel footprint. PITFALL: FlowSimShader::AtlasGutter
- *  sizes the texture in C++ and must equal this, or every face reads its
- *  neighbour's tile. */
+ *  B-spline read's two-texel footprint. FlowSimShader::AtlasGutter sizes the
+ *  texture in C++ to match. */
 #define FLOW_ATLAS_GUTTER (FLOW_ATLAS_BLEND + 2)
+
+// The sim, which writes the atlas, gets C++'s value.
+#if defined(FLOWSIM_ATLAS_GUTTER) && FLOWSIM_ATLAS_GUTTER != FLOW_ATLAS_GUTTER
+#error FlowSimShader::AtlasGutter and FLOW_ATLAS_GUTTER disagree.
+#endif
 
 // -- Cube atlas ---------------------------------------------------------------
 
@@ -82,24 +86,6 @@ void Flow_FaceFrame(uint Face, out float3 M, out float3 U, out float3 V)
         U = float3(0, 1, 0);
         V = float3(1, 0, 0);
     }
-}
-
-/** The face a direction falls on: its largest component. */
-uint Flow_Face(float3 N)
-{
-    const float3 A = abs(N);
-
-    if (A.x >= A.y && A.x >= A.z)
-    {
-        return (N.x >= 0.0f) ? 0u : 1u;
-    }
-
-    if (A.y >= A.z)
-    {
-        return (N.y >= 0.0f) ? 2u : 3u;
-    }
-
-    return (N.z >= 0.0f) ? 4u : 5u;
 }
 
 /** Equi-angular face coordinates in [-1, 1]: the angle from the face centre

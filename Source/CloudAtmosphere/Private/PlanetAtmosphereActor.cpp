@@ -321,9 +321,8 @@ void APlanetAtmosphereActor::Initialize()
 
 void APlanetAtmosphereActor::DestroyLegacyChildActors()
 {
-    // A saved actor can still hold the post-process component the atmosphere
-    // once drew through, by its old subobject name. Unbound and registered, it
-    // would enter every view's post-process blend.
+    // A saved actor can hold a post-process component named PostProcess.
+    // Unbound and registered, it would enter every view's post-process blend.
     TInlineComponentArray<UPostProcessComponent*> PostProcess(this);
 
     for (UPostProcessComponent* Component : PostProcess)
@@ -486,7 +485,7 @@ static FTerrestrialFieldParameters PackCloudField(const APlanetAtmosphereActor& 
     // point back carries the field forward.
     const UFlowSimConfig* SpinConfig = Clock.Config.Get();
     const double Omega = SpinConfig
-        ? 0.5 * (double)FMath::Max(SpinConfig->PlanetaryVorticity, 0.1f) * FMath::Max(Model.Planet.SpinRatio, 0.0f)
+        ? 0.5 * (double)SpinConfig->GetPlanetaryVorticity() * FMath::Max(Model.Planet.SpinRatio, 0.0f)
         : 0.0;
     const float SpinAngle = (float)FMath::Fmod(-Omega * Clock.SpinTime, 2.0 * UE_DOUBLE_PI);
 
@@ -538,14 +537,14 @@ static FTerrestrialFieldParameters PackCloudField(const APlanetAtmosphereActor& 
     Out.StormExtinction = ToVector4(Material.StormExtinction);
     Out.CloudOpticalDepth = FMath::Max(Material.CloudOpticalDepth, 0.0f);
 
-    // The deep material's depth goes from fills of buried deck to atmosphere
-    // fractions; the slab reads none of it.
+    // The deep material and the floor's softness: the material's depth from
+    // fills below the base to atmosphere fractions. The slab reads none of it.
     const FLinearColor DeepExtinction = Model.Deep.Extinction;
 
     Out.DeepExtinction = FVector4f(FMath::Max(DeepExtinction.R, 0.0f), FMath::Max(DeepExtinction.G, 0.0f),
         FMath::Max(DeepExtinction.B, 0.0f), FMath::Max(DeepExtinction.A, 0.0f));
-    Out.DeepMaterial = FVector4f(bDeep ? FMath::Clamp(Model.Deep.MaterialShare, 0.0f, 1.0f) : 0.0f,
-        FMath::Max(Model.Deep.MaterialDepth, 0.0f) * DeepFill, 0.0f, 0.0f);
+    Out.DeepMaterial = FVector4f(FMath::Max(Model.Deep.MaterialDepth, 0.0f) * DeepFill,
+        FMath::Max(Model.Deep.FloorSoftness, 0.001f), 0.0f, 0.0f);
 
     return Out;
 }
@@ -826,7 +825,7 @@ bool APlanetAtmosphereActor::FillShadowRequest(
     }
 
     // NO EXTENT AND NO CENTRE PUSHED. Every cascade derives its half-width from
-    // the fade radii and its centre from the camera, on both sides, so the level
+    // CascadeRadii and its centre from the camera, on both sides, so the level
     // index is the only thing that distinguishes them -- and that comes from the
     // dispatch rather than from here.
     Params.MapSize = FIntPoint(ShadowTarget->SizeX, ShadowTarget->SizeY);
@@ -1028,6 +1027,11 @@ bool APlanetAtmosphereActor::FillMarchParams(
     Out.ShadowCamera1 = ShadowBakedCamera[1];
     Out.ShadowCamera2 = ShadowBakedCamera[2];
 
+    for (int32 Level = 0; Level < AtmoShadowBake::CascadeCount; ++Level)
+    {
+        Out.ShadowLight[Level] = ShadowBakedLight[Level];
+    }
+
     // -- Sampling -------------------------------------------------------------
 
     Out.CellSize = Sampling.CellSize;
@@ -1161,6 +1165,10 @@ void APlanetAtmosphereActor::ReleaseCloudResources()
 
 void APlanetAtmosphereActor::SetPlanetType(EPlanetAtmosphereType InType)
 {
+#if WITH_EDITOR
+    Modify();
+#endif
+
     PlanetType = InType;
     SyncModelFlags();
 }
@@ -1172,6 +1180,10 @@ FAtmosphereModelParams APlanetAtmosphereActor::GetModelParams(EPlanetAtmosphereT
 
 void APlanetAtmosphereActor::SetModelParams(EPlanetAtmosphereType InModel, const FAtmosphereModelParams& InParams)
 {
+#if WITH_EDITOR
+    Modify();
+#endif
+
     ModelOf(InModel) = InParams;
     SyncModelFlags();
 }
@@ -1194,7 +1206,11 @@ UFlowSimConfig* APlanetAtmosphereActor::GetWritableSimConfig(EPlanetAtmosphereTy
     Copy->SetFlags(RF_Transient);
     Slot = Copy;
 
-    if (UFlowSimSubsystem* Sim = World->GetSubsystem<UFlowSimSubsystem>())
+    // The running sim carries on under the copy only if it is the active
+    // model's: another slot's copy is not what this actor bids with.
+    UFlowSimSubsystem* Sim = World->GetSubsystem<UFlowSimSubsystem>();
+
+    if (Sim && &Slot == &SimConfigSlot(PlanetType))
     {
         Sim->AdoptConfig(this, Shared, Copy);
     }

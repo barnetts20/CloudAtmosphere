@@ -12,14 +12,14 @@ class FTextureRenderTargetResource;
  *
  *  THE PINS, NOT THE DERIVED PROFILE. AtmoT_Profile turns the authored alphas
  *  into scale heights on both sides; converting here would be a third copy of
- *  that derivation. The radii are the same values the material builds its
- *  planetRadius and atmoRadius pins from. */
+ *  that derivation. The radii are the same values the march builds its
+ *  planetRadius and atmoRadius from (TR_BuildAtmo). */
 struct CLOUDATMOSPHERE_API FAtmosphereTransmittanceParams
 {
 	float PlanetRadius = 0.0f;
 	float AtmosphereRadius = 0.0f;
 
-	/** (RayleighBeta.A, MieBeta.A, AbsorptionBeta.A, AbsorptionFalloff). */
+	/** (RayleighScaleHeight, MieScaleHeight, AbsorptionAltitude, AbsorptionFalloff). */
 	FVector4f ProfilePins = FVector4f::Zero();
 
 	/** The bake's destination, resolved to its RHI handle on the render

@@ -7,11 +7,12 @@
 // When owned by APlanetActor the scale is set externally to
 // max(OceanRadius, PlanetRadius), the visible surface floor.
 //
-// TWO CLOUD MODELS SHARE ONE FIELD AND ONE MARCH, run as compute passes with a
+// THREE MODELS SHARE ONE FIELD AND ONE MARCH, run as compute passes with a
 // temporal resolve (FAtmosphereViewExtension), the sim as their weather map: a
-// terrestrial slab over a surface, or a gas giant's deep deck over a saturated
-// core. Each model has its own parameter bundle and sim config
-// (AtmosphereParams.h). The nearest claiming planet drives the world's one sim;
+// terrestrial slab over a surface, a gas giant's deep deck over a saturated
+// core, or the terrestrial air alone. The two cloud models each have a
+// parameter bundle and sim config (AtmosphereParams.h); air only uses the
+// terrestrial ones. The nearest claiming planet drives the world's one sim;
 // the others draw the field they kept (UFlowSimSubsystem).
 
 #pragma once
@@ -59,9 +60,10 @@ struct FAtmosphereFieldClock
  *  with the shadow bake and the transmittance table. Owns a directional light
  *  component, synced from the actor's rotation and LightColor. When
  *  planet-owned, location and scale are locked and rotation stays editable.
- *  Its panel shows CloudAtmosphere first after the transform, its groups in
- *  declaration order: Atmosphere, Model, Pipeline. */
-UCLASS(meta = (PrioritizeCategories = "TransformCommon CloudAtmosphere"))
+ *  Its panel shows CloudAtmosphere first after the transform (the module's
+ *  details customization), its groups in declaration order: Atmosphere,
+ *  Model, Pipeline. */
+UCLASS()
 class CLOUDATMOSPHERE_API APlanetAtmosphereActor : public AActor
 {
     GENERATED_BODY()
@@ -76,9 +78,9 @@ public:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Atmosphere")
     bool bIsPlanetOwned = false;
 
-    /** Which cloud model renders, from its own bundle: the terrestrial slab or
-     *  the gas giant's deep deck. A change rebakes the shadow map and restarts
-     *  the view histories on the next tick. */
+    /** Which model renders: the terrestrial slab, the gas giant's deep deck,
+     *  or the terrestrial air alone. A change rebakes the shadow map and
+     *  restarts the view histories on the next tick. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Atmosphere")
     EPlanetAtmosphereType PlanetType = EPlanetAtmosphereType::GasGiant;
 
@@ -152,7 +154,8 @@ public:
 
     /** A model's sim config to change at runtime. In a game world the first
      *  call replaces the slot's shared asset with a transient copy owned by
-     *  this actor, which a running sim carries on under, so no other planet
+     *  this actor, which a sim running the active model's slot carries on
+     *  under, so no other planet
      *  and no asset sees the change. In an editor world it is the asset,
      *  which is how tuning saves. Null when the slot is empty. */
     UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
@@ -217,7 +220,7 @@ public:
 
     /** Seconds a rebaked cascade fades in from its reprojected previous bake:
      *  hides rebake steps, and the shadow trails the clouds by about this. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "0.0", UIMax = "1.0"))
     float ShadowTemporalSmoothing = 0.1f;
 
     // --- The active model ---

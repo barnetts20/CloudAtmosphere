@@ -26,10 +26,11 @@ namespace AtmoShadowBake
 	/** Cascade count, one slice each: ATMO_SHADOW_CASCADES in
 	 *  AtmosphereShadowMap.ush, which the bake and the march both read. Each
 	 *  inner level has its authored radius (CascadeRadii) and the march's camera
-	 *  uniform (ShadowCamera1, ShadowCamera2). */
+	 *  uniform (ShadowCamera1, ShadowCamera2), and every level a light uniform
+	 *  (ShadowLight0 to ShadowLight2). */
 	static constexpr int32 CascadeCount = 3;
 
-	static_assert(CascadeCount == 3, "The cascade radii, the march's camera uniforms and ATMO_SHADOW_CASCADES are built for three levels.");
+	static_assert(CascadeCount == 3, "The cascade radii, the march's camera and light uniforms and ATMO_SHADOW_CASCADES are built for three levels.");
 
 	/** Ceiling on the share of a level's previous bake a rebake keeps. At 1 the
 	 *  map would never change. */

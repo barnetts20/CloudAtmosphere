@@ -97,7 +97,7 @@ float SimFaceCos(int J)
 }
 
 /** Unit direction from grid coordinates. Right-handed, Z along the rotation
- *  axis, matching the material's planet-local space. */
+ *  axis, matching the field's planet-local space. */
 float3 SimDirection(float Lon, float Mu)
 {
     const float C = sqrt(max(1.0f - Mu * Mu, 0.0f));

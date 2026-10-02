@@ -152,7 +152,7 @@ float FlowSimProfile::ThermalShape(const UFlowSimConfig& Config, float Mu)
 
 float FlowSimProfile::WaveSpeed(const UFlowSimConfig& Config)
 {
-	return FMath::Max(Config.DeformationRadius * FMath::Max(Config.PlanetaryVorticity, 0.1f) * 0.70710678f, 1e-3f);
+	return FMath::Max(Config.DeformationRadius * Config.GetPlanetaryVorticity() * 0.70710678f, 1e-3f);
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +189,7 @@ float UFlowSimConfig::GetImplicitWeight(float Step) const
 {
 	const float Authored = FlowSimNumerics::ImplicitWeight;
 
-	return (FMath::Clamp(LayerCount, 1, 8) > 1 && Step > FlowSimStep::StackLargeStep)
+	return (FMath::Clamp(LayerCount, 1, 8) > 1 && Step > FlowSimStep::StackLargeStep * GetTurnover())
 		? FMath::Max(Authored, FlowSimStep::StackWeight)
 		: Authored;
 }

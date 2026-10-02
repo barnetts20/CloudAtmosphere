@@ -205,7 +205,7 @@ namespace
 		P.CellDryTolerance = Params.CellDryTolerance;
 		P.CellMoisture = Params.CellMoisture;
 		P.CellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
-		P.StepIndex = Params.StepIndex;
+		P.StepIndex = (int32)(uint32)Params.StepIndex;
 
 		// Each perpetual storm's longitude at PerpetualTime, in double and
 		// wrapped, so it holds its precision however long the sim has run.
@@ -396,7 +396,7 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 
 	// 32-bit throughout. The Helmholtz operator is a small difference of larger
 	// numbers and the thickness anomaly rides on the layer depth; half
-	// precision loses both. The output texture the material reads is 16-bit,
+	// precision loses both. The flow atlas the field reads is 16-bit,
 	// which is fine once the differencing is done.
 	const FRDGTextureDesc FaceDesc = FRDGTextureDesc::Create2DArray(
 		Size, PF_G32R32F, FClearValueBinding::Black, Flags, Slices);
@@ -777,9 +777,6 @@ void FFlowSimulation::AddResamplePass(FRDGBuilder& GraphBuilder, const FFlowSimP
 	P->SimCentreLatestSRV = GraphBuilder.CreateSRV(R.CentreLatest);
 	P->SimLatLonLatestSRV = GraphBuilder.CreateSRV(R.LatLonLatest);
 	P->SimCellSRV = GraphBuilder.CreateSRV(R.Cells);
-
-	// The latest noise state, whose phase B w is the eye tracer.
-	P->SimNoiseSRV = GraphBuilder.CreateSRV(R.NoiseSource());
 	P->SimOutputUAV = GraphBuilder.CreateUAV(R.Output);
 
 	AddSimPass<FFlowSimResampleCS>(GraphBuilder, TEXT("FlowSim.Resample"), P, Groups);
@@ -852,13 +849,7 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	R.Cells = GraphBuilder.RegisterExternalBuffer(PooledCells);
 	R.CellFlow = GraphBuilder.RegisterExternalTexture(PooledCellFlow);
 	R.CellColumn = GraphBuilder.RegisterExternalTexture(PooledCellColumn);
-	// The frame's passes place the perpetual storms at the output's time,
-	// where the resample stamps them.
-	FFlowSimParams FrameParams = Params;
-	FrameParams.PerpetualTime = Params.TimeAt(Params.StepIndex + NumSubsteps - 1)
-		+ (double)Params.StateBlend * Params.DeltaTime;
-
-	const TRDGUniformBufferRef<FFlowSimUniformParameters> FrameUniforms = CreateUniforms(GraphBuilder, FrameParams);
+	const TRDGUniformBufferRef<FFlowSimUniformParameters> FrameUniforms = CreateUniforms(GraphBuilder, Params);
 
 	R.Uniforms = FrameUniforms;
 	R.Current = CurrentFace;

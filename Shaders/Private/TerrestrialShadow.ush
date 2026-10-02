@@ -9,42 +9,35 @@
 
 #define TR_ExtinctionTintRange(Cloud, Storm) AtmoShadow_ExtinctionTintRange(Cloud, Storm)
 
-/** The deep material's share at a sample with Buried atmosphere fractions of
- *  full-density deck above it: DeepMaterial.x at most, reached at .y of
- *  buried deck. */
-float TR_DeepMaterialWeight(float Buried, float4 DeepMaterial)
+/** The deep material's share at Depth below a column's base, an atmosphere
+ *  fraction: whole DeepMaterial.x below the base. */
+float TR_DeepMaterialWeight(float Depth, float4 DeepMaterial)
 {
-    return DeepMaterial.x * smoothstep(0.0f, max(DeepMaterial.y, 1e-5f), Buried);
+    return smoothstep(0.0f, max(DeepMaterial.x, 1e-5f), Depth);
 }
 
-/** TR_ExtinctionTintRange over every material in use: the deep deck's joins
- *  while its share is above zero. The bake's fold constant and the march's
- *  reader both take it from here. */
-float2 TR_MaterialTintRange(float3 Cloud, float3 Storm, float3 Deep, float DeepShare)
+/** TR_ExtinctionTintRange over every material in use, the deep deck's
+ *  included. The bake's fold constant and the march's reader both take it
+ *  from here. */
+float2 TR_MaterialTintRange(float3 Cloud, float3 Storm, float3 Deep)
 {
     const float2 Range = TR_ExtinctionTintRange(Cloud, Storm);
 
 #if TR_DEEP_DECK
-    if (DeepShare > 0.0f)
-    {
-        return float2(min(Range.x, min(Deep.x, min(Deep.y, Deep.z))), max(Range.y, max(Deep.x, max(Deep.y, Deep.z))));
-    }
-#endif
-
+    return float2(min(Range.x, min(Deep.x, min(Deep.y, Deep.z))), max(Range.y, max(Deep.x, max(Deep.y, Deep.z))));
+#else
     return Range;
+#endif
 }
 
 /** The least extinction, tint times amount, across the materials in use: what
  *  the deep terminus counts the light out against. */
-float TR_MaterialLeastExtinction(float4 Cloud, float4 Storm, float4 Deep, float DeepShare)
+float TR_MaterialLeastExtinction(float4 Cloud, float4 Storm, float4 Deep)
 {
     float3 Low = min(Cloud.rgb * Cloud.a, Storm.rgb * Storm.a);
 
 #if TR_DEEP_DECK
-    if (DeepShare > 0.0f)
-    {
-        Low = min(Low, Deep.rgb * Deep.a);
-    }
+    Low = min(Low, Deep.rgb * Deep.a);
 #endif
 
     return min(Low.x, min(Low.y, Low.z));

@@ -97,6 +97,9 @@ BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereMarchParameters, )
 
 	SHADER_PARAMETER(FVector3f, ShadowCamera1)
 	SHADER_PARAMETER(FVector3f, ShadowCamera2)
+	SHADER_PARAMETER(FVector3f, ShadowLight0)
+	SHADER_PARAMETER(FVector3f, ShadowLight1)
+	SHADER_PARAMETER(FVector3f, ShadowLight2)
 
 	SHADER_PARAMETER_TEXTURE(Texture2DArray, FlowTarget)
 	SHADER_PARAMETER_SAMPLER(SamplerState, FlowTargetSampler)
@@ -488,7 +491,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 	// their motion settings over the whole view.
 	FMatrix44f PlanetDelta = FMatrix44f::Identity;
 
-	// Cloud also turns with the field's spin about the planet's axis, through
+	// A depth the field set also turns with its spin about the planet's axis, through
 	// the planet's centre: the spin since then, applied before the planet's own
 	// delta. Field_ samples at Atmo_RotateZ(local, spin), so a feature now at p
 	// stood at RotateZ(p, spin now - spin then).
@@ -599,6 +602,9 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 
 		P->ShadowCamera1 = March.ShadowCamera1;
 		P->ShadowCamera2 = March.ShadowCamera2;
+		P->ShadowLight0 = March.ShadowLight[0];
+		P->ShadowLight1 = March.ShadowLight[1];
+		P->ShadowLight2 = March.ShadowLight[2];
 
 		// Samplers as the bake binds them: the flow atlas carries its own
 		// gutters, the volumes tile, and the shadow map and the table clamp.

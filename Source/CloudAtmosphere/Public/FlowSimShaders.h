@@ -225,6 +225,8 @@ namespace FlowSimShader
 	/** Tallest column the latitude solve holds in group shared memory. */
 	static constexpr int32 MaxGridLatitude = 1024;
 
+	static_assert(MaxGridLatitude % ThreadGroupSizeLine == 0, "The column solve splits a column evenly across its group.");
+
 	/** Storm cell slots, and the thread group of the pass that advances them.
 	 *  PITFALL: UFlowSnapshot::CellFloats is sized from this too. */
 	static constexpr int32 MaxStormCells = 32;
@@ -235,6 +237,8 @@ namespace FlowSimShader
 	 *  indexes them as 2 * Slot) and six of control, and the buffer's length. */
 	static constexpr int32 CellStateStride = 2;
 	static constexpr int32 CellControlStride = 6;
+
+	static_assert(CellStateStride == 2, "FlowSim.usf indexes a slot's state as 2 * Slot.");
 	static constexpr int32 CellBufferSize = (CellStateStride + CellControlStride) * MaxStormCells;
 
 	/** Planes a snapshot holds per cell: FFlowSimulation::StateFloatsPerCell. */
@@ -245,9 +249,9 @@ namespace FlowSimShader
 	static constexpr float FroudeKnee = 0.7f;
 	static constexpr float DampingMax = 0.45f;
 
-	/** Gutter texels around each atlas face. PITFALL: must equal
-	 *  FLOW_ATLAS_GUTTER in FlowField.ush, which the materials read without
-	 *  this define, or every face reads its neighbour's tile. */
+	/** Gutter texels around each atlas face: FLOW_ATLAS_GUTTER in FlowField.ush,
+	 *  which errors in the sim's compile on a mismatch, since a face then reads
+	 *  its neighbour's tile. */
 	static constexpr int32 AtlasGutter = 4;
 
 	/** The atlas: six faces with their gutters, packed 3 x 2. */

@@ -88,7 +88,8 @@ float4 Atmo_Expand(float4 C)
 Texture2D<float4> FreshColor;
 Texture2D<float2> FreshTint;
 
-/** float2(representative depth, view-axis scene depth at the sample). */
+/** float2(representative depth, view-axis scene depth at the sample), the
+ *  second positive where the depth is the field's, which turns with its spin. */
 Texture2D<float2> FreshDepth;
 uint2 FreshSize;
 uint CellSize;
@@ -107,8 +108,8 @@ uint HistoryValid;
 float4x4 PrevCameraToClip;
 float4x4 PrevPlanetToClip;
 
-/** PrevPlanetToClip with the field's spin since then: for a depth short of the
- *  scene's, which is cloud, carried round the planet's axis by the spin. */
+/** PrevPlanetToClip with the field's spin since then, about the planet's axis:
+ *  for a depth the field set. */
 float4x4 PrevCloudToClip;
 
 // PITFALL: a local named as one of these uniforms hides it without a warning,
@@ -167,6 +168,7 @@ void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     float FillTotal = 0.0f;
     float BestWeight = 0.0f;
     float BestDepth = ATMO_SKY_DEPTH;
+    bool bBestCloud = false;
     float4 Own = 0.0f;
     float2 FillTint = 0.0f;
     float2 OwnTint = 0.0f;
@@ -195,7 +197,7 @@ void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
         const float2 Depths = FreshDepth[K];
         const float Guide = bUsable
-			? Atmo_GuideWeight(PixelDepth, Depths.y, ATMO_GUIDE_SHARPNESS) + 1e-3f : 0.0f;
+			? Atmo_GuideWeight(PixelDepth, abs(Depths.y), ATMO_GUIDE_SHARPNESS) + 1e-3f : 0.0f;
 
         const float4 C = FreshColor[K];
         const float2 E = FreshTint[K];
@@ -211,6 +213,7 @@ void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         FillTotal += FillW;
 
         BestDepth = (FillW > BestWeight) ? Depths.x : BestDepth;
+        bBestCloud = (FillW > BestWeight) ? (Depths.y > 0.0f) : bBestCloud;
         BestWeight = max(BestWeight, FillW);
 
         const float2 Tent = saturate(1.0f - 0.5f * Distance);
@@ -234,12 +237,11 @@ void MainResolveCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
 	// THE REPROJECTION, by this pixel's ray at its representative depth: its
 	// own when marched, else the best-weighted neighbour's. A point at a depth
-	// moves with the planet, and cloud with the field's spin too; sky moves as a
+	// moves with the planet, and the field's with its spin too; sky moves as a
 	// direction, with no parallax.
     const float Depth = bFresh ? FreshDepth[Base].x : BestDepth;
+    const bool bCloud = bFresh ? (FreshDepth[Base].y > 0.0f) : bBestCloud;
     const float3 Dir = Atmo_RayDirection(Pixel / OutputSize);
-
-    const bool bCloud = Depth < 0.99f * Atmo_SceneRayDistance(PixelDepth, Dir);
 
     const float4 PrevClip = (Depth > 0.0f)
 		? mul(float4(Dir * Depth, 1.0f), bCloud ? PrevCloudToClip : PrevPlanetToClip)

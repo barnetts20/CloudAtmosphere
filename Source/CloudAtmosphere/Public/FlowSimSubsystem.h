@@ -161,7 +161,7 @@ public:
 	double GetDisplayTime() const { return SimulatedTime - (1.0 - StateBlend) * CurrentStep; }
 
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
-	int32 GetStepsCompleted() const { return StepsCompleted; }
+	int64 GetStepsCompleted() const { return StepsCompleted; }
 
 	/** Steps the last frame took: the cost readout for SimSpeed. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
@@ -322,13 +322,13 @@ private:
 
 	/** Double precision: a float stops resolving a small step within hours. */
 	double SimulatedTime = 0.0;
-	int32 StepsCompleted = 0;
+	int64 StepsCompleted = 0;
 
 	/** The step clock, FFlowSimParams::AnchorTime and AnchorStep at ClockStep:
 	 *  re-anchored at the current time when the step changes, and at zero
 	 *  ClockStep after a reset or restore. */
 	double ClockAnchorTime = 0.0;
-	int32 ClockAnchorStep = 0;
+	int64 ClockAnchorStep = 0;
 	float ClockStep = 0.0f;
 
 	/** The grid the running state was reset at. A config grid that differs

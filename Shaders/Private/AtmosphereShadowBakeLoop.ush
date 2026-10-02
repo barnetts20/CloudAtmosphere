@@ -21,7 +21,7 @@
 //   BakeField_Params()                      built from its uniforms
 //   BakeField_CullRadius(F)                 the shell the map covers
 //   BakeField_CascadeExtent(F, Level)       half-width, 0 to collapse a level
-//   BakeField_TopBound(F)                   highest the field reaches, unfaded
+//   BakeField_TopBound(F)                   highest the field reaches
 //   BakeField_Entry(O, D, Len, Top, F)      where to start marching
 //   BakeField_TerminusRadius(F)             where the light stops, <= 0 for none
 //   BakeField_HeightStep(F)                 radial advance a step may take
@@ -75,8 +75,8 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
     const float ShadowExtent = BakeField_CascadeExtent(F, Level);
     const float Extent0 = BakeField_CascadeExtent(F, 0);
 
-	// A collapsed level -- a layer faded to nothing -- writes the sentinel and
-	// is skipped by the walk that reads it.
+	// A collapsed level, a zero cascade radius, writes the sentinel and is
+	// skipped by the walk that reads it.
     if (ShadowExtent <= 0.0f)
     {
         ShadowMapUAV[Texel] = ATMO_SHADOW_NO_DECK;

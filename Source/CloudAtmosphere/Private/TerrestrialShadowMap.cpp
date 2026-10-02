@@ -117,8 +117,9 @@ namespace TerrestrialShadow
 		P->FlowTargetSampler = FlowSampler;
 		P->CoverageThreshold = Coverage;
 
-		// A missing volume binds black so the binding is complete. It is never
-		// weighted in: the actor zeroes a layer's amount when it has no volume.
+		// A missing volume binds black so the binding is complete. The actor
+		// marks a layer without a volume asset unread (NoiseLevels); one whose
+		// resource is not yet created reads black for those frames.
 		P->DetailVolume = Params.DetailTexture.IsValid()
 			? Params.DetailTexture
 			: GBlackVolumeTexture->TextureRHI;
