@@ -46,10 +46,10 @@ void Atmo_ChordSteps(float Length, float Count, float Spread, out float First, o
 // chord by Atmo_ChordSteps.
 //
 // Lattice: step length is a function of distance alone, so rays agree wherever
-// they overlap. Growth counts from the origin shell: the camera inside the
-// atmosphere, else the shell through the atmosphere's nearest point, so a far
-// camera crosses the planet with the steps of one at the atmosphere top. A cloud
-// segment widens to the lattice points either side of it.
+// they overlap. Growth counts from the origin shell: the camera in or under the
+// deck, else the shell through the deck top's nearest point, so every camera
+// above the deck steps it like one at the deck top. A cloud segment widens to the
+// lattice points either side of it.
 // After air, the widened span ahead of the shell crossing holds no cloud and is
 // one step of air alone ending at the crossing; cloud steps run from there, and
 // only the terminus trims one.
@@ -71,11 +71,8 @@ void Atmo_ChordSteps(float Length, float Count, float Spread, out float First, o
 /** Camera lattice step growth (actor's Sampling group): past the knee each step is
  *  this fraction of its distance from the origin shell. Costs about
  *  (1 + ln(Distance * x / Floor)) / x steps, up to ATMO_MAX_ITER, mostly in grazing
- *  views. One value per frame, blended geometrically by
- *  camera altitude from LatticeGrowth (in or below the deck) to LatticeGrowthFar
- *  (FAR_ALTITUDE shell depths above it). Equal values disable the blend. */
+ *  views. */
 float LatticeGrowth;
-float LatticeGrowthFar;
 
 #ifndef ATMO_ENTRY_SUBSTEPS
 #define ATMO_ENTRY_SUBSTEPS 4.0f
@@ -84,19 +81,6 @@ float LatticeGrowthFar;
 #ifndef ATMO_ENTRY_SPAN
 #define ATMO_ENTRY_SPAN 2.0f
 #endif
-
-#ifndef ATMO_CAMERA_LATTICE_FAR_ALTITUDE
-#define ATMO_CAMERA_LATTICE_FAR_ALTITUDE 4.0f
-#endif
-
-/** Lattice growth for a camera Altitude shell depths above the cloud shell top. */
-float Atmo_LatticeGrowth(float Altitude)
-{
-    const float Blend = smoothstep(0.0f, ATMO_CAMERA_LATTICE_FAR_ALTITUDE, Altitude);
-
-    return exp(lerp(log(max(LatticeGrowth, 1e-3f)),
-		log(max(LatticeGrowthFar, 1e-3f)), Blend));
-}
 
 /** Camera lattice: from Origin (distance to the origin shell), Floor-length steps
  *  (shell depth / CloudSteps) up to Knee = Floor / Growth past it, then growing in

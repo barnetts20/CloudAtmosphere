@@ -59,9 +59,12 @@ struct FAtmosphereFieldClock
  *  by UpdateAtmosphere with the active model's params, the shadow bake and the
  *  transmittance table. Owns a directional light synced from the actor's rotation
  *  and LightColor. When planet-owned, location and scale are locked. The details
- *  panel shows CloudAtmosphere first after the transform, its groups in
- *  declaration order: Atmosphere, Model, Pipeline. */
-UCLASS()
+ *  panel shows CloudAtmosphere first, its groups in declaration order:
+ *  Atmosphere, Model, Pipeline, Advanced Graphics. The panel shows nothing
+ *  else but the transform: the engine's actor groups are hidden, and the sun
+ *  light, whose settings all derive from the actor, is not exposed. */
+UCLASS(HideCategories = (Rendering, Replication, Collision, Actor, Input, Physics, Networking, LOD, HLOD, Cooking, WorldPartition, DataLayers, Events),
+    meta = (PrioritizeCategories = "CloudAtmosphere"))
 class CLOUDATMOSPHERE_API APlanetAtmosphereActor : public AActor
 {
     GENERATED_BODY()
@@ -129,6 +132,20 @@ public:
     UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
     void OrientToStar(const FVector& StarWorldPos);
 
+    /** The performance tier written to Advanced Graphics. Choosing one in the
+     *  panel applies it; later edits there stay until the next choice. */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CloudAtmosphere|Atmosphere")
+    EAtmosphereGraphicsPreset GraphicsPreset = EAtmosphereGraphicsPreset::High;
+
+    /** Writes GraphicsPreset's values to Advanced Graphics; the passes take
+     *  them on the next tick, and a new ShadowResolution rebakes. */
+    UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
+    void ApplyGraphicsPreset();
+
+    /** Selects a preset and applies it, as from a settings menu. */
+    UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
+    void SetGraphicsPreset(EAtmosphereGraphicsPreset InPreset);
+
     // --- Parameters ---
     //
     // ONE BUNDLE PER MODEL, each shown only while its model is active. A
@@ -170,17 +187,16 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline")
     FAtmosphereSimulationParams Simulation;
 
-    // Quality: Raymarch, Sampling and the shadow settings below are a
-    // performance tier, shared by both models; tunes apply them only on request.
+    // Advanced Graphics: the performance tier, shared by both models; tunes
+    // apply it only on request. GraphicsPreset writes all of it but
+    // ShadowTemporalSmoothing, which costs nothing. The cascade extents are
+    // look, in each model's SurfaceShadow.
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Raymarch", meta = (ShowOnlyInnerProperties))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Advanced Graphics|Raymarch", meta = (ShowOnlyInnerProperties))
     FAtmosphereRaymarchParams Raymarch;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Sampling", meta = (ShowOnlyInnerProperties))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Advanced Graphics|Sampling", meta = (ShowOnlyInnerProperties))
     FAtmosphereSamplingParams Sampling;
-
-    // Baked Lighting: set once for a performance tier. The cascade extents are
-    // look, in each model's SurfaceShadow.
 
     /** The deck shadow bake in the light's frame: a cascade of slices, each
      *  covering a smaller radius, sized by ShadowResolution. */
@@ -209,17 +225,12 @@ public:
 
     /** Edge of every cascade slice, in texels. Bake time and memory scale with
      *  its square, 2 MB per slice at 512; lower softens rather than aliases. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "128", ClampMax = "4096"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Advanced Graphics|Shadows", meta = (ClampMin = "128", ClampMax = "4096"))
     int32 ShadowResolution = 1024;
-
-    /** Cascades rebaked per frame, in turn; each is read against the camera it
-     *  was baked with. 1 rebakes a level every third frame. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "1", ClampMax = "3"))
-    int32 ShadowLevelsPerFrame = 1;
 
     /** Seconds a rebaked cascade fades in from its reprojected previous bake:
      *  hides rebake steps, and the shadow trails the clouds by about this. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline|Baked Lighting", meta = (ClampMin = "0.0", UIMax = "1.0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Advanced Graphics|Shadows", meta = (ClampMin = "0.0", UIMax = "1.0"))
     float ShadowTemporalSmoothing = 0.1f;
 
     // --- The active model ---
@@ -293,8 +304,9 @@ private:
     TObjectPtr<USceneComponent> AtmosphereRoot;
 
     /** Synced from the actor's rotation and LightColor, in absolute rotation
-     *  and scale. A component, so a duplicate or deletion takes its own. */
-    UPROPERTY(VisibleAnywhere, Category = "CloudAtmosphere|Pipeline")
+     *  and scale. A component, so a duplicate or deletion takes its own. Not
+     *  in the panel: exposed, its settings would show on the actor. */
+    UPROPERTY()
     TObjectPtr<UDirectionalLightComponent> SunLightComponent;
 
     /** Legacy child actors a saved level can still hold, destroyed on Initialize. */

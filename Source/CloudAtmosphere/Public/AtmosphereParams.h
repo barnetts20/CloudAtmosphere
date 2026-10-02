@@ -32,6 +32,18 @@ enum class EPlanetAtmosphereType : uint8
 	AirOnly UMETA(DisplayName = "Air Only")
 };
 
+/** A performance tier for the actor's Advanced Graphics settings, applied by
+ *  APlanetAtmosphereActor::ApplyGraphicsPreset. */
+UENUM(BlueprintType)
+enum class EAtmosphereGraphicsPreset : uint8
+{
+	Max,
+	High,
+	Mid,
+	Low,
+	Min
+};
+
 /** The flow simulation the cloud field reads as its weather map, a config per
  *  model. ONE SIM PER WORLD: the claiming planet nearest the camera drives it
  *  with its active model's config, restored from that config's InitialState,
@@ -590,15 +602,12 @@ struct CLOUDATMOSPHERE_API FAtmosphereSamplingParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.01", ClampMax = "1.0"))
 	float FreshWeight = 0.15f;
 
-	/** How much longer each cloud step is than the last, with the camera in or
-	 *  under the deck and from four shell depths above it, blended between by
-	 *  altitude. Lower is finer and costlier; equal values retire the blend. */
+	/** How much longer each cloud step is than the last, counted from the
+	 *  camera in or under the deck and from the deck top above it, so any
+	 *  camera above the deck steps it as one at the deck top. Lower is finer
+	 *  and costlier. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", UIMax = "1.0"))
 	float LatticeGrowth = 0.2f;
-
-	/** The growth from four shell depths above the deck and beyond. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", UIMax = "1.0"))
-	float LatticeGrowthFar = 0.02f;
 };
 
 /** The deep deck beneath the slab (TR_DEEP_DECK). */
@@ -865,10 +874,10 @@ struct CLOUDATMOSPHERE_API FAtmosphereRaymarchParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "2", ClampMax = "256"))
 	int32 AtmosphereSteps = 64;
 
-	/** Cloud steps at the lattice origin (the camera, or from outside the
-	 *  atmosphere its near edge): the band's depth over this is the base step,
-	 *  growing with distance past the origin by Sampling's LatticeGrowth, so a
-	 *  ray's count varies. Capped by ATMO_MAX_ITER per segment. */
+	/** Cloud steps at the lattice origin (the camera, or from above the deck
+	 *  its top): the band's depth over this is the base step, growing with
+	 *  distance past the origin by Sampling's LatticeGrowth, so a ray's count
+	 *  varies. Capped by ATMO_MAX_ITER per segment. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "2", ClampMax = "256"))
 	int32 CloudSteps = 128;
 

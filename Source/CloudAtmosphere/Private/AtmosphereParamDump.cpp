@@ -497,8 +497,8 @@ namespace AtmosphereDump
 	const TSet<FName>& ActorQuality()
 	{
 		static const TSet<FName> Names = {
-			TEXT("Raymarch"), TEXT("Sampling"), TEXT("ShadowResolution"),
-			TEXT("ShadowLevelsPerFrame"), TEXT("ShadowTemporalSmoothing") };
+			TEXT("GraphicsPreset"), TEXT("Raymarch"), TEXT("Sampling"), TEXT("ShadowResolution"),
+			TEXT("ShadowTemporalSmoothing") };
 		return Names;
 	}
 
@@ -1044,6 +1044,13 @@ namespace AtmosphereLoad
 			{ TEXT("PostprocessMaterial"), TEXT("") },
 			{ TEXT("Composite"), TEXT("") },
 			{ TEXT("TerrestrialSampling.YoungBlur"), TEXT("") },
+
+			// One lattice growth: every camera above the deck counts it from the
+			// deck top.
+			{ TEXT("Sampling.LatticeGrowthFar"), TEXT("") },
+
+			// The bake rebakes one cascade per frame, in turn.
+			{ TEXT("ShadowLevelsPerFrame"), TEXT("") },
 
 			// The gas giant runs the cloud field: its shell height and spin carry
 			// over, its own deck's groups retire, and it takes GasGiant twins of the

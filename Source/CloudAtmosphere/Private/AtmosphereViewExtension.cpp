@@ -55,7 +55,6 @@ BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereMarchParameters, )
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, AtmoSceneDepth)
 	SHADER_PARAMETER(FMatrix44f, RayViewToClip)
 	SHADER_PARAMETER(float, LatticeGrowth)
-	SHADER_PARAMETER(float, LatticeGrowthFar)
 
 	SHADER_PARAMETER(FVector3f, PlanetOffset)
 	SHADER_PARAMETER(FVector4f, PlanetRotation)
@@ -561,7 +560,6 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		P->AtmoSceneDepth = SceneDepth;
 		P->RayViewToClip = RayViewToClip;
 		P->LatticeGrowth = FMath::Max(March.LatticeGrowth, 1e-3f);
-		P->LatticeGrowthFar = FMath::Max(March.LatticeGrowthFar, 1e-3f);
 
 		// Formed here in double from this view's own camera.
 		P->PlanetOffset = FVector3f(March.PlanetCenter - ViewOrigin);

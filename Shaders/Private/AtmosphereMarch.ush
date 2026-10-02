@@ -467,11 +467,10 @@ float4 Atmo_MainMarchDepth(
 		P.Atmo.planetParams.cloudOuterRadius - P.Atmo.planetParams.cloudInnerRadius, 1e-4f);
 
     const float CameraRadius = length(RayOrigin - P.Atmo.planetParams.planetPos);
-    const float CameraAltitude = (CameraRadius - P.Atmo.planetParams.cloudOuterRadius) / ShellDepth;
 
     const AtmoCameraLattice CloudLattice = Atmo_CameraLattice(ShellDepth,
 		float(P.Atmo.mainRayParams.cloudSteps), P.Atmo.mainRayParams.chordSpread,
-		Atmo_LatticeGrowth(CameraAltitude), max(CameraRadius - P.Atmo.planetParams.atmoRadius, 0.0f));
+		max(LatticeGrowth, 1e-3f), max(CameraRadius - P.Atmo.planetParams.cloudOuterRadius, 0.0f));
 
     const float CloudPhase = LatticePhase;
 

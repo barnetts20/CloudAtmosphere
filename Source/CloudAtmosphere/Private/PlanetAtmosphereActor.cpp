@@ -206,6 +206,11 @@ void APlanetAtmosphereActor::PostEditChangeProperty(FPropertyChangedEvent& Prope
 {
     Super::PostEditChangeProperty(PropertyChangedEvent);
 
+    if (PropertyChangedEvent.GetMemberPropertyName() == GET_MEMBER_NAME_CHECKED(APlanetAtmosphereActor, GraphicsPreset))
+    {
+        ApplyGraphicsPreset();
+    }
+
     SyncModelFlags();
 
     // Every parameter reaches the passes on the next Tick; the light syncs now.
@@ -764,9 +769,11 @@ bool APlanetAtmosphereActor::FillShadowRequest(
 
     // -- Rotation -----------------------------------------------------------
     //
-    // ShadowLevelsPerFrame levels this request, taken in turn; every level on
-    // the first request into a fresh target, which holds nothing yet. NOTHING
-    // IS RECORDED HERE: CommitShadowBake does that once the request is taken.
+    // One level this request, taken in turn, so each is rebaked every third
+    // frame and the stagger adds to the shadows' temporal smoothing; every
+    // level on the first request into a fresh target, which holds nothing yet.
+    // NOTHING IS RECORDED HERE: CommitShadowBake does that once the request is
+    // taken.
     const int32 LevelCount = AtmoShadowBake::CascadeCount;
 
     // A fresh target holds nothing to blend from.
@@ -778,12 +785,7 @@ bool APlanetAtmosphereActor::FillShadowRequest(
     }
     else
     {
-        Params.LevelMask = 0u;
-
-        for (int32 i = 0; i < FMath::Clamp(ShadowLevelsPerFrame, 1, LevelCount); ++i)
-        {
-            Params.LevelMask |= 1u << ((ShadowLevelCursor + i) % LevelCount);
-        }
+        Params.LevelMask = 1u << (ShadowLevelCursor % LevelCount);
     }
 
     // -- History ------------------------------------------------------------
@@ -1037,7 +1039,6 @@ bool APlanetAtmosphereActor::FillMarchParams(
     Out.CellSize = Sampling.CellSize;
     Out.FreshWeight = Sampling.FreshWeight;
     Out.LatticeGrowth = Sampling.LatticeGrowth;
-    Out.LatticeGrowthFar = Sampling.LatticeGrowthFar;
 
     // -- Resources ------------------------------------------------------------
 
@@ -1184,6 +1185,58 @@ void APlanetAtmosphereActor::SetPlanetType(EPlanetAtmosphereType InType)
 
     PlanetType = InType;
     SyncModelFlags();
+}
+
+/** One graphics preset: the Advanced Graphics values it writes. */
+struct FAtmosphereGraphicsPresetRow
+{
+    int32 CellSize;
+    float FreshWeight;
+    int32 AtmosphereSteps;
+    int32 CloudSteps;
+    float ChordSpread;
+    float LatticeGrowth;
+    int32 ShadowResolution;
+};
+
+/** In EAtmosphereGraphicsPreset's order, Max to Min. */
+static constexpr FAtmosphereGraphicsPresetRow GraphicsPresetRows[] = {
+    { 2, 0.50f, 32, 256, 8.0f, 0.050f, 256 },
+    { 3, 0.33f, 32, 256, 8.0f, 0.075f, 256 },
+    { 4, 0.25f, 32, 256, 8.0f, 0.100f, 256 },
+    { 5, 0.20f, 32, 256, 8.0f, 0.125f, 128 },
+    { 6, 0.18f, 16, 128, 8.0f, 0.150f, 128 },
+};
+
+static_assert(static_cast<int32>(UE_ARRAY_COUNT(GraphicsPresetRows)) == static_cast<int32>(EAtmosphereGraphicsPreset::Min) + 1,
+    "One row per graphics preset.");
+
+void APlanetAtmosphereActor::ApplyGraphicsPreset()
+{
+#if WITH_EDITOR
+    Modify();
+#endif
+
+    const FAtmosphereGraphicsPresetRow& Row = GraphicsPresetRows[FMath::Clamp(
+        static_cast<int32>(GraphicsPreset), 0, static_cast<int32>(UE_ARRAY_COUNT(GraphicsPresetRows)) - 1)];
+
+    Sampling.CellSize = Row.CellSize;
+    Sampling.FreshWeight = Row.FreshWeight;
+    Sampling.LatticeGrowth = Row.LatticeGrowth;
+    Raymarch.AtmosphereSteps = Row.AtmosphereSteps;
+    Raymarch.CloudSteps = Row.CloudSteps;
+    Raymarch.ChordSpread = Row.ChordSpread;
+    ShadowResolution = Row.ShadowResolution;
+}
+
+void APlanetAtmosphereActor::SetGraphicsPreset(EAtmosphereGraphicsPreset InPreset)
+{
+#if WITH_EDITOR
+    Modify();
+#endif
+
+    GraphicsPreset = InPreset;
+    ApplyGraphicsPreset();
 }
 
 FAtmosphereModelParams APlanetAtmosphereActor::GetModelParams(EPlanetAtmosphereType InModel) const

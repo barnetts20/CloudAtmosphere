@@ -87,7 +87,6 @@ struct CLOUDATMOSPHERE_API FAtmosphereMarchParams
 	int32 CellSize = 0;
 	float FreshWeight = 0.0f;
 	float LatticeGrowth = 0.0f;
-	float LatticeGrowthFar = 0.0f;
 
 	// -- Resources: game-thread objects, resolved to RHI handles on the render
 	// thread, as the shadow bake does.
