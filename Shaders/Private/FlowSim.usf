@@ -2250,7 +2250,7 @@ void SimCellWriteControl(uint Slot, float3 P, float Intensity, SimTraits T, floa
  *  step's centre velocities and output. Slot 2n holds position and intensity
  *  (0 is free), slot 2n + 1 the age and the last step's move.
  *
- *  A FREE SLOT SPAWNS ON ITS OWN DRAW, with chance SpawnRate dt / slots. It
+ *  THE FIRST FREE SLOT DRAWS, with chance SpawnRate dt free / hurricane slots. It
  *  draws SIM_CELL_SPAWN_DRAWS points in the genesis band and takes the best
  *  seed -- a storm with cyclonic spin -- then centres on that storm's peak by
  *  a shrinking ring search. The spawn holds where the window and humidity pass,

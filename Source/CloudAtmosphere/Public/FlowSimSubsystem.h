@@ -108,7 +108,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	bool SaveSnapshot(UFlowSnapshot* Target);
 
-	/** Advance exactly N substeps and then pause. */
+	/** Queue N substeps, run at up to 64 a frame ahead of the clock's own
+	 *  steps; a paused sim stays paused after them. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	void StepOnce(int32 NumSteps = 1);
 

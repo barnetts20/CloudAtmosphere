@@ -573,8 +573,8 @@ float TR_Priority(float4 Weather, TRFieldParams F)
  *  formation altitude for all but towers, so outflow becomes high layered
  *  cloud; no noise keeps it exact. Depth ramps in over CoverageDepthRamp, so
  *  clear sky has no slab, and the sim's depth factor scales it, so an eye is a
- *  bowl. PITFALL: relief steepens the top; if grazing rays lose cloud, raise
- *  SlopePerTexel. */
+ *  bowl. PITFALL: relief steepens the top; if shadow goes missing under
+ *  steep cloud walls, raise SlopePerTexel. */
 TRColumn TR_ColumnFromInputs(TRColumnInputs In, float3 N, TRFieldParams F)
 {
     TRColumn Col;

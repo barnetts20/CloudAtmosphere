@@ -173,7 +173,8 @@ struct CLOUDATMOSPHERE_API FCloudShapeParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001", ClampMax = "0.5", UIMin = "0.05"))
 	float SurfaceSoftness = 0.35f;
 
-	/** Shape of the profile's top ramp. Below 0.5 it loses its C1 join. */
+	/** Shape of the profile's top ramp: higher flattens and lowers the top, as
+	 *  BottomCurve does the base. Below 0.5 it loses its C1 join. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0001"))
 	float TopCurve = 1.0f;
 
@@ -226,7 +227,8 @@ struct CLOUDATMOSPHERE_API FCloudCoverageParams
 	 *  storm, and the threshold is solved each frame so this share lies above
 	 *  it: hurricanes first, then storms, then plain cloud from systems' cores
 	 *  outward. The same setting covers the same share whatever the sim's cloud
-	 *  does; the noise breaks up what is covered. */
+	 *  does, up to the share holding cloud above CoverageSoftness; the noise
+	 *  breaks up what is covered. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float CloudCover = 0.5f;
 
@@ -245,7 +247,9 @@ struct CLOUDATMOSPHERE_API FCloudCoverageParams
 	float StormPriority = 1.0f;
 
 	/** Half-width of the coverage threshold, in rank: how far a system's edge
-	 *  ramps from clear to fully covered. Lower is crisper. */
+	 *  ramps from clear to fully covered. Lower is crisper. PITFALL: the
+	 *  threshold never falls below this, so above 0.5 no column reaches full
+	 *  coverage and CloudCover loses its hold. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", UIMax = "1.0"))
 	float CoverageSoftness = 0.2f;
 
@@ -301,7 +305,7 @@ struct CLOUDATMOSPHERE_API FCloudGenusParams
 
 /** Cloud type, 0 stratiform to 1 towering: TypeBias + TypeTropical *
  *  tropicality + TypeStorm * storm^TypeCurve. It sets column depth and the
- *  noise genus, not the material, which follows storm alone. */
+ *  noise genus, not the material, which follows the storm index (Material). */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FCloudTypeParams
 {
@@ -439,8 +443,8 @@ struct CLOUDATMOSPHERE_API FCloudStructureLayerParams
 	float Breakup = 0.5f;
 
 	/** Share of the sim's carried noise displacement the layer follows: 1 moves
-	 *  with the weather, 0 stays fixed on the planet. At 1, high-turnover
-	 *  regions shear the noise into streaks. */
+	 *  with the weather, 0 keeps only the sim's NoiseDriftSpeed drift. At 1,
+	 *  high-turnover regions shear the noise into streaks. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "0.0", UIMax = "1.0"))
 	float FlowInherit = 0.9f;
 
@@ -623,8 +627,9 @@ struct CLOUDATMOSPHERE_API FCloudDeepParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", UIMin = "0.01", UIMax = "1.0"))
 	float FloorSoftness = 0.25f;
 
-	/** Least share of light the deck absorbs per scattering, whatever its
-	 *  albedo: higher darkens the interior sooner below the cloud tops. */
+	/** Least absorption the sky's light meets as it fades into the deck below
+	 *  a column's base, whatever the albedo: higher darkens the depths sooner.
+	 *  Sunlight and albedo are unaffected. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0", UIMax = "0.2"))
 	float Darkening = 0.01f;
 
@@ -859,26 +864,25 @@ struct CLOUDATMOSPHERE_API FAtmosphereRaymarchParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "2", ClampMax = "256"))
 	int32 AtmosphereSteps = 64;
 
-	/** Steps across the cloud a ray actually crosses, shared across every cloud
-	 *  segment on it. Capped by ATMO_MAX_ITER per segment. */
+	/** Cloud steps near the camera: the marched band's depth over this is the
+	 *  base step, which grows with distance by Sampling's LatticeGrowth, so the
+	 *  count a ray takes varies. Capped by ATMO_MAX_ITER per segment. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "2", ClampMax = "256"))
 	int32 CloudSteps = 128;
 
-	/** How much longer a class's last step is than its first, the counts above
-	 *  being spread geometrically across the chord that class actually occupies.
-	 *  1 is uniform; raising it moves samples toward the NEAR END OF THE CLOUD,
-	 *  which is the face the camera sees from either side of the band.
-	 *
-	 *  THE COUNTS ARE EXACT, so this redistributes rather than adds: a ray costs
-	 *  what the two counts name however it is angled, and the only variance left
-	 *  is a step per segment boundary and rays that end early on transmittance. */
+	/** Air: how much longer the last step is than the first, AtmosphereSteps
+	 *  spread geometrically over the air the ray crosses; 1 is uniform, and the
+	 *  count is exact, so this redistributes rather than adds. Cloud: the most a
+	 *  step may rise through the band, in base steps, so a far camera still
+	 *  crosses the deck in several steps; higher is cheaper and coarser far
+	 *  away. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0", UIMax = "64.0"))
 	float ChordSpread = 8.0f;
 
 };
 
 /** One model's look: every group the field, the air and the cloud's lighting
- *  read, and no performance setting. The actor holds one per model, and a
+ *  read; the quality tier is the actor's. The actor holds one per model, and a
  *  group the model does not read is hidden. Declaration order is the
  *  panel's. */
 USTRUCT(BlueprintType)
