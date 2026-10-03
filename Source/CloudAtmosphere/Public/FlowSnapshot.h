@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "FlowSimTypes.h"
 #include "FlowSnapshot.generated.h"
 
 /** The profile a snapshot was captured under.
@@ -12,7 +13,7 @@
  *  hundred steps -- quietly, looking wrong in the meantime. So it is reported at
  *  load instead. */
 USTRUCT(BlueprintType)
-struct FFlowSnapshotProvenance
+struct CLOUDATMOSPHERE_API FFlowSnapshotProvenance
 {
 	GENERATED_BODY()
 
@@ -37,6 +38,57 @@ struct FFlowSnapshotProvenance
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
 	float ThermalShear = 0.0f;
 
+	// The rest of the skeleton, recorded from format 1: the profile's own jet
+	// and thermal shape, the deformation radius, the layers and the perpetual
+	// storms' latitudes. Authored values, as the config holds them.
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
+	EFlowZonalProfile ZonalProfile = EFlowZonalProfile::Banded;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
+	float JetLatitude = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
+	float TradeWindStrength = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
+	float PolarEasterlyStrength = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
+	float JetIrregularity = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
+	float JetHarmonic = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
+	float JetFlatness = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
+	float EquatorialJetWidth = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
+	EFlowThermalShape ThermalShape = EFlowThermalShape::Midlatitude;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
+	float BaroclinicLatitude = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
+	float BaroclinicWidth = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
+	float DeformationRadius = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
+	TArray<FFlowLayerProfile> LayerProfiles;
+
+	/** Each perpetual storm's requested latitude, in list order. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Provenance")
+	TArray<float> PerpetualLatitudes;
+
+	/** The profile Config runs under: what a capture records and a restore
+	 *  compares against. */
+	static FFlowSnapshotProvenance FromConfig(const UFlowSimConfig& Config);
+
 	/** True when this profile would draw the same jets at the same latitudes.
 	 *  Only the parameters that place the jets are compared; the rest change how
 	 *  the field evolves, not where its structure sits. */
@@ -51,6 +103,12 @@ struct FFlowSnapshotProvenance
 			&& FMath::IsNearlyEqual(WidthBias, Other.WidthBias, Tol)
 			&& FMath::IsNearlyEqual(ThermalShear, Other.ThermalShear, Tol);
 	}
+
+	/** The format 1 fields: the rotation, the deformation radius, the active
+	 *  profile's jet shape, the midlatitude zone when it is the thermal shape,
+	 *  the layers, and the perpetual storms' count and latitudes. Settings the
+	 *  active profile does not read are not compared. */
+	bool MatchesSkeleton(const FFlowSnapshotProvenance& Other) const;
 };
 
 /** A captured simulation state, as raw floats.
@@ -65,7 +123,7 @@ struct FFlowSnapshotProvenance
  *  ascent and the eye tracer, each plane layer-major, then row, then column;
  *  then the storm cells, eight floats a slot. The layout is told by its size:
  *  one without the last two planes restores them as zero. See
- *  FFlowSimulation::StateFloatsPerCell.
+ *  FFlowSimulation::StateFloatsPerCell and MainCaptureCS.
  *
  *  PITFALL: THE TRACERS ARE STATE TOO. The clouds, moisture and noise the deck
  *  draws are carried by the sim, not derived from the flow; a snapshot without
@@ -97,15 +155,32 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Snapshot")
 	int32 StepsCompleted = 0;
 
+	/** What the snapshot records: 0 the jet shape alone, 1 the whole skeleton
+	 *  (MatchesSkeleton). The state's layout is still told by its size. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Snapshot")
+	int32 FormatVersion = 0;
+
+	/** The format a capture writes. */
+	static constexpr int32 CurrentFormatVersion = 1;
+
 	/** Floats per cell the current solver stores, and the layout without the
 	 *  noise phases' w that still restores. Match FFlowSimulation's; duplicated
 	 *  so this header stays free of the render-side one. */
 	static constexpr int32 FloatsPerCell = 15;
 	static constexpr int32 LegacyFloatsPerCell = 13;
 
+	/** First planes of noise phase A's and phase B's displacement, x then y
+	 *  then z, in both layouts. Match MainCaptureCS. */
+	static constexpr int32 NoisePlaneA = 7;
+	static constexpr int32 NoisePlaneB = 10;
+
+	/** A storm cell slot's floats: position and intensity, then age and the
+	 *  last move. Match MainCaptureCS. */
+	static constexpr int32 FloatsPerSlot = 8;
+
 	/** The storm cells after the planes. Matches
 	 *  FFlowSimulation::StateTrailingFloats. */
-	static constexpr int32 TrailingFloats = 8 * 32;
+	static constexpr int32 TrailingFloats = FloatsPerSlot * 32;
 
 	bool IsValidFor(const FIntVector& InGrid) const
 	{
@@ -115,4 +190,18 @@ public:
 			&& (State.Num() == N * FloatsPerCell + TrailingFloats
 				|| State.Num() == N * LegacyFloatsPerCell + TrailingFloats);
 	}
+
+	/** Whether Live matches the profile this was captured under, as far as
+	 *  FormatVersion records it. */
+	bool MatchesProvenance(const FFlowSnapshotProvenance& Live) const;
+
+	/** A transient copy turned east about the pole by Columns grid columns,
+	 *  Columns * 360 / Grid.X degrees: every plane rolled, and the noise
+	 *  displacements and the storm cells' positions and moves turned with it.
+	 *  The sim is zonally symmetric, so the copy starts balanced. The clock and
+	 *  provenance are kept. Null when the layout is not one this solver restores.
+	 *  PITFALL: perpetual storms are placed from their config, not the state, so
+	 *  their Longitude must turn by the same angle or they spin up beside their
+	 *  own imprint. */
+	UFlowSnapshot* MakeRolled(UObject* Outer, int32 Columns) const;
 };

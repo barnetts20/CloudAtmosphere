@@ -1192,22 +1192,11 @@ bool UFlowSimSubsystem::QueueInitialState()
 
 	// Shape mismatch is a WARNING, not a refusal: the nudge re-registers the
 	// zonal mean over a few hundred steps.
-	const FFlowSimScales Speeds = Config->ResolveScales();
-
-	FFlowSnapshotProvenance Now;
-	Now.BandCount = Config->BandCount;
-	Now.JetStrength = Speeds.JetStrength;
-	Now.EquatorialBoost = Config->EquatorialBoost;
-	Now.Asymmetry = Config->Asymmetry;
-	Now.WidthBias = Config->WidthBias;
-	Now.PlanetaryVorticity = Config->PlanetaryVorticity;
-	Now.ThermalShear = Speeds.ThermalShear;
-
-	if (!Snapshot->Provenance.MatchesShape(Now))
+	if (!Snapshot->MatchesProvenance(FFlowSnapshotProvenance::FromConfig(*Config)))
 	{
 		UE_LOG(LogFlowSim, Warning,
-			TEXT("InitialState '%s' was captured under a different jet profile. ")
-			TEXT("The nudge will re-register it over a few hundred steps."),
+			TEXT("InitialState '%s' was captured under a different profile: jets, thermal shear, ")
+			TEXT("layers or perpetual storms. The nudge will re-register it over a few hundred steps."),
 			*Snapshot->GetName());
 	}
 
@@ -1326,16 +1315,8 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 
 	Target->Grid = Grid;
 	Target->State = MoveTemp(Result);
-
-	Target->Provenance.BandCount = Config->BandCount;
-	const FFlowSimScales Speeds = Config->ResolveScales();
-
-	Target->Provenance.JetStrength = Speeds.JetStrength;
-	Target->Provenance.EquatorialBoost = Config->EquatorialBoost;
-	Target->Provenance.Asymmetry = Config->Asymmetry;
-	Target->Provenance.WidthBias = Config->WidthBias;
-	Target->Provenance.PlanetaryVorticity = Config->PlanetaryVorticity;
-	Target->Provenance.ThermalShear = Speeds.ThermalShear;
+	Target->Provenance = FFlowSnapshotProvenance::FromConfig(*Config);
+	Target->FormatVersion = UFlowSnapshot::CurrentFormatVersion;
 	Target->SimulatedTime = (float)SimulatedTime;
 	Target->StepsCompleted = (int32)FMath::Min<int64>(StepsCompleted, MAX_int32);
 
