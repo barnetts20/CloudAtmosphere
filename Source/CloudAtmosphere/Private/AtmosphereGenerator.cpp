@@ -256,9 +256,77 @@ namespace
 		Line.Source = Source;
 	}
 
+	/** The palettes: an option per group, its R, G and B scaled by one factor
+	 *  and mutated per path and channel. A swept group shows its options as
+	 *  authored. */
+	void ApplyChoices(const FDrawTarget& Target, const FAtmosphereDrawSet& Set, const FAtmosphereGenerateOptions& Options,
+		TArray<FAtmosphereDrawRecord>& Report)
+	{
+		for (const FAtmosphereChoiceGroup& Group : Set.Choices)
+		{
+			int32 Count = Group.Colours.Num() > 0 ? MAX_int32 : 0;
+
+			for (const FAtmospherePaletteColour& Colour : Group.Colours)
+			{
+				Count = FMath::Min(Count, Colour.Options.Num());
+			}
+
+			if (Count == 0)
+			{
+				continue;
+			}
+
+			const FString Key = Group.Name.ToString();
+			const bool bSwept = !Options.SweepPath.IsEmpty() && Options.SweepPath == Key;
+
+			const double Pick = bSwept ? (double)Options.SweepPosition : Unit(Target.Seed, Target.Stream, TEXT("Choice/") + Key);
+			const int32 Index = FMath::Clamp((int32)(Pick * Count), 0, Count - 1);
+
+			FAtmosphereDraw Brightness;
+			Brightness.Distribution = EAtmosphereDrawDistribution::LogUniform;
+			Brightness.Min = Group.ScaleMin;
+			Brightness.Max = Group.ScaleMax;
+
+			const double Scale = bSwept ? 1.0 : AtmosphereHarness::Sample(Brightness, Unit(Target.Seed, Target.Stream, TEXT("Scale/") + Key), 1.0);
+
+			for (const FAtmospherePaletteColour& Colour : Group.Colours)
+			{
+				const FString& Path = Colour.Path;
+
+				if (Options.Locks.Contains(Path))
+				{
+					continue;
+				}
+
+				FLinearColor Value = Colour.Options[Index];
+				float* Channels[3] = { &Value.R, &Value.G, &Value.B };
+
+				for (int32 Channel = 0; Channel < 3; ++Channel)
+				{
+					const double Move = (bSwept || Group.Mutation <= 0.0f) ? 0.0
+						: (2.0 * Unit(Target.Seed, Target.Stream, TEXT("Mutate/") + Path, Channel) - 1.0) * Group.Mutation;
+
+					*Channels[Channel] = (float)FMath::Max((double)*Channels[Channel] * Scale * (1.0 + Move), 0.0);
+				}
+
+				const FResolved Setting = Resolve(Target.Type, Target.Container, Path);
+
+				if (!Setting.Property || !WriteChannels(Setting, Value))
+				{
+					Record(Report, Target, Path, FString(), EAtmosphereDrawSource::Missing);
+					continue;
+				}
+
+				Record(Report, Target, Path, Describe(Setting), EAtmosphereDrawSource::Choice);
+			}
+		}
+	}
+
 	void ApplyDraws(const FDrawTarget& Target, const FAtmosphereDrawSet& Set, const FAtmosphereGenerateOptions& Options,
 		TArray<FAtmosphereDrawRecord>& Report)
 	{
+		ApplyChoices(Target, Set, Options, Report);
+
 		const TArray<FString>& Locks = Options.Locks;
 
 		for (const FAtmosphereDraw& Entry : Set.Draws)
@@ -287,39 +355,6 @@ namespace
 
 			Write(Setting, Sample(Entry, Position, Base));
 			Record(Report, Target, Entry.Path, Describe(Setting), EAtmosphereDrawSource::Draw);
-		}
-
-		for (const FAtmosphereChoiceGroup& Group : Set.Choices)
-		{
-			const int32 Count = Group.Options.Num();
-
-			if (Count == 0)
-			{
-				continue;
-			}
-
-			const double Pick = Unit(Target.Seed, Target.Stream, FString(TEXT("Choice/")) + Group.Name.ToString());
-			const FAtmosphereChoiceOption& Option = Group.Options[FMath::Min((int32)(Pick * Count), Count - 1)];
-
-			for (int32 i = 0; i < Group.Paths.Num(); ++i)
-			{
-				const FString& Path = Group.Paths[i];
-
-				if (!Option.Values.IsValidIndex(i) || Locks.Contains(Path))
-				{
-					continue;
-				}
-
-				const FResolved Setting = Resolve(Target.Type, Target.Container, Path);
-
-				if (!Setting.Property || !WriteChannels(Setting, Option.Values[i]))
-				{
-					Record(Report, Target, Path, FString(), EAtmosphereDrawSource::Missing);
-					continue;
-				}
-
-				Record(Report, Target, Path, Describe(Setting), EAtmosphereDrawSource::Choice);
-			}
 		}
 	}
 
@@ -355,6 +390,75 @@ namespace
 
 		return Out;
 	}
+}
+
+namespace
+{
+	void CollectLookSettings(const UStruct* Type, const FString& Prefix, TArray<FString>& Numbers, TArray<FString>& Colours)
+	{
+		for (TFieldIterator<FProperty> It(Type); It; ++It)
+		{
+			const FProperty* Property = *It;
+
+			if (!Property->HasAnyPropertyFlags(CPF_Edit)
+				|| Property->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated | CPF_EditConst))
+			{
+				continue;
+			}
+
+			const FString Path = Prefix + Property->GetName();
+
+			if (const FStructProperty* Struct = CastField<FStructProperty>(Property))
+			{
+				if (Struct->Struct == TBaseStructure<FLinearColor>::Get())
+				{
+					Colours.Add(Path);
+				}
+				else
+				{
+					CollectLookSettings(Struct->Struct, Path + TEXT("."), Numbers, Colours);
+				}
+			}
+			else if (const FNumericProperty* Numeric = CastField<FNumericProperty>(Property); Numeric && !Numeric->IsEnum())
+			{
+				Numbers.Add(Path);
+			}
+		}
+	}
+}
+
+bool AtmosphereHarness::ReadColour(const UStruct* Type, const void* Container, FStringView Path, FLinearColor& Out)
+{
+	const FResolved Setting = Resolve(Type, const_cast<void*>(Container), Path);
+	const FStructProperty* Struct = CastField<FStructProperty>(Setting.Property);
+
+	if (!Struct || Struct->Struct != TBaseStructure<FLinearColor>::Get())
+	{
+		return false;
+	}
+
+	Out = *static_cast<const FLinearColor*>(Setting.Address);
+	return true;
+}
+
+void AtmosphereHarness::LookSettings(EPlanetAtmosphereType Model, TArray<FString>& OutNumbers, TArray<FString>& OutColours)
+{
+	OutNumbers.Reset();
+	OutColours.Reset();
+	CollectLookSettings(FAtmosphereModelParams::StaticStruct(), FString(), OutNumbers, OutColours);
+
+	const auto Excluded = [Model](const FString& Path)
+		{
+			const bool bQuality = Path == TEXT("MultipleScattering.OctaveCount") || Path.StartsWith(TEXT("SurfaceShadow.CascadeRadii."));
+			const bool bAir = Path.StartsWith(TEXT("Planet.")) || Path.StartsWith(TEXT("Air.")) || Path.StartsWith(TEXT("Ambient."));
+
+			return bQuality
+				|| (Path.StartsWith(TEXT("Deep.")) && Model != EPlanetAtmosphereType::GasGiant)
+				|| (!bAir && Model == EPlanetAtmosphereType::AirOnly);
+		};
+
+	OutNumbers.RemoveAll(Excluded);
+	OutColours.RemoveAll(Excluded);
 }
 
 double AtmosphereHarness::Unit(int32 Seed, EStream Stream, FStringView Key, uint32 Sub)
@@ -563,7 +667,13 @@ void FAtmosphereGenerator::GenerateSim(int32 Seed, const UAtmosphereArchetype& A
 	if (const UFlowSnapshot* Snapshot = Archetype.Template->InitialState)
 	{
 		const int32 Width = Snapshot->Grid.X;
-		const int32 Columns = (Width > 0) ? FMath::Min((int32)(Unit(Seed, EStream::Roll, TEXT("Roll")) * Width), Width - 1) : 0;
+		const double Span = FMath::Clamp((double)Archetype.MaxRoll, 0.0, 360.0) / 360.0;
+		const int32 Columns = (Width > 0) ? FMath::Min((int32)(Unit(Seed, EStream::Roll, TEXT("Roll")) * Span * Width), Width - 1) : 0;
+
+		if (Columns == 0)
+		{
+			return;
+		}
 
 		if (UFlowSnapshot* Rolled = Snapshot->MakeRolled(Config, Columns))
 		{

@@ -16,7 +16,7 @@ namespace AtmosphereHarness
 {
 	/** Raised when the same seed and assets would generate a different planet:
 	 *  distribution maths, stream keys or the order draws apply in. */
-	constexpr int32 GeneratorVersion = 1;
+	constexpr int32 GeneratorVersion = 2;
 
 	/** A draw's stream family, so one key in two families draws independently. */
 	enum class EStream : uint64
@@ -42,6 +42,15 @@ namespace AtmosphereHarness
 	 *  Type. False when Path names no such setting. */
 	CLOUDATMOSPHERE_API bool ReadValue(const UStruct* Type, const void* Container, FStringView Path, double& Out);
 	CLOUDATMOSPHERE_API bool WriteValue(const UStruct* Type, void* Container, FStringView Path, double Value);
+
+	/** The colour at Path, a FLinearColor member. */
+	CLOUDATMOSPHERE_API bool ReadColour(const UStruct* Type, const void* Container, FStringView Path, FLinearColor& Out);
+
+	/** Every look setting Model reads that a draw can set: the bundle's
+	 *  editable numbers and its colours, less the quality tier's and the
+	 *  groups Model does not draw (Deep without a deep deck; for air only,
+	 *  everything but Planet, Air and Ambient). */
+	CLOUDATMOSPHERE_API void LookSettings(EPlanetAtmosphereType Model, TArray<FString>& OutNumbers, TArray<FString>& OutColours);
 }
 
 /** How a generation runs, beyond the seed and the set. */

@@ -16,8 +16,7 @@ namespace
 		ForAll = ForClouds | ForAirOnly,
 	};
 
-	/** A first-estimate range from Design/HarnessReference.md. bOfBase reads
-	 *  the range as multiples of Base's value, or the class default's. */
+	/** A first-estimate range from Design/HarnessReference.md. */
 	struct FStarterDraw
 	{
 		const TCHAR* Path;
@@ -25,8 +24,16 @@ namespace
 		float Min, Max;
 		float GasMin, GasMax;
 		uint8 Models;
-		const TCHAR* Link = nullptr;
-		bool bOfBase = false;
+	};
+
+	/** A colour's palette: Base's colour, or the class default's, as its one
+	 *  option, scaled and mutated. */
+	struct FStarterPalette
+	{
+		const TCHAR* Path;
+		float ScaleMin, ScaleMax;
+		float Mutation;
+		uint8 Models;
 	};
 
 	// Unity builds merge anonymous namespaces across files: keep these names distinct.
@@ -38,18 +45,9 @@ namespace
 		{ TEXT("Planet.HeightScale"), StarterEven, 0.05f, 0.2f, 0.05f, 0.2f, ForAll },
 		{ TEXT("Planet.SpinRatio"), StarterLog, 0.2f, 1.0f, 0.01f, 0.1f, ForClouds },
 
-		{ TEXT("Air.RayleighDepth.R"), StarterLog, 0.3f, 3.0f, 0.3f, 3.0f, ForAll, TEXT("AirDepth"), true },
-		{ TEXT("Air.RayleighDepth.G"), StarterLog, 0.3f, 3.0f, 0.3f, 3.0f, ForAll, TEXT("AirDepth"), true },
-		{ TEXT("Air.RayleighDepth.B"), StarterLog, 0.3f, 3.0f, 0.3f, 3.0f, ForAll, TEXT("AirDepth"), true },
 		{ TEXT("Air.RayleighScaleHeight"), StarterEven, 0.1f, 0.25f, 0.1f, 0.25f, ForAll },
-		{ TEXT("Air.MieDepth.R"), StarterLog, 0.3f, 3.0f, 0.3f, 3.0f, ForAll, TEXT("Haze"), true },
-		{ TEXT("Air.MieDepth.G"), StarterLog, 0.3f, 3.0f, 0.3f, 3.0f, ForAll, TEXT("Haze"), true },
-		{ TEXT("Air.MieDepth.B"), StarterLog, 0.3f, 3.0f, 0.3f, 3.0f, ForAll, TEXT("Haze"), true },
 		{ TEXT("Air.MieScaleHeight"), StarterEven, 0.05f, 0.2f, 0.05f, 0.2f, ForAll },
 		{ TEXT("Air.MieG"), StarterEven, 0.75f, 0.95f, 0.75f, 0.95f, ForAll },
-		{ TEXT("Air.AbsorptionDepth.R"), StarterEven, 0.0f, 2.0f, 0.0f, 2.0f, ForAll, TEXT("Absorption"), true },
-		{ TEXT("Air.AbsorptionDepth.G"), StarterEven, 0.0f, 2.0f, 0.0f, 2.0f, ForAll, TEXT("Absorption"), true },
-		{ TEXT("Air.AbsorptionDepth.B"), StarterEven, 0.0f, 2.0f, 0.0f, 2.0f, ForAll, TEXT("Absorption"), true },
 
 		{ TEXT("Shape.CloudBase"), StarterEven, 0.0f, 0.05f, 0.0f, 0.05f, ForClouds },
 		{ TEXT("Shape.CloudThickness"), StarterEven, 0.3f, 0.6f, 0.5f, 0.75f, ForClouds },
@@ -86,12 +84,21 @@ namespace
 		{ TEXT("Material.CloudOpticalDepth"), StarterLog, 15.0f, 40.0f, 8.0f, 20.0f, ForClouds },
 		{ TEXT("Material.StormBalance"), StarterEven, 0.3f, 0.7f, 0.3f, 0.7f, ForClouds },
 		{ TEXT("Material.StormBlend"), StarterEven, 0.3f, 0.6f, 0.3f, 0.6f, ForClouds },
-		{ TEXT("Material.CloudScatter.R"), StarterEven, 0.95f, 0.99f, 0.95f, 0.99f, ForTerrestrial, TEXT("CloudWhite") },
-		{ TEXT("Material.CloudScatter.G"), StarterEven, 0.95f, 0.99f, 0.95f, 0.99f, ForTerrestrial, TEXT("CloudWhite") },
-		{ TEXT("Material.CloudScatter.B"), StarterEven, 0.95f, 0.99f, 0.95f, 0.99f, ForTerrestrial, TEXT("CloudWhite") },
 		{ TEXT("Material.StormExtinction.A"), StarterEven, 1.5f, 2.5f, 1.5f, 2.5f, ForClouds },
 
 		{ TEXT("SurfaceShadow.DirectFraction"), StarterEven, 0.7f, 0.9f, 0.7f, 0.9f, ForAll },
+	};
+
+	const FStarterPalette StarterPalettes[] =
+	{
+		{ TEXT("Air.RayleighDepth"), 0.3f, 3.0f, 0.1f, ForAll },
+		{ TEXT("Air.MieDepth"), 0.3f, 3.0f, 0.1f, ForAll },
+		{ TEXT("Air.AbsorptionDepth"), 0.0f, 2.0f, 0.1f, ForAll },
+
+		{ TEXT("Material.CloudScatter"), 0.97f, 1.0f, 0.0f, ForTerrestrial },
+		{ TEXT("Material.CloudScatter"), 1.0f, 1.0f, 0.1f, ForGasGiant },
+		{ TEXT("Material.StormScatter"), 1.0f, 1.0f, 0.1f, ForClouds },
+		{ TEXT("Deep.Scatter"), 1.0f, 1.0f, 0.1f, ForGasGiant },
 	};
 }
 
@@ -124,8 +131,8 @@ void UAtmosphereLookProfile::AddStarterDraws()
 
 	Modify();
 
-	// The air's colours scale Base's, or the class default's for Model.
-	const FAtmosphereModelParams AirSource = Base ? Base->Model
+	// Palettes start from Base's colours, or the class default's for Model.
+	const FAtmosphereModelParams ColourSource = Base ? Base->Model
 		: GetDefault<APlanetAtmosphereActor>()->GetModelParams(Model);
 
 	int32 Added = 0;
@@ -140,29 +147,38 @@ void UAtmosphereLookProfile::AddStarterDraws()
 			continue;
 		}
 
-		FAtmosphereDraw Entry;
+		FAtmosphereDraw& Entry = Draws.Draws.AddDefaulted_GetRef();
 		Entry.Path = Starter.Path;
 		Entry.Distribution = Starter.Distribution;
 		Entry.Min = (Mask == ForGasGiant) ? Starter.GasMin : Starter.Min;
 		Entry.Max = (Mask == ForGasGiant) ? Starter.GasMax : Starter.Max;
-		Entry.Link = Starter.Link ? FName(Starter.Link) : NAME_None;
-
-		if (Starter.bOfBase)
-		{
-			double BaseValue = 0.0;
-
-			if (!AtmosphereHarness::ReadValue(FAtmosphereModelParams::StaticStruct(), &AirSource, Entry.Path, BaseValue))
-			{
-				continue;
-			}
-
-			Entry.Min *= (float)BaseValue;
-			Entry.Max *= (float)BaseValue;
-		}
-
-		Draws.Draws.Add(Entry);
 		++Added;
 	}
 
-	UE_LOG(LogAtmosphereHarness, Log, TEXT("'%s': added %d starter draws."), *GetName(), Added);
+	for (const FStarterPalette& Starter : StarterPalettes)
+	{
+		const FName Name(Starter.Path);
+		const bool bAlready = Draws.Choices.ContainsByPredicate(
+			[&Name](const FAtmosphereChoiceGroup& Group) { return Group.Name == Name; });
+
+		FLinearColor Colour;
+
+		if (!(Starter.Models & Mask) || bAlready
+			|| !AtmosphereHarness::ReadColour(FAtmosphereModelParams::StaticStruct(), &ColourSource, Starter.Path, Colour))
+		{
+			continue;
+		}
+
+		FAtmosphereChoiceGroup& Palette = Draws.Choices.AddDefaulted_GetRef();
+		Palette.Name = Name;
+		FAtmospherePaletteColour& Entry = Palette.Colours.AddDefaulted_GetRef();
+		Entry.Path = Starter.Path;
+		Entry.Options.Add(Colour);
+		Palette.ScaleMin = Starter.ScaleMin;
+		Palette.ScaleMax = Starter.ScaleMax;
+		Palette.Mutation = Starter.Mutation;
+		++Added;
+	}
+
+	UE_LOG(LogAtmosphereHarness, Log, TEXT("'%s': added %d starter draws and palettes."), *GetName(), Added);
 }

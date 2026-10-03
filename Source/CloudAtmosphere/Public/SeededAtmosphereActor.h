@@ -64,6 +64,14 @@ public:
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CloudAtmosphere|Generation")
 	void Reroll();
 
+	/** Replaces the active model's look profile draws and palettes with the
+	 *  actor's current look (AtmosphereHarness::LookSettings): an entry per
+	 *  number pinned to its value, and a one-option palette per colour with no
+	 *  scale or mutation. Every seed reproduces it; widen one setting at a
+	 *  time. Apply the tune first: a generation leaves drawn values behind. */
+	UFUNCTION(CallInEditor, Category = "CloudAtmosphere|Generation")
+	void CaptureLookBaseline();
+
 	virtual void Tick(float DeltaTime) override;
 
 #if WITH_EDITOR
@@ -71,6 +79,9 @@ public:
 #endif
 
 private:
+	/** The look profile Set offers PlanetType. */
+	UAtmosphereLookProfile* ActiveLookProfile() const;
+
 	/** bSim false regenerates the look alone, keeping the sim's config. */
 	void GenerateParts(bool bSim);
 

@@ -85,39 +85,57 @@ struct CLOUDATMOSPHERE_API FAtmosphereDraw
 	bool bInvert = false;
 };
 
-/** One option of a choice group: a value per path, in the group's order. A
- *  colour or vector path takes the value's channels in its own member order
- *  (RGBA, XYZW); a scalar path takes R. */
+/** One colour a palette sets: its path and its colour for each option. A
+ *  vector path takes a colour's channels in its member order (XYZW); a scalar
+ *  path takes R. */
 USTRUCT(BlueprintType)
-struct CLOUDATMOSPHERE_API FAtmosphereChoiceOption
+struct CLOUDATMOSPHERE_API FAtmospherePaletteColour
 {
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Choice")
-	TArray<FLinearColor> Values;
+	FString Path;
+
+	/** One colour per option, in the group's option order. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Choice")
+	TArray<FLinearColor> Options;
 };
 
-/** Several settings set together from one pick, so they always agree: a
- *  gas giant's cloud, storm and deep scatter, say. */
+/** A palette: each seed picks one option index and sets every colour's
+ *  option at it, so they always agree (a gas giant's cloud, storm and deep
+ *  scatter, say), then scales and mutates them. One colour makes a single
+ *  colour's palette. Options past the shortest list are never picked. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FAtmosphereChoiceGroup
 {
 	GENERATED_BODY()
 
-	/** Keys the group's stream, and what an archetype's group of the same name
-	 *  replaces. */
+	/** Keys the group's streams, what an archetype's group of the same name
+	 *  replaces, and what the actor's Sweep Path names to step through the
+	 *  options as authored. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Choice")
 	FName Name;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Choice")
-	TArray<FString> Paths;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Choice", meta = (TitleProperty = "Path"))
+	TArray<FAtmospherePaletteColour> Colours;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Choice")
-	TArray<FAtmosphereChoiceOption> Options;
+	/** One factor on the pick's R, G and B, even in ratio between the two (even
+	 *  in value when either is 0): the same hue, thicker or thinner. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Choice", meta = (ClampMin = "0.0"))
+	float ScaleMin = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Choice", meta = (ClampMin = "0.0"))
+	float ScaleMax = 1.0f;
+
+	/** Each colour's R, G and B moved by up to this share of their value either
+	 *  way, drawn per colour and channel: 0.1 is up to 10%. Alpha is kept. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Choice", meta = (ClampMin = "0.0", UIMax = "1.0"))
+	float Mutation = 0.0f;
 };
 
-/** The draws onto one root, the bundle or the sim config. Entries apply in
- *  order, then the choice groups, so a group wins a path both set. */
+/** The draws onto one root, the bundle or the sim config. The choice groups
+ *  apply first, then the entries in order, so an entry refines a palette's
+ *  channel: a numeric draw on StormExtinction.A, say. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FAtmosphereDrawSet
 {

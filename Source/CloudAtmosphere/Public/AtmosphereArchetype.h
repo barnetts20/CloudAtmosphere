@@ -36,6 +36,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Archetype")
 	FAtmosphereDrawSet SimDraws;
 
+	/** How far a seed may turn the start state east, in degrees. 0 starts every
+	 *  planet of the archetype from the same weather in the same place. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Archetype", meta = (ClampMin = "0.0", ClampMax = "360.0"))
+	float MaxRoll = 360.0f;
+
 	/** Look draws that replace the look profile's entry on the same path, or
 	 *  its choice group of the same name, for planets of this archetype. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Archetype")
@@ -71,10 +76,10 @@ public:
 	FAtmosphereDrawSet Draws;
 
 	/** Adds a draw for every Identity and Style look setting of Model at its
-	 *  first-estimate range (Design/HarnessReference.md), leaving paths already
-	 *  drawn alone. The air's colours draw as linked multiples of Base's, or
-	 *  of the actor class default's without one, so their hue holds; palettes
-	 *  are left to choice groups. */
+	 *  first-estimate range (Design/HarnessReference.md), and a palette for
+	 *  the air's and the clouds' colours from Base's, or the actor class
+	 *  default's: scaled for the air's thickness, mutated for hue. Paths and
+	 *  palettes already present are left alone. */
 	UFUNCTION(CallInEditor, Category = "Look")
 	void AddStarterDraws();
 };

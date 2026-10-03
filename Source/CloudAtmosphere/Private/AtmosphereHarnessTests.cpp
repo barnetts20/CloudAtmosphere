@@ -84,6 +84,152 @@ bool FAtmosphereHarnessPathsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAtmosphereHarnessBaselineTest, "CloudAtmosphere.Harness.Baseline",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAtmosphereHarnessBaselineTest::RunTest(const FString& Parameters)
+{
+	const UScriptStruct* Look = FAtmosphereModelParams::StaticStruct();
+	TArray<FString> Numbers, Colours, GasNumbers, GasColours, AirNumbers, AirColours;
+
+	LookSettings(EPlanetAtmosphereType::Terrestrial, Numbers, Colours);
+	LookSettings(EPlanetAtmosphereType::GasGiant, GasNumbers, GasColours);
+	LookSettings(EPlanetAtmosphereType::AirOnly, AirNumbers, AirColours);
+
+	TestTrue(TEXT("The air's profile is drawn"), Numbers.Contains(TEXT("Air.MieScaleHeight")));
+	TestTrue(TEXT("A colour is one setting"), Colours.Contains(TEXT("Material.CloudScatter")));
+	TestFalse(TEXT("Not its channels"), Numbers.Contains(TEXT("Material.CloudScatter.G")));
+	TestFalse(TEXT("The quality tier is not drawn"), Numbers.Contains(TEXT("MultipleScattering.OctaveCount")));
+	TestFalse(TEXT("Nor the cascade extents"), Numbers.Contains(TEXT("SurfaceShadow.CascadeRadii.X")));
+	TestFalse(TEXT("The slab has no deep deck"), Numbers.Contains(TEXT("Deep.DeepFill")) || Colours.Contains(TEXT("Deep.Scatter")));
+	TestTrue(TEXT("The gas giant has"), GasNumbers.Contains(TEXT("Deep.DeepFill")) && GasColours.Contains(TEXT("Deep.Scatter")));
+	TestFalse(TEXT("Air only draws no cloud"), AirNumbers.Contains(TEXT("Shape.CloudBase")) || AirColours.Contains(TEXT("Material.CloudScatter")));
+
+	// Pinned to a tune, every seed reproduces it.
+	FAtmosphereModelParams Tune;
+	Tune.Shape.CloudThickness = 0.37f;
+	Tune.Material.CloudScatter = FLinearColor(0.2f, 0.4f, 0.6f, 1.0f);
+	Tune.Deep.DeepFill = 0.29f;
+
+	UAtmosphereLookProfile* Profile = NewObject<UAtmosphereLookProfile>();
+	bool bAllRead = true;
+
+	for (const FString& Path : GasNumbers)
+	{
+		double Value = 0.0;
+		bAllRead &= ReadValue(Look, &Tune, Path, Value);
+
+		FAtmosphereDraw& Entry = Profile->Draws.Draws.AddDefaulted_GetRef();
+		Entry.Path = Path;
+		Entry.Min = (float)Value;
+		Entry.Max = (float)Value;
+	}
+
+	for (const FString& Path : GasColours)
+	{
+		FLinearColor Colour;
+		bAllRead &= ReadColour(Look, &Tune, Path, Colour);
+
+		FAtmosphereChoiceGroup& Palette = Profile->Draws.Choices.AddDefaulted_GetRef();
+		Palette.Name = FName(*Path);
+		FAtmospherePaletteColour& Entry = Palette.Colours.AddDefaulted_GetRef();
+		Entry.Path = Path;
+		Entry.Options.Add(Colour);
+	}
+
+	TestTrue(TEXT("Every look setting resolves"), bAllRead);
+
+	FAtmosphereGenerationSet Set;
+	Set.GasGiant.Look = Profile;
+
+	bool bReproduced = true;
+
+	for (int32 Seed : { 1, 2, 3 })
+	{
+		FAtmosphereGeneration Out;
+		FAtmosphereGenerator::Generate(Seed, EPlanetAtmosphereType::GasGiant, Set, FAtmosphereModelParams(), FAtmosphereGenerateOptions(), nullptr, Out);
+
+		bReproduced &= Out.Look.Material.CloudScatter == Tune.Material.CloudScatter;
+
+		for (const FString& Path : GasNumbers)
+		{
+			double Want = 0.0, Got = 0.0;
+			bReproduced &= ReadValue(Look, &Tune, Path, Want) && ReadValue(Look, &Out.Look, Path, Got) && Want == Got;
+		}
+	}
+
+	TestTrue(TEXT("A pinned profile reproduces its tune on every seed"), bReproduced);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAtmosphereHarnessPaletteTest, "CloudAtmosphere.Harness.Palette",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAtmosphereHarnessPaletteTest::RunTest(const FString& Parameters)
+{
+	const FLinearColor Red(0.8f, 0.2f, 0.1f, 2.0f);
+	const FLinearColor Blue(0.1f, 0.3f, 0.9f, 2.0f);
+
+	UAtmosphereLookProfile* Profile = NewObject<UAtmosphereLookProfile>();
+	FAtmosphereChoiceGroup& Palette = Profile->Draws.Choices.AddDefaulted_GetRef();
+	Palette.Name = TEXT("Storm");
+	FAtmospherePaletteColour& Storm = Palette.Colours.AddDefaulted_GetRef();
+	Storm.Path = TEXT("Material.StormExtinction");
+	Storm.Options = { Red, Blue };
+	Palette.ScaleMin = 0.5f;
+	Palette.ScaleMax = 2.0f;
+	Palette.Mutation = 0.1f;
+
+	FAtmosphereGenerationSet Set;
+	Set.Terrestrial.Look = Profile;
+
+	bool bBounded = true;
+	bool bAlphaKept = true;
+	int32 Reds = 0;
+
+	for (int32 Seed = 0; Seed < 200; ++Seed)
+	{
+		FAtmosphereGeneration Out;
+		FAtmosphereGenerator::Generate(Seed, EPlanetAtmosphereType::Terrestrial, Set, FAtmosphereModelParams(), FAtmosphereGenerateOptions(), nullptr, Out);
+
+		const FLinearColor Got = Out.Look.Material.StormExtinction;
+		const bool bRed = Got.R > Got.B;
+		const FLinearColor& From = bRed ? Red : Blue;
+		Reds += bRed ? 1 : 0;
+
+		// Each channel within scale and mutation of the picked option.
+		for (int32 Channel = 0; Channel < 3; ++Channel)
+		{
+			const float Share = Got.Component(Channel) / From.Component(Channel);
+			bBounded &= Share >= 0.5f * 0.9f - 1e-4f && Share <= 2.0f * 1.1f + 1e-4f;
+		}
+
+		bAlphaKept &= Got.A == 2.0f;
+	}
+
+	TestTrue(TEXT("Channels stay within scale and mutation"), bBounded);
+	TestTrue(TEXT("Alpha is the option's"), bAlphaKept);
+	TestTrue(TEXT("Both options are picked"), Reds > 50 && Reds < 150);
+
+	FAtmosphereGenerateOptions Sweeping;
+	Sweeping.SweepPath = TEXT("Storm");
+	Sweeping.SweepPosition = 1.0f;
+
+	FAtmosphereGeneration Swept;
+	FAtmosphereGenerator::Generate(7, EPlanetAtmosphereType::Terrestrial, Set, FAtmosphereModelParams(), Sweeping, nullptr, Swept);
+	TestTrue(TEXT("A swept palette shows its option as authored"), Swept.Look.Material.StormExtinction == Blue);
+
+	FAtmosphereDraw& Amount = Profile->Draws.Draws.AddDefaulted_GetRef();
+	Amount.Path = TEXT("Material.StormExtinction.A");
+	Amount.Min = 1.5f;
+	Amount.Max = 1.5f;
+
+	FAtmosphereGeneration Refined;
+	FAtmosphereGenerator::Generate(7, EPlanetAtmosphereType::Terrestrial, Set, FAtmosphereModelParams(), FAtmosphereGenerateOptions(), nullptr, Refined);
+	TestEqual(TEXT("An entry refines a palette's channel"), Refined.Look.Material.StormExtinction.A, 1.5f);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAtmosphereHarnessPickTest, "CloudAtmosphere.Harness.Pick",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 

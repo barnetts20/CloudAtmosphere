@@ -23,10 +23,16 @@ void ASeededAtmosphereActor::PostEditChangeProperty(FPropertyChangedEvent& Prope
 	const bool bSweep = Name == GET_MEMBER_NAME_CHECKED(ASeededAtmosphereActor, SweepPath)
 		|| Name == GET_MEMBER_NAME_CHECKED(ASeededAtmosphereActor, SweepPosition);
 
-	// A look sweep leaves the sim alone, so it follows the slider.
+	// A look sweep leaves the sim alone, so it follows the slider: a bundle
+	// path, or a palette of the look profile.
 	double Unused = 0.0;
+	const UAtmosphereLookProfile* Profile = ActiveLookProfile();
 
-	if (bSweep && AtmosphereHarness::ReadValue(FAtmosphereModelParams::StaticStruct(), &Terrestrial, SweepPath, Unused))
+	const bool bLookSweep = bSweep && (AtmosphereHarness::ReadValue(FAtmosphereModelParams::StaticStruct(), &Terrestrial, SweepPath, Unused)
+		|| (Profile && Profile->Draws.Choices.ContainsByPredicate(
+			[this](const FAtmosphereChoiceGroup& Group) { return Group.Name.ToString() == SweepPath; })));
+
+	if (bLookSweep)
 	{
 		GenerateParts(false);
 		return;
@@ -57,6 +63,72 @@ void ASeededAtmosphereActor::Reroll()
 
 	Seed = FMath::RandRange(0, MAX_int32 - 1);
 	Generate();
+}
+
+UAtmosphereLookProfile* ASeededAtmosphereActor::ActiveLookProfile() const
+{
+	switch (PlanetType)
+	{
+	case EPlanetAtmosphereType::Terrestrial:
+		return Set.Terrestrial.Look.Get();
+	case EPlanetAtmosphereType::GasGiant:
+		return Set.GasGiant.Look.Get();
+	default:
+		return Set.AirOnly.Get();
+	}
+}
+
+void ASeededAtmosphereActor::CaptureLookBaseline()
+{
+	const EPlanetAtmosphereType Model = PlanetType;
+	UAtmosphereLookProfile* Profile = ActiveLookProfile();
+
+	if (!Profile)
+	{
+		UE_LOG(LogAtmosphereHarness, Warning, TEXT("'%s': Set has no look profile for %s to capture into."),
+			*GetName(), *UEnum::GetDisplayValueAsText(Model).ToString());
+		return;
+	}
+
+	const FAtmosphereModelParams Current = GetModelParams(Model);
+	const UScriptStruct* LookType = FAtmosphereModelParams::StaticStruct();
+
+	TArray<FString> Numbers, Colours;
+	AtmosphereHarness::LookSettings(Model, Numbers, Colours);
+
+	Profile->Modify();
+	Profile->Draws.Draws.Reset();
+	Profile->Draws.Choices.Reset();
+
+	for (const FString& Path : Numbers)
+	{
+		double Value = 0.0;
+
+		if (AtmosphereHarness::ReadValue(LookType, &Current, Path, Value))
+		{
+			FAtmosphereDraw& Entry = Profile->Draws.Draws.AddDefaulted_GetRef();
+			Entry.Path = Path;
+			Entry.Min = (float)Value;
+			Entry.Max = (float)Value;
+		}
+	}
+
+	for (const FString& Path : Colours)
+	{
+		FLinearColor Colour;
+
+		if (AtmosphereHarness::ReadColour(LookType, &Current, Path, Colour))
+		{
+			FAtmosphereChoiceGroup& Palette = Profile->Draws.Choices.AddDefaulted_GetRef();
+			Palette.Name = FName(*Path);
+			FAtmospherePaletteColour& Entry = Palette.Colours.AddDefaulted_GetRef();
+			Entry.Path = Path;
+			Entry.Options.Add(Colour);
+		}
+	}
+
+	UE_LOG(LogAtmosphereHarness, Log, TEXT("'%s': captured %d pinned draws and %d palettes into '%s'."),
+		*GetName(), Profile->Draws.Draws.Num(), Profile->Draws.Choices.Num(), *Profile->GetName());
 }
 
 void ASeededAtmosphereActor::Generate()
