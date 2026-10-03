@@ -256,9 +256,11 @@ namespace
 		Line.Source = Source;
 	}
 
-	void ApplyDraws(const FDrawTarget& Target, const FAtmosphereDrawSet& Set, const TArray<FString>& Locks,
+	void ApplyDraws(const FDrawTarget& Target, const FAtmosphereDrawSet& Set, const FAtmosphereGenerateOptions& Options,
 		TArray<FAtmosphereDrawRecord>& Report)
 	{
+		const TArray<FString>& Locks = Options.Locks;
+
 		for (const FAtmosphereDraw& Entry : Set.Draws)
 		{
 			if (Entry.Distribution == EAtmosphereDrawDistribution::Hold || Locks.Contains(Entry.Path))
@@ -279,7 +281,11 @@ namespace
 				? Unit(Target.Seed, Target.Stream, Entry.Path)
 				: Unit(Target.Seed, EStream::Link, Entry.Link.ToString());
 
-			Write(Setting, Sample(Entry, Entry.bInvert ? 1.0 - Drawn : Drawn, Base));
+			const double Position = (!Options.SweepPath.IsEmpty() && Entry.Path == Options.SweepPath)
+				? (double)Options.SweepPosition
+				: (Entry.bInvert ? 1.0 - Drawn : Drawn);
+
+			Write(Setting, Sample(Entry, Position, Base));
 			Record(Report, Target, Entry.Path, Describe(Setting), EAtmosphereDrawSource::Draw);
 		}
 
@@ -453,7 +459,8 @@ UAtmosphereArchetype* FAtmosphereGenerator::PickArchetype(int32 Seed, EPlanetAtm
 }
 
 bool FAtmosphereGenerator::Generate(int32 Seed, EPlanetAtmosphereType Model, const FAtmosphereGenerationSet& Set,
-	const FAtmosphereModelParams& CurrentLook, const TArray<FString>& Locks, UObject* Outer, FAtmosphereGeneration& Out)
+	const FAtmosphereModelParams& CurrentLook, const FAtmosphereGenerateOptions& Options, UObject* Outer,
+	FAtmosphereGeneration& Out)
 {
 	Out = FAtmosphereGeneration();
 	Out.Genome.Seed = Seed;
@@ -475,23 +482,24 @@ bool FAtmosphereGenerator::Generate(int32 Seed, EPlanetAtmosphereType Model, con
 
 	// -- The look -------------------------------------------------------------
 	//
-	// FROM THE PROFILE'S BASE, NEVER THE ACTOR'S BUNDLE. PITFALL: drawn over the
-	// last generation, a path one archetype draws and another does not keeps
-	// the old planet's value, and Jitter walks further each time: the planet
-	// would depend on what came before it, not on its seed.
+	// From the profile's Base, or else the actor's bundle: drawn paths are
+	// overwritten either way, and undrawn ones keep the starting value.
+	// PITFALL: from the actor's bundle, Jitter walks further on every
+	// generation, and a path one archetype draws and another does not keeps
+	// the last planet's value. A Base makes the whole look a function of the seed.
 
-	if (Profile && Profile->Base)
+	if (Profile)
 	{
 		const UScriptStruct* LookType = FAtmosphereModelParams::StaticStruct();
 
-		Out.Look = Profile->Base->Model;
+		Out.Look = Profile->Base ? Profile->Base->Model : CurrentLook;
 		Out.bHasLook = true;
 
 		const FDrawTarget LookTarget{ Seed, EStream::Look, LookType, &Out.Look, TEXT("") };
 
-		ApplyDraws(LookTarget, Merge(Profile->Draws, Archetype ? Archetype->LookDraws : FAtmosphereDrawSet()), Locks, Out.Report);
+		ApplyDraws(LookTarget, Merge(Profile->Draws, Archetype ? Archetype->LookDraws : FAtmosphereDrawSet()), Options, Out.Report);
 
-		for (const FString& Path : Locks)
+		for (const FString& Path : Options.Locks)
 		{
 			const FResolved To = Resolve(LookType, &Out.Look, Path);
 			const FResolved From = Resolve(LookType, const_cast<FAtmosphereModelParams*>(&CurrentLook), Path);
@@ -503,16 +511,12 @@ bool FAtmosphereGenerator::Generate(int32 Seed, EPlanetAtmosphereType Model, con
 			}
 		}
 	}
-	else if (Profile)
-	{
-		UE_LOG(LogAtmosphereHarness, Warning, TEXT("Look profile '%s' has no Base preset; the look is not drawn."), *Profile->GetName());
-	}
 
 	// -- The sim --------------------------------------------------------------
 
-	if (Archetype)
+	if (Archetype && Options.bSim)
 	{
-		GenerateSim(Seed, *Archetype, Locks, Outer, Out);
+		GenerateSim(Seed, *Archetype, Options, Outer, Out);
 	}
 
 	const int32 Missing = Out.Report.FilterByPredicate(
@@ -526,7 +530,7 @@ bool FAtmosphereGenerator::Generate(int32 Seed, EPlanetAtmosphereType Model, con
 	return true;
 }
 
-void FAtmosphereGenerator::GenerateSim(int32 Seed, const UAtmosphereArchetype& Archetype, const TArray<FString>& Locks,
+void FAtmosphereGenerator::GenerateSim(int32 Seed, const UAtmosphereArchetype& Archetype, const FAtmosphereGenerateOptions& Options,
 	UObject* Outer, FAtmosphereGeneration& Out)
 {
 	UObject* Owner = Outer ? Outer : GetTransientPackage();
@@ -542,9 +546,9 @@ void FAtmosphereGenerator::GenerateSim(int32 Seed, const UAtmosphereArchetype& A
 
 	const FDrawTarget SimTarget{ Seed, EStream::Sim, UFlowSimConfig::StaticClass(), Config, TEXT("Sim.") };
 
-	ApplyDraws(SimTarget, Archetype.SimDraws, Locks, Out.Report);
+	ApplyDraws(SimTarget, Archetype.SimDraws, Options, Out.Report);
 
-	for (const FString& Path : Locks)
+	for (const FString& Path : Options.Locks)
 	{
 		const FResolved Kept = Resolve(SimTarget.Type, Config, Path);
 

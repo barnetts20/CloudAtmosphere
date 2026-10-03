@@ -19,15 +19,27 @@ void ASeededAtmosphereActor::PostEditChangeProperty(FPropertyChangedEvent& Prope
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
-	// A drag regenerates once, on release: each generation restarts the sim.
+	const FName Name = PropertyChangedEvent.GetMemberPropertyName();
+	const bool bSweep = Name == GET_MEMBER_NAME_CHECKED(ASeededAtmosphereActor, SweepPath)
+		|| Name == GET_MEMBER_NAME_CHECKED(ASeededAtmosphereActor, SweepPosition);
+
+	// A look sweep leaves the sim alone, so it follows the slider.
+	double Unused = 0.0;
+
+	if (bSweep && AtmosphereHarness::ReadValue(FAtmosphereModelParams::StaticStruct(), &Terrestrial, SweepPath, Unused))
+	{
+		GenerateParts(false);
+		return;
+	}
+
+	// Anything else regenerates once, on release: each generation restarts the sim.
 	if (PropertyChangedEvent.ChangeType == EPropertyChangeType::Interactive)
 	{
 		return;
 	}
 
-	const FName Name = PropertyChangedEvent.GetMemberPropertyName();
-
-	if (Name == GET_MEMBER_NAME_CHECKED(ASeededAtmosphereActor, Seed)
+	if (bSweep
+		|| Name == GET_MEMBER_NAME_CHECKED(ASeededAtmosphereActor, Seed)
 		|| Name == GET_MEMBER_NAME_CHECKED(ASeededAtmosphereActor, Set)
 		|| Name == GET_MEMBER_NAME_CHECKED(ASeededAtmosphereActor, Locks)
 		|| Name == GET_MEMBER_NAME_CHECKED(APlanetAtmosphereActor, PlanetType))
@@ -49,6 +61,11 @@ void ASeededAtmosphereActor::Reroll()
 
 void ASeededAtmosphereActor::Generate()
 {
+	GenerateParts(true);
+}
+
+void ASeededAtmosphereActor::GenerateParts(bool bSim)
+{
 	// A class default or template generates nothing: only placed actors own state.
 	if (HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject))
 	{
@@ -57,12 +74,29 @@ void ASeededAtmosphereActor::Generate()
 
 	const EPlanetAtmosphereType Model = PlanetType;
 
+	FAtmosphereGenerateOptions Options;
+	Options.Locks = Locks;
+	Options.SweepPath = SweepPath;
+	Options.SweepPosition = SweepPosition;
+	Options.bSim = bSim;
+
 	FAtmosphereGeneration Generation;
 
-	if (!FAtmosphereGenerator::Generate(Seed, Model, Set, GetModelParams(Model), Locks, this, Generation))
+	if (!FAtmosphereGenerator::Generate(Seed, Model, Set, GetModelParams(Model), Options, this, Generation))
 	{
-		UE_LOG(LogAtmosphereHarness, Warning, TEXT("'%s': the set offers model %d nothing to generate."), *GetName(), (int32)Model);
+		UE_LOG(LogAtmosphereHarness, Warning,
+			TEXT("'%s': Set offers %s nothing: no enabled archetype of that model with a Template, and no look profile."),
+			*GetName(), *UEnum::GetDisplayValueAsText(Model).ToString());
 		return;
+	}
+
+	// A look-only pass keeps the sim's lines and roll from the last full one.
+	if (!bSim)
+	{
+		Generation.Genome.RollColumns = Genome.RollColumns;
+		Generation.Genome.RollDegrees = Genome.RollDegrees;
+		Generation.Report.Append(Report.FilterByPredicate(
+			[](const FAtmosphereDrawRecord& Line) { return Line.Path.StartsWith(TEXT("Sim.")); }));
 	}
 
 	Genome = Generation.Genome;
@@ -88,7 +122,10 @@ void ASeededAtmosphereActor::Generate()
 		Slot = Generation.Config;
 	}
 
-	UE_LOG(LogAtmosphereHarness, Log, TEXT("'%s': seed %d, archetype %s, rolled %.1f degrees, %d settings."),
-		*GetName(), Seed, Genome.Archetype ? *Genome.Archetype->GetName() : TEXT("none"),
-		Genome.RollDegrees, Report.Num());
+	if (bSim)
+	{
+		UE_LOG(LogAtmosphereHarness, Log, TEXT("'%s': seed %d, archetype %s, rolled %.1f degrees, %d settings."),
+			*GetName(), Seed, Genome.Archetype ? *Genome.Archetype->GetName() : TEXT("none"),
+			Genome.RollDegrees, Report.Num());
+	}
 }

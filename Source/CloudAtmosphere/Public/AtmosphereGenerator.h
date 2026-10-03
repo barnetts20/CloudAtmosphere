@@ -44,6 +44,23 @@ namespace AtmosphereHarness
 	CLOUDATMOSPHERE_API bool WriteValue(const UStruct* Type, void* Container, FStringView Path, double Value);
 }
 
+/** How a generation runs, beyond the seed and the set. */
+struct FAtmosphereGenerateOptions
+{
+	/** Paths the seed leaves alone: a look path keeps CurrentLook's value, a
+	 *  sim path the template's. */
+	TArray<FString> Locks;
+
+	/** A draw entry's path to place at SweepPosition in its range, 0 its low
+	 *  end and 1 its high, in place of the seed's draw. Empty draws every
+	 *  entry from the seed. */
+	FString SweepPath;
+	float SweepPosition = 0.5f;
+
+	/** False generates the look alone: no config, no pick of the start. */
+	bool bSim = true;
+};
+
 /** One generation's output. */
 USTRUCT(BlueprintType)
 struct CLOUDATMOSPHERE_API FAtmosphereGeneration
@@ -57,7 +74,7 @@ struct CLOUDATMOSPHERE_API FAtmosphereGeneration
 	UPROPERTY(BlueprintReadOnly, Category = "Generation")
 	FAtmosphereModelParams Look;
 
-	/** The set's look profile has a Base, so Look was generated. */
+	/** The set has a look profile for the model, so Look was generated. */
 	UPROPERTY(BlueprintReadOnly, Category = "Generation")
 	bool bHasLook = false;
 
@@ -74,12 +91,11 @@ class CLOUDATMOSPHERE_API FAtmosphereGenerator
 {
 public:
 	/** Model's planet for Seed from Set. The look starts from the look
-	 *  profile's Base, so a seed gives the same look whatever came before; a
-	 *  profile without one draws no look. A locked look path keeps CurrentLook's
-	 *  value and a locked sim path the template's. Outer owns the config and
-	 *  its snapshot. False when the set offers the model nothing. */
+	 *  profile's Base, or CurrentLook without one, and the draws overwrite
+	 *  their paths. Outer owns the config and its snapshot. False when the
+	 *  set offers the model nothing. */
 	static bool Generate(int32 Seed, EPlanetAtmosphereType Model, const FAtmosphereGenerationSet& Set,
-		const FAtmosphereModelParams& CurrentLook, const TArray<FString>& Locks, UObject* Outer,
+		const FAtmosphereModelParams& CurrentLook, const FAtmosphereGenerateOptions& Options, UObject* Outer,
 		FAtmosphereGeneration& Out);
 
 	/** The enabled archetype of Model that Seed picks, by weighted rendezvous
@@ -90,6 +106,6 @@ public:
 private:
 	/** The config: Archetype's template duplicated into Outer, its sim draws,
 	 *  and its start state rolled. */
-	static void GenerateSim(int32 Seed, const UAtmosphereArchetype& Archetype, const TArray<FString>& Locks,
+	static void GenerateSim(int32 Seed, const UAtmosphereArchetype& Archetype, const FAtmosphereGenerateOptions& Options,
 		UObject* Outer, FAtmosphereGeneration& Out);
 };

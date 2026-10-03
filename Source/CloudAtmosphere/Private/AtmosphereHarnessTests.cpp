@@ -49,8 +49,8 @@ bool FAtmosphereHarnessStreamsTest::RunTest(const FString& Parameters)
 		Previous = Ordered;
 
 		const double Drawn = Sample(Normal, U, 0.0);
-		const double Ratio = Sample(Amount, U, 0.0);
-		bInRange &= Drawn >= 0.2 && Drawn <= 0.8 && Ratio >= 8.0 && Ratio <= 64.0;
+		const double Scaled = Sample(Amount, U, 0.0);
+		bInRange &= Drawn >= 0.2 && Drawn <= 0.8 && Scaled >= 8.0 && Scaled <= 64.0;
 	}
 
 	TestTrue(TEXT("Draws stay in range"), bInRange);
@@ -154,11 +154,11 @@ bool FAtmosphereHarnessReproduceTest::RunTest(const FString& Parameters)
 	Set.Terrestrial.Look = Profile;
 
 	const FAtmosphereModelParams Current;
-	const TArray<FString> NoLocks;
+	const FAtmosphereGenerateOptions Plain;
 	FAtmosphereGeneration First, Second, Grown, Locked;
 
-	FAtmosphereGenerator::Generate(42, EPlanetAtmosphereType::Terrestrial, Set, Current, NoLocks, nullptr, First);
-	FAtmosphereGenerator::Generate(42, EPlanetAtmosphereType::Terrestrial, Set, Current, NoLocks, nullptr, Second);
+	FAtmosphereGenerator::Generate(42, EPlanetAtmosphereType::Terrestrial, Set, Current, Plain, nullptr, First);
+	FAtmosphereGenerator::Generate(42, EPlanetAtmosphereType::Terrestrial, Set, Current, Plain, nullptr, Second);
 
 	TestTrue(TEXT("One seed, one planet"),
 		FAtmosphereModelParams::StaticStruct()->CompareScriptStruct(&First.Look, &Second.Look, PPF_None));
@@ -166,19 +166,48 @@ bool FAtmosphereHarnessReproduceTest::RunTest(const FString& Parameters)
 	FAtmosphereGeneration After;
 	FAtmosphereModelParams Previous = First.Look;
 	Previous.Shape.CloudThickness = 0.123f;
-	FAtmosphereGenerator::Generate(42, EPlanetAtmosphereType::Terrestrial, Set, Previous, NoLocks, nullptr, After);
+	FAtmosphereGenerator::Generate(42, EPlanetAtmosphereType::Terrestrial, Set, Previous, Plain, nullptr, After);
 
 	TestTrue(TEXT("A planet does not depend on the one before it"),
 		FAtmosphereModelParams::StaticStruct()->CompareScriptStruct(&First.Look, &After.Look, PPF_None));
 
 	Add(TEXT("Shape.CloudThickness"), 0.5f, 0.85f);
-	FAtmosphereGenerator::Generate(42, EPlanetAtmosphereType::Terrestrial, Set, Current, NoLocks, nullptr, Grown);
+	FAtmosphereGenerator::Generate(42, EPlanetAtmosphereType::Terrestrial, Set, Current, Plain, nullptr, Grown);
 
 	TestEqual(TEXT("A new entry leaves the others' values"), Grown.Look.Coverage.CloudCover, First.Look.Coverage.CloudCover);
 	TestEqual(TEXT("A new entry leaves the others' values"), Grown.Look.Shape.CloudBase, First.Look.Shape.CloudBase);
 
-	FAtmosphereGenerator::Generate(42, EPlanetAtmosphereType::Terrestrial, Set, Current, TArray<FString>{ FString(TEXT("Coverage.CloudCover")) }, nullptr, Locked);
+	FAtmosphereGenerateOptions Locking;
+	Locking.Locks.Add(TEXT("Coverage.CloudCover"));
+	FAtmosphereGenerator::Generate(42, EPlanetAtmosphereType::Terrestrial, Set, Current, Locking, nullptr, Locked);
 	TestEqual(TEXT("A lock keeps the actor's value"), Locked.Look.Coverage.CloudCover, Current.Coverage.CloudCover);
+
+	FAtmosphereGenerateOptions Sweeping;
+	Sweeping.SweepPath = TEXT("Coverage.CloudCover");
+	FAtmosphereGeneration Low, High;
+
+	Sweeping.SweepPosition = 0.0f;
+	FAtmosphereGenerator::Generate(42, EPlanetAtmosphereType::Terrestrial, Set, Current, Sweeping, nullptr, Low);
+	Sweeping.SweepPosition = 1.0f;
+	FAtmosphereGenerator::Generate(42, EPlanetAtmosphereType::Terrestrial, Set, Current, Sweeping, nullptr, High);
+
+	TestEqual(TEXT("A sweep at 0 is the range's low end"), Low.Look.Coverage.CloudCover, 0.3f);
+	TestEqual(TEXT("A sweep at 1 is its high end"), High.Look.Coverage.CloudCover, 0.8f);
+	TestEqual(TEXT("A sweep leaves the other draws"), High.Look.Shape.CloudBase, First.Look.Shape.CloudBase);
+
+	// Without a Base the look starts from the actor's bundle.
+	Profile->Base = nullptr;
+
+	FAtmosphereModelParams Tweaked;
+	Tweaked.Type.TypeBias = 0.123f;
+	Tweaked.Coverage.CloudCover = 0.05f;
+
+	FAtmosphereGeneration Own;
+	FAtmosphereGenerator::Generate(42, EPlanetAtmosphereType::Terrestrial, Set, Tweaked, Plain, nullptr, Own);
+
+	TestTrue(TEXT("Without a Base the look is still drawn"), Own.bHasLook);
+	TestEqual(TEXT("An undrawn setting keeps the actor's value"), Own.Look.Type.TypeBias, 0.123f);
+	TestEqual(TEXT("A drawn setting is overwritten by the seed's value"), Own.Look.Coverage.CloudCover, Grown.Look.Coverage.CloudCover);
 	return true;
 }
 

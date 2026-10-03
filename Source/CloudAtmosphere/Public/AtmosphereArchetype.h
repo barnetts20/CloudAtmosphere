@@ -61,13 +61,22 @@ public:
 	EPlanetAtmosphereType Model = EPlanetAtmosphereType::Terrestrial;
 
 	/** The bundle draws start from, its Model; its SimConfig is unread. None
-	 *  starts from the actor's bundle. */
+	 *  starts from the actor's bundle, so undrawn settings stay the actor's
+	 *  own; set one to make every setting a function of the seed. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Look")
 	TObjectPtr<UAtmospherePreset> Base = nullptr;
 
 	/** Paths are bundle members. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Look")
 	FAtmosphereDrawSet Draws;
+
+	/** Adds a draw for every Identity and Style look setting of Model at its
+	 *  first-estimate range (Design/HarnessReference.md), leaving paths already
+	 *  drawn alone. The air's colours draw as linked multiples of Base's, or
+	 *  of the actor class default's without one, so their hue holds; palettes
+	 *  are left to choice groups. */
+	UFUNCTION(CallInEditor, Category = "Look")
+	void AddStarterDraws();
 };
 
 /** An archetype a set offers, switchable per actor. */
