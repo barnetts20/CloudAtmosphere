@@ -1,0 +1,95 @@
+// A seed into a planet: the archetype pick, the look and sim draws, the locks
+// and the start state's roll. Pure: it writes nothing but its output.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "AtmosphereParams.h"
+#include "AtmosphereHarnessTypes.h"
+#include "AtmosphereGenerator.generated.h"
+
+class UFlowSimConfig;
+struct FAtmosphereModelSet;
+struct FAtmosphereGenerationSet;
+
+namespace AtmosphereHarness
+{
+	/** Raised when the same seed and assets would generate a different planet:
+	 *  distribution maths, stream keys or the order draws apply in. */
+	constexpr int32 GeneratorVersion = 1;
+
+	/** A draw's stream family, so one key in two families draws independently. */
+	enum class EStream : uint64
+	{
+		Look = 1,
+		Sim = 2,
+		Pick = 3,
+		Roll = 4,
+		Link = 5,
+	};
+
+	/** A uniform number in [0, 1), counter based: a function of the seed, the
+	 *  family, the key and the sub-draw alone, so adding or reordering draws
+	 *  leaves every other key's value as it was. */
+	CLOUDATMOSPHERE_API double Unit(int32 Seed, EStream Stream, FStringView Key, uint32 Sub = 0);
+
+	/** Entry's value for U in [0, 1). Base is the template's value, which
+	 *  Jitter moves and Hold keeps. Monotonic in U for every distribution but
+	 *  Choice, so linked entries move together. */
+	CLOUDATMOSPHERE_API double Sample(const FAtmosphereDraw& Entry, double U, double Base);
+
+	/** A numeric, enum or bool setting at Path inside Container, an instance of
+	 *  Type. False when Path names no such setting. */
+	CLOUDATMOSPHERE_API bool ReadValue(const UStruct* Type, const void* Container, FStringView Path, double& Out);
+	CLOUDATMOSPHERE_API bool WriteValue(const UStruct* Type, void* Container, FStringView Path, double Value);
+}
+
+/** One generation's output. */
+USTRUCT(BlueprintType)
+struct CLOUDATMOSPHERE_API FAtmosphereGeneration
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Generation")
+	FAtmosphereGenome Genome;
+
+	/** The model's bundle, when bHasLook. */
+	UPROPERTY(BlueprintReadOnly, Category = "Generation")
+	FAtmosphereModelParams Look;
+
+	/** The set's look profile has a Base, so Look was generated. */
+	UPROPERTY(BlueprintReadOnly, Category = "Generation")
+	bool bHasLook = false;
+
+	/** A transient copy of the archetype's template with its draws, its
+	 *  InitialState the rolled snapshot; null for air only or no archetype. */
+	UPROPERTY(BlueprintReadOnly, Category = "Generation")
+	TObjectPtr<UFlowSimConfig> Config = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Generation")
+	TArray<FAtmosphereDrawRecord> Report;
+};
+
+class CLOUDATMOSPHERE_API FAtmosphereGenerator
+{
+public:
+	/** Model's planet for Seed from Set. The look starts from the look
+	 *  profile's Base, so a seed gives the same look whatever came before; a
+	 *  profile without one draws no look. A locked look path keeps CurrentLook's
+	 *  value and a locked sim path the template's. Outer owns the config and
+	 *  its snapshot. False when the set offers the model nothing. */
+	static bool Generate(int32 Seed, EPlanetAtmosphereType Model, const FAtmosphereGenerationSet& Set,
+		const FAtmosphereModelParams& CurrentLook, const TArray<FString>& Locks, UObject* Outer,
+		FAtmosphereGeneration& Out);
+
+	/** The enabled archetype of Model that Seed picks, by weighted rendezvous
+	 *  hashing on each archetype's id: switching one archetype off moves only
+	 *  the seeds that picked it. Null when none is enabled. */
+	static UAtmosphereArchetype* PickArchetype(int32 Seed, EPlanetAtmosphereType Model, const FAtmosphereModelSet& Set);
+
+private:
+	/** The config: Archetype's template duplicated into Outer, its sim draws,
+	 *  and its start state rolled. */
+	static void GenerateSim(int32 Seed, const UAtmosphereArchetype& Archetype, const TArray<FString>& Locks,
+		UObject* Outer, FAtmosphereGeneration& Out);
+};
