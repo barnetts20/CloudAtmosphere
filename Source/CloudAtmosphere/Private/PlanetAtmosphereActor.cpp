@@ -434,8 +434,8 @@ static void NoiseClock(const UFlowSimConfig* Config, double T, float& OutDriftAn
     OutPhase = (float)(Cycles - FMath::FloorToDouble(Cycles));
 }
 
-/** The cloud material as the view and the bake read it: albedo held to [0, 1],
- *  extinction non-negative, and fair-weather extinction's amount at 1, since
+/** The cloud material as the view and the bake read it: albedo and extinction
+ *  non-negative, and fair-weather extinction's amount at 1, since
  *  CloudOpticalDepth carries it. */
 static FCloudMaterialParams ResolveCloudMaterial(const FCloudMaterialParams& M)
 {
@@ -446,8 +446,8 @@ static FCloudMaterialParams ResolveCloudMaterial(const FCloudMaterialParams& M)
 
     FCloudMaterialParams Out = M;
 
-    Out.CloudScatter = M.CloudScatter.GetClamped(0.0f, 1.0f);
-    Out.StormScatter = M.StormScatter.GetClamped(0.0f, 1.0f);
+    Out.CloudScatter = NonNegative(M.CloudScatter);
+    Out.StormScatter = NonNegative(M.StormScatter);
     Out.CloudExtinction = NonNegative(M.CloudExtinction);
     Out.CloudExtinction.A = 1.0f;
     Out.StormExtinction = NonNegative(M.StormExtinction);
@@ -971,7 +971,7 @@ bool APlanetAtmosphereActor::FillMarchParams(
 
     Out.CloudScatter = ToVector3(Material.CloudScatter);
     Out.StormScatter = ToVector3(Material.StormScatter);
-    Out.DeepScatter = ToVector3(Model.Deep.Scatter.GetClamped(0.0f, 1.0f));
+    Out.DeepScatter = ToVector3(Model.Deep.Scatter.GetClamped(0.0f, MAX_flt));
 
     // -- Air, ambient, lighting -----------------------------------------------
 

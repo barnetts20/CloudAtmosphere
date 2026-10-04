@@ -786,9 +786,9 @@ float4 Atmo_MainMarchDepth(
 
                         const float3 CloudStepTransmittance = exp(-StepExtinction);
 
-						// Energy-conserving: what the step scatters IN is what
-						// it takes OUT, scaled by albedo, so the deck cannot
-						// emit more than it receives however dense it gets.
+						// What the step scatters IN is what it takes OUT, scaled
+						// by albedo: at albedo 1 or below the deck cannot emit
+						// more than it receives however dense it gets.
                         const float3 CloudStepLight =
 							CloudLight * Albedo * (1.0f - CloudStepTransmittance);
 

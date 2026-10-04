@@ -532,7 +532,9 @@ struct CLOUDATMOSPHERE_API FCloudDetailLayerParams
 
 /** The clouds' material: fair-weather cloud at 0, storm cloud at 1, blended by
  *  the storm index StormBalance and StormBlend threshold, not by cloud type.
- *  Scatter is single-scattering albedo, held to [0, 1]. CloudExtinction is an
+ *  Scatter is single-scattering albedo, non-negative: above 1 a channel
+ *  scatters more light than the cloud intercepts, a brightening past physical
+ *  cloud rather than an instability. CloudExtinction is an
  *  RGB tint on the solved extinction, 1 neutral; CloudOpticalDepth sets its
  *  amount. StormExtinction is a tint with the storm's amount in A, as a
  *  multiple of fair-weather cloud's. */
@@ -561,8 +563,7 @@ struct CLOUDATMOSPHERE_API FCloudMaterialParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.001", UIMax = "1.0"))
 	float StormBlend = 0.15f;
 
-	/** Fair-weather cloud's single-scattering albedo, per channel, held to
-	 *  [0, 1]. */
+	/** Fair-weather cloud's single-scattering albedo, per channel. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
 	FLinearColor CloudScatter = FLinearColor(0.98f, 0.98f, 0.98f, 1.0f);
 
@@ -571,8 +572,8 @@ struct CLOUDATMOSPHERE_API FCloudMaterialParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
 	FLinearColor CloudExtinction = FLinearColor(1.0f, 1.0f, 1.0f, 1.0f);
 
-	/** Storm cloud's single-scattering albedo, per channel, held to [0, 1]:
-	 *  lower is darker storm cloud. */
+	/** Storm cloud's single-scattering albedo, per channel: lower is darker
+	 *  storm cloud. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
 	FLinearColor StormScatter = FLinearColor(0.9f, 0.92f, 0.95f, 1.0f);
 
@@ -649,8 +650,8 @@ struct CLOUDATMOSPHERE_API FCloudDeepParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", UIMax = "4.0"))
 	float MaterialDepth = 0.25f;
 
-	/** The deep material's single-scattering albedo, per channel, held to
-	 *  [0, 1]. */
+	/** The deep material's single-scattering albedo, per channel, as the
+	 *  cloud's. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (HideAlphaChannel))
 	FLinearColor Scatter = FLinearColor(0.98f, 0.98f, 0.98f, 1.0f);
 

@@ -584,6 +584,13 @@ bool FAtmosphereGenerator::Generate(int32 Seed, EPlanetAtmosphereType Model, con
 
 	Out.Genome.Archetype = Archetype;
 
+	if (ModelSet && !Archetype && Options.bSim)
+	{
+		UE_LOG(LogAtmosphereHarness, Warning,
+			TEXT("Seed %d: the set offers %s no enabled archetype of that model with a Template, so no sim is generated or rolled; the actor's own config runs."),
+			Seed, *UEnum::GetDisplayValueAsText(Model).ToString());
+	}
+
 	// -- The look -------------------------------------------------------------
 	//
 	// From the profile's Base, or else the actor's bundle: drawn paths are
@@ -664,7 +671,14 @@ void FAtmosphereGenerator::GenerateSim(int32 Seed, const UAtmosphereArchetype& A
 
 	// The start state turned east, the perpetual storms with it, since they are
 	// placed from the config rather than the state.
-	if (const UFlowSnapshot* Snapshot = Archetype.Template->InitialState)
+	const UFlowSnapshot* Snapshot = Archetype.Template->InitialState;
+
+	if (!Snapshot)
+	{
+		UE_LOG(LogAtmosphereHarness, Warning, TEXT("Archetype '%s': Template '%s' has no InitialState; the start is not rolled."),
+			*Archetype.GetName(), *Archetype.Template->GetName());
+	}
+	else
 	{
 		const int32 Width = Snapshot->Grid.X;
 		const double Span = FMath::Clamp((double)Archetype.MaxRoll, 0.0, 360.0) / 360.0;
