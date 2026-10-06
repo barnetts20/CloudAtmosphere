@@ -27,7 +27,7 @@
 // THE LAYERS ARE A STACK, 0 ON TOP. The weather slice of a layer describes the
 // column from the top of the stack down to it, so the lowest layer's is the
 // whole sky seen from above. Phase A's w is unused; phase B's is the deck
-// depth factor, 1 - StormCellEyeDepth times the eye tracer, which a deck
+// depth factor, 1 - StormCellEyeDepth's Max times the eye tracer, which a deck
 // scales its columns' depth and density by, thinning them across an eye.
 
 /** Texels either side of a face edge over which neighbouring faces cross-fade.

@@ -16,7 +16,7 @@ namespace AtmosphereHarness
 {
 	/** Raised when the same seed and assets would generate a different planet:
 	 *  distribution maths, stream keys or the order draws apply in. */
-	constexpr int32 GeneratorVersion = 2;
+	constexpr int32 GeneratorVersion = 3;
 
 	/** A draw's stream family, so one key in two families draws independently. */
 	enum class EStream : uint64
@@ -87,8 +87,9 @@ struct CLOUDATMOSPHERE_API FAtmosphereGeneration
 	UPROPERTY(BlueprintReadOnly, Category = "Generation")
 	bool bHasLook = false;
 
-	/** A transient copy of the archetype's template with its draws, its
-	 *  InitialState the rolled snapshot; null for air only or no archetype. */
+	/** A transient copy of the archetype's template with its own Seed and
+	 *  draws, its InitialState the rolled snapshot; null for air only or no
+	 *  archetype. */
 	UPROPERTY(BlueprintReadOnly, Category = "Generation")
 	TObjectPtr<UFlowSimConfig> Config = nullptr;
 
@@ -113,8 +114,8 @@ public:
 	static UAtmosphereArchetype* PickArchetype(int32 Seed, EPlanetAtmosphereType Model, const FAtmosphereModelSet& Set);
 
 private:
-	/** The config: Archetype's template duplicated into Outer, its sim draws,
-	 *  and its start state rolled. */
+	/** The config: Archetype's template duplicated into Outer, its Seed from
+	 *  the planet's unless locked, its sim draws, and its start state rolled. */
 	static void GenerateSim(int32 Seed, const UAtmosphereArchetype& Archetype, const FAtmosphereGenerateOptions& Options,
 		UObject* Outer, FAtmosphereGeneration& Out);
 };

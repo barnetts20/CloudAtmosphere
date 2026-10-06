@@ -50,6 +50,9 @@ SHADER_PARAMETER(FVector4f, CloudExtinction)
 SHADER_PARAMETER(FVector4f, StormExtinction)
 SHADER_PARAMETER(FVector4f, DeepExtinction)
 SHADER_PARAMETER(FVector4f, DeepMaterial)
+
+// Each noise layer's StretchBias and StretchFlatten, structure then detail.
+SHADER_PARAMETER(FVector4f, NoiseStretch)
 SHADER_PARAMETER(float, CloudOpticalDepth)
 
 END_SHADER_PARAMETER_STRUCT()

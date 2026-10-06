@@ -519,6 +519,7 @@ static FTerrestrialFieldParameters PackCloudField(const APlanetAtmosphereActor& 
     // The fade as a start and a length, in planet radii.
     Out.DetailWarp = FVector4f(
         Detail.FlowInherit, Detail.BillowHeight, Detail.FadeNear, FMath::Max(Detail.FadeFar - Detail.FadeNear, 0.0f));
+    Out.NoiseStretch = FVector4f(Structure.StretchBias, Structure.StretchFlatten, Detail.StretchBias, Detail.StretchFlatten);
 
     Out.CloudGenusStratus = ToVector4(Type.Genus.Stratus);
     Out.CloudGenusStratocumulus = ToVector4(Type.Genus.Stratocumulus);
@@ -561,6 +562,7 @@ static uint32 MakeShadowFieldKey(const FTerrestrialFieldParameters& F, float Pla
         F.NoiseLevels, F.StructureSampling, F.StructureWarp, F.DetailSampling, F.DetailWarp,
         F.CloudGenusStratus, F.CloudGenusStratocumulus, F.CloudGenusCumulus, F.CloudGenusCirrus,
         F.ShadowCascades, F.CloudResponse, F.CloudExtinction, F.StormExtinction, F.DeepExtinction, F.DeepMaterial,
+        F.NoiseStretch,
         FVector4f(F.CloudMotion.Z, F.CloudOpticalDepth, PlanetRadius, HeightScale) };
 
     return FCrc::MemCrc32(Pins, sizeof(Pins));

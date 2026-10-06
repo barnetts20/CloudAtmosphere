@@ -884,11 +884,12 @@ void UFlowSimSubsystem::ReportCourant() const
 
 	// The cells' two targets share one ceiling, SIM_CELL_TARGET_CEILING of the
 	// Froude ceiling: the inflow gets what the vortex leaves.
-	if (Config->MaxStormCells > 0 && Config->SpeedRoot > 0.0f && Config->StormCellInflow > 0.0f)
+	// The strongest draw of each, which may not meet in one cell.
+	if (Config->MaxStormCells > 0 && Config->SpeedRoot > 0.0f && Config->StormCellInflow.Max > 0.0f)
 	{
 		const float Room = 0.9f * FMath::Max(Config->SpeedRoot, 0.1f) * C;
-		const float Wind = Speeds.CellWind;
-		const float Inflow = FMath::Clamp(Config->StormCellInflow, 0.0f, 1.0f) * Wind;
+		const float Wind = Speeds.CellWindRange.Y;
+		const float Inflow = Config->StormCellInflow.Clamped(0.0f, 1.0f).Max * Wind;
 		const float Left = FMath::Sqrt(FMath::Max(Room * Room - Wind * Wind, 0.0f));
 
 		if (Left < Inflow)
@@ -933,7 +934,7 @@ void UFlowSimSubsystem::ReportCourant() const
 
 	const float TopWind = LayerPeakWind(*Config, Speeds, 0) / FMath::Max(Speeds.Root, 1e-6f);
 	const float TopEddies = Config->EddySpeed * Top.EddyScale;
-	const float Cells = Config->StormCellWind;
+	const float Cells = Config->StormCellWind.Clamped(0.0f, MAX_flt).Max;
 
 	UE_LOG(LogFlowSim, Log,
 		TEXT("Speed root %.3f, turnover %.4f. Of the root: top layer's jets and shear %.2f, ")
@@ -946,10 +947,11 @@ void UFlowSimSubsystem::ReportCourant() const
 
 	UE_LOG(LogFlowSim, Log,
 		TEXT("A turnover is %.3f of a day; %.2f turnovers a second at SimSpeed %.4f. In days: cloud %.2f, ")
-		TEXT("storm %.2f, storm cell %.2f, forcing pattern %.2f. Storm cell radius %.1f degrees."),
+		TEXT("storm %.2f, storm cell %.2f to %.2f, forcing pattern %.2f. Storm cell radius %.1f to %.1f degrees."),
 		Speeds.Turnover / Day, FMath::Max(Config->SimSpeed, 0.0f) / Speeds.Turnover, Config->SimSpeed,
-		Speeds.CloudLifetime / Day, Speeds.StormLifetime / Day, Speeds.CellLifetime / Day,
-		Speeds.ForcingLifetime / Day, FMath::RadiansToDegrees(Speeds.CellRadius));
+		Speeds.CloudLifetime / Day, Speeds.StormLifetime / Day,
+		Speeds.CellLifetimeRange.X / Day, Speeds.CellLifetimeRange.Y / Day, Speeds.ForcingLifetime / Day,
+		FMath::RadiansToDegrees(Speeds.CellRadiusRange.X), FMath::RadiansToDegrees(Speeds.CellRadiusRange.Y));
 
 	float PerpetualWind = 0.0f;
 
@@ -1495,14 +1497,24 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	const float GenesisMin = FMath::DegreesToRadians(FMath::Clamp(Config->GenesisLatitudeMin, 0.0f, 90.0f));
 	const float GenesisMax = FMath::DegreesToRadians(FMath::Clamp(Config->GenesisLatitudeMax, 0.0f, 90.0f));
 
-	const float Wall = FMath::Clamp(Config->StormCellEyewall, 0.01f, 0.95f);
+	// Each hurricane draws its traits from these ranges (SimCellResolve); the
+	// shared uniforms hold their midpoints, which perpetual storms take.
+	const FFlowSimRange WallRange = Config->StormCellEyewall.Clamped(0.01f, 0.95f);
+	const FFlowSimRange StormRange = Config->StormCellStorm.Clamped(0.0f, 1.0f);
+	const FFlowSimRange PressureRange = Config->StormCellPressure.Clamped(0.0f, MAX_flt);
+	const FFlowSimRange CoverRange = Config->StormCellCloudCover.Clamped(0.0f, 0.99f);
+	const FFlowSimRange InflowRange = Config->StormCellInflow.Clamped(0.0f, 1.0f);
+	const FFlowSimRange EyeDepthRange = Config->StormCellEyeDepth.Clamped(0.0f, 1.0f);
+	const float Wall = WallRange.Mid();
+	const float BandExcess = FMath::Max(Config->StormCellBandExcess, 0.0f);
 
 	// The inner ramp held to a grid cell, scaled by the eye's strength: under
 	// a cell a nonzero strength puts a cone in the streamfunction and a point
-	// sink in the potential at the centre.
+	// sink in the potential at the centre. SimCellCoreFor per hurricane.
 	const float EyeStrength = FMath::Clamp(Config->StormCellEyeStrength, 0.0f, 1.0f);
-	const float GridCell = 2.0f * UE_PI / (float)FMath::Max(Out.GridSize.X, 1) / FMath::Max(Scales.CellRadius, 1e-4f);
-	const float Inner = FMath::Max(FMath::Clamp(Config->StormCellEyeRatio, 0.0f, 0.9f) * Wall, EyeStrength * GridCell);
+	const float EyeRatio = FMath::Clamp(Config->StormCellEyeRatio, 0.0f, 0.9f);
+	const float GridArc = 2.0f * UE_PI / (float)FMath::Max(Out.GridSize.X, 1);
+	const float Inner = FMath::Max(EyeRatio * Wall, EyeStrength * (GridArc / FMath::Max(Scales.CellRadius, 1e-4f)));
 
 	Out.CellShape = FVector4f(Scales.CellRadius, FMath::Min(Inner, 0.9f * Wall), Wall, EyeStrength);
 
@@ -1515,8 +1527,8 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.CellDraft = FVector4f(
 		FMath::Clamp(Config->StormCellDraft, -1.0f, 1.0f),
 		FMath::Clamp(Config->StormCellEyeDraft, -1.0f, 1.0f),
-		FMath::Clamp(Config->StormCellStorm + FMath::Max(Config->StormCellBandExcess, 0.0f), 0.0f, 1.0f),
-		FMath::Max(Config->StormCellPressure, 0.0f));
+		FMath::Clamp(StormRange.Mid() + BandExcess, 0.0f, 1.0f),
+		PressureRange.Mid());
 
 	Out.CellLife = FVector4f(
 		Scales.CellSpawnRate,
@@ -1538,17 +1550,23 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 
 	// The lift's rate r that settles a full-intensity eyewall at the cover
 	// against the cloud's decay alone: Cover = r / (r + 1 / CloudLifetime).
-	const float CellCover = FMath::Clamp(Config->StormCellCloudCover, 0.0f, 0.99f);
+	const float CellCover = CoverRange.Mid();
 
 	Out.CellCloud = FVector4f(
 		CellCover / (1.0f - CellCover) / Out.CloudLifetime,
-		0.0f,
-		FMath::Clamp(Config->StormCellInflow, 0.0f, 1.0f),
-		FMath::Clamp(Config->StormCellStorm, 0.0f, 1.0f));
+		BandExcess,
+		InflowRange.Mid(),
+		StormRange.Mid());
+
+	Out.CellRangeA = FVector4f(Scales.CellRadiusRange.X, Scales.CellRadiusRange.Y, Scales.CellWindRange.X, Scales.CellWindRange.Y);
+	Out.CellRangeB = FVector4f(StormRange.Min, StormRange.Max, PressureRange.Min, PressureRange.Max);
+	Out.CellRangeC = FVector4f(CoverRange.Min, CoverRange.Max, InflowRange.Min, InflowRange.Max);
+	Out.CellRangeD = FVector4f(EyeDepthRange.Min, EyeDepthRange.Max, Scales.CellLifetimeRange.X, Scales.CellLifetimeRange.Y);
+	Out.CellRangeE = FVector4f(WallRange.Min, WallRange.Max, EyeRatio, GridArc);
 
 	Out.CellWindBreadth = FMath::Clamp(Config->StormCellWindBreadth, 0.0f, 0.95f);
 	Out.CellSustain = FMath::Clamp(FMath::Max(Config->StormCellSustainRatio, 0.0f) * Out.CellGenesis.Z, 0.0f, 1.0f);
-	Out.CellEyeDepth = FMath::Clamp(Config->StormCellEyeDepth, 0.0f, 1.0f);
+	Out.CellEyeDepth = EyeDepthRange.Max;
 	Out.CellCoreFollow = Scales.CellCoreFollow;
 	Out.CellEyeSoftness = FMath::Clamp(Config->StormCellEyeSoftness, 0.05f, 1.0f);
 	Out.CellBandFloor = FMath::Clamp(Config->StormCellBandFloor, 0.0f, 0.99f);
@@ -1622,6 +1640,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.CellCount = FMath::Clamp(FMath::Max(Config->MaxStormCells, 0) + Out.PerpetualCount, 0, FlowSimShader::MaxStormCells);
 
 	Out.StepIndex = StepsCompleted;
+	Out.SeedSalt = Config->GetSeedSalt();
 
 	Out.NoiseDriftRate = Config->GetNoiseDriftRate();
 	Out.NoiseResetTime = Config->GetNoiseResetTime();

@@ -154,11 +154,25 @@ namespace
 		return Enum ? Enum->GetUnderlyingProperty() : nullptr;
 	}
 
+	/** A hurricane trait range: a setting by itself, its midpoint read and both
+	 *  ends written, while its Min and Max paths draw each end. */
+	FFlowSimRange* RangeOf(const FResolved& Setting)
+	{
+		const FStructProperty* Struct = CastField<FStructProperty>(Setting.Property);
+		return (Struct && Struct->Struct == FFlowSimRange::StaticStruct()) ? static_cast<FFlowSimRange*>(Setting.Address) : nullptr;
+	}
+
 	bool Read(const FResolved& Setting, double& Out)
 	{
 		if (const FBoolProperty* Bool = CastField<FBoolProperty>(Setting.Property))
 		{
 			Out = Bool->GetPropertyValue(Setting.Address) ? 1.0 : 0.0;
+			return true;
+		}
+
+		if (const FFlowSimRange* Range = RangeOf(Setting))
+		{
+			Out = Range->Mid();
 			return true;
 		}
 
@@ -180,6 +194,12 @@ namespace
 		if (const FBoolProperty* Bool = CastField<FBoolProperty>(Setting.Property))
 		{
 			Bool->SetPropertyValue(Setting.Address, Value >= 0.5);
+			return true;
+		}
+
+		if (FFlowSimRange* Range = RangeOf(Setting))
+		{
+			*Range = FFlowSimRange((float)Value);
 			return true;
 		}
 
@@ -656,6 +676,15 @@ void FAtmosphereGenerator::GenerateSim(int32 Seed, const UAtmosphereArchetype& A
 	Out.Config = Config;
 
 	const FDrawTarget SimTarget{ Seed, EStream::Sim, UFlowSimConfig::StaticClass(), Config, TEXT("Sim.") };
+
+	// The sim's own seed, so planets on one archetype share its climate but
+	// not its weather: the stirring, and the hurricanes' spawns and traits. A
+	// lock keeps the template's, a draw on Seed replaces it.
+	if (!Options.Locks.Contains(TEXT("Seed")))
+	{
+		Config->Seed = 1 + (int32)(Unit(Seed, EStream::Sim, TEXT("Seed")) * (double)(MAX_int32 - 1));
+		Record(Out.Report, SimTarget, TEXT("Seed"), FString::FromInt(Config->Seed), EAtmosphereDrawSource::Draw);
+	}
 
 	ApplyDraws(SimTarget, Archetype.SimDraws, Options, Out.Report);
 

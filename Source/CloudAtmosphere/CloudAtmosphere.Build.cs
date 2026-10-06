@@ -28,5 +28,11 @@ public class CloudAtmosphere : ModuleRules
 				"JsonUtilities",
 			}
 			);
+
+		// FlowSim.Capture registers the assets it creates.
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.Add("AssetRegistry");
+		}
 	}
 }

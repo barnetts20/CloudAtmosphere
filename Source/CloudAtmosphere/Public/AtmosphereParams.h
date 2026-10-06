@@ -429,14 +429,16 @@ struct CLOUDATMOSPHERE_API FCloudStructureLayerParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	TObjectPtr<UVolumeTexture> Volume = nullptr;
 
-	/** Horizontal frequency at the planet's surface, in noise units per
-	 *  radian: higher is smaller clouds. It grows with height by
-	 *  exp(Aspect * HeightScale * height), height in atmosphere fractions. */
+	/** Horizontal frequency at CloudBase, in noise units per radian: higher is
+	 *  smaller clouds. It grows with height at the rate Aspect sets, so the
+	 *  base's height leaves the clouds' size alone. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "0.01"))
 	float Scale = 6.0f;
 
-	/** Vertical frequency over the horizontal one, at every height: higher is
-	 *  flatter features. */
+	/** Vertical frequency over the horizontal one, at every height, measured
+	 *  in decks: higher is flatter features. Every deck spans the features a
+	 *  0.06 planet radii deep one would (TR_ASPECT_DEPTH), so CloudThickness
+	 *  and HeightScale leave the noise's features alone. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", UIMin = "0.01"))
 	float Aspect = 2.0f;
 
@@ -459,6 +461,20 @@ struct CLOUDATMOSPHERE_API FCloudStructureLayerParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "0.0", UIMax = "1.0"))
 	float FlowInherit = 0.9f;
 
+	/** How far the crossfade between the noise's two phases leans to the one
+	 *  the flow has drawn out less: each weighs by its stretch to the power
+	 *  -StretchBias, from the sim's strain. Breaks strands up where a long
+	 *  NoiseResetTurnovers lets the shear stretch them. 0 crossfades evenly. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "8.0", UIMax = "4.0"))
+	float StretchBias = 0.0f;
+
+	/** How far the flow's stretch flattens the features: the vertical
+	 *  frequency takes the stretch to this power. At 1 a feature thins
+	 *  vertically as much as it narrows across the flow, so shear zones draw
+	 *  sheets rather than tall narrow walls. 0 leaves the height alone. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", UIMax = "1.0"))
+	float StretchFlatten = 0.0f;
+
 	/** Mips added to the one the volume is read at from the pixel's footprint:
 	 *  lower is sharper and shimmers more in motion, which the temporal resolve
 	 *  partly averages. The volume needs its mips. */
@@ -479,13 +495,13 @@ struct CLOUDATMOSPHERE_API FCloudDetailLayerParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	TObjectPtr<UVolumeTexture> Volume = nullptr;
 
-	/** Horizontal frequency at the surface, in noise units per radian: higher
-	 *  is finer grain. It grows with height as the structure layer's does. */
+	/** Horizontal frequency at CloudBase, in noise units per radian: higher is
+	 *  finer grain. It grows with height as the structure layer's does. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "0.01"))
 	float Scale = 30.0f;
 
-	/** Vertical frequency over the horizontal one, at every height, as for the
-	 *  structure layer. */
+	/** Vertical frequency over the horizontal one, at every height, measured
+	 *  in decks as for the structure layer. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", UIMin = "0.01"))
 	float Aspect = 1.0f;
 
@@ -505,6 +521,15 @@ struct CLOUDATMOSPHERE_API FCloudDetailLayerParams
 	 *  rounded detail. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "0.0", UIMax = "1.0"))
 	float FlowInherit = 0.4f;
+
+	/** The crossfade's lean to the less stretched phase, as for the structure
+	 *  layer; it acts in proportion to this layer's FlowInherit. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "8.0", UIMax = "4.0"))
+	float StretchBias = 0.0f;
+
+	/** The flattening by the flow's stretch, as for the structure layer. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", UIMax = "1.0"))
+	float StretchFlatten = 0.0f;
 
 	/** Mips added to the one the pixel's footprint reads, as for the
 	 *  structure layer. */

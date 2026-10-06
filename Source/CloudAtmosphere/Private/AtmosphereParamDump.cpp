@@ -94,11 +94,13 @@ namespace AtmosphereDump
 	}
 
 	/** Structs declared in this module are parameter groups and are diffed per
-	 *  member; engine structs (colours, vectors) are single values. */
+	 *  member; engine structs (colours, vectors) and a trait range are single
+	 *  values. */
 	bool IsGroup(const FProperty* Property)
 	{
 		const FStructProperty* Struct = CastField<FStructProperty>(Property);
-		return Struct && Struct->Struct->GetPackage() == APlanetAtmosphereActor::StaticClass()->GetPackage();
+		return Struct && Struct->Struct != FFlowSimRange::StaticStruct()
+			&& Struct->Struct->GetPackage() == APlanetAtmosphereActor::StaticClass()->GetPackage();
 	}
 
 	TSharedRef<FJsonObject> Values(const UStruct* Type, const void* Container, FFilter Filter)
@@ -1500,6 +1502,23 @@ namespace AtmosphereLoad
 		return Property;
 	}
 
+	/** A plain number where an FFlowSimRange is, as Min = Max. Null for
+	 *  anything else. */
+	TSharedPtr<FJsonObject> RangeOfNumber(const FProperty* Property, const TSharedPtr<FJsonValue>& Json)
+	{
+		const FStructProperty* Struct = CastField<FStructProperty>(Property);
+
+		if (!Struct || Struct->Struct != FFlowSimRange::StaticStruct() || !Json.IsValid() || Json->Type != EJson::Number)
+		{
+			return nullptr;
+		}
+
+		TSharedPtr<FJsonObject> Range = MakeShared<FJsonObject>();
+		Range->SetNumberField(TEXT("Min"), Json->AsNumber());
+		Range->SetNumberField(TEXT("Max"), Json->AsNumber());
+		return Range;
+	}
+
 	/** A Values object: parameter groups member by member, so a file may carry
 	 *  any subset of a group; everything else as a whole. */
 	void ApplyValues(const UStruct* Type, void* Container, const FJsonObject& Json, const FString& Prefix, bool bTop, FReport& Report)
@@ -1530,6 +1549,10 @@ namespace AtmosphereLoad
 			if (IsGroup(Property) && Field.Value.IsValid() && Field.Value->Type == EJson::Object)
 			{
 				ApplyValues(CastFieldChecked<FStructProperty>(Property)->Struct, Value, *Field.Value->AsObject(), Name + TEXT("."), false, Report);
+			}
+			else if (const TSharedPtr<FJsonObject> Range = RangeOfNumber(Property, Field.Value))
+			{
+				ApplyValues(FFlowSimRange::StaticStruct(), Value, *Range, Name + TEXT("."), false, Report);
 			}
 			else
 			{
@@ -1578,9 +1601,20 @@ namespace AtmosphereLoad
 				Scope = CastFieldChecked<FStructProperty>(Property)->Struct;
 			}
 
-			if (Property)
+			if (!Property)
 			{
-				SetValue(Property, Property->ContainerPtrToValuePtr<void>(Owner), (*Pair)->TryGetField(TEXT("Value")), Field.Key, Report);
+				continue;
+			}
+
+			void* Value = Property->ContainerPtrToValuePtr<void>(Owner);
+
+			if (const TSharedPtr<FJsonObject> Range = RangeOfNumber(Property, (*Pair)->TryGetField(TEXT("Value"))))
+			{
+				ApplyValues(FFlowSimRange::StaticStruct(), Value, *Range, Field.Key + TEXT("."), false, Report);
+			}
+			else
+			{
+				SetValue(Property, Value, (*Pair)->TryGetField(TEXT("Value")), Field.Key, Report);
 			}
 		}
 	}
@@ -1714,8 +1748,9 @@ namespace AtmosphereLoad
 	}
 
 	/** The Sim section onto Config, under the current names. NO CONVERSION: a
-	 *  file from an older config version applies its values under today's
-	 *  meanings. */
+	 *  file from before UFlowSimConfig::MeaningVersion applies its values under
+	 *  today's meanings. A plain number for a hurricane trait range applies as
+	 *  Min = Max (RangeOfNumber). */
 	void ApplySim(const FJsonObject& Sim, UFlowSimConfig* Config, const FScope& Scope)
 	{
 		double FileVersion = -1.0;
@@ -1726,7 +1761,7 @@ namespace AtmosphereLoad
 			UE_LOG(LogAtmosphereDump, Warning,
 				TEXT("The Sim section records no ConfigVersion; values written before a conversion apply under the current meanings."));
 		}
-		else if ((int32)FileVersion < Current)
+		else if ((int32)FileVersion < UFlowSimConfig::MeaningVersion)
 		{
 			UE_LOG(LogAtmosphereDump, Warning,
 				TEXT("The Sim section is config version %d, the config is %d; values written before a conversion apply under the current meanings."),

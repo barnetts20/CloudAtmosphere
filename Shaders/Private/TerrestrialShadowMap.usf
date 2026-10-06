@@ -67,6 +67,7 @@ float4 CloudGenusCumulus;
 float4 CloudGenusCirrus;
 float4 ShadowCascades;
 float4 CloudResponse;
+float4 NoiseStretch;
 
 /** First cascade that samples the detail volume. Coarser levels take the
  *  detail layer's mean erosion without a fetch: their texels span more than a

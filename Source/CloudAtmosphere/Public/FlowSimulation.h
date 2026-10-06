@@ -35,20 +35,34 @@ public:
 	 *  those two come back as zero. */
 	static constexpr int32 LegacyStateFloatsPerCell = 13;
 
-	/** Floats after the per-cell planes: every storm cell slot's two float4s. */
-	static constexpr int32 StateTrailingFloats = 8 * 32;
+	/** Floats after the per-cell planes: every storm cell slot's two float4s
+	 *  of state, then every slot's seed float4. */
+	static constexpr int32 StateTrailingFloats = 12 * 32;
+
+	/** The trailer without the seeds, which a restore still reads; the seeds
+	 *  then come back as -1, the trait ranges' midpoints. */
+	static constexpr int32 LegacyStateTrailingFloats = 8 * 32;
 
 	/** Floats a snapshot of this grid holds. */
-	static int32 StateFloats(const FIntVector& Grid, int32 FloatsPerCell = StateFloatsPerCell)
+	static int32 StateFloats(const FIntVector& Grid, int32 FloatsPerCell = StateFloatsPerCell, int32 Trailing = StateTrailingFloats)
 	{
-		return Grid.X * Grid.Y * Grid.Z * FloatsPerCell + StateTrailingFloats;
+		return Grid.X * Grid.Y * Grid.Z * FloatsPerCell + Trailing;
 	}
 
-	/** Which layout Num floats are for this grid, or 0 for neither. */
-	static int32 FloatsPerCellOf(const FIntVector& Grid, int32 Num)
+	/** Which layout Num floats are for this grid, or 0 for none; bOutSeeds
+	 *  says whether its trailer carries the cells' seeds. */
+	static int32 FloatsPerCellOf(const FIntVector& Grid, int32 Num, bool* bOutSeeds = nullptr)
 	{
-		return Num == StateFloats(Grid) ? StateFloatsPerCell
-			: Num == StateFloats(Grid, LegacyStateFloatsPerCell) ? LegacyStateFloatsPerCell
+		const bool bSeeds = Num == StateFloats(Grid);
+
+		if (bOutSeeds)
+		{
+			*bOutSeeds = bSeeds;
+		}
+
+		return bSeeds ? StateFloatsPerCell
+			: Num == StateFloats(Grid, StateFloatsPerCell, LegacyStateTrailingFloats) ? StateFloatsPerCell
+			: Num == StateFloats(Grid, LegacyStateFloatsPerCell, LegacyStateTrailingFloats) ? LegacyStateFloatsPerCell
 			: 0;
 	}
 
@@ -82,13 +96,15 @@ private:
 
 	void AddBalancePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	void AddInitPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
-	void AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R, int32 FloatsPerCell);
+	void AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R, int32 FloatsPerCell, bool bSeeds);
 	void AddReducePasses(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	/** Centre, explicit and output fields of the current faces. bLatest writes
 	 *  the output pair the resample blends toward, rather than the working pair,
 	 *  and no explicit field. */
 	void AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R, bool bLatest);
 	void AddCellsPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
+	/** Every slot's traits from its seed under Params' ranges, without a step. */
+	void AddCellTraitsPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	/** The cells' streamfunction, potential and column terms for Predict. */
 	void AddCellFieldPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	void AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, struct FFlowSimResources& R);

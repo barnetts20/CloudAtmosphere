@@ -1,11 +1,12 @@
-// The generator's contract: streams, distributions, paths, the archetype pick
-// and reproducibility. CPU only; run as CloudAtmosphere.Harness in the
-// automation tests.
+// The generator's contract: streams, distributions, paths, the archetype pick,
+// reproducibility and the sim's seed. CPU only; run as CloudAtmosphere.Harness
+// in the automation tests.
 
 #include "AtmosphereArchetype.h"
 #include "AtmosphereGenerator.h"
 #include "AtmospherePreset.h"
 #include "FlowSimTypes.h"
+#include "FlowSnapshot.h"
 #include "Misc/AutomationTest.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -354,6 +355,88 @@ bool FAtmosphereHarnessReproduceTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Without a Base the look is still drawn"), Own.bHasLook);
 	TestEqual(TEXT("An undrawn setting keeps the actor's value"), Own.Look.Type.TypeBias, 0.123f);
 	TestEqual(TEXT("A drawn setting is overwritten by the seed's value"), Own.Look.Coverage.CloudCover, Grown.Look.Coverage.CloudCover);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAtmosphereHarnessSimSeedTest, "CloudAtmosphere.Harness.SimSeed",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAtmosphereHarnessSimSeedTest::RunTest(const FString& Parameters)
+{
+	UFlowSimConfig* Template = NewObject<UFlowSimConfig>();
+	TestEqual(TEXT("Seed 0 is the unseeded sequence"), Template->GetSeedSalt(), 0u);
+
+	TSet<uint32> Salts;
+
+	for (int32 Seed = 1; Seed <= 2000; ++Seed)
+	{
+		Template->Seed = Seed;
+		Salts.Add(Template->GetSeedSalt());
+	}
+
+	TestEqual(TEXT("Every seed salts differently"), Salts.Num(), 2000);
+	TestFalse(TEXT("No seed salts as 0"), Salts.Contains(0u));
+
+	const FFlowSimRange Swapped = FFlowSimRange(0.8f, 0.2f).Clamped(0.0f, 1.0f);
+	TestEqual(TEXT("A Max below Min is held to Min"), Swapped.Max, 0.8f);
+	TestEqual(TEXT("A range's ends are held"), FFlowSimRange(-1.0f, 2.0f).Clamped(0.0f, 1.0f).Max, 1.0f);
+	TestTrue(TEXT("A draw reaches a range's end"),
+		WriteValue(UFlowSimConfig::StaticClass(), Template, TEXT("StormCellRadius.Max"), 1.5));
+	TestEqual(TEXT("Into the range"), Template->StormCellRadius.Max, 1.5f);
+	TestTrue(TEXT("A draw on the whole range"), WriteValue(UFlowSimConfig::StaticClass(), Template, TEXT("StormCellWind"), 0.4));
+	TestTrue(TEXT("Sets both ends"), Template->StormCellWind.Min == 0.4f && Template->StormCellWind.Max == 0.4f);
+
+	// A snapshot of 8 x 4 x 1 cells: every layout restores, the seeds ride a roll as they are.
+	constexpr int32 Cells = 32;
+	UFlowSnapshot* Snapshot = NewObject<UFlowSnapshot>();
+	Snapshot->Grid = FIntVector(8, 4, 1);
+
+	Snapshot->State.SetNumZeroed(Cells * UFlowSnapshot::LegacyFloatsPerCell + UFlowSnapshot::LegacyTrailingFloats);
+	TestTrue(TEXT("The oldest layout restores"), Snapshot->IsValidFor(Snapshot->Grid));
+	Snapshot->State.SetNumZeroed(Cells * UFlowSnapshot::FloatsPerCell + UFlowSnapshot::LegacyTrailingFloats);
+	TestTrue(TEXT("The layout without seeds restores"), Snapshot->IsValidFor(Snapshot->Grid));
+	Snapshot->State.SetNumZeroed(Cells * UFlowSnapshot::LegacyFloatsPerCell + UFlowSnapshot::TrailingFloats);
+	TestFalse(TEXT("Seeds without the last planes are no layout"), Snapshot->IsValidFor(Snapshot->Grid));
+	Snapshot->State.SetNumZeroed(Cells * UFlowSnapshot::FloatsPerCell + UFlowSnapshot::TrailingFloats);
+	TestTrue(TEXT("The current layout restores"), Snapshot->IsValidFor(Snapshot->Grid));
+
+	const int32 Seeds = Cells * UFlowSnapshot::FloatsPerCell + UFlowSnapshot::LegacyTrailingFloats;
+	Snapshot->State[Seeds] = 12345.0f;
+	Snapshot->State[Seeds + UFlowSnapshot::SeedFloatsPerSlot] = -1.0f;
+
+	const UFlowSnapshot* Rolled = Snapshot->MakeRolled(nullptr, 3);
+	TestTrue(TEXT("A roll keeps the seeds"), Rolled && Rolled->State[Seeds] == 12345.0f
+		&& Rolled->State[Seeds + UFlowSnapshot::SeedFloatsPerSlot] == -1.0f);
+
+	// Each planet runs its own seed, one seed one sim seed, and a lock keeps the template's.
+	Template->Seed = 77;
+	Template->InitialState = Snapshot;
+
+	UAtmosphereArchetype* Archetype = NewObject<UAtmosphereArchetype>();
+	Archetype->Template = Template;
+
+	FAtmosphereGenerationSet Set;
+	Set.Terrestrial.Archetypes.AddDefaulted_GetRef().Archetype = Archetype;
+
+	FAtmosphereGenerateOptions Locking;
+	Locking.Locks.Add(TEXT("Seed"));
+
+	FAtmosphereGeneration First, Again, Other, Locked;
+	const FAtmosphereModelParams Current;
+	FAtmosphereGenerator::Generate(1, EPlanetAtmosphereType::Terrestrial, Set, Current, FAtmosphereGenerateOptions(), nullptr, First);
+	FAtmosphereGenerator::Generate(1, EPlanetAtmosphereType::Terrestrial, Set, Current, FAtmosphereGenerateOptions(), nullptr, Again);
+	FAtmosphereGenerator::Generate(2, EPlanetAtmosphereType::Terrestrial, Set, Current, FAtmosphereGenerateOptions(), nullptr, Other);
+	FAtmosphereGenerator::Generate(1, EPlanetAtmosphereType::Terrestrial, Set, Current, Locking, nullptr, Locked);
+
+	if (!TestTrue(TEXT("Every generation has a config"), First.Config && Again.Config && Other.Config && Locked.Config))
+	{
+		return false;
+	}
+
+	TestTrue(TEXT("A planet's sim is seeded"), First.Config->Seed != 0 && First.Config->Seed != Template->Seed);
+	TestEqual(TEXT("One seed, one sim seed"), Again.Config->Seed, First.Config->Seed);
+	TestNotEqual(TEXT("Planets differ"), Other.Config->Seed, First.Config->Seed);
+	TestEqual(TEXT("A lock keeps the template's"), Locked.Config->Seed, 77);
 	return true;
 }
 

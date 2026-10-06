@@ -151,23 +151,27 @@
 /** Rate surface evaporation grows with the bottom layer's wind speed. */
 #define SimWindEvaporation FlowSimUB.WindEvaporation
 
-/** Storm cells; see MainCellsCS and SimCellStamp.
+/** Storm cells; see MainCellsCS and SimCellStamp. Every trait a hurricane
+ *  draws (SimCellResolve) holds its range's midpoint here, which perpetual
+ *  storms take for the traits they share.
  *    Shape    x radius (radians); y eye ramp and z eyewall radius as fractions
  *             of it; w vector strength at the ramp's edge over the eyewall's.
  *    Vortex   x falloff exponent past the eyewall, y relax rate toward the
  *             target vortex, z top layer's share of the target (bottom 1),
  *             w target eyewall wind at full intensity.
  *    Draft    x draft at full strength, y in the eye, both W units; z storm
- *             raised in the intense band; w pressure drop through the eyewall,
- *             easing to none at the radius, normalised output units.
+ *             raised in a perpetual storm's intense band; w pressure drop
+ *             through the eyewall, easing to none at the radius, normalised
+ *             output units.
  *    Life     x spawn attempts per unit time, y growth, z decay, w lifetime.
  *    Motion   x poleward-west drift speed, y pull toward the parent storm,
  *             z and w genesis latitudes, radians.
  *    Genesis  x shear limit, y humidity threshold, z storm a seed needs,
  *             w cyclonic vorticity at which a seed counts fully.
- *    Cloud    x eyewall cloud lift rate per layer, y unused, z inflow below
- *             and outflow above at the eyewall as a fraction of target wind,
- *             w storm raised across the whole storm. */
+ *    Cloud    x eyewall cloud lift rate per layer, y storm the intense band
+ *             adds over a hurricane's own, z inflow below and outflow above at
+ *             the eyewall as a fraction of target wind, w storm raised across
+ *             the whole storm. */
 #define SimCellShape FlowSimUB.CellShape
 #define SimCellVortex FlowSimUB.CellVortex
 #define SimCellDraft FlowSimUB.CellDraft
@@ -183,7 +187,25 @@
 /** Storm tracer a mature cell tops up toward, on the stamp's profile. */
 #define SimCellSustain FlowSimUB.CellSustain
 
-/** Share of the deck's depth a full-intensity eye removes at its centre. */
+/** The ranges a hurricane draws its traits from at spawn (SimCellResolve):
+ *    RangeA  radius min and max, radians; target eyewall wind min and max.
+ *    RangeB  storm min and max; pressure drop min and max.
+ *    RangeC  eyewall cloud cover min and max; inflow min and max.
+ *    RangeD  eye depth min and max; lifetime min and max, sim time.
+ *    RangeE  eyewall min and max, fractions of the radius; eye ramp over the
+ *            eyewall; one grid column, radians. */
+#define SimCellRangeA FlowSimUB.CellRangeA
+#define SimCellRangeB FlowSimUB.CellRangeB
+#define SimCellRangeC FlowSimUB.CellRangeC
+#define SimCellRangeD FlowSimUB.CellRangeD
+#define SimCellRangeE FlowSimUB.CellRangeE
+
+/** XORed into the forcing's and the spawns' hash keys: 0 is the unseeded
+ *  sequence. */
+#define SimSeedSalt FlowSimUB.SeedSalt
+
+/** Share of the deck's depth the deepest eye removes at its centre: the eye
+ *  depth range's maximum. A slot's eye source carries its share of it. */
 #define SimCellEyeDepth FlowSimUB.CellEyeDepth
 
 /** Rate a cell is pulled onto its vortex's core, per unit time. */
@@ -233,7 +255,7 @@
 #define SimPerpetualLook FlowSimUB.PerpetualLook
 #define SimPerpetualForm FlowSimUB.PerpetualForm
 
-/** Steps completed before this one: seeds the cells' spawn draws. */
+/** Steps completed before this one: keys the cells' spawn draws. */
 #define SimStepIndex FlowSimUB.StepIndex
 
 /** Noise coordinates: the solid-body drift, radians per unit time, and the sim
@@ -345,7 +367,8 @@ SamplerState SimForcingNoiseSampler;
 
 /** Storm cells: two float4 of state per slot (position and intensity, 0 is a
  *  free slot; age and the last move), then the control block from
- *  SIM_CELL_CONTROL_BASE: vortex and inflow gains, health and the low. */
+ *  SIM_CELL_CONTROL_BASE: vortex and inflow gains, health, the low and the
+ *  resolved traits; then one seed per slot from SIM_CELL_SEED_BASE. */
 StructuredBuffer<float4> SimCellSRV;
 RWStructuredBuffer<float4> SimCellUAV;
 
@@ -362,12 +385,18 @@ RWTexture2D<float4> SimCellColumnUAV;
 
 /** Snapshot transfer, one plane per float; see MainCaptureCS. A restore reads
  *  SimRestoreFloatsPerCell planes: SIM_SNAPSHOT_PLANES, or the 13 of the layout
- *  without the noise phases' w, which then restore as zero. */
+ *  without the noise phases' w, which then restore as zero. Nonzero
+ *  SimRestoreCellSeeds reads the cells' seeds after their state; otherwise
+ *  every seed restores as -1, the ranges' midpoints. */
 StructuredBuffer<float> SimRestoreBuffer;
 RWStructuredBuffer<float> SimCaptureBuffer;
 uint SimRestoreFloatsPerCell;
+uint SimRestoreCellSeeds;
 
 #define SIM_SNAPSHOT_PLANES FLOWSIM_SNAPSHOT_PLANES
+
+/** Float4 entries after the planes: every slot's state, then its seed. */
+#define SIM_SNAPSHOT_CELL_ENTRIES (3 * FLOWSIM_MAX_CELLS)
 
 // -- Stack ------------------------------------------------------------------
 
@@ -591,7 +620,7 @@ float SimForcingPhase(float3 P, float3 Dir, uint Layer, float Rate, uint Cycle, 
 {
     const float Age = Fraction * SimForcingLifetime;
 
-    const float3 Offset = SimHash3((Cycle * 2u + Phase) * 8u + Layer);
+    const float3 Offset = SimHash3(((Cycle * 2u + Phase) * 8u + Layer) ^ SimSeedSalt);
 
     float SinA, CosA;
     sincos(-Rate * Age, SinA, CosA);
@@ -946,16 +975,28 @@ float SimCellSeedScore(float3 P)
 // PITFALL: convergence confined to a thin eyewall band starves the cell: the
 // storm tracer under the whole core is what keeps a cell alive.
 
-/** Control block after the 2 FLOWSIM_MAX_CELLS state entries, six float4 per
- *  slot: two of vortex gains, two of inflow gains (one component per layer),
- *  health (SIM_CELL_HEALTH), then the low's pressure at the eyewall, its least,
- *  the ring it was measured on and the eased rotation sense (SIM_CELL_CORE). */
+/** Control block after the 2 FLOWSIM_MAX_CELLS state entries, nine float4 per
+ *  slot, rewritten each step: two of vortex gains, two of inflow gains (one
+ *  component per layer), health (SIM_CELL_HEALTH), the low's pressure at the
+ *  eyewall, its least, the ring it was measured on and the eased rotation
+ *  sense (SIM_CELL_CORE), then a hurricane's traits (SIM_CELL_TRAITS, see
+ *  SimCellResolve).
+ *
+ *  The seed block follows, one float4 per slot, x the seed a hurricane drew
+ *  its traits from at spawn, an integer under 2^24, or -1 for the ranges'
+ *  midpoints. It is captured with the state and never cleared by a step. */
 #define SIM_CELL_CONTROL_BASE (2 * FLOWSIM_MAX_CELLS)
 #define SIM_CELL_CONTROL_STRIDE FLOWSIM_CELL_CONTROL_STRIDE
 #define SIM_CELL_HEALTH 4u
 #define SIM_CELL_CORE 5u
+#define SIM_CELL_TRAITS 6u
 
-#define SIM_CELL_BUFFER_SIZE (SIM_CELL_CONTROL_BASE + SIM_CELL_CONTROL_STRIDE * FLOWSIM_MAX_CELLS)
+#define SIM_CELL_SEED_BASE (SIM_CELL_CONTROL_BASE + SIM_CELL_CONTROL_STRIDE * FLOWSIM_MAX_CELLS)
+#define SIM_CELL_BUFFER_SIZE (SIM_CELL_SEED_BASE + FLOWSIM_MAX_CELLS)
+
+#if FLOWSIM_CELL_CONTROL_STRIDE != 9
+#error The control block holds nine entries a slot: gains, health, the low and three of traits.
+#endif
 
 // Perpetual storms take the first cell slots.
 #if FLOWSIM_MAX_PERPETUAL > FLOWSIM_MAX_CELLS
@@ -989,20 +1030,190 @@ float SimCellTowardTarget(float Target, float Measured, float Unit)
  *  vortex it reads is resolved. */
 #define SIM_CELL_RING_CELLS 2.0f
 
-/** The eyewall's radius, in cell radii: StormCellEyewall, held just outside
- *  the eye. Every read of the eyewall goes through this. */
+// -- Traits ------------------------------------------------------------------
+//
+// A slot's shape and look. A hurricane draws its own from the trait ranges at
+// spawn, keyed by its seed (SimCellResolve), and MainCellsCS writes them into
+// its control block each step. The first SimPerpetualCount slots are perpetual
+// storms, each with its own uniforms and the ranges' midpoints for the rest,
+// and an ellipse whose longitude axis is Aspect times its latitude one.
+
+struct SimTraits
+{
+    float Radius;
+    float Aspect;
+    float Wind;
+
+	/** 0 takes SimSpinSense's; otherwise the sign it turns with. */
+    float Sense;
+    float Storm;
+
+	/** Storm raised in the intense band. */
+    float Band;
+    float Cloud;
+    float Pressure;
+    float Inflow;
+
+	/** Share of SimCellEyeDepth its eye removes. */
+    float Eye;
+
+	/** Age past which it decays. */
+    float Life;
+
+	/** Eyewall radius and eye ramp, fractions of the radius. Every read of a
+	 *  slot's eyewall goes through Wall, held just outside the ramp. */
+    float Wall;
+    float Core;
+
+	/** The share of the gap to the push closed this step. */
+    float Share;
+};
+
+/** The eye ramp inside an eyewall at Wall of a slot of Radius: the ramp ratio
+ *  of the eyewall, held to a grid column scaled by the eye's strength. Under a
+ *  cell a nonzero strength puts a cone in the streamfunction and a point sink
+ *  in the potential at the centre. */
+float SimCellCoreFor(float Radius, float Wall)
+{
+    const float Inner = max(SimCellRangeE.z * Wall, SimCellShape.w * (SimCellRangeE.w / max(Radius, 1e-4f)));
+
+    return min(Inner, 0.9f * Wall);
+}
+
+/** The eyewall at the ranges' midpoints, in cell radii, held just outside the
+ *  eye ramp: a perpetual storm's. */
 float SimCellWall()
 {
     return max(SimCellShape.z, SimCellShape.y + 1e-3f);
 }
 
-/** Vector strength at R, a distance from the centre in cell radii, [0, 1]:
+/** A hurricane's traits from its seed, as its control block holds them:
+ *    A  radius, target wind, storm, pressure drop
+ *    B  cloud lift rate, inflow, share of the deepest eye, lifetime
+ *    C  eyewall, eye ramp
+ *  Each draws uniformly across its range on its own hash of the seed, so a
+ *  range with Min = Max draws that value exactly. The cloud draws an eyewall
+ *  cover and lifts at the rate that settles it against the cloud's decay. A
+ *  seed below 0 takes every range's midpoint. */
+void SimCellResolve(float Seed, out float4 A, out float4 B, out float4 C)
+{
+    const uint Key = (uint) max(Seed, 0.0f) * 16u;
+
+    float U[9];
+
+	[unroll]
+    for (uint K = 0; K < 9u; K++)
+    {
+        U[K] = (Seed < 0.0f) ? 0.5f : (float) SimHash(Key + K) * (1.0f / 4294967296.0f);
+    }
+
+    const float Radius = lerp(SimCellRangeA.x, SimCellRangeA.y, U[0]);
+    const float Cover = lerp(SimCellRangeC.x, SimCellRangeC.y, U[4]);
+    const float Depth = lerp(SimCellRangeD.x, SimCellRangeD.y, U[6]);
+    const float Wall = lerp(SimCellRangeE.x, SimCellRangeE.y, U[8]);
+    const float Core = SimCellCoreFor(Radius, Wall);
+
+    A = float4(Radius, lerp(SimCellRangeA.z, SimCellRangeA.w, U[1]),
+		lerp(SimCellRangeB.x, SimCellRangeB.y, U[2]), lerp(SimCellRangeB.z, SimCellRangeB.w, U[3]));
+    B = float4(Cover / (1.0f - Cover) * SimCloudDecay, lerp(SimCellRangeC.z, SimCellRangeC.w, U[5]),
+		Depth / max(SimCellRangeD.y, 1e-6f), lerp(SimCellRangeD.z, SimCellRangeD.w, U[7]));
+    C = float4(max(Wall, Core + 1e-3f), Core, 0.0f, 0.0f);
+}
+
+/** A hurricane's SimTraits from its three trait entries. */
+SimTraits SimCellTraitsFrom(float4 A, float4 B, float4 C)
+{
+    SimTraits T;
+
+    T.Radius = A.x;
+    T.Aspect = 1.0f;
+    T.Wind = A.y;
+    T.Sense = 0.0f;
+    T.Storm = A.z;
+    T.Band = saturate(A.z + SimCellCloud.y);
+    T.Pressure = A.w;
+    T.Cloud = B.x;
+    T.Inflow = B.y;
+    T.Eye = B.z;
+    T.Life = B.w;
+    T.Wall = C.x;
+    T.Core = C.y;
+    T.Share = 1.0f - exp(-SimCellVortex.y * SimDeltaTime);
+
+    return T;
+}
+
+/** A perpetual storm's SimTraits: its uniforms, and the ranges' midpoints for
+ *  its eyewall, eye ramp and band. Its eye is its share of a midpoint
+ *  hurricane's. */
+SimTraits SimPerpetualTraits(uint Slot)
+{
+	// Clamped: a flattened branch still reads the arrays for every slot.
+    const uint K = min(Slot, (uint) FLOWSIM_MAX_PERPETUAL - 1u);
+    const float4 Shape = SimPerpetualShape[K];
+    const float4 Look = SimPerpetualLook[K];
+    const float4 Form = SimPerpetualForm[K];
+
+    SimTraits T;
+
+    T.Radius = Shape.z;
+    T.Aspect = Shape.w;
+    T.Wind = abs(Look.x);
+    T.Sense = (Look.x >= 0.0f) ? 1.0f : -1.0f;
+    T.Storm = Look.y;
+    T.Band = SimCellDraft.z;
+    T.Pressure = Look.z;
+    T.Cloud = Look.w;
+    T.Inflow = Form.x;
+    T.Eye = Form.y * 0.5f * (SimCellRangeD.x + SimCellRangeD.y) / max(SimCellRangeD.y, 1e-6f);
+    T.Life = SimCellLife.w;
+    T.Wall = SimCellWall();
+    T.Core = SimCellShape.y;
+    T.Share = 1.0f - exp(-SimPerpetualForcing * SimDeltaTime);
+
+    return T;
+}
+
+/** A cell's control entry K, written by MainCellsCS this step. */
+float4 SimCellControl(uint Slot, uint K)
+{
+    return SimCellSRV[SIM_CELL_CONTROL_BASE + SIM_CELL_CONTROL_STRIDE * Slot + K];
+}
+
+/** A slot's traits. A hurricane's come from its control block, so
+ *  MainCellsCS, which writes it, resolves its own (SimCellResolve). */
+SimTraits SimCellTraitsOf(uint Slot)
+{
+    if ((int) Slot < SimPerpetualCount)
+    {
+        return SimPerpetualTraits(Slot);
+    }
+
+    return SimCellTraitsFrom(SimCellControl(Slot, SIM_CELL_TRAITS),
+		SimCellControl(Slot, SIM_CELL_TRAITS + 1u), SimCellControl(Slot, SIM_CELL_TRAITS + 2u));
+}
+
+/** A perpetual storm's reach in radians: its longest axis. */
+float SimPerpetualReach(uint Slot)
+{
+    const float4 Shape = SimPerpetualShape[min(Slot, (uint) FLOWSIM_MAX_PERPETUAL - 1u)];
+
+    return Shape.z * Shape.w;
+}
+
+/** A slot's reach in radians: its longest axis. */
+float SimCellReachOf(uint Slot)
+{
+    return ((int) Slot < SimPerpetualCount) ? SimPerpetualReach(Slot) : SimCellControl(Slot, SIM_CELL_TRAITS).x;
+}
+
+/** Vector strength at R, a distance from the centre in slot radii, [0, 1]:
  *  rising through the eye to 1 at the eyewall, holding to Hold, then falling
  *  to 0 at the radius as the power SimCellVortex.x of the distance left. */
-float SimCellProfileHeld(float R, float Hold)
+float SimCellProfileHeld(float R, float Hold, SimTraits S)
 {
-    const float Eye = SimCellShape.y;
-    const float Wall = SimCellWall();
+    const float Eye = S.Core;
+    const float Wall = S.Wall;
     const float EyeStrength = SimCellShape.w;
 
     Hold = max(Hold, Wall);
@@ -1033,17 +1244,17 @@ float SimCellProfileHeld(float R, float Hold)
 }
 
 /** The stamp's profile: cloud, storm and draft peak at the eyewall. */
-float SimCellProfile(float R)
+float SimCellProfile(float R, SimTraits S)
 {
-    return SimCellProfileHeld(R, SimCellWall());
+    return SimCellProfileHeld(R, S.Wall, S);
 }
 
 /** SimCellProfileHeld integrated from the centre to R in closed form: the
  *  basis of the vortex's streamfunction and the inflow's potential. */
-float SimCellIntegralHeld(float R, float Hold)
+float SimCellIntegralHeld(float R, float Hold, SimTraits S)
 {
-    const float Eye = SimCellShape.y;
-    const float Wall = SimCellWall();
+    const float Eye = S.Core;
+    const float Wall = S.Wall;
     Hold = max(Hold, Wall);
     const float EyeStrength = SimCellShape.w;
     const float Falloff = SimCellVortex.x;
@@ -1065,9 +1276,9 @@ float SimCellIntegralHeld(float R, float Hold)
 }
 
 /** The stamp profile's integral: the inflow. */
-float SimCellIntegral(float R)
+float SimCellIntegral(float R, SimTraits S)
 {
-    return SimCellIntegralHeld(R, SimCellWall());
+    return SimCellIntegralHeld(R, S.Wall, S);
 }
 
 /** A cell's centre at the output's time: its latest position backed off by
@@ -1075,78 +1286,6 @@ float SimCellIntegral(float R)
 float3 SimCellDisplayCentre(float4 Cell, float4 Life)
 {
     return normalize(Cell.xyz - (1.0f - SimStateBlend) * Life.yzw);
-}
-
-// -- Traits ------------------------------------------------------------------
-//
-// A slot's shape and look. Storm cells share the config's; the first
-// SimPerpetualCount slots are perpetual storms, each with its own, and an
-// ellipse whose longitude axis is Aspect times its latitude one.
-
-struct SimTraits
-{
-    float Radius;
-    float Aspect;
-    float Wind;
-
-	/** 0 takes SimSpinSense's; otherwise the sign it turns with. */
-    float Sense;
-    float Storm;
-    float Cloud;
-    float Pressure;
-    float Inflow;
-    float Eye;
-
-	/** The share of the gap to the push closed this step. */
-    float Share;
-};
-
-SimTraits SimCellTraitsOf(uint Slot)
-{
-    SimTraits T;
-
-    if ((int) Slot < SimPerpetualCount)
-    {
-		// Clamped: a flattened branch still reads the arrays for every slot.
-        const uint K = min(Slot, (uint) FLOWSIM_MAX_PERPETUAL - 1u);
-        const float4 Shape = SimPerpetualShape[K];
-        const float4 Look = SimPerpetualLook[K];
-        const float4 Form = SimPerpetualForm[K];
-
-        T.Radius = Shape.z;
-        T.Aspect = Shape.w;
-        T.Wind = abs(Look.x);
-        T.Sense = (Look.x >= 0.0f) ? 1.0f : -1.0f;
-        T.Storm = Look.y;
-        T.Pressure = Look.z;
-        T.Cloud = Look.w;
-        T.Inflow = Form.x;
-        T.Eye = Form.y;
-        T.Share = 1.0f - exp(-SimPerpetualForcing * SimDeltaTime);
-    }
-    else
-    {
-        T.Radius = SimCellShape.x;
-        T.Aspect = 1.0f;
-        T.Wind = SimCellVortex.w;
-        T.Sense = 0.0f;
-        T.Storm = SimCellCloud.w;
-        T.Pressure = SimCellDraft.w;
-        T.Cloud = SimCellCloud.x;
-        T.Inflow = SimCellCloud.z;
-        T.Eye = 1.0f;
-        T.Share = 1.0f - exp(-SimCellVortex.y * SimDeltaTime);
-    }
-
-    return T;
-}
-
-/** A slot's reach in radians: its longest axis. */
-float SimCellReachOf(uint Slot)
-{
-    const float4 Shape = SimPerpetualShape[min(Slot, (uint) FLOWSIM_MAX_PERPETUAL - 1u)];
-
-    return ((int) Slot < SimPerpetualCount) ? Shape.z * Shape.w : SimCellShape.x;
 }
 
 /** Unit east at a direction, x at the poles. */
@@ -1160,24 +1299,17 @@ float3 SimCellEastOf(float3 P)
 /** Radius, in slot radii, where its vortex's wind starts to fall: the eyewall
  *  plus SimCellWindBreadth of the span beyond. The fall-off keeps at least
  *  SIM_CELL_RING_CELLS grid cells, or the rim is a grid-scale shear sheet. */
-float SimCellWindHoldFor(float Radius)
+float SimCellWindHoldFor(SimTraits S)
 {
-    const float Wall = SimCellWall();
-    const float Cap = max(1.0f - SIM_CELL_RING_CELLS * SimDLon() / max(Radius, 1e-4f), Wall);
+    const float Cap = max(1.0f - SIM_CELL_RING_CELLS * SimDLon() / max(S.Radius, 1e-4f), S.Wall);
 
-    return min(lerp(Wall, 1.0f, saturate(SimCellWindBreadth)), min(Cap, 0.999f));
+    return min(lerp(S.Wall, 1.0f, saturate(SimCellWindBreadth)), min(Cap, 0.999f));
 }
 
 /** Sharpness of a cell's rotation-sense turnover at the equator: 0.8 of full
  *  at 2 degrees, 0.96 at 5. PITFALL: a hard sign flips a cell drifting along
  *  the equator at full strength, each reversal sending a wave through the layer. */
 #define SIM_CELL_HEMISPHERE_SHARPNESS 40.0f
-
-/** A cell's control entry K, written by MainCellsCS this step. */
-float4 SimCellControl(uint Slot, uint K)
-{
-    return SimCellSRV[SIM_CELL_CONTROL_BASE + SIM_CELL_CONTROL_STRIDE * Slot + K];
-}
 
 /** A slot's reach at N: centre, rotation sense (a perpetual storm's own, the
  *  hemisphere's at the centre on a three-cell profile, otherwise MainCellsCS's
@@ -1271,7 +1403,7 @@ float SimCellStormFloor(float3 P)
 
         if (SimCellReach((uint) Slot, P, false, Axis, Sense, Intensity, R))
         {
-            Floor = max(Floor, SimCellStrength(Intensity) * SimCellProfile(R));
+            Floor = max(Floor, SimCellStrength(Intensity) * SimCellProfile(R, SimCellTraitsOf((uint) Slot)));
         }
     }
 
@@ -1351,10 +1483,10 @@ float SimCellStream(float3 P, uint Layer)
         if (SimCellReach((uint) Slot, P, false, Axis, Sense, Intensity, R))
         {
             const SimTraits T = SimCellTraitsOf((uint) Slot);
-            const float Hold = SimCellWindHoldFor(T.Radius);
+            const float Hold = SimCellWindHoldFor(T);
 
             Psi += T.Share * T.Wind * T.Radius * Sense * SimCellGain((uint) Slot, Layer)
-                * (SimCellIntegralHeld(R, Hold) - SimCellIntegralHeld(1.0f, Hold));
+                * (SimCellIntegralHeld(R, Hold, T) - SimCellIntegralHeld(1.0f, Hold, T));
         }
     }
 
@@ -1402,8 +1534,6 @@ float2 SimCellFlow(int I, int J, uint Layer)
  *  the weather into trailing spiral bands and converges under the core. */
 float SimCellPotential(float3 P, uint Layer)
 {
-    const float Whole = SimCellIntegral(1.0f);
-
     float Chi = 0.0f;
 
 	[loop]
@@ -1416,7 +1546,7 @@ float SimCellPotential(float3 P, uint Layer)
         {
             const SimTraits T = SimCellTraitsOf((uint) Slot);
 
-            Chi -= T.Share * T.Wind * T.Radius * SimCellInflowGain((uint) Slot, Layer) * (SimCellIntegral(R) - Whole);
+            Chi -= T.Share * T.Wind * T.Radius * SimCellInflowGain((uint) Slot, Layer) * (SimCellIntegral(R, T) - SimCellIntegral(1.0f, T));
         }
     }
 
@@ -1447,7 +1577,9 @@ float SimCellCloudFeed(float3 P)
             continue;
         }
 
-        Target = max(Target, Intensity * SimCellTraitsOf((uint) Slot).Cloud * SimCellProfile(R));
+        const SimTraits T = SimCellTraitsOf((uint) Slot);
+
+        Target = max(Target, Intensity * T.Cloud * SimCellProfile(R, T));
     }
 
     return Target;
@@ -1507,7 +1639,8 @@ SimStamp SimCellStamp(float3 N)
             continue;
         }
 
-        const float Profile = SimCellProfile(R);
+        const SimTraits T = SimCellTraitsOf((uint) Slot);
+        const float Profile = SimCellProfile(R, T);
 
         // The strongest overlapping draft, as for storm, low and strength; the
         // draft's sign is global, so the larger magnitude is the stronger.
@@ -1516,12 +1649,10 @@ SimStamp SimCellStamp(float3 N)
         // Held full inside the eyewall: the vector profile falls toward the
         // eye, and a band read from it leaves the eye and its lining at the
         // whole-storm level, a clean disc inside the eyewall.
-        const float Band = (R <= SimCellWall()) ? 1.0f : smoothstep(SimCellBandFloor, 1.0f, Profile);
-        const float Whole = 1.0f - smoothstep(SimCellWall(), 1.0f, R);
+        const float Band = (R <= T.Wall) ? 1.0f : smoothstep(SimCellBandFloor, 1.0f, Profile);
+        const float Whole = 1.0f - smoothstep(T.Wall, 1.0f, R);
 
-        const SimTraits T = SimCellTraitsOf((uint) Slot);
-
-        S.Storm = max(S.Storm, Intensity * max(T.Storm * Whole, SimCellDraft.z * Band));
+        S.Storm = max(S.Storm, Intensity * max(T.Storm * Whole, T.Band * Band));
         S.Low = max(S.Low, T.Pressure * Intensity * Whole);
         S.Strength = max(S.Strength, Intensity * Profile);
         S.Presence = max(S.Presence, saturate(Intensity / SIM_CELL_FREE - 1.0f)
@@ -1871,7 +2002,7 @@ void MainInitStateCS(uint3 Id : SV_DispatchThreadID)
 		[loop]
         for (int Slot = 0; Slot < SIM_CELL_BUFFER_SIZE; Slot++)
         {
-            SimCellUAV[Slot] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+            SimCellUAV[Slot] = float4((Slot >= SIM_CELL_SEED_BASE) ? -1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
         }
     }
 }
@@ -2118,7 +2249,7 @@ void SimCellWriteControl(uint Slot, float3 P, float Intensity, SimTraits T, floa
 {
     const uint Block = SIM_CELL_CONTROL_BASE + SIM_CELL_CONTROL_STRIDE * Slot;
     const float Radius = T.Radius;
-    const float Ring = clamp(SIM_CELL_RING_CELLS * SimDLon() / max(Radius, 1e-4f), min(SimCellWall(), 0.9f), 0.9f);
+    const float Ring = clamp(SIM_CELL_RING_CELLS * SimDLon() / max(Radius, 1e-4f), min(T.Wall, 0.9f), 0.9f);
 
     float Least = SimCellPressure(P);
     float Wall = 0.0f;
@@ -2141,7 +2272,7 @@ void SimCellWriteControl(uint Slot, float3 P, float Intensity, SimTraits T, floa
     SimCellUAV[Block + SIM_CELL_CORE] = float4(Wall, Least, Ring, Sense * SenseShare);
 
     const uint L = (uint) SimGridSize.z;
-    const float Hold = SimCellWindHoldFor(Radius);
+    const float Hold = SimCellWindHoldFor(T);
     const float Outer = min(max(Ring, 0.5f * (Hold + 1.0f)), 0.9f);
     const float Strength = SimCellStrength(Intensity);
 
@@ -2158,7 +2289,7 @@ void SimCellWriteControl(uint Slot, float3 P, float Intensity, SimTraits T, floa
 	[unroll]
     for (int Band = 0; Band < 2; Band++)
     {
-        WindUnit[Band] = max(T.Wind * SimCellProfileHeld(RingAt[Band], Hold), 1e-4f);
+        WindUnit[Band] = max(T.Wind * SimCellProfileHeld(RingAt[Band], Hold, T), 1e-4f);
         Unit[Band] = max(WindUnit[Band] * SenseShare, 1e-4f);
 
 		[unroll]
@@ -2188,7 +2319,7 @@ void SimCellWriteControl(uint Slot, float3 P, float Intensity, SimTraits T, floa
 
 	// The bottom layer's inflow target at the eyewall, cut back so it and the
 	// vortex's target stay under the ceiling.
-    const float InflowUnit = max(T.Wind * SimCellProfile(Ring), 1e-4f);
+    const float InflowUnit = max(T.Wind * SimCellProfile(Ring, T), 1e-4f);
     float InflowTarget = T.Inflow * Strength * WindUnit[0];
 
     if (SimSpeedRoot > 0.0f)
@@ -2249,16 +2380,39 @@ void SimCellWriteControl(uint Slot, float3 P, float Intensity, SimTraits T, floa
     SimCellUAV[Block + 3] = Draw[1];
 }
 
+/** A hurricane's resolved traits into its control block (SIM_CELL_TRAITS). */
+void SimCellWriteTraits(uint Slot, float4 A, float4 B, float4 C)
+{
+    const uint Block = SIM_CELL_CONTROL_BASE + SIM_CELL_CONTROL_STRIDE * Slot + SIM_CELL_TRAITS;
+
+    SimCellUAV[Block] = A;
+    SimCellUAV[Block + 1u] = B;
+    SimCellUAV[Block + 2u] = C;
+}
+
+/** One thread per slot. Dispatch (1, 1, 1), in a frame without steps whose
+ *  parameters changed: every slot's traits from its seed under this frame's
+ *  ranges, so a paused sim's edits reach its live hurricanes. */
+[numthreads(FLOWSIM_MAX_CELLS, 1, 1)]
+void MainCellTraitsCS(uint Slot : SV_GroupIndex)
+{
+    float4 A, B, C;
+    SimCellResolve(SimCellUAV[SIM_CELL_SEED_BASE + Slot].x, A, B, C);
+    SimCellWriteTraits(Slot, A, B, C);
+}
+
 /** One thread per slot. Dispatch (1, 1, 1), after Reconstruct: reads this
  *  step's centre velocities and output. Slot 2n holds position and intensity
  *  (0 is free), slot 2n + 1 the age and the last step's move.
  *
  *  THE FIRST FREE SLOT DRAWS, with chance SpawnRate dt free / hurricane slots. It
- *  draws SIM_CELL_SPAWN_DRAWS points in the genesis band and takes the best
- *  seed -- a storm with cyclonic spin -- then centres on that storm's peak by
- *  a shrinking ring search. The spawn holds where the window and humidity pass,
- *  no live cell is within SimCellSpacing radii and no perpetual storm within
- *  SimPerpetualClearance of its own.
+ *  draws its traits' seed (SimCellResolve) and SIM_CELL_SPAWN_DRAWS points in
+ *  the genesis band, takes the best -- a storm with cyclonic spin -- then
+ *  centres on that storm's peak by a shrinking ring search. The spawn holds
+ *  where the window and humidity pass, no live cell is within SimCellSpacing
+ *  of the two's mean radius and no perpetual storm within
+ *  SimPerpetualClearance of its own. Every draw is keyed by the step and slot,
+ *  salted by SimSeedSalt.
  *
  *  A LIVE CELL moves with the layers' flow, each weighed by its share of the
  *  vortex, a drift poleward and west, a pull toward the storm-weighted centre
@@ -2269,7 +2423,8 @@ void SimCellWriteControl(uint Slot, float3 P, float Intensity, SimTraits T, floa
  *  storm at the centre, on that ring or on the eyewall, where the cell's own
  *  inflow converges -- toward 0 once any fails or its lifetime is past, and
  *  toward 0 inside the radius of a stronger cell or a perpetual storm, so two
- *  that meet merge. Below SIM_CELL_FREE the slot frees.
+ *  that meet merge. Below SIM_CELL_FREE the slot frees. Each step it writes
+ *  the traits its seed resolves to (SIM_CELL_TRAITS) for the passes after.
  *
  *  THE LOW AND THE GAINS (SIM_CELL_CONTROL_BASE): a live cell takes its low as
  *  the bottom layer's mean pressure on the eyewall ring and the least sample
@@ -2288,6 +2443,7 @@ void SimCellWriteControl(uint Slot, float3 P, float Intensity, SimTraits T, floa
  *  spawns within SimPerpetualClearance of one's reach, and a cell inside one
  *  merges away. */
 groupshared float4 SimCellShared[FLOWSIM_MAX_CELLS];
+groupshared float SimCellSharedRadius[FLOWSIM_MAX_CELLS];
 
 [numthreads(FLOWSIM_MAX_CELLS, 1, 1)]
 void MainCellsCS(uint Slot : SV_GroupIndex)
@@ -2298,7 +2454,11 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
     const float4 Cell = bActive ? SimCellUAV[2 * Slot] : float4(0.0f, 0.0f, 0.0f, 0.0f);
     const float Age = SimCellUAV[2 * Slot + 1].x;
 
+    float4 TraitA, TraitB, TraitC;
+    SimCellResolve(SimCellUAV[SIM_CELL_SEED_BASE + Slot].x, TraitA, TraitB, TraitC);
+
     SimCellShared[Slot] = Cell;
+    SimCellSharedRadius[Slot] = TraitA.x;
 
 	[unroll]
     for (int Entry = 0; Entry < SIM_CELL_CONTROL_STRIDE; Entry++)
@@ -2316,7 +2476,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
         const float4 Shape = SimPerpetualShape[min(Slot, (uint) FLOWSIM_MAX_PERPETUAL - 1u)];
         const float3 Pinned = SimDirection(Shape.y, sin(Shape.x));
         const bool bHeld = Cell.w > 0.0f && dot(Cell.xyz, Pinned) > cos(min(Shape.z, PI));
-        const SimTraits Traits = SimCellTraitsOf(Slot);
+        const SimTraits Traits = SimPerpetualTraits(Slot);
 
         SimCellUAV[2 * Slot] = float4(Pinned, 1.0f);
         SimCellUAV[2 * Slot + 1] = float4(0.0f, bHeld ? Pinned - Cell.xyz : float3(0.0f, 0.0f, 0.0f));
@@ -2333,8 +2493,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
     }
 
     const float Dt = SimDeltaTime;
-    const float Radius = SimCellShape.x;
-    const uint Seed = (uint) SimStepIndex * (uint) FLOWSIM_MAX_CELLS + Slot;
+    const uint Key = ((uint) SimStepIndex * (uint) FLOWSIM_MAX_CELLS + Slot) ^ SimSeedSalt;
 
     if (Cell.w <= 0.0f)
     {
@@ -2353,10 +2512,17 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
         }
 
         if (Slot != FirstFree
-            || SimHash3(Seed).x >= SimCellLife.x * Dt * (float) Free / (float) max(Active - SimPerpetualCount, 1))
+            || SimHash3(Key).x >= SimCellLife.x * Dt * (float) Free / (float) max(Active - SimPerpetualCount, 1))
         {
             return;
         }
+
+        const float Seed = (float) (SimHash(Key ^ 0x2C1B3C6Du) & 0xFFFFFFu);
+
+        float4 SpawnA, SpawnB, SpawnC;
+        SimCellResolve(Seed, SpawnA, SpawnB, SpawnC);
+
+        const float Radius = SpawnA.x;
 
         float Best = 0.0f;
         float3 P = float3(0.0f, 0.0f, 1.0f);
@@ -2364,7 +2530,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 		[loop]
         for (uint Candidate = 0; Candidate < SIM_CELL_SPAWN_DRAWS; Candidate++)
         {
-            const float3 Place = SimHash3((Seed ^ 0x5BD1E995u) * SIM_CELL_SPAWN_DRAWS + Candidate);
+            const float3 Place = SimHash3((Key ^ 0x5BD1E995u) * SIM_CELL_SPAWN_DRAWS + Candidate);
             const float Lat = lerp(SimCellMotion.z, SimCellMotion.w, Place.x) * (Place.y < 0.5f ? -1.0f : 1.0f);
             const float3 Q = SimDirection(2.0f * PI * Place.z, sin(Lat));
 
@@ -2416,14 +2582,14 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
             return;
         }
 
-		// SimCellSpacing radii from a storm cell, SimPerpetualClearance of its
-		// reach from a perpetual storm.
+		// SimCellSpacing of the two's mean radius from a storm cell,
+		// SimPerpetualClearance of its reach from a perpetual storm.
 		[loop]
         for (int Other = 0; Other < Active; Other++)
         {
             const float Spacing = (Other < SimPerpetualCount)
-				? cos(min(SimPerpetualClearance * SimCellReachOf((uint) Other), PI))
-				: cos(min(SimCellSpacing * Radius, PI));
+				? cos(min(SimPerpetualClearance * SimPerpetualReach((uint) Other), PI))
+				: cos(min(SimCellSpacing * 0.5f * (Radius + SimCellSharedRadius[Other]), PI));
 
             if (SimCellShared[Other].w > 0.0f && dot(SimCellShared[Other].xyz, P) > Spacing)
             {
@@ -2433,6 +2599,8 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 
         SimCellUAV[2 * Slot] = float4(P, 0.1f);
         SimCellUAV[2 * Slot + 1] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        SimCellUAV[SIM_CELL_SEED_BASE + Slot] = float4(Seed, 0.0f, 0.0f, 0.0f);
+        SimCellWriteTraits(Slot, SpawnA, SpawnB, SpawnC);
 
 		// Its health as a live cell reads it, so the health view shows it from
 		// the step it spawns.
@@ -2445,11 +2613,16 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
         return;
     }
 
+    SimCellWriteTraits(Slot, TraitA, TraitB, TraitC);
+
+    const SimTraits T = SimCellTraitsFrom(TraitA, TraitB, TraitC);
+    const float Radius = T.Radius;
+
     // -- Parent storm ------------------------------------------------------------
 
 	// The eyewall, or as close in as the grid resolves: where the eyewall's
 	// gain is measured, and where the storm the cell's own inflow feeds sits.
-    const float Ring = clamp(SIM_CELL_RING_CELLS * SimDLon() / max(Radius, 1e-4f), min(SimCellWall(), 0.9f), 0.9f);
+    const float Ring = clamp(SIM_CELL_RING_CELLS * SimDLon() / max(Radius, 1e-4f), min(T.Wall, 0.9f), 0.9f);
 
     float ParentPeak = SimCellParent(Cell.xyz).x;
     float3 Centroid = ParentPeak * Cell.xyz;
@@ -2474,7 +2647,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 	// rotating planet, and the one-sided push never drags it back. A cell left
 	// to the environment's steering slides off its core, and the eye it feeds
 	// is swept round a centre it is not on.
-    const float CoreReach = max(SimCellWall() * Radius, SIM_CELL_RING_CELLS * SimDLon());
+    const float CoreReach = max(T.Wall * Radius, SIM_CELL_RING_CELLS * SimDLon());
 
     const float CoreSpin = SimCellParent(Cell.xyz).y;
     float3 Core = CoreSpin * CoreSpin * Cell.xyz;
@@ -2549,7 +2722,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 		SimCellHumidityFavour(Conditions.y),
 		saturate(max(ParentPeak / max(SimCellGenesis.z, 1e-3f), SimCellMoistureParent(Conditions.y))));
 
-    float Favour = (Age > SimCellLife.w) ? 0.0f : Health.x * Health.y * Health.z;
+    float Favour = (Age > T.Life) ? 0.0f : Health.x * Health.y * Health.z;
 
 	// Inside a stronger slot's reach, the weaker merges away. A perpetual storm
 	// is always the stronger.
@@ -2559,7 +2732,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
         const float4 O = SimCellShared[Other];
 
         const bool bStronger = O.w > Cell.w || (O.w == Cell.w && Other < (int) Slot);
-        const float Merge = cos(min((Other < SimPerpetualCount) ? SimCellReachOf((uint) Other) : Radius, PI));
+        const float Merge = cos(min((Other < SimPerpetualCount) ? SimPerpetualReach((uint) Other) : SimCellSharedRadius[Other], PI));
 
         if (Other != (int) Slot && O.w > 0.0f && bStronger && dot(O.xyz, Cell.xyz) > Merge)
         {
@@ -2592,7 +2765,7 @@ void MainCellsCS(uint Slot : SV_GroupIndex)
 	// until it pins at SIM_CELL_GAIN_LIMIT.
     const float Spin = SimSpinSense(P, SIM_CELL_HEMISPHERE_SHARPNESS);
 
-    SimCellWriteControl(Slot, P, Intensity, SimCellTraitsOf(Slot), (Spin >= 0.0f) ? 1.0f : -1.0f, abs(Spin));
+    SimCellWriteControl(Slot, P, Intensity, T, (Spin >= 0.0f) ? 1.0f : -1.0f, abs(Spin));
 }
 
 // ---------------------------------------------------------------------------
@@ -3393,17 +3566,19 @@ void MainCaptureCS(uint3 Id : SV_DispatchThreadID)
     SimCaptureBuffer[13 * Total + Index] = NoiseA.w;
     SimCaptureBuffer[14 * Total + Index] = NoiseB.w;
 
+	// The cells' state, then their seeds: SIM_SNAPSHOT_CELL_ENTRIES float4.
     if (all(Id == 0u))
     {
 		[loop]
-        for (int Slot = 0; Slot < 2 * FLOWSIM_MAX_CELLS; Slot++)
+        for (int Entry = 0; Entry < SIM_SNAPSHOT_CELL_ENTRIES; Entry++)
         {
-            const float4 Cell = SimCellSRV[Slot];
+            const int Source = (Entry < 2 * FLOWSIM_MAX_CELLS) ? Entry : SIM_CELL_SEED_BASE + Entry - 2 * FLOWSIM_MAX_CELLS;
+            const float4 Cell = SimCellSRV[Source];
 
             [unroll]
             for (int K = 0; K < 4; K++)
             {
-                SimCaptureBuffer[SIM_SNAPSHOT_PLANES * Total + 4 * Slot + K] = Cell[K];
+                SimCaptureBuffer[SIM_SNAPSHOT_PLANES * Total + 4 * Entry + K] = Cell[K];
             }
         }
     }
@@ -3461,11 +3636,27 @@ void MainRestoreCS(uint3 Id : SV_DispatchThreadID)
 				SimRestoreBuffer[Base + 2], SimRestoreBuffer[Base + 3]);
         }
 
-		// The control block is not captured; the cells pass rewrites it.
+		// The control block is not captured; the cells pass rewrites it. The
+		// traits are resolved here too, so a restored hurricane reads before
+		// the first step.
 		[loop]
-        for (int Entry = SIM_CELL_CONTROL_BASE; Entry < SIM_CELL_BUFFER_SIZE; Entry++)
+        for (int Entry = SIM_CELL_CONTROL_BASE; Entry < SIM_CELL_SEED_BASE; Entry++)
         {
             SimCellUAV[Entry] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
+
+		[loop]
+        for (int Slot = 0; Slot < FLOWSIM_MAX_CELLS; Slot++)
+        {
+            const float Seed = (SimRestoreCellSeeds != 0u)
+				? SimRestoreBuffer[(int) SimRestoreFloatsPerCell * Total + 4 * (2 * FLOWSIM_MAX_CELLS + Slot)]
+				: -1.0f;
+
+            float4 A, B, C;
+            SimCellResolve(Seed, A, B, C);
+
+            SimCellUAV[SIM_CELL_SEED_BASE + Slot] = float4(Seed, 0.0f, 0.0f, 0.0f);
+            SimCellWriteTraits((uint) Slot, A, B, C);
         }
     }
 }
@@ -3595,6 +3786,23 @@ float4 SimResampleOutput(SimMeridianTaps Taps, uint Slice)
 		SimSampleMeridianTaps(SimLatLonLatestSRV, Taps, Slice), SimStateBlend);
 }
 
+/** The flow's strain rate, per unit sim time, from central differences of the
+ *  Cartesian centre field Step radians either side along T1 (Plus1, Minus1)
+ *  and T2: sqrt((du/dx - dv/dy)^2 + (du/dy + dv/dx)^2). Zero in solid
+ *  rotation, the shear across a jet. Differenced in 3D and projected, so it
+ *  has no singularity at the poles. */
+float SimStrainRate(SimMeridianTaps Plus1, SimMeridianTaps Minus1, SimMeridianTaps Plus2,
+	SimMeridianTaps Minus2, uint Layer, float3 T1, float3 T2, float Step)
+{
+    const float3 Along1 = SimResampleCentre(Plus1, Layer).xyz - SimResampleCentre(Minus1, Layer).xyz;
+    const float3 Along2 = SimResampleCentre(Plus2, Layer).xyz - SimResampleCentre(Minus2, Layer).xyz;
+
+    const float Normal = dot(Along1, T1) - dot(Along2, T2);
+    const float Shear = dot(Along1, T2) + dot(Along2, T1);
+
+    return sqrt(Normal * Normal + Shear * Shear) / (2.0f * Step);
+}
+
 /** One atlas texel of every slice of every layer. Dispatch (AtlasW, AtlasH,
  *  1), after the frame's last Reconstruct. The taps, the cells' stamp and the
  *  face basis depend on the direction alone, so each is built once for all
@@ -3616,7 +3824,12 @@ float4 SimResampleOutput(SimMeridianTaps Taps, uint Slice)
  *  lat-lon output carries there for the cells: 1, falling across each cell's
  *  eye tracer. The deck scales its columns' depth and density by it, so the
  *  eye is cloud thinned where the flow carries the tracer; cover is left as
- *  the sim has it. */
+ *  the sim has it.
+ *
+ *  THE ATLAS'S NOISE A w IS THE STRAIN over a reset period, SimStrainRate
+ *  times NoiseResetTime: the deck estimates from it how far each noise phase
+ *  has been drawn out. Differenced one grid column either side, at four more
+ *  tap sets per texel. */
 [numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
 void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 {
@@ -3642,9 +3855,20 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
     float3 T1, T2;
     Flow_FaceBasis(N, Face, T1, T2);
 
+	// One grid column at the equator.
+    const float Step = 2.0f * PI / (float) SimGridSize.x;
+
+    const SimMeridianTaps Plus1 = SimMeridianTapsAt(normalize(N + Step * T1));
+    const SimMeridianTaps Minus1 = SimMeridianTapsAt(normalize(N - Step * T1));
+    const SimMeridianTaps Plus2 = SimMeridianTapsAt(normalize(N + Step * T2));
+    const SimMeridianTaps Minus2 = SimMeridianTapsAt(normalize(N - Step * T2));
+
 	[loop]
     for (uint Layer = 0; Layer < L; Layer++)
     {
+        const float Strain = SimStrainRate(Plus1, Minus1, Plus2, Minus2, Layer, T1, T2, Step)
+			* SimNoiseResetTime;
+
         float3 Velocity = SimResampleCentre(Taps, Layer).xyz;
         Velocity -= N * dot(N, Velocity);
 
@@ -3683,7 +3907,7 @@ void MainResampleCS(uint3 Id : SV_DispatchThreadID)
 
         SimOutputUAV[int3(Id.xy, Layer)] = float4(dot(Velocity, T1), dot(Velocity, T2), Flow.zw);
         SimOutputUAV[int3(Id.xy, Layer + L)] = Weather;
-        SimOutputUAV[int3(Id.xy, Layer + 2u * L)] = float4(NoiseA.xyz, 0.0f);
+        SimOutputUAV[int3(Id.xy, Layer + 2u * L)] = float4(NoiseA.xyz, Strain);
         SimOutputUAV[int3(Id.xy, Layer + 3u * L)] = NoiseB;
     }
 }
@@ -3774,7 +3998,7 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
             {
                 const float4 Health = SimCellControl((uint) Slot, SIM_CELL_HEALTH);
 
-                Colour = (R < SimCellWall()) ? Health.www : Health.xyz * (0.35f + 0.65f * Intensity);
+                Colour = (R < SimCellTraitsOf((uint) Slot).Wall) ? Health.www : Health.xyz * (0.35f + 0.65f * Intensity);
             }
         }
 
@@ -3818,7 +4042,8 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
 		// window, green humidity, blue the storm or the share of it humidity
 		// stands in for. Bright where spawning's gates pass (blue's is
 		// SimCellSeedScore, which also weighs cyclonic spin), dim where any
-		// fails, dimmer within SimCellSpacing radii of a live cell or
+		// fails, dimmer where a midpoint cell would sit within SimCellSpacing
+		// mean radii of a live cell (see MainCellsCS's spawn) or within
 		// SimPerpetualClearance of a perpetual storm, where no seed may spawn.
         const float3 N = SimDirection(SimColumnToLon((float) C.x), Mu);
         const float2 Conditions = SimCellConditions(N, 0.0f);
@@ -3836,7 +4061,7 @@ void MainDebugVisCS(uint3 Id : SV_DispatchThreadID)
             const float4 Cell = SimCellSRV[2 * Slot];
             const float Spacing = (Slot < SimPerpetualCount)
 				? cos(min(SimPerpetualClearance * SimCellReachOf((uint) Slot), PI))
-				: cos(min(SimCellSpacing * SimCellShape.x, PI));
+				: cos(min(SimCellSpacing * 0.5f * (SimCellShape.x + SimCellReachOf((uint) Slot)), PI));
 
             bExcluded = bExcluded || (Cell.w > 0.0f && dot(Cell.xyz, N) > Spacing);
         }

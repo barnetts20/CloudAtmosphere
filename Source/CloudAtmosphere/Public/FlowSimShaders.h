@@ -90,6 +90,11 @@ SHADER_PARAMETER(FVector4f, CellLife)
 SHADER_PARAMETER(FVector4f, CellMotion)
 SHADER_PARAMETER(FVector4f, CellGenesis)
 SHADER_PARAMETER(FVector4f, CellCloud)
+SHADER_PARAMETER(FVector4f, CellRangeA)
+SHADER_PARAMETER(FVector4f, CellRangeB)
+SHADER_PARAMETER(FVector4f, CellRangeC)
+SHADER_PARAMETER(FVector4f, CellRangeD)
+SHADER_PARAMETER(FVector4f, CellRangeE)
 SHADER_PARAMETER(float, CellWindBreadth)
 SHADER_PARAMETER(float, CellSustain)
 SHADER_PARAMETER(float, CellEyeDepth)
@@ -105,6 +110,7 @@ SHADER_PARAMETER(float, CellDryTolerance)
 SHADER_PARAMETER(float, CellMoisture)
 SHADER_PARAMETER(int32, CellCount)
 SHADER_PARAMETER(int32, StepIndex)
+SHADER_PARAMETER(uint32, SeedSalt)
 
 // -- Perpetual storms ---------------------------------------------------
 SHADER_PARAMETER(int32, PerpetualCount)
@@ -148,6 +154,7 @@ SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FFlowSimUniformParameters, FlowSimUB)
 // -- Per pass -----------------------------------------------------------
 SHADER_PARAMETER(int32, SimReconstructLatest)
 SHADER_PARAMETER(uint32, SimRestoreFloatsPerCell)
+SHADER_PARAMETER(uint32, SimRestoreCellSeeds)
 
 // -- Resources ----------------------------------------------------------
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float2>, SimFaceSRV)
@@ -233,13 +240,15 @@ namespace FlowSimShader
 
 	static_assert(MaxPerpetualStorms <= MaxStormCells, "MainCellsCS updates the perpetual storms on its cell threads.");
 
-	/** A slot's float4 entries in the cell buffer, two of state (the shader
-	 *  indexes them as 2 * Slot) and six of control, and the buffer's length. */
+	/** A slot's float4 entries in the cell buffer: two of state (the shader
+	 *  indexes them as 2 * Slot), nine of control (gains, health, the low and
+	 *  three of traits) and one seed; and the buffer's length. */
 	static constexpr int32 CellStateStride = 2;
-	static constexpr int32 CellControlStride = 6;
+	static constexpr int32 CellControlStride = 9;
+	static constexpr int32 CellSeedStride = 1;
 
 	static_assert(CellStateStride == 2, "FlowSim.usf indexes a slot's state as 2 * Slot.");
-	static constexpr int32 CellBufferSize = (CellStateStride + CellControlStride) * MaxStormCells;
+	static constexpr int32 CellBufferSize = (CellStateStride + CellControlStride + CellSeedStride) * MaxStormCells;
 
 	/** Planes a snapshot holds per cell: FFlowSimulation::StateFloatsPerCell. */
 	static constexpr int32 SnapshotPlanes = 15;
@@ -318,6 +327,7 @@ FLOWSIM_DECLARE_SHADER(FFlowSimReduceRowsCS)
 FLOWSIM_DECLARE_SHADER(FFlowSimReduceGlobalCS)
 FLOWSIM_DECLARE_SHADER(FFlowSimReconstructCS)
 FLOWSIM_DECLARE_SHADER(FFlowSimCellsCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimCellTraitsCS)
 FLOWSIM_DECLARE_SHADER(FFlowSimCellFieldCS)
 FLOWSIM_DECLARE_SHADER(FFlowSimPredictCS)
 FLOWSIM_DECLARE_SHADER(FFlowSimFilterCS)

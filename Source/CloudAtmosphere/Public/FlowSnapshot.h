@@ -121,9 +121,11 @@ struct CLOUDATMOSPHERE_API FFlowSnapshotProvenance
  *  the layer thickness, cloud fraction, cloud times formation ascent, vapour,
  *  storm, noise phase A's displacement xyz and phase B's, then the low-passed
  *  ascent and the eye tracer, each plane layer-major, then row, then column;
- *  then the storm cells, eight floats a slot. The layout is told by its size:
- *  one without the last two planes restores them as zero. See
- *  FFlowSimulation::StateFloatsPerCell and MainCaptureCS.
+ *  then the storm cells, eight floats a slot, then their seeds, four a slot.
+ *  The layout is told by its size: one without the last two planes restores
+ *  them as zero, and one without the seeds restores every hurricane at the
+ *  trait ranges' midpoints. See FFlowSimulation::StateFloatsPerCell and
+ *  MainCaptureCS.
  *
  *  PITFALL: THE TRACERS ARE STATE TOO. The clouds, moisture and noise the deck
  *  draws are carried by the sim, not derived from the flow; a snapshot without
@@ -139,8 +141,8 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Snapshot")
 	FIntVector Grid = FIntVector::ZeroValue;
 
-	/** Length Grid.X * Grid.Y * Grid.Z * FloatsPerCell + TrailingFloats, or the
-	 *  same with LegacyFloatsPerCell. */
+	/** Length Grid.X * Grid.Y * Grid.Z * FloatsPerCell + TrailingFloats, or a
+	 *  legacy layout (TrailingFloatsFor). */
 	UPROPERTY()
 	TArray<float> State;
 
@@ -174,21 +176,32 @@ public:
 	static constexpr int32 NoisePlaneA = 7;
 	static constexpr int32 NoisePlaneB = 10;
 
-	/** A storm cell slot's floats: position and intensity, then age and the
-	 *  last move. Match MainCaptureCS. */
+	/** A storm cell slot's state floats, position and intensity, then age and
+	 *  the last move; and its seed's, x the seed its traits resolve from. Every
+	 *  slot's state comes first, then every slot's seed. Match MainCaptureCS. */
 	static constexpr int32 FloatsPerSlot = 8;
+	static constexpr int32 SeedFloatsPerSlot = 4;
 
-	/** The storm cells after the planes. Matches
-	 *  FFlowSimulation::StateTrailingFloats. */
-	static constexpr int32 TrailingFloats = FloatsPerSlot * 32;
+	/** The storm cells after the planes, and the trailer without the seeds
+	 *  that still restores. Match FFlowSimulation's. */
+	static constexpr int32 TrailingFloats = (FloatsPerSlot + SeedFloatsPerSlot) * 32;
+	static constexpr int32 LegacyTrailingFloats = FloatsPerSlot * 32;
+
+	/** The trailer's length for N cells a plane, or 0 for a layout this solver
+	 *  does not restore. */
+	int32 TrailingFloatsFor(int32 N) const
+	{
+		const int32 Num = State.Num();
+
+		return (N <= 0) ? 0
+			: (Num == N * FloatsPerCell + TrailingFloats) ? TrailingFloats
+			: (Num == N * FloatsPerCell + LegacyTrailingFloats || Num == N * LegacyFloatsPerCell + LegacyTrailingFloats) ? LegacyTrailingFloats
+			: 0;
+	}
 
 	bool IsValidFor(const FIntVector& InGrid) const
 	{
-		const int32 N = InGrid.X * InGrid.Y * InGrid.Z;
-
-		return Grid == InGrid && N > 0
-			&& (State.Num() == N * FloatsPerCell + TrailingFloats
-				|| State.Num() == N * LegacyFloatsPerCell + TrailingFloats);
+		return Grid == InGrid && TrailingFloatsFor(InGrid.X * InGrid.Y * InGrid.Z) > 0;
 	}
 
 	/** Whether Live matches the profile this was captured under, as far as

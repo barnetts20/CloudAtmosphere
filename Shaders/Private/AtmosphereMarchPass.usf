@@ -44,6 +44,7 @@ float4 CloudGenusStratocumulus;
 float4 CloudGenusCumulus;
 float4 CloudGenusCirrus;
 float4 ShadowCascades;
+float4 NoiseStretch;
 
 // The cloud material.
 float3 CloudScatter;

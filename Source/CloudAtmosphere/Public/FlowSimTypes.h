@@ -3,12 +3,14 @@
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
 #include "Templates/Function.h"
+#include "Serialization/StructuredArchive.h"
 #include "FlowSimTypes.generated.h"
 
 class FTextureResource;
 class FTextureRenderTargetResource;
 class UVolumeTexture;
 class UFlowSnapshot;
+struct FPropertyTag;
 
 /** The zonal flow the nudge maintains. Mirrors SIM_PROFILE_* in FlowSim.usf. */
 UENUM(BlueprintType)
@@ -140,7 +142,8 @@ struct FFlowLayerProfile
 /** A storm that never dies: a storm cell held in place with its own size, wind
  *  and oval. It sits in the shear between two opposite jets, which sets its spin,
  *  and moves by Steering plus Drift in closed form, so snapshots do not carry it.
- *  The hurricane shape and look settings apply to it too. */
+ *  The hurricane shape and look settings apply to it too, a range's at its
+ *  midpoint. */
 USTRUCT(BlueprintType)
 struct FFlowPerpetualStorm
 {
@@ -203,9 +206,50 @@ struct FFlowPerpetualStorm
 	float Lift = 0.5f;
 
 	/** Share of a hurricane's eye it opens: 0 a calm core with no hole, 1 an
-	 *  eye as deep as a hurricane's. */
+	 *  eye as deep as StormCellEyeDepth's midpoint. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Storm", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Eye = 0.0f;
+};
+
+/** A hurricane trait each cell draws uniformly from Min to Max at spawn, on its
+ *  own seed; Min = Max gives every hurricane that value. A perpetual storm takes
+ *  the midpoint of a trait it shares. A plain number saved in its place loads
+ *  as Min = Max. */
+USTRUCT(BlueprintType)
+struct FFlowSimRange
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Range")
+	float Min = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Range")
+	float Max = 0.0f;
+
+	FFlowSimRange() = default;
+	explicit FFlowSimRange(float Value) : Min(Value), Max(Value) {}
+	FFlowSimRange(float InMin, float InMax) : Min(InMin), Max(InMax) {}
+
+	/** Each end held to [Lo, Hi]; a Max below Min is held to Min. */
+	FFlowSimRange Clamped(float Lo, float Hi) const
+	{
+		const float Low = FMath::Clamp(Min, Lo, Hi);
+		return FFlowSimRange(Low, FMath::Clamp(Max, Low, Hi));
+	}
+
+	float Mid() const { return 0.5f * (Min + Max); }
+
+	/** A float or double property of the same name loads as Min = Max. */
+	bool SerializeFromMismatchedTag(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot);
+};
+
+template<>
+struct TStructOpsTypeTraits<FFlowSimRange> : public TStructOpsTypeTraitsBase2<FFlowSimRange>
+{
+	enum
+	{
+		WithStructuredSerializeFromMismatchedTag = true,
+	};
 };
 
 /** The layer profiles a new config starts with: a light top layer with the
@@ -307,6 +351,12 @@ struct FFlowSimScales
 
 	/** Storm cell radius, radians; forcing volume tiles per planet radius. */
 	float CellRadius = 0.1f;
+
+	/** The hurricane trait ranges in sim units, Min then Max; CellRadius,
+	 *  CellWind and CellLifetime are their midpoints. */
+	FVector2f CellRadiusRange = FVector2f(0.1f, 0.1f);
+	FVector2f CellWindRange = FVector2f::ZeroVector;
+	FVector2f CellLifetimeRange = FVector2f(1.0f, 1.0f);
 	float ForcingFrequency = 0.25f;
 };
 
@@ -325,6 +375,18 @@ class CLOUDATMOSPHERE_API UFlowSimConfig : public UDataAsset
 	GENERATED_BODY()
 
 public:
+	/** Config version whose values last changed meaning: an asset or tune file
+	 *  older than this applies its values unconverted. */
+	static constexpr int32 MeaningVersion = 11;
+
+	// -- Planet ---------------------------------------------------------------
+
+	/** Varies the stirring's pattern and the hurricanes' spawns and traits, so
+	 *  two planets on one config share a climate but not their weather. 0 is
+	 *  the unseeded sequence. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet")
+	int32 Seed = 0;
+
 	// -- Planet: winds ------------------------------------------------------
 	// Each layer's target is the jet profile plus its share of ShearSpeed (all on
 	// the top layer, none on the bottom). The nudge holds the winds to it; thermal
@@ -584,11 +646,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (ClampMin = "0.0", ClampMax = "90.0"))
 	float GenesisLatitudeMax = 22.0f;
 
-	/** Turnovers after which a cell decays whatever the conditions. It then
-	 *  fades at its decay rate, StormCellGrowth times one less
-	 *  StormCellPersistence, so it lives about ln(20) over that rate longer. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (ClampMin = "0.01", UIMin = "0.05"))
-	float StormCellLifetime = 30.0f;
+	/** Turnovers after which a cell decays whatever the conditions, drawn per
+	 *  cell, each end at least 0.01. It then fades at its decay rate,
+	 *  StormCellGrowth times one less StormCellPersistence, so it lives about
+	 *  ln(20) over that rate longer. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes")
+	FFlowSimRange StormCellLifetime = FFlowSimRange(30.0f);
 
 	/** Storm tracer a mature cell tops its eyewall up toward, as a multiple of the
 	 *  genesis storm (up to 1); the storm settles a little below it. Zero leaves the
@@ -598,31 +661,34 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (ClampMin = "0.0"))
 	float StormCellSustainRatio = 3.0f;
 
-	/** Outer radius, in deformation radii, where every effect reaches zero;
-	 *  the start log reports it in degrees. Held to 0.5 to 45 degrees. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (ClampMin = "0.01"))
-	float StormCellRadius = 0.7f;
+	/** Outer radius, in deformation radii, where every effect reaches zero,
+	 *  drawn per cell; the start log reports it in degrees. Each end held to
+	 *  0.5 to 45 degrees. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes")
+	FFlowSimRange StormCellRadius = FFlowSimRange(0.7f);
 
-	/** Where the vectors peak, as a fraction of the radius. Outside the eye. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (ClampMin = "0.01", ClampMax = "0.95"))
-	float StormCellEyewall = 0.18f;
+	/** Where the vectors peak, as a fraction of the radius, drawn per cell; each
+	 *  end held to 0.01 to 0.95. Outside the eye. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes")
+	FFlowSimRange StormCellEyewall = FFlowSimRange(0.18f);
 
 	/** Eyewall wind a mature cell holds on the bottom layer, as a fraction of the
 	 *  speed root. The push is closed-loop, so a cell settles here against drag and
 	 *  the flow around it; it pushes at full strength from StormCellMaturity. Keep
 	 *  it under the ceiling's knee, 0.7, less the background wind the cell rides on;
-	 *  StormCellWindBreadth widens the band of peak wind. PITFALL: far past the
-	 *  ceiling the push pins at its limit and the clip flattens the vortex to the cap,
-	 *  unregulated. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (ClampMin = "0.0"))
-	float StormCellWind = 0.6f;
+	 *  StormCellWindBreadth widens the band of peak wind. Drawn per cell; the
+	 *  start log checks the Max. PITFALL: far past the ceiling the push pins at
+	 *  its limit and the clip flattens the vortex to the cap, unregulated. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes")
+	FFlowSimRange StormCellWind = FFlowSimRange(0.6f);
 
 	/** How strongly a cell lifts every layer's cloud toward full cover at the
 	 *  eyewall, scaled by the vector ramp elsewhere, on top of the weather there, so
 	 *  a hurricane is the last thing cover or erosion removes. Against cloud decay
-	 *  alone a full-intensity eyewall settles at this cover, whatever CloudLifetime. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes", meta = (ClampMin = "0.0", ClampMax = "0.99"))
-	float StormCellCloudCover = 0.75f;
+	 *  alone a full-intensity eyewall settles at this cover, whatever CloudLifetime.
+	 *  Drawn per cell; each end held to 0 to 0.99. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricanes")
+	FFlowSimRange StormCellCloudCover = FFlowSimRange(0.75f);
 
 	/** Least distance between cells at spawn, in radii: 1 packs storms edge to
 	 *  edge, 3 keeps them apart. */
@@ -735,9 +801,10 @@ public:
 	/** Inflow on the bottom layer and outflow on the top at the eyewall, as a
 	 *  fraction of the target wind: the tangent of the spiral's inflow angle (0.2
 	 *  about 11 degrees, 0.4 about 22). Closed-loop, yielding to the vortex under the
-	 *  speed ceiling. Turns the vortex's rings into trailing spiral bands; zero is off. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Dynamics", meta = (EditCondition = "LayerCount > 1", EditConditionHides, ClampMin = "0.0", ClampMax = "1.0"))
-	float StormCellInflow = 0.2f;
+	 *  speed ceiling. Turns the vortex's rings into trailing spiral bands; zero is off.
+	 *  Drawn per cell; each end held to 0 to 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Dynamics", meta = (EditCondition = "LayerCount > 1", EditConditionHides))
+	FFlowSimRange StormCellInflow = FFlowSimRange(0.2f);
 
 
 	/** Vertical motion in the eye, in W's units, carried with the eye tracer.
@@ -761,9 +828,10 @@ public:
 	/** Storm intensity raised across the whole storm, full from the centre through
 	 *  the eyewall and easing to none at the radius, joined to the sim's by a smooth
 	 *  max. Storm deepens and darkens existing cloud without adding any; with the
-	 *  sim's storm tuned lower, the cells make the heaviest storm anywhere. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Look", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float StormCellStorm = 1.0f;
+	 *  sim's storm tuned lower, the cells make the heaviest storm anywhere. Drawn
+	 *  per cell; each end held to 0 to 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Look")
+	FFlowSimRange StormCellStorm = FFlowSimRange(1.0f);
 
 	/** Width of the smooth max joining a cell's storm to the sim's: higher
 	 *  melts a hurricane into the storms around it, lower leaves a crease. */
@@ -773,14 +841,16 @@ public:
 	/** Pressure drop full through the eyewall and easing to none at the radius, in
 	 *  the output's normalised units; the deck raises the lid and lowers the base
 	 *  under lows. Applied before the output's soft saturation, so a deep drop rounds
-	 *  off toward -1 rather than flattening into a plateau. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Look", meta = (ClampMin = "0.0", UIMax = "2.0"))
-	float StormCellPressure = 0.5f;
+	 *  off toward -1 rather than flattening into a plateau. Drawn per cell; each
+	 *  end at least 0. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Look")
+	FFlowSimRange StormCellPressure = FFlowSimRange(0.5f);
 
 	/** Share of the deck's column depth a full-intensity eye removes at its
-	 *  centre: 1 thins it to nothing, lower leaves a floor of cloud. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Look", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float StormCellEyeDepth = 0.8f;
+	 *  centre: 1 thins it to nothing, lower leaves a floor of cloud. Drawn per
+	 *  cell; each end held to 0 to 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Hurricane Look")
+	FFlowSimRange StormCellEyeDepth = FFlowSimRange(0.8f);
 
 	/** Share of the low's eye, in radius from the eyewall inward, that its rim
 	 *  ramps over smoothly. Higher starts the descent gently from the eyewall and
@@ -818,7 +888,8 @@ public:
 
 	// -- Planet: perpetual storms -------------------------------------------
 	// Authored storms in the first cell slots, sharing the hurricane shape and
-	// look settings. A cell that drifts inside one merges away.
+	// look settings, a range's at its midpoint. A cell that drifts inside one
+	// merges away.
 
 	/** Up to FlowSimShader::MaxPerpetualStorms; entries past it are ignored.
 	 *  They take the first cell slots; the hurricanes get MaxStormCells of the
@@ -970,6 +1041,9 @@ public:
 	 *  updating. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
 	bool bPaused = false;
+
+	/** Seed hashed for the shader's draw keys: 0 for Seed 0, nonzero otherwise. */
+	uint32 GetSeedSalt() const;
 
 	/** Storm intensity genesis needs: GenesisStormRatio of the full-drive equilibrium. */
 	float GetGenesisStorm() const
@@ -1150,7 +1224,7 @@ struct FFlowSimParams
 	/** x rate, y threshold, z spin, w decay rate. */
 	FVector4f StormParams = FVector4f::Zero();
 
-	/** See SimCellShape through SimCellGenesis in FlowSim.usf. */
+	/** See SimCellShape through SimCellRangeE in FlowSim.usf. */
 	FVector4f CellShape = FVector4f::Zero();
 	FVector4f CellVortex = FVector4f::Zero();
 	FVector4f CellDraft = FVector4f::Zero();
@@ -1158,6 +1232,11 @@ struct FFlowSimParams
 	FVector4f CellMotion = FVector4f::Zero();
 	FVector4f CellGenesis = FVector4f::Zero();
 	FVector4f CellCloud = FVector4f::Zero();
+	FVector4f CellRangeA = FVector4f::Zero();
+	FVector4f CellRangeB = FVector4f::Zero();
+	FVector4f CellRangeC = FVector4f::Zero();
+	FVector4f CellRangeD = FVector4f::Zero();
+	FVector4f CellRangeE = FVector4f::Zero();
 
 	float CellWindBreadth = 0.0f;
 
@@ -1186,8 +1265,11 @@ struct FFlowSimParams
 	float PerpetualClearance = 0.0f;
 	int32 CellCount = 0;
 
-	/** Steps completed before the frame's first; seeds cell spawns, wrapped to 32 bits. */
+	/** Steps completed before the frame's first; keys cell spawns, wrapped to 32 bits. */
 	int64 StepIndex = 0;
+
+	/** UFlowSimConfig::GetSeedSalt. */
+	uint32 SeedSalt = 0;
 
 	/** Perpetual storms: see SimPerpetualShape, SimPerpetualLook and SimPerpetualForm in
 	 *  FlowSim.usf, Shape's y being longitude at time zero. PerpetualRate is each one's

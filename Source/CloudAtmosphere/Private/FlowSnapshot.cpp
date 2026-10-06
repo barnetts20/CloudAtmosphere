@@ -120,7 +120,8 @@ UFlowSnapshot* UFlowSnapshot::MakeRolled(UObject* Outer, int32 Columns) const
 
 	const int64 Width = Grid.X;
 	const int64 Cells = Width * Grid.Y * Grid.Z;
-	const int64 Planes = (State.Num() - TrailingFloats) / Cells;
+	const int32 Trailing = TrailingFloatsFor((int32)Cells);
+	const int64 Planes = (State.Num() - Trailing) / Cells;
 	const int64 Shift = ((Columns % Width) + Width) % Width;
 
 	// East is +Z by the right hand: SimDirection puts column I at longitude
@@ -161,11 +162,12 @@ UFlowSnapshot* UFlowSnapshot::MakeRolled(UObject* Outer, int32 Columns) const
 		}
 	}
 
+	// The seeds, after the slots' state, carry over as they are.
 	const int64 Trailer = Planes * Cells;
-	FMemory::Memcpy(Dst + Trailer, Src + Trailer, TrailingFloats * sizeof(float));
+	FMemory::Memcpy(Dst + Trailer, Src + Trailer, Trailing * sizeof(float));
 
 	// Position xyz and intensity, then age and the move xyz; a free slot is zero.
-	for (int32 Slot = 0; Slot < TrailingFloats / FloatsPerSlot; ++Slot)
+	for (int32 Slot = 0; Slot < LegacyTrailingFloats / FloatsPerSlot; ++Slot)
 	{
 		float* S = Dst + Trailer + Slot * FloatsPerSlot;
 

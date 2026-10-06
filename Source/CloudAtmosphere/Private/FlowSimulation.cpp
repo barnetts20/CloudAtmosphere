@@ -35,8 +35,10 @@ static_assert(FFlowSimulation::StateFloatsPerCell == FlowSimShader::SnapshotPlan
 	"The snapshot planes the shader transfers and the solver state disagree.");
 
 static_assert(UFlowSnapshot::TrailingFloats == FFlowSimulation::StateTrailingFloats
-	&& FFlowSimulation::StateTrailingFloats == 8 * FlowSimShader::MaxStormCells,
-	"Snapshot layout and solver state disagree about the storm cells.");
+	&& UFlowSnapshot::LegacyTrailingFloats == FFlowSimulation::LegacyStateTrailingFloats
+	&& FFlowSimulation::StateTrailingFloats == 12 * FlowSimShader::MaxStormCells
+	&& FFlowSimulation::LegacyStateTrailingFloats == 8 * FlowSimShader::MaxStormCells,
+	"Snapshot layout and solver state disagree about the storm cells: SIM_SNAPSHOT_CELL_ENTRIES float4s.");
 
 static_assert(sizeof(FFlowSimParams::PerpetualShape) == FlowSimShader::MaxPerpetualStorms * sizeof(FVector4f)
 	&& sizeof(FFlowSimParams::PerpetualLook) == FlowSimShader::MaxPerpetualStorms * sizeof(FVector4f)
@@ -191,6 +193,11 @@ namespace
 		P.CellMotion = Params.CellMotion;
 		P.CellGenesis = Params.CellGenesis;
 		P.CellCloud = Params.CellCloud;
+		P.CellRangeA = Params.CellRangeA;
+		P.CellRangeB = Params.CellRangeB;
+		P.CellRangeC = Params.CellRangeC;
+		P.CellRangeD = Params.CellRangeD;
+		P.CellRangeE = Params.CellRangeE;
 		P.CellWindBreadth = Params.CellWindBreadth;
 		P.CellSustain = Params.CellSustain;
 		P.CellEyeDepth = Params.CellEyeDepth;
@@ -206,6 +213,7 @@ namespace
 		P.CellMoisture = Params.CellMoisture;
 		P.CellCount = FMath::Clamp(Params.CellCount, 0, FlowSimShader::MaxStormCells);
 		P.StepIndex = (int32)(uint32)Params.StepIndex;
+		P.SeedSalt = Params.SeedSalt;
 
 		// Each perpetual storm's longitude at PerpetualTime, in double and
 		// wrapped, so it holds its precision however long the sim has run.
@@ -458,9 +466,9 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 		TEXT("FlowSim.GlobalMean"));
 
 	// Two float4 of state per slot (captured in snapshots), then two of vortex
-	// gains, two of inflow gains, one of health and one of the low per
-	// slot (rewritten each step). Perpetual storms take the first slots. Must
-	// match SIM_CELL_BUFFER_SIZE.
+	// gains, two of inflow gains, one of health, one of the low and three of
+	// traits per slot (rewritten each step), then one seed per slot (captured).
+	// Perpetual storms take the first slots. Must match SIM_CELL_BUFFER_SIZE.
 	PooledCells = AllocatePooledBuffer(
 		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), FlowSimShader::CellBufferSize),
 		TEXT("FlowSim.Cells"));
@@ -508,7 +516,7 @@ void FFlowSimulation::AddInitPass(FRDGBuilder& GraphBuilder, const FFlowSimParam
 	AddSimPass<FFlowSimInitStateCS>(GraphBuilder, TEXT("FlowSim.InitState"), P, GroupCount2D(Params.GridSize));
 }
 
-void FFlowSimulation::AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R, int32 FloatsPerCell)
+void FFlowSimulation::AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R, int32 FloatsPerCell, bool bSeeds)
 {
 	FRDGBufferRef Upload = CreateStructuredBuffer(
 		GraphBuilder,
@@ -521,6 +529,7 @@ void FFlowSimulation::AddRestorePass(FRDGBuilder& GraphBuilder, const FFlowSimPa
 	FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
 	P->SimRestoreBuffer = GraphBuilder.CreateSRV(Upload);
 	P->SimRestoreFloatsPerCell = (uint32)FloatsPerCell;
+	P->SimRestoreCellSeeds = bSeeds ? 1u : 0u;
 	P->SimFaceUAV = GraphBuilder.CreateUAV(R.Source());
 	P->SimPhiUAV = GraphBuilder.CreateUAV(R.Phi);
 	P->SimTracerUAV = GraphBuilder.CreateUAV(R.TracerSource());
@@ -629,6 +638,14 @@ void FFlowSimulation::AddCellsPass(FRDGBuilder& GraphBuilder, const FFlowSimPara
 	P->SimCellUAV = GraphBuilder.CreateUAV(R.Cells);
 
 	AddSimPass<FFlowSimCellsCS>(GraphBuilder, TEXT("FlowSim.Cells"), P, FIntVector(1, 1, 1));
+}
+
+void FFlowSimulation::AddCellTraitsPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
+{
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
+	P->SimCellUAV = GraphBuilder.CreateUAV(R.Cells);
+
+	AddSimPass<FFlowSimCellTraitsCS>(GraphBuilder, TEXT("FlowSim.CellTraits"), P, FIntVector(1, 1, 1));
 }
 
 void FFlowSimulation::AddCellFieldPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
@@ -877,11 +894,12 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	if (bNeedsSeeding || !bInitialised)
 	{
 		const int32 Expected = StateFloats(Params.GridSize);
-		const int32 FloatsPerCell = FloatsPerCellOf(Params.GridSize, PendingRestore.Num());
+		bool bSeeds = false;
+		const int32 FloatsPerCell = FloatsPerCellOf(Params.GridSize, PendingRestore.Num(), &bSeeds);
 
 		if (FloatsPerCell > 0)
 		{
-			AddRestorePass(GraphBuilder, Params, R, FloatsPerCell);
+			AddRestorePass(GraphBuilder, Params, R, FloatsPerCell, bSeeds);
 
 			UE_LOG(LogFlowSim, Log, TEXT("Restored state from snapshot."));
 		}
@@ -936,6 +954,13 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 
 	if (NumSubsteps > 0 || Latest != LatestKey)
 	{
+		// Without a step the cells pass does not run, so the live hurricanes
+		// take this frame's trait ranges here.
+		if (NumSubsteps <= 0)
+		{
+			AddCellTraitsPass(GraphBuilder, Params, R);
+		}
+
 		AddReducePasses(GraphBuilder, Params, R);
 		AddReconstructPass(GraphBuilder, Params, R, true);
 		LatestKey = MoveTemp(Latest);

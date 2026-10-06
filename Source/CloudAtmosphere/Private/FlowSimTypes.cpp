@@ -3,18 +3,23 @@
 #include "FlowSimShaders.h"
 #include "FlowSimulation.h"
 #include "Serialization/CustomVersion.h"
+#include "UObject/PropertyTag.h"
 
 namespace
 {
-	/** Versions of UFlowSimConfig's saved data. An asset saved at an older
-	 *  version loads its values under the current meanings, unconverted. */
+	/** Versions of UFlowSimConfig's saved data. An asset saved before
+	 *  UFlowSimConfig::MeaningVersion loads its values under the current
+	 *  meanings, unconverted. */
 	struct FFlowSimConfigVersion
 	{
 		enum Type : int32
 		{
+			/** The hurricane traits as ranges; a saved scalar loads as Min = Max. */
+			TraitRanges = 12,
+
 			/** PITFALL: never lower this number. The engine refuses a package
 			 *  saved at a version above Latest. */
-			Current = 11,
+			Current = TraitRanges,
 
 			Latest = Current
 		};
@@ -28,6 +33,7 @@ namespace
 		FFlowSimConfigVersion::Guid, FFlowSimConfigVersion::Latest, TEXT("FlowSimConfig"));
 
 	static_assert(FlowSimShader::MaxStormCells == 32, "MaxStormCells' ClampMax in FlowSimTypes.h names the slot count.");
+	static_assert(UFlowSimConfig::MeaningVersion <= FFlowSimConfigVersion::Current, "MeaningVersion is a saved version.");
 
 	float JetPeak(const UFlowSimConfig& Config)
 	{
@@ -229,7 +235,9 @@ FFlowSimScales UFlowSimConfig::ResolveScales() const
 	S.ThermalShear = ShearSpeed * S.Root / ShapePeak(*this);
 
 	S.EddySpeed = FMath::Max(EddySpeed, 0.0f) * S.Root;
-	S.CellWind = FMath::Max(StormCellWind, 0.0f) * S.Root;
+	const FFlowSimRange Wind = StormCellWind.Clamped(0.0f, MAX_flt);
+	S.CellWindRange = FVector2f(Wind.Min, Wind.Max) * S.Root;
+	S.CellWind = Wind.Mid() * S.Root;
 	S.CellDrift = FMath::Max(StormCellDriftSpeed, 0.0f) * S.Root;
 	S.GenesisShear = FMath::Max(GenesisShearRatio * FMath::Max(FMath::Abs(ShearSpeed), 0.1f) * S.Root, 0.01f);
 
@@ -253,20 +261,65 @@ FFlowSimScales UFlowSimConfig::ResolveScales() const
 	S.CloudLifetime = FMath::Max(CloudLifetime * S.Turnover, 1e-3f);
 	S.AscentSmoothing = FlowSimNumerics::AscentSmoothing * S.Turnover;
 	S.StormLifetime = FMath::Max(StormLifetime * S.Turnover, 1e-3f);
-	S.CellLifetime = FMath::Max(StormCellLifetime * S.Turnover, 0.01f);
+	S.CellLifetimeRange = FVector2f(
+		FMath::Max(StormCellLifetime.Min * S.Turnover, 0.01f),
+		FMath::Max(FMath::Max(StormCellLifetime.Min, StormCellLifetime.Max) * S.Turnover, 0.01f));
+	S.CellLifetime = 0.5f * (S.CellLifetimeRange.X + S.CellLifetimeRange.Y);
 	S.ForcingLifetime = FMath::Max(ForcingLifetime * S.Turnover, 0.01f);
 
 	const float DR = FMath::Max(DeformationRadius, 0.01f);
 
-	S.CellRadius = FMath::Clamp(StormCellRadius * DR, FMath::DegreesToRadians(0.5f), FMath::DegreesToRadians(45.0f));
+	const FFlowSimRange Radius = FFlowSimRange(StormCellRadius.Min * DR, StormCellRadius.Max * DR)
+		.Clamped(FMath::DegreesToRadians(0.5f), FMath::DegreesToRadians(45.0f));
+	S.CellRadiusRange = FVector2f(Radius.Min, Radius.Max);
+	S.CellRadius = Radius.Mid();
 	S.ForcingFrequency = ForcingFrequency / DR;
 
 	return S;
 }
 
+uint32 UFlowSimConfig::GetSeedSalt() const
+{
+	if (Seed == 0)
+	{
+		return 0u;
+	}
+
+	// A full-avalanche mix, so neighbouring seeds share no key bits.
+	uint32 H = (uint32)Seed;
+	H ^= H >> 16;
+	H *= 0x7FEB352Du;
+	H ^= H >> 15;
+	H *= 0x846CA68Bu;
+	H ^= H >> 16;
+
+	return H ? H : 1u;
+}
+
 // ---------------------------------------------------------------------------
 // Loading
 // ---------------------------------------------------------------------------
+
+bool FFlowSimRange::SerializeFromMismatchedTag(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot)
+{
+	if (Tag.Type == NAME_FloatProperty)
+	{
+		float Value = 0.0f;
+		Slot << Value;
+		Min = Max = Value;
+		return true;
+	}
+
+	if (Tag.Type == NAME_DoubleProperty)
+	{
+		double Value = 0.0;
+		Slot << Value;
+		Min = Max = (float)Value;
+		return true;
+	}
+
+	return false;
+}
 
 void UFlowSimConfig::Serialize(FArchive& Ar)
 {
@@ -286,11 +339,11 @@ void UFlowSimConfig::PostLoad()
 
 	const int32 Version = GetLinkerCustomVersion(FFlowSimConfigVersion::Guid);
 
-	if (Version < FFlowSimConfigVersion::Current)
+	if (Version < MeaningVersion)
 	{
 		UE_LOG(LogFlowSim, Warning,
 			TEXT("'%s' is config version %d, older than %d: its values apply under the current meanings, unconverted. ")
 			TEXT("Load a preset with CloudAtmosphere.LoadParams and save the asset."),
-			*GetName(), Version, (int32)FFlowSimConfigVersion::Current);
+			*GetName(), Version, MeaningVersion);
 	}
 }
