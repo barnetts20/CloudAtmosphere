@@ -386,7 +386,7 @@ namespace
 			// zeta = 2 mu R - (1 - mu^2) dR/dmu for an angular rate R(mu).
 			Speed += W * Rate * FMath::Cos(Lat);
 			Vorticity += W * (2.0f * M * Rate - (1.0f - M * M) * Slope);
-			Weight += W;
+
 		}
 
 		FPerpetualBackground Out;
