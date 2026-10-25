@@ -1,0 +1,84 @@
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/Common.ush"
+
+// Stage A5: the flow sim's weather at the surface on a latitude-longitude grid,
+// for the CPU (FAtmosphereWeatherReadback, AtmosphereWeather.cpp): the lowest
+// layer's wind, rotated out of each face's basis and blended across the faces as
+// the field reads them, in planet-local axes; and the column's storm.
+//
+// THE GRID: cell (i, j) at longitude (i + 0.5) / W 2 pi - pi and latitude
+// ((j + 0.5) / H - 0.5) pi, its direction (cos lat cos lon, cos lat sin lon,
+// sin lat), row-major, south to north. FAtmosphereWeatherMap reads it the same
+// way.
+//
+// THE FIELD'S SPIN: the field samples the sim at RotateZ(local, Spin), so the
+// sim is read there and its wind turned back by -Spin.
+
+#include "/Plugin/CloudAtmosphere/Private/FlowField.ush"
+
+Texture2DArray WeatherFlow;
+SamplerState WeatherFlowSampler;
+uint2 WeatherMapSize;
+float WeatherSpin;
+
+/** float4(wind, planet-local axes, sim units; storm 0..1). */
+RWStructuredBuffer<float4> WeatherMapOut;
+
+float3 Atmo_WeatherRotateZ(float3 P, float Angle)
+{
+    float SinA, CosA;
+    sincos(Angle, SinA, CosA);
+
+    return float3(P.x * CosA - P.y * SinA, P.x * SinA + P.y * CosA, P.z);
+}
+
+[numthreads(8, 8, 1)]
+void MainWeatherMapCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (any(DispatchThreadId.xy >= WeatherMapSize))
+    {
+        return;
+    }
+
+    const float Lon = (float(DispatchThreadId.x) + 0.5f) / float(WeatherMapSize.x) * 2.0f * PI - PI;
+    const float Lat = ((float(DispatchThreadId.y) + 0.5f) / float(WeatherMapSize.y) - 0.5f) * PI;
+
+    const float3 Local = float3(cos(Lat) * cos(Lon), cos(Lat) * sin(Lon), sin(Lat));
+    const float3 N = normalize(Atmo_WeatherRotateZ(Local, WeatherSpin));
+
+    const float Layer = Flow_LowestLayer(WeatherFlow);
+
+    float FaceSize;
+    float2 InvSize;
+    Flow_AtlasMetrics(WeatherFlow, FaceSize, InvSize);
+
+    const FlowFaceSet Set = Flow_FaceSet(N, FaceSize);
+
+	// THE VELOCITY ROTATED OUT BEFORE IT BLENDS: each face stores it in its own
+	// basis (FlowField.ush).
+    float3 Wind = float3(0.0f, 0.0f, 0.0f);
+
+	[unroll]
+    for (uint Slot = 0; Slot < 3u; ++Slot)
+    {
+        [branch]
+        if (Set.Weight[Slot] > 0.0f)
+        {
+            const float4 Flow = Flow_SampleTile(WeatherFlow, WeatherFlowSampler,
+				Set.Face[Slot], Set.Coord[Slot], Layer, FaceSize, InvSize);
+
+            float3 T1, T2;
+            Flow_FaceBasis(N, Set.Face[Slot], T1, T2);
+
+            Wind += Set.Weight[Slot] * (Flow.x * T1 + Flow.y * T2);
+        }
+    }
+
+    const float4 Weather = Flow_SampleWeather(WeatherFlow, WeatherFlowSampler, N, Layer);
+
+    const float3 LocalWind = Atmo_WeatherRotateZ(Wind, -WeatherSpin);
+    const bool bFinite = all(isfinite(LocalWind)) && isfinite(Weather.w);
+
+    WeatherMapOut[DispatchThreadId.y * WeatherMapSize.x + DispatchThreadId.x] =
+		bFinite ? float4(LocalWind, saturate(Weather.w)) : float4(0.0f, 0.0f, 0.0f, 0.0f);
+}
