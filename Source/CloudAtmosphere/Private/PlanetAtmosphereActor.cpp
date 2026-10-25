@@ -74,6 +74,21 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     // carries more of the surface's brightness than the deck's does.
     Terrestrial.SurfaceShadow.DirectFraction = 0.85f;
 
+    // Stage A2 (the planet integration's first look, 2026-10-25): an Earth-like
+    // shell, a few hundredths of the radius deep, its cloud a third of it, and
+    // the cloud's ambient at a thousandth of the star's light: at 0.04 the
+    // cloud glowed.
+    Terrestrial.Planet.HeightScale = 0.05f;
+    Terrestrial.Shape.CloudThickness = 0.3f;
+    Terrestrial.Ambient.CloudAmbient = FLinearColor(0.0010f, 0.0011f, 0.0013f, 1.0f);
+
+    // NO SPIN ON A SURFACE THAT DOESN'T TURN. The sim runs in the planet's
+    // rotating frame (its Coriolis is the planet's spin), and the field turns
+    // with the planet's own frame (GetFieldFrame): a spin on top slides every
+    // cloud across the ground at the planet's rotation speed, far faster than
+    // the sim's winds churn them. A gas giant, with no surface, keeps one.
+    Terrestrial.Planet.SpinRatio = 0.0f;
+
     // Default source assets, so the details panel shows something and a fresh
     // actor renders. A field with no volumes is not a subtle failure -- erosion
     // goes to its neutral value and the clouds come out as smooth slabs.
@@ -116,16 +131,29 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
         UE_LOG(LogCloudAtmosphere, Warning, TEXT("PlanetAtmosphereActor: Failed to load default blue noise"));
     }
 
-    static ConstructorHelpers::FObjectFinder<UFlowSimConfig> DefaultSimConfig(
-        TEXT("/CloudAtmosphere/NoiseRecipes/GasGiantSimScratch"));
-    if (DefaultSimConfig.Succeeded())
+    // Each model's own sim. (Until stage A2 both took GasGiantSimScratch, the
+    // gas giant's scratch tune, which a terrestrial planet's weather doesn't
+    // sit on.)
+    static ConstructorHelpers::FObjectFinder<UFlowSimConfig> DefaultTerrestrialSimConfig(
+        TEXT("/CloudAtmosphere/NoiseRecipes/TerrestrialSim_Main"));
+    if (DefaultTerrestrialSimConfig.Succeeded())
     {
-        Simulation.TerrestrialConfig = DefaultSimConfig.Object;
-        Simulation.GasGiantConfig = DefaultSimConfig.Object;
+        Simulation.TerrestrialConfig = DefaultTerrestrialSimConfig.Object;
     }
     else
     {
-        UE_LOG(LogCloudAtmosphere, Warning, TEXT("PlanetAtmosphereActor: Failed to load default sim config"));
+        UE_LOG(LogCloudAtmosphere, Warning, TEXT("PlanetAtmosphereActor: Failed to load the default terrestrial sim config"));
+    }
+
+    static ConstructorHelpers::FObjectFinder<UFlowSimConfig> DefaultGasGiantSimConfig(
+        TEXT("/CloudAtmosphere/NoiseRecipes/GasGiantSim_Main"));
+    if (DefaultGasGiantSimConfig.Succeeded())
+    {
+        Simulation.GasGiantConfig = DefaultGasGiantSimConfig.Object;
+    }
+    else
+    {
+        UE_LOG(LogCloudAtmosphere, Warning, TEXT("PlanetAtmosphereActor: Failed to load the default gas giant sim config"));
     }
 
     // The gas giant's noise: broad structure stretched tall through the deep
@@ -394,23 +422,41 @@ void APlanetAtmosphereActor::UpdateAtmosphere()
     UpdateComputeMarch(PlanetRadius, PlanetCenter, LightDir);
 }
 
+/** How far the lift can lower a column's base below CloudBase, in atmosphere
+ *  thicknesses: TR_FieldReach's BaseDown. */
+static float CloudBaseDown(const FCloudShapeParams& Shape, const FCloudLiftParams& Lift)
+{
+    const float D = FMath::Max(Shape.CloudThickness, 1e-4f);
+
+    return D * (-FMath::Min(Lift.BaseTropical, 0.0f)
+        + FMath::Abs(Lift.BasePressure) - FMath::Min(Lift.AltitudeLift, 0.0f));
+}
+
+/** The CloudBase the field is packed with: solved, while bSolveBase on the
+ *  slab, so the lowest base lands at BaseMinTarget. */
+static float ResolvedCloudBase(const FCloudShapeParams& Shape, const FCloudLiftParams& Lift, bool bDeep)
+{
+    return (Shape.bSolveBase && !bDeep) ? Shape.BaseMinTarget + CloudBaseDown(Shape, Lift) : Shape.CloudBase;
+}
+
 /** READOUT ONLY, NEVER PUSHED. Mirrors TR_FieldReach, TR_TopMax and
  *  TR_BaseMin, for the active model's shape. A mismatch misreports the
  *  readouts and changes nothing drawn. */
-static void SolveFieldBounds(FCloudShapeParams& Shape, const FCloudLiftParams& Lift)
+static void SolveFieldBounds(FCloudShapeParams& Shape, const FCloudLiftParams& Lift, bool bDeep)
 {
     const float D = FMath::Max(Shape.CloudThickness, 1e-4f);
 
     const float BaseUp = D * (FMath::Max(Lift.BaseTropical, 0.0f)
         + FMath::Abs(Lift.BasePressure) + FMath::Max(Lift.AltitudeLift, 0.0f));
 
-    const float BaseDown = D * (-FMath::Min(Lift.BaseTropical, 0.0f)
-        + FMath::Abs(Lift.BasePressure) - FMath::Min(Lift.AltitudeLift, 0.0f));
+    const float BaseDown = CloudBaseDown(Shape, Lift);
 
     const float Depth = D * (1.0f + FMath::Abs(Lift.CeilingPressure));
 
-    Shape.SolvedTopMax = FMath::Min(Shape.CloudBase + BaseUp + Depth, 1.0f);
-    Shape.SolvedBaseMin = Shape.CloudBase - BaseDown;
+    const float Base = ResolvedCloudBase(Shape, Lift, bDeep);
+
+    Shape.SolvedTopMax = FMath::Min(Base + BaseUp + Depth, 1.0f);
+    Shape.SolvedBaseMin = Base - BaseDown;
 }
 
 /** The sim's noise drift angle and phase A's position in its reset cycle, at
@@ -490,7 +536,9 @@ static FTerrestrialFieldParameters PackCloudField(const APlanetAtmosphereActor& 
         : 0.0;
     const float SpinAngle = (float)FMath::Fmod(-Omega * Clock.SpinTime, 2.0 * UE_DOUBLE_PI);
 
-    Out.CloudProfile = FVector4f(Shape.CloudBase, Shape.CloudThickness, Shape.SurfaceSoftness, Shape.CeilingFalloff);
+    // (Stage A2: the base solved from BaseMinTarget on the slab, ResolvedCloudBase.)
+    Out.CloudProfile = FVector4f(ResolvedCloudBase(Shape, Lift, A.PlanetType == EPlanetAtmosphereType::GasGiant),
+        Shape.CloudThickness, Shape.SurfaceSoftness, Shape.CeilingFalloff);
     Out.CloudCurves = FVector4f(Shape.TopCurve, Shape.BottomCurve, Shape.SlopePerTexel, Warp.WarpStretch);
     // The deep deck's fill, floor and darkening ride in spare slots; the slab
     // reads none of them.
@@ -965,7 +1013,7 @@ bool APlanetAtmosphereActor::FillMarchParams(
 
     if (HasClouds())
     {
-        SolveFieldBounds(Model.Shape, Model.Lift);
+        SolveFieldBounds(Model.Shape, Model.Lift, PlanetType == EPlanetAtmosphereType::GasGiant);
         Out.Field = PackCloudField(*this);
     }
 
@@ -1106,13 +1154,59 @@ void APlanetAtmosphereActor::UpdateComputeMarch(
     if (bWant)
     {
         ViewExtension->SetFrame_GameThread(Params);
+        UpdateWeatherReadback(Params);
     }
 
     ViewExtension->SetEnabled(bWant);
 }
 
+void APlanetAtmosphereActor::UpdateWeatherReadback(const FAtmosphereMarchParams& March)
+{
+    // Only while someone reads it (the actor holds one reference), with a field to read.
+    if (WeatherReadbackSeconds <= 0.0f || WeatherFeed.GetSharedReferenceCount() <= 1
+        || March.Model == AtmosphereMarchModel::AirOnly || !March.FlowResource)
+    {
+        return;
+    }
+
+    if (!WeatherReadback.IsValid())
+    {
+        WeatherReadback = MakeShared<FAtmosphereWeatherReadback, ESPMode::ThreadSafe>(WeatherFeed);
+    }
+
+    const double Now = FPlatformTime::Seconds();
+    const bool bDue = Now - WeatherReadbackTime >= (double)WeatherReadbackSeconds;
+
+    if (bDue)
+    {
+        WeatherReadbackTime = Now;
+    }
+
+    // The field the march draws, at its spin.
+    ENQUEUE_RENDER_COMMAND(CloudAtmosphereWeatherReadback)(
+        [Readback = WeatherReadback, Flow = March.FlowResource, Spin = March.Field.CloudMotion.W, bDue](FRHICommandListImmediate& RHICmdList)
+        {
+            Readback->Poll_RenderThread();
+
+            if (bDue)
+            {
+                Readback->Request_RenderThread(RHICmdList, Flow, Spin);
+            }
+        });
+}
+
 void APlanetAtmosphereActor::ReleaseViewExtension()
 {
+    // Stage A5: the weather's read-backs in flight go on the render thread too.
+    if (WeatherReadback.IsValid())
+    {
+        ENQUEUE_RENDER_COMMAND(CloudAtmosphereReleaseWeatherReadback)(
+            [Readback = MoveTemp(WeatherReadback)](FRHICommandListImmediate&) mutable
+            {
+                Readback.Reset();
+            });
+    }
+
     if (!ViewExtension)
     {
         return;
@@ -1482,4 +1576,4 @@ void APlanetAtmosphereActor::SetAtmosphereActive(bool bActive)
     {
         SunLightComponent->SetVisibility(bActive);
     }
-}
+}

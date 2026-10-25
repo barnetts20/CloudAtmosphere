@@ -166,9 +166,24 @@ struct CLOUDATMOSPHERE_API FCloudShapeParams
 	GENERATED_BODY()
 
 	/** Condensation level of an unlifted column, as a fraction of atmosphere
-	 *  thickness. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "0.0", UIMax = "1.0"))
+	 *  thickness. Unread while bSolveBase: the base is solved from
+	 *  BaseMinTarget. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "0.0", UIMax = "1.0", EditCondition = "!bSolveBase"))
 	float CloudBase = 0.15f;
+
+	/** Solve CloudBase so the lowest a column base can fall (SolvedBaseMin)
+	 *  lands at BaseMinTarget, whatever the thickness and the lift: the lowest
+	 *  cloud just meets the ground, as fog and low stratus. The slab only; the
+	 *  deep deck keeps CloudBase. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	bool bSolveBase = true;
+
+	/** Where the lowest column base lands while bSolveBase, as a fraction of
+	 *  atmosphere thickness: slightly under the surface, so the lowest cloud
+	 *  reaches the ground rather than stopping short of it. The marched band
+	 *  is held at the surface either way. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (UIMin = "-0.05", UIMax = "0.05", EditCondition = "bSolveBase"))
+	float BaseMinTarget = -0.005f;
 
 	/** Depth of a fully towering column before the pressure lid, as a fraction of
 	 *  atmosphere thickness, and the unit of every lift and warp offset. THE

@@ -14,6 +14,13 @@
 // per rank in the cell, so each frame's marched set reads one contiguous window
 // of the blue noise and stays blue at cell resolution, where the resolve filters
 // it; seeded by output pixel, each frame's set is close to white.
+//
+// MainSurfaceSunCS, the surface-sun pass, shares the uniforms: the sun at a
+// list of surface points as the march's surface shadow takes it
+// (Atmo_SurfaceSun), for a renderer that lights its own sun with it (the
+// ocean). Those pixels it marks in the self-lit mask, which the march reads to
+// leave its surface multiply off them (FAtmosphereViewExtension's
+// AddSurfaceSunPass_RenderThread and SetSelfLitMask_RenderThread).
 
 #ifndef ATMO_MODEL
 #define ATMO_MODEL 0
@@ -147,6 +154,14 @@ float2 OutputSize;
 float JitterShift;
 uint2 NoiseOffset;
 
+/** Pixels whose renderer lit its own sun with the surface-sun pass, and
+ *  dimmed what it drew behind itself: the march leaves its surface multiply
+ *  off them. On 0: none (a black stand-in is bound). Info: the mask's texels
+ *  per output pixel (xy) and its last texel (zw). */
+Texture2D<float> SelfLitMask;
+uint SelfLitMaskOn;
+float4 SelfLitMaskInfo;
+
 /** float4(in-scattered light, green transmittance). */
 RWTexture2D<float4> MarchColor;
 
@@ -203,6 +218,21 @@ void MainMarchCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     P.Atmo = TR_BUILD_ATMO(Svxy, RayDir, SceneRayDistance, F);
     P.Atmo.mainRayParams.jitterShift = JitterShift;
 
+	// A self-lit pixel has had its sun dimmed already, by the same
+	// Atmo_SurfaceSun, and what it drew behind itself by this multiply: a
+	// second would darken it twice.
+    BRANCH
+
+    if (SelfLitMaskOn != 0u)
+    {
+        const int2 MaskTexel = int2(min(Pixel * SelfLitMaskInfo.xy, SelfLitMaskInfo.zw));
+
+        if (SelfLitMask.Load(int3(MaskTexel, 0)) > 0.5f)
+        {
+            P.Atmo.surfaceShadowParams.enabled = 0.0f;
+        }
+    }
+
     float Depth;
     bool bCloudDepth;
     float3 Transmittance;
@@ -229,4 +259,400 @@ void MainMarchCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	// The guide depth's sign says whether the depth is the field's.
     MarchDepth[DispatchThreadId.xy] = float2(bFinite ? Depth : ATMO_SKY_DEPTH,
 		(bFinite && bCloudDepth) ? GuideDepth : -GuideDepth);
+}
+
+// -- The surface-sun pass ---------------------------------------------------------
+
+/** The points, three floats each in their own frame, and how many. */
+Buffer<float> SurfaceSunPoints;
+uint SurfaceSunCount;
+
+/** The points' frame to camera-relative world (row vectors: the rotation and
+ *  scale, then the frame's origin from this view's camera, formed in double). */
+float4x4 SurfaceSunToView;
+
+/** Two per point: float4(the sun through the deck and the air, the planet's
+ *  shadow) and float4(the air alone, the direct share). A point the surface
+ *  shadow is off for, or not finite, takes (1, 1, 1, 1) and (1, 1, 1, 0): its
+ *  sun undimmed and nothing to take from behind it. */
+RWBuffer<float4> SurfaceSunOut;
+
+#ifndef ATMO_SURFACE_SUN_THREADS
+#define ATMO_SURFACE_SUN_THREADS 64
+#endif
+
+[numthreads(ATMO_SURFACE_SUN_THREADS, 1, 1)]
+void MainSurfaceSunCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint Index = DispatchThreadId.x;
+
+    if (Index >= SurfaceSunCount)
+    {
+        return;
+    }
+
+    const float3 Point = float3(
+		SurfaceSunPoints[Index * 3u],
+		SurfaceSunPoints[Index * 3u + 1u],
+		SurfaceSunPoints[Index * 3u + 2u]);
+
+    const float3 World = mul(float4(Point, 1.0f), SurfaceSunToView).xyz;
+
+    float4 Out0 = float4(1.0f, 1.0f, 1.0f, 1.0f);
+    float4 Out1 = float4(1.0f, 1.0f, 1.0f, 0.0f);
+
+	// A point written as NaN (a mesh's hole) keeps the stand-in.
+    BRANCH
+
+    if (SurfaceShadow.x > 0.0f && all(isfinite(World)))
+    {
+        const float Distance = length(World);
+        const float3 RayDir = Distance > 1e-4f ? World / Distance : float3(0.0f, 0.0f, 1.0f);
+
+        FieldParams F = TR_BUILD_FIELD();
+
+        AtmoMarchParams P;
+        P.Field = F;
+        P.WorldToLocal = Atmo_WorldToLocal(PlanetRotation);
+        P.Scatter = TR_BUILD_SCATTER();
+        P.Atmo = TR_BUILD_ATMO(float2(0.0f, 0.0f), RayDir, Distance, F);
+
+        const AtmoShadowCameras Cameras =
+			AtmoShadow_MakeCameras(ShadowCamera1, ShadowCamera2, ShadowLight0, ShadowLight1, ShadowLight2);
+
+        const AtmoLightConstants C = Atmo_LightConstants(ShadowTarget, Cameras, P);
+
+        const AtmoSurfaceSun S = Atmo_SurfaceSun(
+			FlowTarget, FlowTargetSampler, ShadowTarget, ShadowTargetSampler, Cameras,
+			TransmittanceTable, TransmittanceTableSampler, C, P,
+			World, Atmo_ToLocal(World, P));
+
+        if (all(isfinite(S.Sun)) && all(isfinite(S.Air)) && isfinite(S.SunUp))
+        {
+            Out0 = float4(saturate(S.Sun), saturate(S.SunUp));
+            Out1 = float4(saturate(S.Air), P.Atmo.surfaceShadowParams.directFraction);
+        }
+    }
+
+    SurfaceSunOut[Index * 2u] = Out0;
+    SurfaceSunOut[Index * 2u + 1u] = Out1;
+}
+
+// -- The sky tables (stage A3) ------------------------------------------------------
+//
+// The air's sky at the surface, per unit of the light above the air, for a renderer
+// that shades its own sky (the ocean's reflection, its foam's and its water's sky
+// light): the march's own clear-air in-scatter (Rayleigh and Mie with the planet's
+// shadow and the transmittance table toward the light, the air's ambient), marched
+// from just above the surface out of the shell. No cloud: the field's shadow and the
+// deck itself are not in it.
+//
+// THE TABLE IS PLANET-LOCAL, so one serves every point of the surface:
+//   x  sqrt(mu), mu the view's cosine from the local zenith (the upper hemisphere)
+//   y  the view's azimuth from the sun's, over pi (the sky is symmetric about it)
+//   z  0.5 + 0.5 sign(mus) sqrt(|mus|), mus the sun's cosine from the zenith
+// at texel centres ((u (N - 1) + 0.5) / N), so each axis's ends are exact. The
+// irradiance table holds the sky's irradiance on the horizontal by z alone.
+// A READER'S MAPPING MUST MATCH (VoxelOceanAtmoSky.ush in the voxel plugin).
+
+/** The table's size, and the air's ambient per unit of the light. */
+uint4 SkyLutSize;
+float3 SkyLutAmbient;
+
+RWTexture3D<float4> SkyLutOut;
+
+/** The table, for the irradiance's integral. */
+Texture3D<float4> SkyLutIn;
+SamplerState SkyLutSampler;
+uint SkyIrradianceSize;
+RWTexture2D<float4> SkyIrradianceOut;
+
+#ifndef ATMO_SKY_LUT_STEPS
+#define ATMO_SKY_LUT_STEPS 40
+#endif
+
+#ifndef ATMO_SKY_LUT_THREADS
+#define ATMO_SKY_LUT_THREADS 4
+#endif
+
+/** The sun's cosine from the zenith for a table coordinate in [0, 1]. */
+float Atmo_SkyLutMuS(float Z)
+{
+    const float V = Z * 2.0f - 1.0f;
+    return sign(V) * V * V;
+}
+
+[numthreads(ATMO_SKY_LUT_THREADS, ATMO_SKY_LUT_THREADS, ATMO_SKY_LUT_THREADS)]
+void MainSkyLutCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (any(DispatchThreadId >= SkyLutSize.xyz))
+    {
+        return;
+    }
+
+    const float3 U = float3(DispatchThreadId) / float3(max(SkyLutSize.xyz - 1u, uint3(1u, 1u, 1u)));
+
+    const float Mu = U.x * U.x;
+    const float Phi = U.y * PI;
+    const float MuS = Atmo_SkyLutMuS(U.z);
+
+    const float SinView = sqrt(saturate(1.0f - Mu * Mu));
+    const float3 Dir = float3(SinView * cos(Phi), SinView * sin(Phi), Mu);
+    const float3 Light = float3(sqrt(saturate(1.0f - MuS * MuS)), 0.0f, MuS);
+
+    FieldParams F = TR_BUILD_FIELD();
+
+    AtmoMarchParams P;
+    P.Field = F;
+    P.WorldToLocal = Atmo_WorldToLocal(PlanetRotation);
+    P.Scatter = TR_BUILD_SCATTER();
+    P.Atmo = TR_BUILD_ATMO(float2(0.0f, 0.0f), Dir, ATMO_NO_OCCLUDER_DISTANCE, F);
+
+	// A frame of its own: the point just above the surface at the origin, its
+	// zenith +z, the sun in the xz plane, a unit light.
+    const float Radius = P.Atmo.planetParams.planetRadius;
+    const float Top = P.Atmo.planetParams.atmoRadius;
+    const float Lift = max((Top - Radius) * 1e-4f, 1e-3f);
+    const float3 Centre = float3(0.0f, 0.0f, -(Radius + Lift));
+
+    P.Atmo.planetParams.planetPos = Centre;
+    P.Atmo.lightRayParams.lightDir = Light;
+    P.Atmo.mainRayParams.lightCol = float3(1.0f, 1.0f, 1.0f);
+    P.Atmo.scatteringParams.atmoAmbient.rgb = SkyLutAmbient;
+    P.Atmo.scatteringParams.cosTheta = dot(Dir, Light);
+    P.Atmo.scatteringParams.phaseR = Atmo_PhaseRayleigh(P.Atmo.scatteringParams.cosTheta);
+    P.Atmo.scatteringParams.phaseM = Atmo_PhaseHG(P.Atmo.scatteringParams.cosTheta, MieG);
+
+    const AtmoShadowCameras Cameras =
+		AtmoShadow_MakeCameras(ShadowCamera1, ShadowCamera2, ShadowLight0, ShadowLight1, ShadowLight2);
+    const AtmoLightConstants C = Atmo_LightConstants(ShadowTarget, Cameras, P);
+
+    const float Length = max(Atmo_RaySphere(float3(0.0f, 0.0f, 0.0f), Dir, Centre, Top).y, 0.0f);
+
+    float3 Sky = float3(0.0f, 0.0f, 0.0f);
+    float3 Transmittance = float3(1.0f, 1.0f, 1.0f);
+
+	// Steps growing with the square of the distance: a horizon ray's air is near
+	// its start.
+    LOOP
+    for (int Step = 0; Step < ATMO_SKY_LUT_STEPS; ++Step)
+    {
+        const float A = float(Step) / float(ATMO_SKY_LUT_STEPS);
+        const float B = float(Step + 1) / float(ATMO_SKY_LUT_STEPS);
+        const float T0 = Length * A * A;
+        const float T1 = Length * B * B;
+        const float Dt = T1 - T0;
+        const float3 Pos = Dir * (0.5f * (T0 + T1));
+
+        const float Dist = length(Pos - Centre);
+        const float Height = Dist - Radius;
+        const float3 Dens = Field_AirDensity(Height, P.Atmo);
+
+        const float3 Up = (Pos - Centre) / max(Dist, 1e-4f);
+        const float PlanetShadow = Atmo_PlanetShadow(P, Pos, Light);
+        const float3 SunAir = PlanetShadow * Atmo_SunAir(TransmittanceTable, TransmittanceTableSampler, C, P, Pos, Light);
+        const float LobeShadow = pow(PlanetShadow, ATMO_LOBE_SHADOW_POWER);
+
+        const float AmbientFactor = Atmo_AmbientFactor(dot(Up, Light),
+			P.Scatter.AmbientTerminator, P.Atmo.scatteringParams.atmoAmbient.a);
+
+        const float3 Direct = (P.Atmo.scatteringParams.rayBeta * P.Atmo.scatteringParams.phaseR * Dens.x
+			+ P.Atmo.scatteringParams.mieBeta * P.Atmo.scatteringParams.phaseM * Dens.y * LobeShadow) * SunAir;
+
+        const float3 Ambient = P.Atmo.scatteringParams.rayBeta * Dens.x
+			* P.Atmo.scatteringParams.atmoAmbient.rgb * AmbientFactor;
+
+        const float3 Extinction = (P.Atmo.scatteringParams.rayBeta * Dens.x
+			+ P.Atmo.scatteringParams.mieBeta * Dens.y
+			+ P.Atmo.scatteringParams.absBeta * Dens.z) * Dt;
+
+		// The march's own step weight: what survives the step's extinction.
+        const float3 Tau = max(Extinction, 1e-6f);
+        const float3 Weight = Dt * lerp((1.0f - exp(-Tau)) / Tau, 1.0f - 0.5f * Tau, step(Tau, 1e-3f));
+
+        Sky += Transmittance * (Direct + Ambient) * Weight;
+        Transmittance *= exp(-Extinction);
+    }
+
+    SkyLutOut[DispatchThreadId] = float4(all(isfinite(Sky)) ? max(Sky, 0.0f) : float3(0.0f, 0.0f, 0.0f), 1.0f);
+}
+
+/** The table's texel-centre coordinate for u in [0, 1] over N texels. */
+float Atmo_SkyLutCoord(float U, float N)
+{
+    return (saturate(U) * (N - 1.0f) + 0.5f) / N;
+}
+
+#ifndef ATMO_SKY_IRRADIANCE_THREADS
+#define ATMO_SKY_IRRADIANCE_THREADS 64
+#endif
+
+[numthreads(ATMO_SKY_IRRADIANCE_THREADS, 1, 1)]
+void MainSkyIrradianceCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= SkyIrradianceSize)
+    {
+        return;
+    }
+
+    const float Z = float(DispatchThreadId.x) / float(max(SkyIrradianceSize - 1u, 1u));
+    const float3 N = float3(SkyLutSize.xyz);
+
+	// The upper hemisphere, cosine-weighted: mu = u^2 at midpoints in u, the
+	// azimuth over [0, pi] twice.
+    const int MuNodes = 32;
+    const int PhiNodes = 16;
+    float3 Sum = float3(0.0f, 0.0f, 0.0f);
+
+    LOOP
+    for (int I = 0; I < MuNodes; ++I)
+    {
+        const float Uu = (float(I) + 0.5f) / float(MuNodes);
+        const float Mu = Uu * Uu;
+        const float DMu = 2.0f * Uu / float(MuNodes);
+
+        for (int J = 0; J < PhiNodes; ++J)
+        {
+            const float Uv = (float(J) + 0.5f) / float(PhiNodes);
+            const float3 UVW = float3(Atmo_SkyLutCoord(Uu, N.x), Atmo_SkyLutCoord(Uv, N.y), Atmo_SkyLutCoord(Z, N.z));
+            const float3 L = SkyLutIn.SampleLevel(SkyLutSampler, UVW, 0.0f).rgb;
+
+            Sum += L * (Mu * DMu * (2.0f * PI / float(PhiNodes)));
+        }
+    }
+
+    SkyIrradianceOut[uint2(DispatchThreadId.x, 0u)] = float4(Sum, 1.0f);
+}
+
+// -- The reflection rays (stage A3b) --------------------------------------------------
+//
+// The march itself along rays from a renderer's own surface points (the ocean's
+// mirror directions), at the step counts given: the air and the cloud a reflection
+// sees, lit as the view sees them. Each ray starts at its origin (camera-relative),
+// not at the camera, and nothing stops it but the planet and the shell.
+
+/** Six floats a ray: its origin (camera-relative, world units) and its direction. */
+Buffer<float> ReflectRays;
+uint ReflectCount;
+
+/** The rays' grid width (their blue noise seeds by cell), the air's and the cloud's
+ *  step counts. */
+uint ReflectGridWidth;
+float ReflectAtmosphereSteps;
+float ReflectCloudSteps;
+
+/** float4(the light the ray gathers, its mean transmittance). */
+RWBuffer<float4> ReflectOut;
+
+#ifndef ATMO_REFLECT_THREADS
+#define ATMO_REFLECT_THREADS 64
+#endif
+
+[numthreads(ATMO_REFLECT_THREADS, 1, 1)]
+void MainReflectCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint Index = DispatchThreadId.x;
+
+    if (Index >= ReflectCount)
+    {
+        return;
+    }
+
+    const float3 Origin = float3(ReflectRays[Index * 6u], ReflectRays[Index * 6u + 1u], ReflectRays[Index * 6u + 2u]);
+    const float3 Dir = float3(ReflectRays[Index * 6u + 3u], ReflectRays[Index * 6u + 4u], ReflectRays[Index * 6u + 5u]);
+
+    float4 Out = float4(0.0f, 0.0f, 0.0f, 1.0f);
+
+    BRANCH
+
+    if (all(isfinite(Origin)) && all(isfinite(Dir)) && dot(Dir, Dir) > 0.5f)
+    {
+        const uint Width = max(ReflectGridWidth, 1u);
+        const float2 Svxy = float2(float(Index % Width), float(Index / Width)) + 0.5f;
+
+        FieldParams F = TR_BUILD_FIELD();
+
+        AtmoMarchParams P;
+        P.Field = F;
+        P.WorldToLocal = Atmo_WorldToLocal(PlanetRotation);
+        P.Scatter = TR_BUILD_SCATTER();
+        P.Atmo = TR_BUILD_ATMO(Svxy, normalize(Dir), ATMO_NO_OCCLUDER_DISTANCE, F);
+        P.Atmo.mainRayParams.cameraPos = Origin;
+        P.Atmo.mainRayParams.atmoSteps = max((int) ReflectAtmosphereSteps, 1);
+        P.Atmo.mainRayParams.cloudSteps = max((int) ReflectCloudSteps, 1);
+        P.Atmo.mainRayParams.jitterShift = 0.0f;
+
+        float Depth;
+        bool bCloudDepth;
+        float3 Transmittance;
+
+        const float4 Color = Atmo_MainMarchDepth(
+			FlowTarget, FlowTargetSampler,
+			DetailVolume, DetailVolumeSampler,
+			StructureVolume, StructureVolumeSampler,
+			BlueNoiseTexture,
+			ShadowTarget, ShadowTargetSampler,
+			AtmoShadow_MakeCameras(ShadowCamera1, ShadowCamera2, ShadowLight0, ShadowLight1, ShadowLight2),
+			TransmittanceTable, TransmittanceTableSampler,
+			P, Depth, bCloudDepth, Transmittance);
+
+        if (all(isfinite(Color.rgb)) && all(isfinite(Transmittance)))
+        {
+            Out = float4(min(max(Color.rgb, 0.0f), ATMO_HALF_MAX), saturate(dot(Transmittance, (1.0f / 3.0f).xxx)));
+        }
+    }
+
+    ReflectOut[Index] = Out;
+}
+
+// -- The weather at surface points (stage A6) -------------------------------------------
+//
+// The flow sim's weather at a renderer's own points (MainSurfaceSunCS's inputs), as the
+// field reads its columns: the cloud layer's weather slice at the point's direction turned
+// by the field's spin. float4(cloud cover 0..1, storm 0..1, vertical motion -1..1 rising
+// positive, 0). Air alone binds no flow: zeros.
+
+RWBuffer<float4> SurfaceWeatherOut;
+
+[numthreads(ATMO_SURFACE_SUN_THREADS, 1, 1)]
+void MainSurfaceWeatherCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint Index = DispatchThreadId.x;
+
+    if (Index >= SurfaceSunCount)
+    {
+        return;
+    }
+
+    const float3 Point = float3(
+		SurfaceSunPoints[Index * 3u],
+		SurfaceSunPoints[Index * 3u + 1u],
+		SurfaceSunPoints[Index * 3u + 2u]);
+
+    const float3 World = mul(float4(Point, 1.0f), SurfaceSunToView).xyz;
+
+    float4 Out = float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    BRANCH
+
+    if (all(isfinite(World)))
+    {
+        FieldParams F = TR_BUILD_FIELD();
+
+        const float3 Local = mul(Atmo_WorldToLocal(PlanetRotation), World - PlanetOffset);
+        const float Length = length(Local);
+
+        if (Length > 1e-4f)
+        {
+            const float3 N = normalize(Atmo_RotateZ(Local / Length, F.SpinAngle));
+            const float4 Weather = Flow_SampleWeather(FlowTarget, FlowTargetSampler, N, TR_FlowLayer(FlowTarget, F.CloudLayer));
+
+            if (all(isfinite(Weather)))
+            {
+                Out = float4(saturate(Weather.y), saturate(Weather.w), clamp(Weather.x, -1.0f, 1.0f), 0.0f);
+            }
+        }
+    }
+
+    SurfaceWeatherOut[Index] = Out;
 }

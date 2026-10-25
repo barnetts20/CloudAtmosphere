@@ -15,6 +15,7 @@
 #include "CoreMinimal.h"
 #include "HAL/CriticalSection.h"
 #include "RHIFwd.h"
+#include "RHIGPUReadback.h"
 
 class FTextureRenderTargetResource;
 
@@ -85,6 +86,10 @@ public:
 	explicit FAtmosphereWeatherReadback(const TSharedRef<FAtmosphereWeatherFeed, ESPMode::ThreadSafe>& InFeed);
 	~FAtmosphereWeatherReadback();
 
+	// Owns its read-backs: not copied (an exported class instantiates every member it has).
+	FAtmosphereWeatherReadback(const FAtmosphereWeatherReadback&) = delete;
+	FAtmosphereWeatherReadback& operator=(const FAtmosphereWeatherReadback&) = delete;
+
 	/** Reads the field's weather back: the flow atlas the field draws, and its spin angle.
 	 *  Render thread. */
 	void Request_RenderThread(FRHICommandListImmediate& RHICmdList, FTextureRenderTargetResource* Flow, float SpinAngle);
@@ -94,6 +99,6 @@ public:
 
 private:
 	TSharedRef<FAtmosphereWeatherFeed, ESPMode::ThreadSafe> Feed;
-	TArray<TUniquePtr<class FRHIGPUBufferReadback>> Pending;
+	TArray<TUniquePtr<FRHIGPUBufferReadback>> Pending;
 	uint64 Serial = 0;
 };

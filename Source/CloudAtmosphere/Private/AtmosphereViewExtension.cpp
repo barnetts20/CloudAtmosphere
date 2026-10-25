@@ -4,6 +4,7 @@
 #include "DataDrivenShaderPlatformInfo.h"
 #include "GlobalShader.h"
 #include "HAL/IConsoleManager.h"
+#include "Misc/Crc.h"
 #include "PostProcess/PostProcessMaterialInputs.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
@@ -45,14 +46,15 @@ namespace
 // which the bake includes too.
 // ---------------------------------------------------------------------------
 
-BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereMarchParameters, )
+/** What the march and the surface-sun pass share: the field, the planet, the
+ *  light, the air and the resources. FillCommonParameters sets it. */
+BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereCommonParameters, )
 	SHADER_PARAMETER_STRUCT_INCLUDE(FTerrestrialFieldParameters, Field)
 	SHADER_PARAMETER(FVector3f, CloudScatter)
 	SHADER_PARAMETER(FVector3f, StormScatter)
 	SHADER_PARAMETER(FVector3f, DeepScatter)
 
 	SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, AtmoSceneDepth)
 	SHADER_PARAMETER(FMatrix44f, RayViewToClip)
 	SHADER_PARAMETER(float, LatticeGrowth)
 
@@ -112,6 +114,11 @@ BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereMarchParameters, )
 	SHADER_PARAMETER_TEXTURE(Texture2D, TransmittanceTable)
 	SHADER_PARAMETER_SAMPLER(SamplerState, TransmittanceTableSampler)
 	SHADER_PARAMETER_TEXTURE(Texture2D<float>, CoverageThreshold)
+END_SHADER_PARAMETER_STRUCT()
+
+BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereMarchParameters, )
+	SHADER_PARAMETER_STRUCT_INCLUDE(FAtmosphereCommonParameters, Common)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, AtmoSceneDepth)
 
 	SHADER_PARAMETER(FUintVector2, MarchCells)
 	SHADER_PARAMETER(uint32, MarchStride)
@@ -120,9 +127,60 @@ BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereMarchParameters, )
 	SHADER_PARAMETER(float, JitterShift)
 	SHADER_PARAMETER(FUintVector2, NoiseOffset)
 
+	// Stage A2: the pixels a renderer lit its own sun for (SetSelfLitMask_RenderThread).
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, SelfLitMask)
+	SHADER_PARAMETER(uint32, SelfLitMaskOn)
+	SHADER_PARAMETER(FVector4f, SelfLitMaskInfo)
+
 	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, MarchColor)
 	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, MarchTint)
 	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, MarchDepth)
+END_SHADER_PARAMETER_STRUCT()
+
+/** Stage A2: the surface-sun pass (MainSurfaceSunCS): the sun at a renderer's
+ *  surface points, as the march's surface shadow takes it. */
+BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereSurfaceSunParameters, )
+	SHADER_PARAMETER_STRUCT_INCLUDE(FAtmosphereCommonParameters, Common)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<float>, SurfaceSunPoints)
+	SHADER_PARAMETER(uint32, SurfaceSunCount)
+	SHADER_PARAMETER(FMatrix44f, SurfaceSunToView)
+	SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<float4>, SurfaceSunOut)
+END_SHADER_PARAMETER_STRUCT()
+
+/** Stage A6: the weather at surface points (MainSurfaceWeatherCS). */
+BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereSurfaceWeatherParameters, )
+	SHADER_PARAMETER_STRUCT_INCLUDE(FAtmosphereCommonParameters, Common)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<float>, SurfaceSunPoints)
+	SHADER_PARAMETER(uint32, SurfaceSunCount)
+	SHADER_PARAMETER(FMatrix44f, SurfaceSunToView)
+	SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<float4>, SurfaceWeatherOut)
+END_SHADER_PARAMETER_STRUCT()
+
+/** Stage A3b: the reflection rays (MainReflectCS). */
+BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereReflectParameters, )
+	SHADER_PARAMETER_STRUCT_INCLUDE(FAtmosphereCommonParameters, Common)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<float>, ReflectRays)
+	SHADER_PARAMETER(uint32, ReflectCount)
+	SHADER_PARAMETER(uint32, ReflectGridWidth)
+	SHADER_PARAMETER(float, ReflectAtmosphereSteps)
+	SHADER_PARAMETER(float, ReflectCloudSteps)
+	SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<float4>, ReflectOut)
+END_SHADER_PARAMETER_STRUCT()
+
+/** Stage A3: the sky tables (MainSkyLutCS, MainSkyIrradianceCS). */
+BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereSkyLutParameters, )
+	SHADER_PARAMETER_STRUCT_INCLUDE(FAtmosphereCommonParameters, Common)
+	SHADER_PARAMETER(FUintVector4, SkyLutSize)
+	SHADER_PARAMETER(FVector3f, SkyLutAmbient)
+	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture3D<float4>, SkyLutOut)
+END_SHADER_PARAMETER_STRUCT()
+
+BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereSkyIrradianceParameters, )
+	SHADER_PARAMETER(FUintVector4, SkyLutSize)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture3D<float4>, SkyLutIn)
+	SHADER_PARAMETER_SAMPLER(SamplerState, SkyLutSampler)
+	SHADER_PARAMETER(uint32, SkyIrradianceSize)
+	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SkyIrradianceOut)
 END_SHADER_PARAMETER_STRUCT()
 
 /** Every model's march: ATMO_MODEL selects the slab, the deep deck or air alone. */
@@ -154,6 +212,157 @@ public:
 
 IMPLEMENT_GLOBAL_SHADER(FAtmosphereMarchCS,
 	"/Plugin/CloudAtmosphere/Private/AtmosphereMarchPass.usf", "MainMarchCS", SF_Compute);
+
+/** Stage A2: the surface-sun pass, every model as the march. */
+class FAtmosphereSurfaceSunCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FAtmosphereSurfaceSunCS);
+
+	using FParameters = FAtmosphereSurfaceSunParameters;
+	SHADER_USE_PARAMETER_STRUCT(FAtmosphereSurfaceSunCS, FGlobalShader);
+
+	using FPermutationDomain = FAtmosphereMarchCS::FPermutationDomain;
+
+	static constexpr int32 Threads = 64;
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+
+	static void ModifyCompilationEnvironment(
+		const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.SetDefine(TEXT("ATMO_SURFACE_SUN_THREADS"), Threads);
+		OutEnvironment.SetDefine(TEXT("ATMO_TRANSMITTANCE_WIDTH"), AtmosphereTransmittance::Width);
+		OutEnvironment.SetDefine(TEXT("ATMO_TRANSMITTANCE_HEIGHT"), AtmosphereTransmittance::Height);
+	}
+};
+
+IMPLEMENT_GLOBAL_SHADER(FAtmosphereSurfaceSunCS,
+	"/Plugin/CloudAtmosphere/Private/AtmosphereMarchPass.usf", "MainSurfaceSunCS", SF_Compute);
+
+/** Stage A6: the weather at surface points, every model as the march. */
+class FAtmosphereSurfaceWeatherCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FAtmosphereSurfaceWeatherCS);
+
+	using FParameters = FAtmosphereSurfaceWeatherParameters;
+	SHADER_USE_PARAMETER_STRUCT(FAtmosphereSurfaceWeatherCS, FGlobalShader);
+
+	using FPermutationDomain = FAtmosphereMarchCS::FPermutationDomain;
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+
+	static void ModifyCompilationEnvironment(
+		const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.SetDefine(TEXT("ATMO_SURFACE_SUN_THREADS"), FAtmosphereSurfaceSunCS::Threads);
+		OutEnvironment.SetDefine(TEXT("ATMO_TRANSMITTANCE_WIDTH"), AtmosphereTransmittance::Width);
+		OutEnvironment.SetDefine(TEXT("ATMO_TRANSMITTANCE_HEIGHT"), AtmosphereTransmittance::Height);
+	}
+};
+
+IMPLEMENT_GLOBAL_SHADER(FAtmosphereSurfaceWeatherCS,
+	"/Plugin/CloudAtmosphere/Private/AtmosphereMarchPass.usf", "MainSurfaceWeatherCS", SF_Compute);
+
+/** Stage A3b: the reflection rays, every model as the march. */
+class FAtmosphereReflectCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FAtmosphereReflectCS);
+
+	using FParameters = FAtmosphereReflectParameters;
+	SHADER_USE_PARAMETER_STRUCT(FAtmosphereReflectCS, FGlobalShader);
+
+	using FPermutationDomain = FAtmosphereMarchCS::FPermutationDomain;
+
+	static constexpr int32 Threads = 64;
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+
+	static void ModifyCompilationEnvironment(
+		const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.SetDefine(TEXT("ATMO_REFLECT_THREADS"), Threads);
+		OutEnvironment.SetDefine(TEXT("ATMO_TRANSMITTANCE_WIDTH"), AtmosphereTransmittance::Width);
+		OutEnvironment.SetDefine(TEXT("ATMO_TRANSMITTANCE_HEIGHT"), AtmosphereTransmittance::Height);
+	}
+};
+
+IMPLEMENT_GLOBAL_SHADER(FAtmosphereReflectCS,
+	"/Plugin/CloudAtmosphere/Private/AtmosphereMarchPass.usf", "MainReflectCS", SF_Compute);
+
+/** Stage A3: the sky table, every model as the march (the deep deck's air included). */
+class FAtmosphereSkyLutCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FAtmosphereSkyLutCS);
+
+	using FParameters = FAtmosphereSkyLutParameters;
+	SHADER_USE_PARAMETER_STRUCT(FAtmosphereSkyLutCS, FGlobalShader);
+
+	using FPermutationDomain = FAtmosphereMarchCS::FPermutationDomain;
+
+	static constexpr int32 Threads = 4;
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+
+	static void ModifyCompilationEnvironment(
+		const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.SetDefine(TEXT("ATMO_SKY_LUT_THREADS"), Threads);
+		OutEnvironment.SetDefine(TEXT("ATMO_TRANSMITTANCE_WIDTH"), AtmosphereTransmittance::Width);
+		OutEnvironment.SetDefine(TEXT("ATMO_TRANSMITTANCE_HEIGHT"), AtmosphereTransmittance::Height);
+	}
+};
+
+IMPLEMENT_GLOBAL_SHADER(FAtmosphereSkyLutCS,
+	"/Plugin/CloudAtmosphere/Private/AtmosphereMarchPass.usf", "MainSkyLutCS", SF_Compute);
+
+/** Its irradiance on the horizontal, one model: it reads the table alone. */
+class FAtmosphereSkyIrradianceCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FAtmosphereSkyIrradianceCS);
+
+	using FParameters = FAtmosphereSkyIrradianceParameters;
+	SHADER_USE_PARAMETER_STRUCT(FAtmosphereSkyIrradianceCS, FGlobalShader);
+
+	static constexpr int32 Threads = 64;
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+
+	static void ModifyCompilationEnvironment(
+		const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.SetDefine(TEXT("ATMO_SKY_IRRADIANCE_THREADS"), Threads);
+		OutEnvironment.SetDefine(TEXT("ATMO_TRANSMITTANCE_WIDTH"), AtmosphereTransmittance::Width);
+		OutEnvironment.SetDefine(TEXT("ATMO_TRANSMITTANCE_HEIGHT"), AtmosphereTransmittance::Height);
+	}
+};
+
+IMPLEMENT_GLOBAL_SHADER(FAtmosphereSkyIrradianceCS,
+	"/Plugin/CloudAtmosphere/Private/AtmosphereMarchPass.usf", "MainSkyIrradianceCS", SF_Compute);
 
 BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereResolveParameters, )
 	SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
@@ -322,6 +531,9 @@ void FAtmosphereViewExtension::ReleaseHistories_RenderThread()
 	check(IsInRenderingThread());
 
 	Histories.Empty();
+	SelfLitMasks.Empty();
+	SkyLut.SafeRelease();
+	SkyIrradiance.SafeRelease();
 	bHasFrame = false;
 }
 
@@ -384,6 +596,388 @@ namespace
 				TexCreate_ShaderResource | TexCreate_UAV),
 			Name);
 	}
+
+	/** The march's and the surface-sun pass's shared uniforms, from this frame's
+	 *  params and the view: the planet's offset formed in double from the
+	 *  view's own camera. */
+	void FillCommonParameters(FAtmosphereCommonParameters& P, const FAtmosphereMarchParams& March,
+		const FSceneView& View, const FMatrix44f& RayViewToClip)
+	{
+		FRHISamplerState* BilinearClamp = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+
+		P.Field = March.Field;
+		P.CloudScatter = March.CloudScatter;
+		P.StormScatter = March.StormScatter;
+		P.DeepScatter = March.DeepScatter;
+
+		P.View = View.ViewUniformBuffer;
+		P.RayViewToClip = RayViewToClip;
+		P.LatticeGrowth = FMath::Max(March.LatticeGrowth, 1e-3f);
+
+		// Formed here in double from this view's own camera.
+		P.PlanetOffset = FVector3f(March.PlanetCenter - View.ViewMatrices.GetViewOrigin());
+		P.PlanetRotation = March.PlanetRotation;
+		P.LightDirection = March.LightDirection;
+		P.LightColor = March.LightColor;
+		P.PlanetRadius = March.PlanetRadius;
+		P.HeightScale = March.HeightScale;
+
+		P.LightExtinctionFraction = March.LightExtinctionFraction;
+
+		P.ForwardG = March.ForwardG;
+		P.BackwardG = March.BackwardG;
+		P.ForwardWeight = March.ForwardWeight;
+		P.CloudAmbient = March.CloudAmbient;
+		P.CloudAmbientFloor = March.CloudAmbientFloor;
+
+		P.OctaveCount = March.OctaveCount;
+		P.OctaveAttenuation = March.OctaveAttenuation;
+		P.OctaveEccentricity = March.OctaveEccentricity;
+
+		P.AmbientTerminator = March.AmbientTerminator;
+		P.MieLobeDecay = March.MieLobeDecay;
+
+		P.RayleighBeta = March.RayleighBeta;
+		P.RayleighScaleHeight = March.RayleighScaleHeight;
+		P.MieBeta = March.MieBeta;
+		P.MieScaleHeight = March.MieScaleHeight;
+		P.MieG = March.MieG;
+		P.AbsorptionBeta = March.AbsorptionBeta;
+		P.AbsorptionAltitude = March.AbsorptionAltitude;
+		P.AbsorptionFalloff = March.AbsorptionFalloff;
+		P.AtmosphereAmbient = March.AtmosphereAmbient;
+		P.AtmosphereAmbientFloor = March.AtmosphereAmbientFloor;
+
+		P.AtmosphereSteps = March.AtmosphereSteps;
+		P.CloudSteps = March.CloudSteps;
+		P.ChordSpread = March.ChordSpread;
+		P.SurfaceShadow = March.SurfaceShadow;
+
+		P.ShadowCamera1 = March.ShadowCamera1;
+		P.ShadowCamera2 = March.ShadowCamera2;
+		P.ShadowLight0 = March.ShadowLight[0];
+		P.ShadowLight1 = March.ShadowLight[1];
+		P.ShadowLight2 = March.ShadowLight[2];
+
+		// Samplers as the bake binds them: the flow atlas carries its own
+		// gutters, the volumes tile, and the shadow map and the table clamp.
+		// Air alone binds black where the cloud's resources go.
+		P.FlowTarget = March.FlowTexture.IsValid() ? March.FlowTexture : GBlackArrayTexture->TextureRHI;
+		P.FlowTargetSampler = TStaticSamplerState<SF_Bilinear, AM_Wrap, AM_Clamp, AM_Clamp>::GetRHI();
+		P.StructureVolume = March.StructureTexture.IsValid() ? March.StructureTexture : GBlackVolumeTexture->TextureRHI;
+		P.StructureVolumeSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
+		P.DetailVolume = March.DetailTexture.IsValid() ? March.DetailTexture : GBlackVolumeTexture->TextureRHI;
+		P.DetailVolumeSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
+		P.BlueNoiseTexture = March.BlueNoiseTexture;
+		P.ShadowTarget = March.ShadowTexture.IsValid() ? March.ShadowTexture : GBlackArrayTexture->TextureRHI;
+		P.ShadowTargetSampler = BilinearClamp;
+		P.TransmittanceTable = March.TransmittanceTexture;
+		P.TransmittanceTableSampler = BilinearClamp;
+		P.CoverageThreshold = March.CoverageTexture.IsValid() ? March.CoverageTexture : GBlackTexture->TextureRHI;
+	}
+}
+
+bool FAtmosphereViewExtension::CanMarch_RenderThread() const
+{
+	check(IsInRenderingThread());
+
+	// Air alone reads none of the cloud's resources and binds black in their slots.
+	const bool bCloudResources = March.Model == AtmosphereMarchModel::AirOnly
+		|| (March.FlowTexture.IsValid() && March.ShadowTexture.IsValid() && March.CoverageTexture.IsValid());
+
+	return bHasFrame && March.IsUsable() && bCloudResources
+		&& March.TransmittanceTexture.IsValid() && March.BlueNoiseTexture.IsValid();
+}
+
+bool FAtmosphereViewExtension::IsSurfaceShadowOn_RenderThread() const
+{
+	return bEnabled.load() && CanMarch_RenderThread() && March.SurfaceShadow.X > 0.0f;
+}
+
+bool FAtmosphereViewExtension::AddSurfaceSunPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View,
+	FRDGBufferSRVRef Points, uint32 Count, const FMatrix44f& PointsToView, FRDGBufferUAVRef Out)
+{
+	check(IsInRenderingThread());
+
+	if (!Points || !Out || Count == 0u || !IsSurfaceShadowOn_RenderThread()
+		|| View.GetFeatureLevel() < ERHIFeatureLevel::SM5 || !View.ViewUniformBuffer.IsValid())
+	{
+		return false;
+	}
+
+	FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(View.GetFeatureLevel());
+
+	FAtmosphereSurfaceSunCS::FPermutationDomain Permutation;
+	Permutation.Set<FAtmosphereMarchCS::FModel>(March.Model);
+
+	TShaderMapRef<FAtmosphereSurfaceSunCS> Shader(ShaderMap, Permutation);
+
+	if (!Shader.IsValid())
+	{
+		return false;
+	}
+
+	FAtmosphereSurfaceSunParameters* P = GraphBuilder.AllocParameters<FAtmosphereSurfaceSunParameters>();
+
+	FillCommonParameters(P->Common, March, View, FMatrix44f(View.ViewMatrices.GetProjectionMatrix()));
+
+	P->SurfaceSunPoints = Points;
+	P->SurfaceSunCount = Count;
+	P->SurfaceSunToView = PointsToView;
+	P->SurfaceSunOut = Out;
+
+	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("AtmosphereSurfaceSun %u", Count),
+		Shader, P, FComputeShaderUtils::GetGroupCount((int32)Count, FAtmosphereSurfaceSunCS::Threads));
+
+	return true;
+}
+
+bool FAtmosphereViewExtension::AddSurfaceWeatherPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View,
+	FRDGBufferSRVRef Points, uint32 Count, const FMatrix44f& PointsToView, FRDGBufferUAVRef Out)
+{
+	check(IsInRenderingThread());
+
+	if (!Points || !Out || Count == 0u || !bEnabled.load() || !CanMarch_RenderThread()
+		|| March.Model == AtmosphereMarchModel::AirOnly
+		|| View.GetFeatureLevel() < ERHIFeatureLevel::SM5 || !View.ViewUniformBuffer.IsValid())
+	{
+		return false;
+	}
+
+	FAtmosphereSurfaceWeatherCS::FPermutationDomain Permutation;
+	Permutation.Set<FAtmosphereMarchCS::FModel>(March.Model);
+
+	TShaderMapRef<FAtmosphereSurfaceWeatherCS> Shader(GetGlobalShaderMap(View.GetFeatureLevel()), Permutation);
+
+	if (!Shader.IsValid())
+	{
+		return false;
+	}
+
+	FAtmosphereSurfaceWeatherParameters* P = GraphBuilder.AllocParameters<FAtmosphereSurfaceWeatherParameters>();
+
+	FillCommonParameters(P->Common, March, View, FMatrix44f(View.ViewMatrices.GetProjectionMatrix()));
+
+	P->SurfaceSunPoints = Points;
+	P->SurfaceSunCount = Count;
+	P->SurfaceSunToView = PointsToView;
+	P->SurfaceWeatherOut = Out;
+
+	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("AtmosphereSurfaceWeather %u", Count),
+		Shader, P, FComputeShaderUtils::GetGroupCount((int32)Count, FAtmosphereSurfaceSunCS::Threads));
+
+	return true;
+}
+
+bool FAtmosphereViewExtension::AddReflectionPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View,
+	FRDGBufferSRVRef Rays, uint32 Count, uint32 GridWidth, int32 AtmosphereSteps, int32 CloudSteps, FRDGBufferUAVRef Out)
+{
+	check(IsInRenderingThread());
+
+	if (!Rays || !Out || Count == 0u || !bEnabled.load() || !CanMarch_RenderThread()
+		|| View.GetFeatureLevel() < ERHIFeatureLevel::SM5 || !View.ViewUniformBuffer.IsValid())
+	{
+		return false;
+	}
+
+	FAtmosphereReflectCS::FPermutationDomain Permutation;
+	Permutation.Set<FAtmosphereMarchCS::FModel>(March.Model);
+
+	TShaderMapRef<FAtmosphereReflectCS> Shader(GetGlobalShaderMap(View.GetFeatureLevel()), Permutation);
+
+	if (!Shader.IsValid())
+	{
+		return false;
+	}
+
+	FAtmosphereReflectParameters* P = GraphBuilder.AllocParameters<FAtmosphereReflectParameters>();
+
+	FillCommonParameters(P->Common, March, View, FMatrix44f(View.ViewMatrices.GetProjectionMatrix()));
+
+	P->ReflectRays = Rays;
+	P->ReflectCount = Count;
+	P->ReflectGridWidth = FMath::Max(GridWidth, 1u);
+	P->ReflectAtmosphereSteps = (float)FMath::Clamp(AtmosphereSteps, 1, 256);
+	P->ReflectCloudSteps = (float)FMath::Clamp(CloudSteps, 1, 256);
+	P->ReflectOut = Out;
+
+	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("AtmosphereReflect %u", Count),
+		Shader, P, FComputeShaderUtils::GetGroupCount((int32)Count, FAtmosphereReflectCS::Threads));
+
+	return true;
+}
+
+bool FAtmosphereViewExtension::GetSkyTables_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View,
+	FRDGTextureRef& OutSky, FRDGTextureRef& OutIrradiance)
+{
+	check(IsInRenderingThread());
+
+	OutSky = nullptr;
+	OutIrradiance = nullptr;
+
+	if (!bEnabled.load() || !CanMarch_RenderThread()
+		|| View.GetFeatureLevel() < ERHIFeatureLevel::SM5 || !View.ViewUniformBuffer.IsValid())
+	{
+		return false;
+	}
+
+	// The air's ambient per unit of the light: the march's is the light's times
+	// the ratio.
+	const auto PerUnit = [](float A, float L) { return L > 1e-20f ? A / L : 0.0f; };
+	const FVector3f UnitAmbient(
+		PerUnit(March.AtmosphereAmbient.X, March.LightColor.X),
+		PerUnit(March.AtmosphereAmbient.Y, March.LightColor.Y),
+		PerUnit(March.AtmosphereAmbient.Z, March.LightColor.Z));
+
+	// What the tables depend on: the air, its ambient and the shell, not the
+	// light or the camera. Made again when it changes, and every SkyRefreshFrames
+	// regardless (the transmittance table is rebuilt after the air changes, a
+	// frame or more later).
+	const float KeyValues[] = {
+		(float)March.Model, March.PlanetRadius, March.HeightScale,
+		March.RayleighBeta.X, March.RayleighBeta.Y, March.RayleighBeta.Z, March.RayleighScaleHeight,
+		March.MieBeta.X, March.MieBeta.Y, March.MieBeta.Z, March.MieScaleHeight, March.MieG,
+		March.AbsorptionBeta.X, March.AbsorptionBeta.Y, March.AbsorptionBeta.Z, March.AbsorptionAltitude, March.AbsorptionFalloff,
+		UnitAmbient.X, UnitAmbient.Y, UnitAmbient.Z, March.AtmosphereAmbientFloor, March.AmbientTerminator };
+	const uint32 Key = FCrc::MemCrc32(KeyValues, sizeof(KeyValues));
+
+	constexpr uint64 SkyRefreshFrames = 30;
+	const uint64 Frame = GFrameCounterRenderThread;
+
+	const bool bHave = SkyLut.IsValid() && SkyIrradiance.IsValid();
+
+	if (bHave && SkyKey == Key && SkyFrame + SkyRefreshFrames > Frame)
+	{
+		OutSky = GraphBuilder.RegisterExternalTexture(SkyLut);
+		OutIrradiance = GraphBuilder.RegisterExternalTexture(SkyIrradiance);
+		return true;
+	}
+
+	if (SkyFrame == Frame && bHave)
+	{
+		// Made already this frame, by another view.
+		OutSky = GraphBuilder.RegisterExternalTexture(SkyLut);
+		OutIrradiance = GraphBuilder.RegisterExternalTexture(SkyIrradiance);
+		return true;
+	}
+
+	FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(View.GetFeatureLevel());
+
+	FAtmosphereSkyLutCS::FPermutationDomain Permutation;
+	Permutation.Set<FAtmosphereMarchCS::FModel>(March.Model);
+
+	TShaderMapRef<FAtmosphereSkyLutCS> LutShader(ShaderMap, Permutation);
+	TShaderMapRef<FAtmosphereSkyIrradianceCS> IrradianceShader(ShaderMap);
+
+	if (!LutShader.IsValid() || !IrradianceShader.IsValid())
+	{
+		return false;
+	}
+
+	const FIntVector Size(AtmosphereSkyTables::ViewZenith, AtmosphereSkyTables::Azimuth, AtmosphereSkyTables::SunZenith);
+
+	FRDGTextureRef Sky = GraphBuilder.CreateTexture(
+		FRDGTextureDesc::Create3D(Size, PF_FloatRGBA, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_UAV),
+		TEXT("CloudAtmosphere.SkyLut"));
+
+	FRDGTextureRef Irradiance = GraphBuilder.CreateTexture(
+		FRDGTextureDesc::Create2D(FIntPoint(AtmosphereSkyTables::Irradiance, 1), PF_FloatRGBA, FClearValueBinding::Black,
+			TexCreate_ShaderResource | TexCreate_UAV),
+		TEXT("CloudAtmosphere.SkyIrradiance"));
+
+	{
+		FAtmosphereSkyLutParameters* P = GraphBuilder.AllocParameters<FAtmosphereSkyLutParameters>();
+
+		FillCommonParameters(P->Common, March, View, FMatrix44f(View.ViewMatrices.GetProjectionMatrix()));
+
+		P->SkyLutSize = FUintVector4((uint32)Size.X, (uint32)Size.Y, (uint32)Size.Z, 0u);
+		P->SkyLutAmbient = UnitAmbient;
+		P->SkyLutOut = GraphBuilder.CreateUAV(Sky);
+
+		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("AtmosphereSkyLut %dx%dx%d", Size.X, Size.Y, Size.Z),
+			LutShader, P, FComputeShaderUtils::GetGroupCount(Size, FAtmosphereSkyLutCS::Threads));
+	}
+
+	{
+		FAtmosphereSkyIrradianceParameters* P = GraphBuilder.AllocParameters<FAtmosphereSkyIrradianceParameters>();
+
+		P->SkyLutSize = FUintVector4((uint32)Size.X, (uint32)Size.Y, (uint32)Size.Z, 0u);
+		P->SkyLutIn = Sky;
+		P->SkyLutSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+		P->SkyIrradianceSize = (uint32)AtmosphereSkyTables::Irradiance;
+		P->SkyIrradianceOut = GraphBuilder.CreateUAV(Irradiance);
+
+		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("AtmosphereSkyIrradiance %d", AtmosphereSkyTables::Irradiance),
+			IrradianceShader, P, FComputeShaderUtils::GetGroupCount(AtmosphereSkyTables::Irradiance, FAtmosphereSkyIrradianceCS::Threads));
+	}
+
+	GraphBuilder.QueueTextureExtraction(Sky, &SkyLut);
+	GraphBuilder.QueueTextureExtraction(Irradiance, &SkyIrradiance);
+	SkyKey = Key;
+	SkyFrame = Frame;
+
+	OutSky = Sky;
+	OutIrradiance = Irradiance;
+	return true;
+}
+
+void FAtmosphereViewExtension::SetSelfLitMask_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View,
+	FRDGTextureRef Mask)
+{
+	check(IsInRenderingThread());
+
+	const uint64 Frame = GFrameCounterRenderThread;
+
+	// Masks from earlier frames, or graphs, are stale handles.
+	SelfLitMasks.RemoveAll([Frame](const FSelfLitMask& Entry) { return Entry.Frame != Frame; });
+
+	if (!Mask)
+	{
+		return;
+	}
+
+	FSelfLitMask* Entry = SelfLitMasks.FindByPredicate([&GraphBuilder, &View](const FSelfLitMask& E)
+		{
+			return E.Builder == &GraphBuilder && E.View == &View;
+		});
+
+	if (!Entry)
+	{
+		Entry = &SelfLitMasks.AddDefaulted_GetRef();
+	}
+
+	Entry->View = &View;
+	Entry->ViewMatrix = View.ViewMatrices.GetViewMatrix();
+	Entry->Builder = &GraphBuilder;
+	Entry->Frame = Frame;
+	Entry->Mask = Mask;
+}
+
+const FAtmosphereViewExtension::FSelfLitMask* FAtmosphereViewExtension::FindSelfLitMask(
+	FRDGBuilder& GraphBuilder, const FSceneView& View) const
+{
+	const uint64 Frame = GFrameCounterRenderThread;
+
+	// The view the hook saw, by address; should the addresses differ, the one
+	// with its camera.
+	for (const FSelfLitMask& E : SelfLitMasks)
+	{
+		if (E.Frame == Frame && E.Builder == &GraphBuilder && E.View == &View)
+		{
+			return &E;
+		}
+	}
+
+	for (const FSelfLitMask& E : SelfLitMasks)
+	{
+		if (E.Frame == Frame && E.Builder == &GraphBuilder
+			&& E.ViewMatrix.Equals(View.ViewMatrices.GetViewMatrix(), 1e-6))
+		{
+			return &E;
+		}
+	}
+
+	return nullptr;
 }
 
 FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
@@ -395,13 +989,8 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		? Inputs.SceneTextures.SceneTextures->GetContents()
 		: nullptr;
 
-	// Air alone reads none of the cloud's resources and binds black in their slots.
-	const bool bCloudResources = March.Model == AtmosphereMarchModel::AirOnly
-		|| (March.FlowTexture.IsValid() && March.ShadowTexture.IsValid() && March.CoverageTexture.IsValid());
-
-	if (!bHasFrame || !March.IsUsable() || !SceneColorSlice.IsValid()
-		|| !SceneTextures || !SceneTextures->SceneDepthTexture || !bCloudResources
-		|| !March.TransmittanceTexture.IsValid() || !March.BlueNoiseTexture.IsValid()
+	if (!CanMarch_RenderThread() || !SceneColorSlice.IsValid()
+		|| !SceneTextures || !SceneTextures->SceneDepthTexture
 		|| View.bIsReflectionCapture || View.bIsPlanarReflection
 		|| !View.IsPerspectiveProjection()
 		|| View.GetFeatureLevel() < ERHIFeatureLevel::SM5)
@@ -551,76 +1140,8 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 
 		FAtmosphereMarchParameters* P = GraphBuilder.AllocParameters<FAtmosphereMarchParameters>();
 
-		P->Field = March.Field;
-		P->CloudScatter = March.CloudScatter;
-		P->StormScatter = March.StormScatter;
-		P->DeepScatter = March.DeepScatter;
-
-		P->View = View.ViewUniformBuffer;
+		FillCommonParameters(P->Common, March, View, RayViewToClip);
 		P->AtmoSceneDepth = SceneDepth;
-		P->RayViewToClip = RayViewToClip;
-		P->LatticeGrowth = FMath::Max(March.LatticeGrowth, 1e-3f);
-
-		// Formed here in double from this view's own camera.
-		P->PlanetOffset = FVector3f(March.PlanetCenter - ViewOrigin);
-		P->PlanetRotation = March.PlanetRotation;
-		P->LightDirection = March.LightDirection;
-		P->LightColor = March.LightColor;
-		P->PlanetRadius = March.PlanetRadius;
-		P->HeightScale = March.HeightScale;
-
-		P->LightExtinctionFraction = March.LightExtinctionFraction;
-
-		P->ForwardG = March.ForwardG;
-		P->BackwardG = March.BackwardG;
-		P->ForwardWeight = March.ForwardWeight;
-		P->CloudAmbient = March.CloudAmbient;
-		P->CloudAmbientFloor = March.CloudAmbientFloor;
-
-		P->OctaveCount = March.OctaveCount;
-		P->OctaveAttenuation = March.OctaveAttenuation;
-		P->OctaveEccentricity = March.OctaveEccentricity;
-
-		P->AmbientTerminator = March.AmbientTerminator;
-		P->MieLobeDecay = March.MieLobeDecay;
-
-		P->RayleighBeta = March.RayleighBeta;
-		P->RayleighScaleHeight = March.RayleighScaleHeight;
-		P->MieBeta = March.MieBeta;
-		P->MieScaleHeight = March.MieScaleHeight;
-		P->MieG = March.MieG;
-		P->AbsorptionBeta = March.AbsorptionBeta;
-		P->AbsorptionAltitude = March.AbsorptionAltitude;
-		P->AbsorptionFalloff = March.AbsorptionFalloff;
-		P->AtmosphereAmbient = March.AtmosphereAmbient;
-		P->AtmosphereAmbientFloor = March.AtmosphereAmbientFloor;
-
-		P->AtmosphereSteps = March.AtmosphereSteps;
-		P->CloudSteps = March.CloudSteps;
-		P->ChordSpread = March.ChordSpread;
-		P->SurfaceShadow = March.SurfaceShadow;
-
-		P->ShadowCamera1 = March.ShadowCamera1;
-		P->ShadowCamera2 = March.ShadowCamera2;
-		P->ShadowLight0 = March.ShadowLight[0];
-		P->ShadowLight1 = March.ShadowLight[1];
-		P->ShadowLight2 = March.ShadowLight[2];
-
-		// Samplers as the bake binds them: the flow atlas carries its own
-		// gutters, the volumes tile, and the shadow map and the table clamp.
-		// Air alone binds black where the cloud's resources go.
-		P->FlowTarget = March.FlowTexture.IsValid() ? March.FlowTexture : GBlackArrayTexture->TextureRHI;
-		P->FlowTargetSampler = TStaticSamplerState<SF_Bilinear, AM_Wrap, AM_Clamp, AM_Clamp>::GetRHI();
-		P->StructureVolume = March.StructureTexture.IsValid() ? March.StructureTexture : GBlackVolumeTexture->TextureRHI;
-		P->StructureVolumeSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
-		P->DetailVolume = March.DetailTexture.IsValid() ? March.DetailTexture : GBlackVolumeTexture->TextureRHI;
-		P->DetailVolumeSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
-		P->BlueNoiseTexture = March.BlueNoiseTexture;
-		P->ShadowTarget = March.ShadowTexture.IsValid() ? March.ShadowTexture : GBlackArrayTexture->TextureRHI;
-		P->ShadowTargetSampler = BilinearClamp;
-		P->TransmittanceTable = March.TransmittanceTexture;
-		P->TransmittanceTableSampler = BilinearClamp;
-		P->CoverageThreshold = March.CoverageTexture.IsValid() ? March.CoverageTexture : GBlackTexture->TextureRHI;
 
 		P->MarchCells = FUintVector2((uint32)MarchCells.X, (uint32)MarchCells.Y);
 		P->MarchStride = MarchN;
@@ -630,6 +1151,32 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		P->NoiseOffset = FUintVector2(
 			(uint32)(FMath::Frac(0.5 + Rank * 0.7548776662) * 4096.0),
 			(uint32)(FMath::Frac(0.5 + Rank * 0.5698402910) * 4096.0));
+
+		// Stage A2: the pixels whose renderer lit its own sun, this frame, this
+		// view, this graph; none, a black stand-in.
+		const FSelfLitMask* SelfLit = FindSelfLitMask(GraphBuilder, View);
+
+		FRDGTextureRef NoSelfLit = nullptr;
+
+		if (!SelfLit)
+		{
+			// Bound but never read: SelfLitMaskOn is 0.
+			NoSelfLit = CreateTarget(GraphBuilder, FIntPoint(1, 1), PF_R16F, TEXT("CloudAtmosphere.NoSelfLit"));
+			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(NoSelfLit), 0.0f);
+		}
+
+		P->SelfLitMask = SelfLit ? SelfLit->Mask : NoSelfLit;
+		P->SelfLitMaskOn = SelfLit ? 1u : 0u;
+		P->SelfLitMaskInfo = FVector4f(1.0f, 1.0f, 0.0f, 0.0f);
+
+		if (SelfLit)
+		{
+			const FIntPoint MaskSize = SelfLit->Mask->Desc.Extent;
+
+			P->SelfLitMaskInfo = FVector4f(
+				(float)MaskSize.X / (float)OutputSize.X, (float)MaskSize.Y / (float)OutputSize.Y,
+				(float)(MaskSize.X - 1), (float)(MaskSize.Y - 1));
+		}
 
 		P->MarchColor = GraphBuilder.CreateUAV(MarchColor);
 		P->MarchTint = GraphBuilder.CreateUAV(MarchTint);

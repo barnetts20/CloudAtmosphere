@@ -26,6 +26,7 @@
 #include "AtmosphereParams.h"
 #include "AtmosphereTransmittance.h"
 #include "AtmosphereShadowBake.h"
+#include "AtmosphereWeather.h"
 #include "PlanetAtmosphereActor.generated.h"
 
 class UTexture2D;
@@ -187,6 +188,11 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline")
     FAtmosphereSimulationParams Simulation;
 
+    /** Stage A5: seconds between read-backs of the field's weather at the surface for the CPU
+     *  (GetWeatherFeed), while something holds the feed (the ocean). 0: none. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline", meta = (ClampMin = "0.0", UIMax = "60.0"))
+    float WeatherReadbackSeconds = 10.0f;
+
     // Advanced Graphics: the performance tier, shared by both models; tunes
     // apply it only on request. GraphicsPreset writes all of it but
     // ShadowTemporalSmoothing, which costs nothing. The cascade extents are
@@ -298,6 +304,22 @@ public:
     void InitializeFromPlanet(USceneComponent* InAttachParent,
         FVector InScale = FVector::ZeroVector);
 
+    /** Stage A2: the march's view extension, for a renderer that lights its
+     *  own sun with it (AddSurfaceSunPass_RenderThread, SetSelfLitMask_RenderThread).
+     *  Null until the first frame the march runs; released and made again
+     *  when the atmosphere is turned off and on, so hold it weakly and ask
+     *  each frame. Game thread. */
+    TWeakPtr<FAtmosphereViewExtension, ESPMode::ThreadSafe> GetViewExtension() const { return ViewExtension; }
+
+    /** Stage A2: the atmosphere's sun light, the star's light above the air.
+     *  Game thread. */
+    UDirectionalLightComponent* GetSunLight() const { return SunLightComponent; }
+
+    /** Stage A5: the field's weather at the surface on the CPU (AtmosphereWeather.h), read back
+     *  every WeatherReadbackSeconds while anything but the actor holds the feed. Any thread reads
+     *  it; empty until the first read-back lands, and on air alone. */
+    TSharedRef<FAtmosphereWeatherFeed, ESPMode::ThreadSafe> GetWeatherFeed() const { return WeatherFeed; }
+
 private:
     /** Root component; carries the planet radius as scale. */
     UPROPERTY()
@@ -388,6 +410,15 @@ private:
      *  passes for this world's views. Created on first use, released on the
      *  render thread. */
     TSharedPtr<FAtmosphereViewExtension, ESPMode::ThreadSafe> ViewExtension;
+
+    /** Stage A5: the weather's feed, its render-thread read-back (made on first use, released
+     *  with the view extension), and when it last ran (platform seconds). */
+    TSharedRef<FAtmosphereWeatherFeed, ESPMode::ThreadSafe> WeatherFeed = MakeShared<FAtmosphereWeatherFeed, ESPMode::ThreadSafe>();
+    TSharedPtr<FAtmosphereWeatherReadback, ESPMode::ThreadSafe> WeatherReadback;
+    double WeatherReadbackTime = -1.0e9;
+
+    /** Reads the weather back when due, and publishes what has landed. */
+    void UpdateWeatherReadback(const FAtmosphereMarchParams& March);
 
     /** Suppress the per-tick repeat of the missing blue noise and structure
      *  volume warnings; each clears once its asset is set. */

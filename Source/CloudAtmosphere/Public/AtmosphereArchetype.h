@@ -82,6 +82,13 @@ public:
 	 *  palettes already present are left alone. */
 	UFUNCTION(CallInEditor, Category = "Look")
 	void AddStarterDraws();
+
+	/** Stage A2: AddStarterDraws over again, the starter paths' and palettes'
+	 *  entries replaced by the current first estimates (their edits lost), and
+	 *  the paths the model no longer draws removed (a terrestrial planet's
+	 *  SpinRatio and CloudBase). Other draws are left alone. */
+	UFUNCTION(CallInEditor, Category = "Look")
+	void RefreshStarterDraws();
 };
 
 /** An archetype a set offers, switchable per actor. */

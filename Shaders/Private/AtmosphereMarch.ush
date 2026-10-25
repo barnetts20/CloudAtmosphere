@@ -221,6 +221,92 @@ float3 Atmo_SunAir(
 		+ P.Atmo.scatteringParams.absBeta * AtmoOptDepth.z));
 }
 
+/** The sun at a surface: what of it reaches the point through the deck's shadow
+ *  and the air, and whether the planet hides it. */
+struct AtmoSurfaceSun
+{
+	/** The deck's shadow times the air's transmittance, per channel: 1 unshadowed
+	 *  under no air. */
+    float3 Sun;
+
+	/** The air's transmittance alone. */
+    float3 Air;
+
+	/** The planet's shadow: 1 lit, 0 behind the planet. */
+    float SunUp;
+};
+
+/** The sun at a surface point, as the march's surface shadow takes it. SHARED
+ *  BY THE MARCH AND THE SURFACE-SUN PASS (MainSurfaceSunCS), so a surface that
+ *  lights its own sun with the result is dimmed exactly as the march dims the
+ *  scene. SurfaceWorld is camera-relative, SurfaceLocal the same point
+ *  planet-local: the march forms it from its own ray, the pass from the point.
+ *  The deck's depth is scaled by surfaceShadowParams.strength; enabled and the
+ *  direct share are the caller's. */
+AtmoSurfaceSun Atmo_SurfaceSun(
+	Texture2DArray FlowField,
+	SamplerState FlowSampler,
+	Texture2DArray ShadowMap,
+	SamplerState ShadowSampler,
+	AtmoShadowCameras ShadowCameras,
+	Texture2D TransmittanceTable,
+	SamplerState TransmittanceSampler,
+	AtmoLightConstants C,
+	AtmoMarchParams P,
+	float3 SurfaceWorld,
+	float3 SurfaceLocal)
+{
+	// Air alone leaves the air's dimming.
+    float3 CloudSun = float3(1.0f, 1.0f, 1.0f);
+
+#if ATMO_FIELD_CLOUDS
+    const float3 LightLocal = mul(P.WorldToLocal, P.Atmo.lightRayParams.lightDir);
+
+	// The fold constant and the tau scale as the light march builds them,
+	// minus the octave term: a surface receives single scattering. The
+	// ceiling is the slab's ATMO_SHADOW_SATURATION under either deck.
+    const float2 Fold = Field_FoldConstant(P.Atmo, P.Scatter);
+
+    const float TauScale = max(Fold.y, ATMO_SHADOW_MIN_TAU_SCALE);
+
+	// NO LOOKUP JITTER: see AtmoShadow_SurfaceOptDepth.
+    const float SurfaceOptDepth = AtmoShadow_SurfaceOptDepth(
+		ShadowMap, ShadowSampler, SurfaceLocal, LightLocal, ShadowCameras,
+		float2(0.0f, 0.0f), ATMO_SHADOW_SATURATION / TauScale,
+		Field_ShadowFrame(P.Field), Fold.x)
+		* P.Atmo.surfaceShadowParams.strength;
+
+	// THE RECEIVER'S MATERIAL COLOURS THE DECK IT WAS SHADOWED BY, the rule
+	// the deck samples above follow, with the same guard and fallback.
+	//
+	// PITFALL: the rule rests on weather systems being far wider than the
+	// deck is deep. A surface sits further below the deck than a deck sample
+	// does, so its light path is longer and the rule weaker -- worst at low
+	// sun near a system's edge.
+    float3 LightTint = Field_NeutralTint(P.Scatter);
+
+    BRANCH
+
+    if (SurfaceOptDepth > 0.0f)
+    {
+        LightTint = Field_LightTint(
+			FlowField, FlowSampler, SurfaceLocal, P.Field, P.Scatter);
+    }
+
+    CloudSun = exp(-P.Atmo.cloudParams.cloudAbsBeta * LightTint * SurfaceOptDepth);
+#endif
+
+	// THE AIR DIMS THE SUN TOO, reddening it toward the terminator.
+    const float3 SunDir = P.Atmo.lightRayParams.lightDir;
+
+    AtmoSurfaceSun Result;
+    Result.Air = Atmo_SunAir(TransmittanceTable, TransmittanceSampler, C, P, SurfaceWorld, SunDir);
+    Result.Sun = CloudSun * Result.Air;
+    Result.SunUp = Atmo_PlanetShadow(P, SurfaceWorld, SunDir);
+
+    return Result;
+}
+
 /** Light reaching a sample: the air's transmittance with the planet shadow,
  *  and the deck's material-weighted depth toward the light, unexponentiated,
  *  since each scattering octave attenuates it by its own factor. It resolves
@@ -927,49 +1013,18 @@ float4 Atmo_MainMarchDepth(
 		&& P.Atmo.mainRayParams.sceneDepth < ATMO_NO_OCCLUDER_DISTANCE
 		&& max(Transmittance.x, max(Transmittance.y, Transmittance.z)) > 0.0f)
     {
-		// Air alone leaves the air's dimming.
-        float3 CloudSun = float3(1.0f, 1.0f, 1.0f);
-
-#if ATMO_FIELD_CLOUDS
 		// sceneDepth is a TRUE RAY DISTANCE and LocalDir is a rotation of a unit
 		// direction, so it spends the same along either. Rederiving the surface
 		// from the depth buffer here would be a second derivation of the value
 		// already bounding the march.
         const float3 SurfaceLocal =
 			LocalOrigin + LocalDir * P.Atmo.mainRayParams.sceneDepth;
+        const float3 SurfaceWorld = RayOrigin + RayDir * P.Atmo.mainRayParams.sceneDepth;
 
-        const float3 LightLocal = mul(P.WorldToLocal, P.Atmo.lightRayParams.lightDir);
-
-		// The fold constant and the tau scale as the light march builds them,
-		// minus the octave term: a surface receives single scattering. The
-		// ceiling is the slab's ATMO_SHADOW_SATURATION under either deck.
-        const float2 Fold = Field_FoldConstant(P.Atmo, P.Scatter);
-
-        const float TauScale = max(Fold.y, ATMO_SHADOW_MIN_TAU_SCALE);
-
-		// NO LOOKUP JITTER: see AtmoShadow_SurfaceOptDepth.
-        const float SurfaceOptDepth = AtmoShadow_SurfaceOptDepth(
-			ShadowMap, ShadowSampler, SurfaceLocal, LightLocal, ShadowCameras,
-			float2(0.0f, 0.0f), ATMO_SHADOW_SATURATION / TauScale,
-			Field_ShadowFrame(P.Field), Fold.x)
-			* P.Atmo.surfaceShadowParams.strength;
-
-		// THE RECEIVER'S MATERIAL COLOURS THE DECK IT WAS SHADOWED BY, the rule
-		// the deck samples above follow, with the same guard and fallback.
-		//
-		// PITFALL: the rule rests on weather systems being far wider than the
-		// deck is deep. A surface sits further below the deck than a deck sample
-		// does, so its light path is longer and the rule weaker -- worst at low
-		// sun near a system's edge.
-        float3 LightTint = Field_NeutralTint(P.Scatter);
-
-        BRANCH
-
-        if (SurfaceOptDepth > 0.0f)
-        {
-            LightTint = Field_LightTint(
-				FlowField, FlowSampler, SurfaceLocal, P.Field, P.Scatter);
-        }
+        const AtmoSurfaceSun S = Atmo_SurfaceSun(
+			FlowField, FlowSampler, ShadowMap, ShadowSampler, ShadowCameras,
+			TransmittanceTable, TransmittanceSampler, LightConstants, P,
+			SurfaceWorld, SurfaceLocal);
 
 		// LERPED AGAINST THE DIRECT SHARE, NOT FOLDED INTO THE EXPONENT. Only
 		// the sun's contribution is occluded; sky and bounce reach the surface
@@ -977,20 +1032,10 @@ float4 Atmo_MainMarchDepth(
 		// Scaling the optical depth instead still runs every channel to black
 		// under a thick deck, which is the hole in the world this dial exists to
 		// prevent -- it only takes more cloud to get there.
-        CloudSun = exp(-P.Atmo.cloudParams.cloudAbsBeta * LightTint * SurfaceOptDepth);
-#endif
-
-		// THE AIR DIMS THE SUN TOO, reddening it toward the terminator, and only
-		// where the sun is up: on the night side there is no direct share to
-		// take, and the multiplier would darken the sky's light instead.
-        const float3 SurfaceWorld = RayOrigin + RayDir * P.Atmo.mainRayParams.sceneDepth;
-        const float3 SunDir = P.Atmo.lightRayParams.lightDir;
-
-        const float SunUp = Atmo_PlanetShadow(P, SurfaceWorld, SunDir);
-        const float3 Sun = CloudSun * Atmo_SunAir(
-			TransmittanceTable, TransmittanceSampler, LightConstants, P, SurfaceWorld, SunDir);
-
-        Transmittance *= 1.0f - P.Atmo.surfaceShadowParams.directFraction * SunUp * (1.0f - Sun);
+		//
+		// Only where the sun is up: on the night side there is no direct share
+		// to take, and the multiplier would darken the sky's light instead.
+        Transmittance *= 1.0f - P.Atmo.surfaceShadowParams.directFraction * S.SunUp * (1.0f - S.Sun);
     }
 
     OutTransmittance = Transmittance;
