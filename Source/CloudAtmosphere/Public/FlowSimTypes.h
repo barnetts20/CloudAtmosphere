@@ -1013,6 +1013,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline")
 	TObjectPtr<UFlowSnapshot> InitialState;
 
+	/** Spin-up after a restore too: InitialState is the start, and SpinUpTurnovers
+	 *  then run on it at the spin-up step under this config (its seed's stirring
+	 *  and storms) before the sim is considered ready. Off: a restore is ready
+	 *  as it lands. A seeded atmosphere sets it for its RestoreThenSpinUp start. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline")
+	bool bSpinUpAfterRestore = false;
+
 	/** Spin-up substeps per frame, held to the per-frame hang guard. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pipeline", meta = (ClampMin = "1", UIMax = "64"))
 	int32 MaxSpinUpStepsPerFrame = 8;

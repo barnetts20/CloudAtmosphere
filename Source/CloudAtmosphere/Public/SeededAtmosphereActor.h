@@ -8,6 +8,22 @@
 #include "AtmosphereHarnessTypes.h"
 #include "SeededAtmosphereActor.generated.h"
 
+/** How a generated sim starts, at load and at every new seed. */
+UENUM(BlueprintType)
+enum class ESeededSimStart : uint8
+{
+	/** From the seed, through the spin-up: the sim's own seeded start and
+	 *  SpinUpTurnovers at the spin-up step. Each seed spins its own weather. */
+	SpinUp,
+	/** The archetype's start state turned by the seed's roll, then the spin-up
+	 *  on it under the seed's stirring and storms: its developed climate, the
+	 *  seed's weather. */
+	RestoreThenSpinUp,
+	/** The archetype's start state turned by the seed's roll, ready as it lands
+	 *  (no spin-up; every seed starts from the same state, turned). */
+	Restore,
+};
+
 /** A planet atmosphere that owns its generated state: it draws the active
  *  model's look and sim from Seed and Set and writes them into its own
  *  settings, in the editor and in play. Editing Seed, Set, Locks or
@@ -32,6 +48,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Generation")
 	FAtmosphereGenerationSet Set;
 
+	/** How the sim starts at load and at each new seed (or set, or model):
+	 *  every generation that makes a new sim config restarts the sim. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Generation")
+	ESeededSimStart SimStart = ESeededSimStart::SpinUp;
+
 	/** Paths the seed leaves alone: a bundle path keeps this actor's value, a
 	 *  sim config path its archetype's. Paths as the draws name them. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Generation")
@@ -55,7 +76,7 @@ public:
 	TArray<FAtmosphereDrawRecord> Report;
 
 	/** Generates the active model from Seed and applies it. A new sim config
-	 *  for the model driving the sim restarts it from the rolled start. Also
+	 *  for the model driving the sim restarts it, as SimStart says. Also
 	 *  after editing an archetype or look profile, which nothing here watches. */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CloudAtmosphere|Generation")
 	void Generate();

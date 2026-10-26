@@ -1,6 +1,7 @@
 #include "SeededAtmosphereActor.h"
 
 #include "AtmosphereGenerator.h"
+#include "FlowSimTypes.h"
 
 void ASeededAtmosphereActor::Tick(float DeltaTime)
 {
@@ -48,6 +49,7 @@ void ASeededAtmosphereActor::PostEditChangeProperty(FPropertyChangedEvent& Prope
 		|| Name == GET_MEMBER_NAME_CHECKED(ASeededAtmosphereActor, Seed)
 		|| Name == GET_MEMBER_NAME_CHECKED(ASeededAtmosphereActor, Set)
 		|| Name == GET_MEMBER_NAME_CHECKED(ASeededAtmosphereActor, Locks)
+		|| Name == GET_MEMBER_NAME_CHECKED(ASeededAtmosphereActor, SimStart)
 		|| Name == GET_MEMBER_NAME_CHECKED(APlanetAtmosphereActor, PlanetType))
 	{
 		Generate();
@@ -186,6 +188,24 @@ void ASeededAtmosphereActor::GenerateParts(bool bSim)
 #if WITH_EDITOR
 		Modify();
 #endif
+
+		// THE START: a seed's sim spins up (its own seeded start, or the rolled
+		// start state then the spin-up on it), or the rolled state lands ready.
+		// The new config restarts the sim either way (the subsystem restarts an
+		// owner whose config changed).
+		switch (SimStart)
+		{
+		case ESeededSimStart::SpinUp:
+			Generation.Config->InitialState = nullptr;
+			Generation.Config->bSpinUpAfterRestore = false;
+			break;
+		case ESeededSimStart::RestoreThenSpinUp:
+			Generation.Config->bSpinUpAfterRestore = true;
+			break;
+		default:
+			Generation.Config->bSpinUpAfterRestore = false;
+			break;
+		}
 
 		TObjectPtr<UFlowSimConfig>& Slot = (Model == EPlanetAtmosphereType::GasGiant)
 			? Simulation.GasGiantConfig

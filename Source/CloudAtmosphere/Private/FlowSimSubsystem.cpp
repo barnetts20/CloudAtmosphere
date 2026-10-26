@@ -1153,7 +1153,7 @@ void UFlowSimSubsystem::ResetSimulation()
 
 	if (bRestored)
 	{
-		if (Config->SpinUpTurnovers > 0.0f)
+		if (Config->SpinUpTurnovers > 0.0f && !Config->bSpinUpAfterRestore)
 		{
 			UE_LOG(LogFlowSim, Log,
 				TEXT("InitialState restores, so SpinUpTurnovers (%.1f) is skipped. It still ")
@@ -1164,6 +1164,15 @@ void UFlowSimSubsystem::ResetSimulation()
 		SimulatedTime = Config->InitialState->SimulatedTime;
 		StepsCompleted = Config->InitialState->StepsCompleted;
 		ClockStep = 0.0f;
+
+		// The spin-up from the restored state on, when the config asks for it.
+		if (Config->bSpinUpAfterRestore)
+		{
+			SpinUpTarget = (int32)FMath::Min<int64>((int64)StepsCompleted + Config->GetSpinUpSteps(), MAX_int32);
+
+			UE_LOG(LogFlowSim, Display, TEXT("Restored '%s' from InitialState; %d spin-up steps on it."),
+				*Config->GetName(), (int32)(SpinUpTarget - StepsCompleted));
+		}
 	}
 }
 
