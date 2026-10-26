@@ -11,6 +11,7 @@
 class UFlowSimConfig;
 struct FAtmosphereModelSet;
 struct FAtmosphereGenerationSet;
+struct FAtmosphereGenerateOptions;
 
 namespace AtmosphereHarness
 {
@@ -26,6 +27,9 @@ namespace AtmosphereHarness
 		Pick = 3,
 		Roll = 4,
 		Link = 5,
+		/** Stage A12: draws a renderer outside the atmosphere applies with ApplyDrawSet (the
+		 *  voxel plugin's ocean), so its keys draw apart from the atmosphere's own. */
+		External = 6,
 	};
 
 	/** A uniform number in [0, 1), counter based: a function of the seed, the
@@ -45,6 +49,16 @@ namespace AtmosphereHarness
 
 	/** The colour at Path, a FLinearColor member. */
 	CLOUDATMOSPHERE_API bool ReadColour(const UStruct* Type, const void* Container, FStringView Path, FLinearColor& Out);
+
+	/** Stage A12: a draw set onto any struct instance, as the generator applies the look's and
+	 *  the sim's: the palettes first, then the entries in order, with their links, locks and the
+	 *  sweep (Options), every setting written recorded in Report under Prefix. For a component
+	 *  outside the atmosphere that seeds with the same language (the voxel plugin's ocean); its
+	 *  Stream keeps its draws apart from the atmosphere's (EStream::External). Links are keyed by
+	 *  their name alone, across every root, so a component's link can follow the atmosphere's. */
+	CLOUDATMOSPHERE_API void ApplyDrawSet(int32 Seed, EStream Stream, const UStruct* Type, void* Container,
+		const FAtmosphereDrawSet& Set, const FAtmosphereGenerateOptions& Options, const TCHAR* Prefix,
+		TArray<FAtmosphereDrawRecord>& Report);
 
 	/** Every look setting Model reads that a draw can set: the bundle's
 	 *  editable numbers and its colours, less the quality tier's and the

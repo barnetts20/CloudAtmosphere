@@ -412,6 +412,19 @@ namespace
 	}
 }
 
+void AtmosphereHarness::ApplyDrawSet(int32 Seed, EStream Stream, const UStruct* Type, void* Container,
+	const FAtmosphereDrawSet& Set, const FAtmosphereGenerateOptions& Options, const TCHAR* Prefix,
+	TArray<FAtmosphereDrawRecord>& Report)
+{
+	if (!Type || !Container)
+	{
+		return;
+	}
+
+	const FDrawTarget Target{ Seed, Stream, Type, Container, Prefix ? Prefix : TEXT("") };
+	ApplyDraws(Target, Set, Options, Report);
+}
+
 namespace
 {
 	void CollectLookSettings(const UStruct* Type, const FString& Prefix, TArray<FString>& Numbers, TArray<FString>& Colours)
