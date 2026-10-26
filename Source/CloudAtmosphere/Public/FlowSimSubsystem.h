@@ -120,6 +120,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	bool IsSpinningUp() const { return StepsCompleted < SpinUpTarget; }
 
+	/** Stage A11: the sim's render-thread object, for a render command that reads its state
+	 *  (FFlowSimulation::AddClimateCapturePass_RenderThread). Use it only from render commands
+	 *  enqueued while the subsystem lives: its deletion is enqueued after them. */
+	FFlowSimulation* GetSimulation() const { return Simulation; }
+
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	bool IsRunning() const { return bRunning; }
 

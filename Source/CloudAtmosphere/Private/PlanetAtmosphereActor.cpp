@@ -12,6 +12,7 @@
 #include "AtmosphereTransmittance.h"
 #include "AtmosphereViewExtension.h"
 #include "Engine/Texture2D.h"
+#include "Math/Float16Color.h"
 #include "RenderingThread.h"
 #include "SceneViewExtension.h"
 #include "TerrestrialShadowMap.h"
@@ -1155,6 +1156,7 @@ void APlanetAtmosphereActor::UpdateComputeMarch(
     {
         ViewExtension->SetFrame_GameThread(Params);
         UpdateWeatherReadback(Params);
+        UpdateClimateReadback();
     }
 
     ViewExtension->SetEnabled(bWant);
@@ -1195,8 +1197,88 @@ void APlanetAtmosphereActor::UpdateWeatherReadback(const FAtmosphereMarchParams&
         });
 }
 
+void APlanetAtmosphereActor::UpdateClimateReadback()
+{
+    // The view of the latest map, on the game thread.
+    if (const TSharedPtr<const FAtmosphereClimateMap, ESPMode::ThreadSafe> Map = ClimateFeed->Latest();
+        Map.IsValid() && Map->Serial != ClimateViewSerial && Map->Width > 0 && Map->Height > 0)
+    {
+        ClimateViewSerial = Map->Serial;
+
+        UTexture2D* Texture = UTexture2D::CreateTransient(Map->Width, Map->Height, PF_FloatRGBA,
+            MakeUniqueObjectName(GetTransientPackage(), UTexture2D::StaticClass(), TEXT("AtmosphereClimateView")));
+
+        if (Texture && Texture->GetPlatformData() && Texture->GetPlatformData()->Mips.Num() > 0)
+        {
+            Texture->SRGB = false;
+            Texture->Filter = TF_Bilinear;
+            Texture->CompressionSettings = TC_HDR;
+
+            // Flipped to north up, as a map reads.
+            FTexture2DMipMap& Mip = Texture->GetPlatformData()->Mips[0];
+            FFloat16Color* Texels = static_cast<FFloat16Color*>(Mip.BulkData.Lock(LOCK_READ_WRITE));
+
+            for (int32 J = 0; J < Map->Height; J++)
+            {
+                for (int32 I = 0; I < Map->Width; I++)
+                {
+                    const FVector4f& C = Map->Cells[J * Map->Width + I];
+                    Texels[(Map->Height - 1 - J) * Map->Width + I] = FFloat16Color(FLinearColor(C.X, C.Y, C.Z, C.W + 0.5f));
+                }
+            }
+
+            Mip.BulkData.Unlock();
+            Texture->UpdateResource();
+            ClimateView = Texture;
+        }
+    }
+
+    UWorld* World = GetWorld();
+    UFlowSimSubsystem* Sim = World ? World->GetSubsystem<UFlowSimSubsystem>() : nullptr;
+
+    // Only the planet driving the sim reads its climate (another's kept map stays).
+    if (ClimateReadbackSeconds <= 0.0f || !Sim || !Sim->IsOwner(this) || !Sim->GetSimulation())
+    {
+        return;
+    }
+
+    if (!ClimateReadback.IsValid())
+    {
+        ClimateReadback = MakeShared<FAtmosphereClimateReadback, ESPMode::ThreadSafe>(ClimateFeed);
+    }
+
+    const double Now = FPlatformTime::Seconds();
+    const bool bDue = Now - ClimateReadbackTime >= (double)ClimateReadbackSeconds;
+
+    if (bDue)
+    {
+        ClimateReadbackTime = Now;
+    }
+
+    ENQUEUE_RENDER_COMMAND(CloudAtmosphereClimateReadback)(
+        [Readback = ClimateReadback, Simulation = Sim->GetSimulation(), bDue](FRHICommandListImmediate& RHICmdList)
+        {
+            Readback->Poll_RenderThread();
+
+            if (bDue)
+            {
+                Readback->Request_RenderThread(RHICmdList, Simulation);
+            }
+        });
+}
+
 void APlanetAtmosphereActor::ReleaseViewExtension()
 {
+    // Stage A11: and the climate's.
+    if (ClimateReadback.IsValid())
+    {
+        ENQUEUE_RENDER_COMMAND(CloudAtmosphereReleaseClimateReadback)(
+            [Readback = MoveTemp(ClimateReadback)](FRHICommandListImmediate&) mutable
+            {
+                Readback.Reset();
+            });
+    }
+
     // Stage A5: the weather's read-backs in flight go on the render thread too.
     if (WeatherReadback.IsValid())
     {
@@ -1397,6 +1479,27 @@ void APlanetAtmosphereActor::ClaimSimulation(const FVector& PlanetCenter, float 
 
     UFlowSimConfig* Config = ActiveSimConfig();
 
+    // Stage A9: THE SURFACE ON THE TERRESTRIAL SIM, on this actor's own config (a generated one,
+    // or a game world's copy; a shared asset in the editor is left alone): set before the bid, so
+    // a new config starts with it, and live on the running one.
+    if (Config)
+    {
+        const bool bGasGiant = (&ActiveModel() == &GasGiant);
+        UTexture2D* Want = bGasGiant ? nullptr : SurfaceMap.Get();
+
+        if (Config->SurfaceMap != Want)
+        {
+            UFlowSimConfig* Own = (Config->GetOuter() == this) ? Config
+                : GetWritableSimConfig(bGasGiant ? EPlanetAtmosphereType::GasGiant : EPlanetAtmosphereType::Terrestrial);
+
+            if (Own && Own->GetOuter() == this)
+            {
+                Own->SurfaceMap = Want;
+                Config = Own;
+            }
+        }
+    }
+
     if (!Config && Simulation.bClaimSimulation && !bWarnedSimConfig)
     {
         bWarnedSimConfig = true;
@@ -1489,6 +1592,48 @@ void APlanetAtmosphereActor::ClaimSimulation(const FVector& PlanetCenter, float 
 
     FieldClock = KeptClock;
     FieldClock.SpinTime = KeptClock.Time + (Now - KeptAt) * SpinRate;
+}
+
+void APlanetAtmosphereActor::SetSurfaceMap(int32 Width, int32 Height, TConstArrayView<FVector2f> Cells)
+{
+    check(IsInGameThread());
+
+    if (Width <= 0 || Height <= 0 || Cells.Num() != Width * Height)
+    {
+        SurfaceMap = nullptr;
+        return;
+    }
+
+    // Half floats, elevation in R and land in G; bilinear, wrapped in longitude and clamped at
+    // the poles by the sim's own sampler.
+    UTexture2D* Texture = UTexture2D::CreateTransient(Width, Height, PF_FloatRGBA,
+        MakeUniqueObjectName(GetTransientPackage(), UTexture2D::StaticClass(), TEXT("AtmosphereSurfaceMap")));
+
+    if (!Texture || !Texture->GetPlatformData() || Texture->GetPlatformData()->Mips.Num() == 0)
+    {
+        SurfaceMap = nullptr;
+        return;
+    }
+
+    Texture->SRGB = false;
+    Texture->Filter = TF_Bilinear;
+    Texture->AddressX = TA_Wrap;
+    Texture->AddressY = TA_Clamp;
+    Texture->CompressionSettings = TC_HDR;
+
+    FTexture2DMipMap& Mip = Texture->GetPlatformData()->Mips[0];
+    FFloat16Color* Texels = static_cast<FFloat16Color*>(Mip.BulkData.Lock(LOCK_READ_WRITE));
+
+    for (int32 Index = 0; Index < Cells.Num(); Index++)
+    {
+        Texels[Index] = FFloat16Color(FLinearColor(
+            FMath::Clamp(Cells[Index].X, 0.0f, 1.0f), FMath::Clamp(Cells[Index].Y, 0.0f, 1.0f), 0.0f, 1.0f));
+    }
+
+    Mip.BulkData.Unlock();
+    Texture->UpdateResource();
+
+    SurfaceMap = Texture;
 }
 
 // --------------------------------------------------------------------------

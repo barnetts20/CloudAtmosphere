@@ -10,6 +10,7 @@
 #include "RenderGraphUtils.h"
 #include "TextureResource.h"
 #include "Engine/VolumeTexture.h"
+#include "Engine/Texture2D.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/TextureRenderTarget2DArray.h"
 #include "RenderingThread.h"
@@ -1493,6 +1494,16 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.AscentSmoothing = Scales.AscentSmoothing;
 	Out.WindEvaporation = Scales.WindEvaporation;
 
+	// Stage A11: the climate's memory.
+	Out.ClimateParams = FVector4f(FMath::Max(Config->ClimateTurnovers, 0.1f), 0.0f, 0.0f, 0.0f);
+
+	// Stage A9: the ground (SurfaceMap; its resource below).
+	Out.SurfaceParams = FVector4f(
+		FMath::Clamp(Config->TopographyHeight, 0.0f, 0.8f),
+		FMath::Max(Config->OrographicLift, 0.0f),
+		FMath::Max(Config->LandDrag, 0.0f) * Scales.DragRate,
+		FMath::Clamp(Config->LandEvaporation, 0.0f, 1.0f));
+
 	const float StormDecay = 1.0f / Scales.StormLifetime;
 
 	Out.StormParams = FVector4f(
@@ -1762,6 +1773,11 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	if (Config->ForcingVolume)
 	{
 		Out.ForcingResource = Config->ForcingVolume->GetResource();
+	}
+
+	if (Config->SurfaceMap)
+	{
+		Out.SurfaceResource = Config->SurfaceMap->GetResource();
 	}
 
 	if (FlowTarget)

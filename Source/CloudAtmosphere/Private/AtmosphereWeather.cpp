@@ -1,4 +1,5 @@
 #include "AtmosphereWeather.h"
+#include "FlowSimulation.h"
 
 #include "DataDrivenShaderPlatformInfo.h"
 #include "GlobalShader.h"
@@ -250,6 +251,112 @@ void FAtmosphereWeatherReadback::Poll_RenderThread()
 		Map->Finish(BroadCells);
 		Map->Serial = ++Serial;
 		Feed->Publish(Map);
+	}
+
+	Pending.RemoveAt(0, Landed + 1);
+}
+
+// ---------------------------------------------------------------------------
+// The climate (stage A11)
+// ---------------------------------------------------------------------------
+
+FVector4f FAtmosphereClimateMap::Sample(const FVector& PlanetDir) const
+{
+	if (Width <= 0 || Height <= 0 || Cells.Num() != Width * Height)
+	{
+		return FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
+	}
+
+	const FVector D = PlanetDir.GetSafeNormal();
+	double Lon = FMath::Atan2(D.Y, D.X);
+	Lon = Lon < 0.0 ? Lon + 2.0 * UE_DOUBLE_PI : Lon;
+
+	// The sim's grid: centres at integers, longitude from 0, rows even in sin(latitude).
+	const double X = Lon / (2.0 * UE_DOUBLE_PI) * Width - 0.5;
+	const double Y = FMath::Clamp((FMath::Clamp(D.Z, -1.0, 1.0) + 1.0) * 0.5 * Height - 0.5, 0.0, (double)(Height - 1));
+
+	const int32 X0 = FMath::FloorToInt32(X);
+	const int32 Y0 = FMath::Min(FMath::FloorToInt32(Y), Height - 1);
+	const float FX = (float)(X - X0);
+	const float FY = (float)(Y - Y0);
+
+	const int32 XA = ((X0 % Width) + Width) % Width;
+	const int32 XB = (XA + 1) % Width;
+	const int32 YB = FMath::Min(Y0 + 1, Height - 1);
+
+	const FVector4f A = FMath::Lerp(Cells[Y0 * Width + XA], Cells[Y0 * Width + XB], FX);
+	const FVector4f B = FMath::Lerp(Cells[YB * Width + XA], Cells[YB * Width + XB], FX);
+
+	return FMath::Lerp(A, B, FY);
+}
+
+FAtmosphereClimateReadback::FAtmosphereClimateReadback(const TSharedRef<FAtmosphereClimateFeed, ESPMode::ThreadSafe>& InFeed)
+	: Feed(InFeed)
+{
+}
+
+FAtmosphereClimateReadback::~FAtmosphereClimateReadback() = default;
+
+void FAtmosphereClimateReadback::Request_RenderThread(FRHICommandListImmediate& RHICmdList, FFlowSimulation* Simulation)
+{
+	check(IsInRenderingThread());
+
+	if (!Simulation || Pending.Num() >= 3)
+	{
+		return;
+	}
+
+	FRDGBuilder GraphBuilder(RHICmdList, RDG_EVENT_NAME("CloudAtmosphere.ClimateReadback"));
+
+	FInFlight Copy;
+	Copy.Buffer = MakeUnique<FRHIGPUBufferReadback>(TEXT("CloudAtmosphere.ClimateReadback"));
+
+	const bool bCopied = Simulation->AddClimateCapturePass_RenderThread(GraphBuilder, Copy.Buffer.Get(), Copy.Grid);
+
+	GraphBuilder.Execute();
+
+	if (bCopied)
+	{
+		Pending.Add(MoveTemp(Copy));
+	}
+}
+
+void FAtmosphereClimateReadback::Poll_RenderThread()
+{
+	check(IsInRenderingThread());
+
+	int32 Landed = INDEX_NONE;
+
+	for (int32 Index = 0; Index < Pending.Num(); ++Index)
+	{
+		if (Pending[Index].Buffer->IsReady())
+		{
+			Landed = Index;
+		}
+	}
+
+	if (Landed == INDEX_NONE)
+	{
+		return;
+	}
+
+	const FIntVector Grid = Pending[Landed].Grid;
+	const int32 Cells = Grid.X * Grid.Y;
+
+	if (Cells > 0)
+	{
+		if (const void* Data = Pending[Landed].Buffer->Lock(Cells * sizeof(FVector4f)))
+		{
+			TSharedPtr<FAtmosphereClimateMap, ESPMode::ThreadSafe> Map = MakeShared<FAtmosphereClimateMap, ESPMode::ThreadSafe>();
+			Map->Width = Grid.X;
+			Map->Height = Grid.Y;
+			Map->Cells.SetNumUninitialized(Cells);
+			FMemory::Memcpy(Map->Cells.GetData(), Data, Cells * sizeof(FVector4f));
+			Pending[Landed].Buffer->Unlock();
+
+			Map->Serial = ++Serial;
+			Feed->Publish(Map);
+		}
 	}
 
 	Pending.RemoveAt(0, Landed + 1);

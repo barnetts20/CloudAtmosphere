@@ -9,6 +9,7 @@
 class FTextureResource;
 class FTextureRenderTargetResource;
 class UVolumeTexture;
+class UTexture2D;
 class UFlowSnapshot;
 struct FPropertyTag;
 
@@ -597,6 +598,57 @@ public:
 	 *  StormCellEyeDraft clears the storm cells' eyes. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Moisture", meta = (ClampMin = "0.0"))
 	float EvaporationRate = 0.3f;
+
+	// -- Planet: surface ----------------------------------------------------
+	// Stage A9: the ground under the air, from the planet (SurfaceMap: its
+	// elevation and land on the sim's own grid layout). The bottom layer feels
+	// the terrain as a potential, so it is held back by and steered around
+	// high ground; air driven up a slope rises (cloud and rain on the windward
+	// side, a shadow in the lee); land evaporates less and drags harder than
+	// the sea. Without a map the planet is all sea, as before.
+
+	/** The highest terrain (SurfaceMap elevation 1) as a share of the bottom
+	 *  layer's depth, felt as a potential by the bottom layer's flow: it
+	 *  thins over the mountains and goes round them. PITFALL: past about half
+	 *  the layer can thin to its floor over the peaks. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Surface", meta = (ClampMin = "0.0", ClampMax = "0.8"))
+	float TopographyHeight = 0.35f;
+
+	/** The ascent of air driven up a slope, as the same share of the bottom
+	 *  layer's depth: the wind across the elevation's gradient, added to every
+	 *  layer's vertical motion. Its own handle, so the rain can follow the
+	 *  mountains harder than their bulk steers the flow. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Surface", meta = (ClampMin = "0.0", UIMax = "2.0"))
+	float OrographicLift = 0.5f;
+
+	/** Extra drag on the bottom layer's wind over land, as a multiple of
+	 *  DragRate: the ground's roughness against the sea's. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Surface", meta = (ClampMin = "0.0", UIMax = "4.0"))
+	float LandDrag = 1.0f;
+
+	/** Land's surface evaporation as a share of the sea's: soil and plants'
+	 *  moisture. 1 evaporates as the sea; 0 is a desert world's dry ground. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Surface", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float LandEvaporation = 0.25f;
+
+	/** The planet's surface (APlanetAtmosphereActor::SetSurfaceMap): per cell
+	 *  elevation (R, 0 sea level to 1 the highest) and land (G, 0 to 1), on the
+	 *  sim's layout (longitude x sin(latitude), longitude 0 on +X, planet-local
+	 *  with Z the spin axis), any resolution. Set at runtime on the planet's
+	 *  own config copy; never saved. */
+	UPROPERTY(Transient, VisibleAnywhere, BlueprintReadOnly, Category = "Planet|Surface")
+	TObjectPtr<UTexture2D> SurfaceMap;
+
+	// -- Planet: climate ----------------------------------------------------
+	// Stage A11: the weather's long-run means on the sim's grid, for the planet
+	// (APlanetAtmosphereActor::GetClimateFeed): precipitation, humidity, cloud
+	// cover and the columns' warmth, kept as running means every step.
+
+	/** How long the climate's running means remember, in turnovers: longer is
+	 *  steadier, shorter follows the weather. A reset starts them from the
+	 *  first step's state. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Climate", meta = (ClampMin = "0.1", UIMax = "200.0"))
+	float ClimateTurnovers = 20.0f;
 
 	// -- Planet: storms -----------------------------------------------------
 	// An advected storm intensity, 0 to 1, grown where condensation is
@@ -1199,6 +1251,13 @@ struct FFlowSimParams
 
 	int32 ForcingChannel = 0;
 
+	/** Stage A9: x TopographyHeight, y OrographicLift, z LandDrag times the drag
+	 *  rate, w LandEvaporation; SurfaceTexture the map (none: all sea). */
+	FVector4f SurfaceParams = FVector4f::Zero();
+
+	/** Stage A11: x ClimateTurnovers, y 1 on the step that starts the means. */
+	FVector4f ClimateParams = FVector4f::Zero();
+
 	float NudgeRate = 0.0f;
 	float ForcingAmplitude = 0.0f;
 	float ForcingFrequency = 0.0f;
@@ -1317,11 +1376,13 @@ struct FFlowSimParams
 	 *  a handle read on the game thread can be one the render thread is replacing. A
 	 *  null forcing volume is legal and evaluates as zero. */
 	FTextureResource* ForcingResource = nullptr;
+	FTextureResource* SurfaceResource = nullptr;
 	FTextureRenderTargetResource* FlowResource = nullptr;
 	FTextureRenderTargetResource* DebugResource = nullptr;
 
 	/** Render thread only. */
 	FTextureRHIRef ForcingTexture;
+	FTextureRHIRef SurfaceTexture;
 	FTextureRHIRef FlowTexture;
 	FTextureRHIRef DebugTexture;
 

@@ -273,6 +273,16 @@
 #define SimForcingChannel FlowSimUB.ForcingChannel
 #define SimHasForcing FlowSimUB.HasForcing
 
+/** Stage A9: the ground. x TopographyHeight and y OrographicLift (shares of the
+ *  bottom layer's depth), z the land's drag rate, w the land's evaporation as a
+ *  share of the sea's; SimHasSurface 0: no map, all sea. */
+#define SimSurfaceParams FlowSimUB.SurfaceParams
+#define SimHasSurface FlowSimUB.HasSurface
+
+/** Stage A11: x ClimateTurnovers (the running means' memory), y 1 on the step
+ *  that starts them. */
+#define SimClimateParams FlowSimUB.ClimateParams
+
 #define SimFilterLatitude FlowSimUB.FilterLatitude
 
 /** Normalisation for the output channels: x pressure, y vorticity, z divergence. */
@@ -383,6 +393,22 @@ RWTexture2DArray<float2> SimCellFlowUAV;
 Texture2D<float4> SimCellColumnSRV;
 RWTexture2D<float4> SimCellColumnUAV;
 
+/** Stage A9: the ground on the sim's grid, made each frame by MainSurfaceCS:
+ *  x the terrain's potential on the bottom layer (geopotential, TopographyHeight
+ *  times the bottom layer's depth times the elevation), y land (0 to 1), z the
+ *  elevation (0 sea level to 1 the highest), w 0. Zeros without a map. And the
+ *  planet's map it is made from: elevation (R) and land (G) on the grid's own
+ *  layout, longitude x sin(latitude), at any resolution. */
+Texture2D<float4> SimSurfaceSRV;
+RWTexture2D<float4> SimSurfaceUAV;
+Texture2D SimSurfaceMap;
+SamplerState SimSurfaceMapSampler;
+
+/** Stage A11: the climate's running means, a float4 per column, row-major from
+ *  the south (MainClimateCS): x precipitation, y the bottom layer's relative
+ *  humidity, z cloud cover, w warmth. */
+RWStructuredBuffer<float4> SimClimateUAV;
+
 /** Snapshot transfer, one plane per float; see MainCaptureCS. A restore reads
  *  SimRestoreFloatsPerCell planes: SIM_SNAPSHOT_PLANES, or the 13 of the layout
  *  without the noise phases' w, which then restore as zero. Nonzero
@@ -406,6 +432,25 @@ uint SimRestoreCellSeeds;
 float SimLayerDepth(uint Layer)
 {
     return SimLayerState[min(Layer, 7u)].x;
+}
+
+/** Stage A9: the ground at a centre, with the grid's topology (across the
+ *  poles and the seam). */
+float4 SimSurfaceAt(int2 C)
+{
+    const int2 W = SimWrapCoord(C);
+
+    return SimSurfaceSRV.Load(int3(W.x, W.y, 0));
+}
+
+/** Stage A9: the gradient of the ground's channel K at a centre, per radian
+ *  east and north, as SimCentreGradient's. */
+float2 SimSurfaceGradient(int2 C, uint K)
+{
+    const float East = SimSurfaceAt(C + int2(1, 0))[K] - SimSurfaceAt(C + int2(-1, 0))[K];
+    const float North = SimSurfaceAt(C + int2(0, 1))[K] - SimSurfaceAt(C + int2(0, -1))[K];
+
+    return float2(East / (2.0f * SimRowCos(C.y) * SimDLon()), SimRowCos(C.y) * North / (2.0f * SimDMu()));
 }
 
 /** Montgomery potential of a layer at a centre, from the layer thicknesses. */
@@ -1769,6 +1814,19 @@ float SimLayerVerticalMotion(int2 C, uint Layer)
 			+ dot(Own - SimCentreComponents(C.x, C.y, (uint) J), SimCentreGradient(C, (uint) J));
     }
 
+	// Stage A9: THE GROUND'S LIFT. The bottom layer's wind across the terrain's
+	// slope lifts it, and every layer above with it, as the flow across the
+	// sloping surfaces below does: upslope rises (cloud and rain on the windward
+	// side), downslope sinks (the lee's shadow). OrographicLift sets the slope's
+	// height against the bottom layer's depth.
+    if (SimHasSurface != 0)
+    {
+        const uint Bottom = (uint) SimGridSize.z - 1u;
+
+        Rise += SimSurfaceParams.y * SimLayerDepth(Bottom)
+			* dot(SimCentreComponents(C.x, C.y, Bottom), SimSurfaceGradient(C, 2u));
+    }
+
     return SimSoftSat(Rise / (0.5f * Depth) / SimOutputScales.z);
 }
 
@@ -2899,6 +2957,12 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
     const bool bCellNear = CellColumn.w > 0.0f;
     const float2 CellHere = bCellNear ? SimCellFlow(C.x, C.y, Layer) : float2(0.0f, 0.0f);
 
+	// Stage A9: the ground under the bottom layer: the terrain's potential
+	// pushes its faces down the slope (the flow thins over the mountains and
+	// goes round them), and the land drags them (implicitly: any rate is stable).
+    const bool bGround = (SimHasSurface != 0) && (Layer + 1u == L);
+    const float4 Ground = (SimHasSurface != 0) ? SimSurfaceAt(C) : float4(0.0f, 0.0f, 0.0f, 0.0f);
+
 	// -- u on the west face -------------------------------------------------
 
     float U;
@@ -2919,6 +2983,14 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 			- Drag * Dt * (U - RowMean.x)
 			- ForcingRate * Dt * SimForcingSlope(P, SimNorth(P), Layer, ZonalRate)
 			+ SimLayerCoupling * Dt * SimCouplingDelta(C, Layer, 0);
+
+        if (bGround)
+        {
+            const float4 West = SimSurfaceAt(C + int2(-1, 0));
+
+            U -= Dt * (Ground.x - West.x) / (SimRowCos(C.y) * SimDLon());
+            U /= 1.0f + Dt * SimSurfaceParams.z * 0.5f * (Ground.y + West.y);
+        }
 
         if (bCellNear)
         {
@@ -2950,6 +3022,14 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 			- Drag * Dt * V
 			+ ForcingRate * Dt * SimForcingSlope(P, SimEast(P), Layer, ZonalRate)
 			+ SimLayerCoupling * Dt * SimCouplingDelta(C, Layer, 1);
+
+        if (bGround)
+        {
+            const float4 South = SimSurfaceAt(C + int2(0, -1));
+
+            V -= Dt * SimFaceCos(C.y) * (Ground.x - South.x) / SimDMu();
+            V /= 1.0f + Dt * SimSurfaceParams.z * 0.5f * (Ground.y + South.y);
+        }
 
         if (bCellNear)
         {
@@ -3064,7 +3144,9 @@ void MainPredictCS(uint3 Id : SV_DispatchThreadID)
 
     if (Layer + 1u == L)
     {
-        const float Supply = SimMoistureParams.w * (1.0f + SimWindEvaporation * length(Centre.xyz));
+        // (Stage A9: land evaporates its share of the sea's.)
+        const float Supply = SimMoistureParams.w * (1.0f + SimWindEvaporation * length(Centre.xyz))
+			* (1.0f - Ground.y * (1.0f - SimSurfaceParams.w));
 
         VapourRate += Supply * max(Saturation - Tracer.z, 0.0f);
         VapourDecay += (Tracer.z < Saturation) ? Supply : 0.0f;
@@ -3506,6 +3588,123 @@ void MainCorrectCS(uint3 Id : SV_DispatchThreadID)
     }
 
     SimPhiUAV[int3(C, Layer)] = Phi;
+}
+
+// ---------------------------------------------------------------------------
+// The ground (stage A9)
+// ---------------------------------------------------------------------------
+
+/** The ground on the sim's grid from the planet's surface map, once a frame:
+ *  each cell the map's mean over its span (a box of bilinear taps, up to 8 a
+ *  side: the map's texels across a cell), the elevation scaled to the bottom
+ *  layer's potential. Zeros without a map. Dispatch (N_lon, N_lat, 1). */
+[numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
+void MainSurfaceCS(uint3 Id : SV_DispatchThreadID)
+{
+    if (Id.x >= (uint) SimGridSize.x || Id.y >= (uint) SimGridSize.y)
+    {
+        return;
+    }
+
+    float4 Out = float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    if (SimHasSurface != 0)
+    {
+        uint MapW, MapH;
+        SimSurfaceMap.GetDimensions(MapW, MapH);
+
+        const int TapsX = clamp((int) ceil((float) MapW * SimInvGridSize.x), 1, 8);
+        const int TapsY = clamp((int) ceil((float) MapH * SimInvGridSize.y), 1, 8);
+
+        float2 Sum = float2(0.0f, 0.0f);
+
+		[loop]
+        for (int J = 0; J < TapsY; J++)
+        {
+			[loop]
+            for (int I = 0; I < TapsX; I++)
+            {
+                const float2 UV = (float2(Id.xy) + (float2((float) I, (float) J) + 0.5f) / float2((float) TapsX, (float) TapsY)) * SimInvGridSize;
+
+                Sum += SimSurfaceMap.SampleLevel(SimSurfaceMapSampler, UV, 0.0f).rg;
+            }
+        }
+
+        const float2 Mean = Sum / (float) (TapsX * TapsY);
+        const float Elevation = saturate(Mean.x);
+        const uint Bottom = (uint) max(SimGridSize.z - 1, 0);
+
+        Out = float4(SimSurfaceParams.x * SimLayerDepth(Bottom) * Elevation, saturate(Mean.y), Elevation, 0.0f);
+    }
+
+    SimSurfaceUAV[Id.xy] = Out;
+}
+
+// ---------------------------------------------------------------------------
+// The climate (stage A11)
+// ---------------------------------------------------------------------------
+
+/** One step of the climate's running means, after Predict (the tracers it
+ *  left, the vertical motion Reconstruct wrote this step): per column,
+ *    x precipitation: the vapour condensed less the cloud evaporated in
+ *      sinking air, summed over the layers, over the condensation of the
+ *      equator's saturated bottom layer in full ascent (about 0 to 1);
+ *    y the bottom layer's relative humidity;
+ *    z cloud cover, 1 - the product of the layers' clear sky;
+ *    w warmth: the column's thickness against its row's mean, over the
+ *      stack's depth (a layer's thickness is its temperature: thick columns
+ *      are warm ridges, thin ones cold troughs; the latitude's own profile is
+ *      the planet's to add).
+ *  Each mixes in by 1 - exp(-dt / memory); the first step after a reset takes
+ *  the state whole. Dispatch (N_lon, N_lat, 1). */
+[numthreads(FLOWSIM_THREADS_2D, FLOWSIM_THREADS_2D, 1)]
+void MainClimateCS(uint3 Id : SV_DispatchThreadID)
+{
+    if (Id.x >= (uint) SimGridSize.x || Id.y >= (uint) SimGridSize.y)
+    {
+        return;
+    }
+
+    const int2 C = int2(Id.xy);
+    const uint L = (uint) SimGridSize.z;
+    const float Mu = SimRowToMu((float) C.y);
+
+    float Precipitation = 0.0f;
+    float Clear = 1.0f;
+    float Thickness = 0.0f;
+    float Depth = 0.0f;
+    float Humidity = 0.0f;
+
+	[loop]
+    for (uint Layer = 0; Layer < L; Layer++)
+    {
+        const float4 Tracer = SimTracerSRV.Load(int4(C, Layer, 0));
+        const float W = SimLatLonSRV.Load(int4(C, Layer + L, 0)).x;
+        const float Saturation = SimSaturation(Mu, Layer);
+
+        const float Condensed = SimCondensation(Tracer.z, Saturation, W) * Saturation;
+        const float Evaporated = SimEvaporationRate * max(-W, 0.0f) * saturate(Tracer.x) * Saturation;
+
+        Precipitation += max(Condensed - Evaporated, 0.0f);
+        Clear *= 1.0f - saturate(Tracer.x);
+        Thickness += SimPhiSRV.Load(int4(C, Layer, 0)) - SimRowMeanSRV.Load(int3(C.y, Layer, 0)).y;
+        Depth += SimLayerDepth(Layer);
+
+        if (Layer + 1u == L)
+        {
+            Humidity = Tracer.z / max(Saturation, 1e-6f);
+        }
+    }
+
+    const float Unit = max(SimCondensationRate * SimSaturation(0.0f, L - 1u), 1e-6f);
+    const float4 Sample = float4(Precipitation / Unit, Humidity, 1.0f - Clear, Thickness / max(Depth, 1e-6f));
+
+    const uint Index = Id.y * (uint) SimGridSize.x + Id.x;
+    const float Weight = (SimClimateParams.y > 0.5f)
+		? 1.0f
+		: 1.0f - exp(-SimDeltaTime / max(SimClimateParams.x * SimTurnover, 1e-6f));
+
+    SimClimateUAV[Index] = lerp(SimClimateUAV[Index], Sample, Weight);
 }
 
 // ---------------------------------------------------------------------------

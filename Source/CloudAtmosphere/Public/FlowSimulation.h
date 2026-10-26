@@ -82,6 +82,12 @@ public:
 	 *  HasState_RenderThread. OutGrid is the allocated grid the capture's layout follows. */
 	bool AddCapturePass_RenderThread(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, class FRHIGPUBufferReadback* Readback, FIntVector& OutGrid);
 
+	/** Stage A11: adds a copy of the climate's running means (Grid.X x Grid.Y float4, the sim
+	 *  grid's layout, row-major from the south: precipitation, humidity, cloud cover, warmth;
+	 *  FlowSim.usf MainClimateCS) into Readback. False, with nothing enqueued, without state.
+	 *  OutGrid is the allocated grid. */
+	bool AddClimateCapturePass_RenderThread(FRDGBuilder& GraphBuilder, class FRHIGPUBufferReadback* Readback, FIntVector& OutGrid);
+
 	/** Adds this frame's passes to the graph. Zero substeps is legal: the output
 	 *  and debug passes still run, so a paused sim can be inspected. */
 	void Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, int32 NumSubsteps);
@@ -110,6 +116,10 @@ private:
 	void AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, struct FFlowSimResources& R);
 	void AddDebugPass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 	void AddResamplePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
+	/** Stage A11: the climate's running means, one step on. */
+	void AddClimatePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
+	/** Stage A9: the ground on the sim's grid from the surface map (zeros without one). */
+	void AddSurfacePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const struct FFlowSimResources& R);
 
 	TRefCountPtr<IPooledRenderTarget> PooledFace[2];
 	TRefCountPtr<IPooledRenderTarget> PooledCentre;
@@ -145,6 +155,12 @@ private:
 	 *  toward from Centre and LatLon by FFlowSimParams::StateBlend. */
 	TRefCountPtr<IPooledRenderTarget> PooledCentreLatest;
 	TRefCountPtr<IPooledRenderTarget> PooledLatLonLatest;
+
+	/** Stage A11: the climate's running means, a float4 per column (MainClimateCS). */
+	TRefCountPtr<FRDGPooledBuffer> PooledClimate;
+
+	/** Stage A11: the next step starts the climate's means (after a seed or restore). */
+	bool bClimateFresh = true;
 
 	TRefCountPtr<IPooledRenderTarget> PooledRowMean;
 	TRefCountPtr<IPooledRenderTarget> PooledMontgomeryEq;

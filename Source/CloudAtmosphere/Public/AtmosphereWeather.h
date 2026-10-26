@@ -18,6 +18,7 @@
 #include "RHIGPUReadback.h"
 
 class FTextureRenderTargetResource;
+class FFlowSimulation;
 
 /** One read-back of the weather. Immutable once published. */
 struct CLOUDATMOSPHERE_API FAtmosphereWeatherMap
@@ -70,6 +71,82 @@ public:
 private:
 	mutable FCriticalSection Mutex;
 	TSharedPtr<const FAtmosphereWeatherMap, ESPMode::ThreadSafe> Map;
+};
+
+/** Stage A11: THE CLIMATE, the weather's long-run means read back from the sim (FlowSim.usf
+ *  MainClimateCS, UFlowSimConfig::ClimateTurnovers): on the sim's own grid (Width x Height,
+ *  longitude x sin(latitude) in the planet's frame with Z the spin axis and longitude 0 on +X,
+ *  row-major from the south; cell (i, j) centred at longitude 2 pi (i + 0.5) / Width,
+ *  sin(latitude) -1 + 2 (j + 0.5) / Height). Per cell:
+ *    x precipitation (the column's net condensation, about 0 dry to 1 a saturated column in full
+ *      ascent; its long-run mean, so 0.05 to 0.3 is a wet climate),
+ *    y the low air's relative humidity (0 to 1),
+ *    z cloud cover (0 to 1),
+ *    w warmth: the column's thickness against its latitude's mean over the air's depth (about
+ *      -0.1 to 0.1; positive warm). The latitude's own temperature profile and the ground's
+ *      height are the reader's to add (the planet knows its terrain).
+ *  Like the weather, not deterministic across machines. Immutable once published. */
+struct CLOUDATMOSPHERE_API FAtmosphereClimateMap
+{
+	int32 Width = 0;
+	int32 Height = 0;
+	TArray<FVector4f> Cells;
+
+	/** Counts the maps published by its feed. */
+	uint64 Serial = 0;
+
+	/** Bilinear at a planet-local direction (any length): wraps in longitude, clamps at the
+	 *  poles' rows. */
+	FVector4f Sample(const FVector& PlanetDir) const;
+};
+
+/** Stage A11: the latest climate map, published by the render thread and read by any thread. */
+class CLOUDATMOSPHERE_API FAtmosphereClimateFeed
+{
+public:
+	TSharedPtr<const FAtmosphereClimateMap, ESPMode::ThreadSafe> Latest() const
+	{
+		FScopeLock Lock(&Mutex);
+		return Map;
+	}
+
+	void Publish(const TSharedPtr<const FAtmosphereClimateMap, ESPMode::ThreadSafe>& InMap)
+	{
+		FScopeLock Lock(&Mutex);
+		Map = InMap;
+	}
+
+private:
+	mutable FCriticalSection Mutex;
+	TSharedPtr<const FAtmosphereClimateMap, ESPMode::ThreadSafe> Map;
+};
+
+/** Stage A11: the climate read-back's render-thread side: the copies in flight. */
+class CLOUDATMOSPHERE_API FAtmosphereClimateReadback
+{
+public:
+	explicit FAtmosphereClimateReadback(const TSharedRef<FAtmosphereClimateFeed, ESPMode::ThreadSafe>& InFeed);
+	~FAtmosphereClimateReadback();
+
+	FAtmosphereClimateReadback(const FAtmosphereClimateReadback&) = delete;
+	FAtmosphereClimateReadback& operator=(const FAtmosphereClimateReadback&) = delete;
+
+	/** Copies the sim's climate back (UFlowSimSubsystem::GetSimulation). Render thread. */
+	void Request_RenderThread(FRHICommandListImmediate& RHICmdList, FFlowSimulation* Simulation);
+
+	/** Publishes the newest copy that has landed. Render thread. */
+	void Poll_RenderThread();
+
+private:
+	struct FInFlight
+	{
+		TUniquePtr<FRHIGPUBufferReadback> Buffer;
+		FIntVector Grid = FIntVector::ZeroValue;
+	};
+
+	TSharedRef<FAtmosphereClimateFeed, ESPMode::ThreadSafe> Feed;
+	TArray<FInFlight> Pending;
+	uint64 Serial = 0;
 };
 
 /** The read-back's render-thread side: the passes and the readbacks in flight. */

@@ -193,6 +193,16 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline", meta = (ClampMin = "0.0", UIMax = "60.0"))
     float WeatherReadbackSeconds = 10.0f;
 
+    /** Stage A11: seconds between read-backs of the sim's climate (GetClimateFeed), while this
+     *  planet drives the sim. 0: none. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CloudAtmosphere|Pipeline", meta = (ClampMin = "0.0", UIMax = "60.0"))
+    float ClimateReadbackSeconds = 10.0f;
+
+    /** Stage A11: the latest climate map as a texture to look at (on the sim's grid: R
+     *  precipitation, G humidity, B cloud cover, A warmth + 0.5), remade as each lands. */
+    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
+    TObjectPtr<UTexture2D> ClimateView;
+
     // Advanced Graphics: the performance tier, shared by both models; tunes
     // apply it only on request. GraphicsPreset writes all of it but
     // ShadowTemporalSmoothing, which costs nothing. The cascade extents are
@@ -320,6 +330,24 @@ public:
      *  it; empty until the first read-back lands, and on air alone. */
     TSharedRef<FAtmosphereWeatherFeed, ESPMode::ThreadSafe> GetWeatherFeed() const { return WeatherFeed; }
 
+    /** Stage A9: the planet's surface under the weather sim (UFlowSimConfig's Planet|Surface):
+     *  Width x Height cells on the sim's own layout (longitude x sin(latitude), planet-local
+     *  with Z the spin axis and longitude 0 on +X; row 0 the south; cell (i, j) centred at
+     *  longitude 2 pi (i + 0.5) / Width, sin(latitude) -1 + 2 (j + 0.5) / Height), each
+     *  (elevation 0 sea level .. 1 the highest, land 0 .. 1). The terrestrial model's sim takes
+     *  it on this actor's own config (a generated one, or a game world's copy), live, without a
+     *  restart; an empty map clears it (all sea, as before). The sim is in the planet's frame:
+     *  the terrestrial model doesn't spin it. Game thread. */
+    void SetSurfaceMap(int32 Width, int32 Height, TConstArrayView<FVector2f> Cells);
+
+    /** Stage A9: the surface map SetSurfaceMap made (null: none). */
+    UTexture2D* GetSurfaceMap() const { return SurfaceMap; }
+
+    /** Stage A11: the sim's climate (AtmosphereWeather.h FAtmosphereClimateMap), read back every
+     *  ClimateReadbackSeconds while this planet drives the sim; the last one kept while another
+     *  does. Any thread reads it; empty until the first lands. */
+    TSharedRef<FAtmosphereClimateFeed, ESPMode::ThreadSafe> GetClimateFeed() const { return ClimateFeed; }
+
 private:
     /** Root component; carries the planet radius as scale. */
     UPROPERTY()
@@ -337,6 +365,10 @@ private:
 
     UPROPERTY()
     TObjectPtr<ADirectionalLight> SunLight_DEPRECATED = nullptr;
+
+    /** Stage A9: the planet's surface for the sim (SetSurfaceMap). */
+    UPROPERTY(Transient)
+    TObjectPtr<UTexture2D> SurfaceMap = nullptr;
 
     /** Air transmittance table, created on first use. */
     UPROPERTY(Transient, VisibleInstanceOnly, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
@@ -416,6 +448,17 @@ private:
     TSharedRef<FAtmosphereWeatherFeed, ESPMode::ThreadSafe> WeatherFeed = MakeShared<FAtmosphereWeatherFeed, ESPMode::ThreadSafe>();
     TSharedPtr<FAtmosphereWeatherReadback, ESPMode::ThreadSafe> WeatherReadback;
     double WeatherReadbackTime = -1.0e9;
+
+    /** Stage A11: the climate's feed and read-back, when it last ran, and the serial the view
+     *  texture shows. */
+    TSharedRef<FAtmosphereClimateFeed, ESPMode::ThreadSafe> ClimateFeed = MakeShared<FAtmosphereClimateFeed, ESPMode::ThreadSafe>();
+    TSharedPtr<FAtmosphereClimateReadback, ESPMode::ThreadSafe> ClimateReadback;
+    double ClimateReadbackTime = -1.0e9;
+    uint64 ClimateViewSerial = 0;
+
+    /** Stage A11: reads the climate back when due (this planet driving the sim), publishes what has
+     *  landed, and remakes the view texture from a new map. */
+    void UpdateClimateReadback();
 
     /** Reads the weather back when due, and publishes what has landed. */
     void UpdateWeatherReadback(const FAtmosphereMarchParams& March);

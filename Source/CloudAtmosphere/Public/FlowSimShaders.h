@@ -59,6 +59,13 @@ SHADER_PARAMETER(float, ImplicitWeight)
 SHADER_PARAMETER(int32, ForcingChannel)
 SHADER_PARAMETER(int32, HasForcing)
 
+// -- Surface (stage A9) -------------------------------------------------
+SHADER_PARAMETER(FVector4f, SurfaceParams)
+SHADER_PARAMETER(int32, HasSurface)
+
+// -- Climate (stage A11) ------------------------------------------------
+SHADER_PARAMETER(FVector4f, ClimateParams)
+
 // -- Forcing ------------------------------------------------------------
 SHADER_PARAMETER(float, NudgeRate)
 SHADER_PARAMETER(float, ForcingAmplitude)
@@ -174,6 +181,7 @@ SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, SimMontgomeryEqSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, SimGlobalMeanSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2DArray<float2>, SimCellFlowSRV)
 SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float4>, SimCellColumnSRV)
+SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float4>, SimSurfaceSRV)
 
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float2>, SimFaceUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimCentreUAV)
@@ -192,14 +200,18 @@ SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float4>, SimOutputUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SimDebugUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<float2>, SimCellFlowUAV)
 SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SimCellColumnUAV)
+SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SimSurfaceUAV)
 
 SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FVector4f>, SimCellSRV)
 SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FVector4f>, SimCellUAV)
 SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, SimRestoreBuffer)
 SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, SimCaptureBuffer)
+SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FVector4f>, SimClimateUAV)
 
 SHADER_PARAMETER_TEXTURE(Texture3D, SimForcingNoise)
 SHADER_PARAMETER_SAMPLER(SamplerState, SimForcingNoiseSampler)
+SHADER_PARAMETER_TEXTURE(Texture2D, SimSurfaceMap)
+SHADER_PARAMETER_SAMPLER(SamplerState, SimSurfaceMapSampler)
 
 END_SHADER_PARAMETER_STRUCT()
 
@@ -340,5 +352,7 @@ FLOWSIM_DECLARE_SHADER(FFlowSimCaptureCS)
 FLOWSIM_DECLARE_SHADER(FFlowSimRestoreCS)
 FLOWSIM_DECLARE_SHADER(FFlowSimDebugVisCS)
 FLOWSIM_DECLARE_SHADER(FFlowSimResampleCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimSurfaceCS)
+FLOWSIM_DECLARE_SHADER(FFlowSimClimateCS)
 
 #undef FLOWSIM_DECLARE_SHADER

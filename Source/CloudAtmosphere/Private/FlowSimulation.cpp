@@ -23,6 +23,7 @@ void FFlowSimParams::ResolveTextures_RenderThread()
 	check(IsInRenderingThread());
 
 	ForcingTexture = ForcingResource ? ForcingResource->TextureRHI : FTextureRHIRef();
+	SurfaceTexture = SurfaceResource ? SurfaceResource->TextureRHI : FTextureRHIRef();
 	FlowTexture = FlowResource ? FTextureRHIRef(FlowResource->GetRenderTargetTexture()) : FTextureRHIRef();
 	DebugTexture = DebugResource ? FTextureRHIRef(DebugResource->GetRenderTargetTexture()) : FTextureRHIRef();
 }
@@ -69,6 +70,13 @@ struct FFlowSimResources
 	FRDGTextureRef Debug = nullptr;
 	FRDGBufferRef Cells = nullptr;
 	FRDGTextureRef CellFlow = nullptr;
+
+	/** Stage A9: the ground on the sim's grid, made once a frame from the map
+	 *  (MainSurfaceCS); zeros without one. */
+	FRDGTextureRef Surface = nullptr;
+
+	/** Stage A11: the climate's running means. */
+	FRDGBufferRef Climate = nullptr;
 
 	/** The scalars the passes being added read: this substep's, or the
 	 *  frame's outside the substeps. */
@@ -164,6 +172,11 @@ namespace
 
 		P.ForcingChannel = Params.ForcingChannel;
 		P.HasForcing = Params.ForcingTexture.IsValid() ? 1 : 0;
+
+		P.SurfaceParams = Params.SurfaceParams;
+		P.HasSurface = Params.SurfaceTexture.IsValid() ? 1 : 0;
+
+		P.ClimateParams = Params.ClimateParams;
 
 		P.NudgeRate = Params.NudgeRate;
 		P.ForcingAmplitude = Params.ForcingAmplitude;
@@ -287,6 +300,13 @@ namespace
 		// clamped read puts a band of constant value along each face.
 		P->SimForcingNoiseSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
 
+		// Stage A9: the surface map, black without one (SimHasSurface gates it):
+		// wrapped in longitude, clamped at the poles.
+		P->SimSurfaceMap = Params.SurfaceTexture.IsValid()
+			? Params.SurfaceTexture
+			: GBlackTexture->TextureRHI;
+		P->SimSurfaceMapSampler = TStaticSamplerState<SF_Bilinear, AM_Wrap, AM_Clamp, AM_Clamp>::GetRHI();
+
 		return P;
 	}
 
@@ -371,6 +391,7 @@ void FFlowSimulation::Release_RenderThread()
 	PooledCells.SafeRelease();
 	PooledCellFlow.SafeRelease();
 	PooledCellColumn.SafeRelease();
+	PooledClimate.SafeRelease();
 
 	BalanceKey.Reset();
 	LatestKey.Reset();
@@ -482,6 +503,13 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 	PooledCellColumn = AllocatePooledTexture(
 		FRDGTextureDesc::Create2D(Size, PF_A32B32G32R32F, FClearValueBinding::Black, Flags),
 		TEXT("FlowSim.CellColumn"));
+
+	// Stage A11: the climate's running means, a float4 per column (a buffer: the pass reads and
+	// writes it in place, which a typed texture needs typed UAV loads for).
+	PooledClimate = AllocatePooledBuffer(
+		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), (uint32)(Size.X * Size.Y)),
+		TEXT("FlowSim.Climate"));
+	bClimateFresh = true;
 
 	AllocatedGrid = Params.GridSize;
 	CurrentFace = 0;
@@ -621,6 +649,7 @@ void FFlowSimulation::AddReconstructPass(FRDGBuilder& GraphBuilder, const FFlowS
 	P->SimTracerSRV = GraphBuilder.CreateSRV(R.TracerSource());
 	P->SimNoiseSRV = GraphBuilder.CreateSRV(R.NoiseSource());
 	P->SimCentreUAV = GraphBuilder.CreateUAV(bLatest ? R.CentreLatest : R.Centre);
+	P->SimSurfaceSRV = GraphBuilder.CreateSRV(R.Surface);
 	P->SimReconstructLatest = bLatest ? 1 : 0;
 
 	// Bound either way, since the kernel declares it; unwritten when latest.
@@ -700,6 +729,7 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 		P->SimCellSRV = GraphBuilder.CreateSRV(R.Cells);
 		P->SimCellFlowSRV = GraphBuilder.CreateSRV(R.CellFlow);
 		P->SimCellColumnSRV = GraphBuilder.CreateSRV(R.CellColumn);
+		P->SimSurfaceSRV = GraphBuilder.CreateSRV(R.Surface);
 		P->SimFaceUAV = GraphBuilder.CreateUAV(R.Dest());
 		P->SimPhiStarUAV = GraphBuilder.CreateUAV(R.PhiStar);
 		P->SimTracerUAV = GraphBuilder.CreateUAV(R.TracerDest());
@@ -709,6 +739,10 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 	}
 	R.Swap();
 	R.SwapTracer();
+
+	// Stage A11: the climate's running means, from the tracers this step left and its vertical
+	// motion.
+	AddClimatePass(GraphBuilder, Params, R);
 
 	// -- 3. Polar filter; filtered phi* lands in Rhs -----------------------
 
@@ -776,6 +810,45 @@ void FFlowSimulation::AddSubstep(FRDGBuilder& GraphBuilder, const FFlowSimParams
 		AddSimPass<FFlowSimCorrectCS>(GraphBuilder, TEXT("FlowSim.Correct"), P, Groups2D);
 	}
 	R.Swap();
+}
+
+void FFlowSimulation::AddClimatePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
+{
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
+	P->SimTracerSRV = GraphBuilder.CreateSRV(R.TracerSource());
+	P->SimLatLonSRV = GraphBuilder.CreateSRV(R.LatLon);
+	P->SimPhiSRV = GraphBuilder.CreateSRV(R.Phi);
+	P->SimRowMeanSRV = GraphBuilder.CreateSRV(R.RowMean);
+	P->SimClimateUAV = GraphBuilder.CreateUAV(R.Climate);
+
+	AddSimPass<FFlowSimClimateCS>(GraphBuilder, TEXT("FlowSim.Climate"), P,
+		GroupCount2D(FIntVector(Params.GridSize.X, Params.GridSize.Y, 1)));
+}
+
+bool FFlowSimulation::AddClimateCapturePass_RenderThread(FRDGBuilder& GraphBuilder, FRHIGPUBufferReadback* Readback, FIntVector& OutGrid)
+{
+	check(IsInRenderingThread());
+
+	OutGrid = AllocatedGrid;
+
+	if (!Readback || !HasState_RenderThread() || !PooledClimate.IsValid() || AllocatedGrid.X <= 0 || AllocatedGrid.Y <= 0)
+	{
+		return false;
+	}
+
+	FRDGBufferRef Climate = GraphBuilder.RegisterExternalBuffer(PooledClimate);
+	AddEnqueueCopyPass(GraphBuilder, Readback, Climate, (uint32)(AllocatedGrid.X * AllocatedGrid.Y) * sizeof(FVector4f));
+
+	return true;
+}
+
+void FFlowSimulation::AddSurfacePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
+{
+	FFlowSimParameters* P = NewParameters(GraphBuilder, Params, R.Uniforms);
+	P->SimSurfaceUAV = GraphBuilder.CreateUAV(R.Surface);
+
+	AddSimPass<FFlowSimSurfaceCS>(GraphBuilder, TEXT("FlowSim.Surface"), P,
+		GroupCount2D(FIntVector(Params.GridSize.X, Params.GridSize.Y, 1)));
 }
 
 void FFlowSimulation::AddResamplePass(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, const FFlowSimResources& R)
@@ -866,6 +939,7 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	R.Cells = GraphBuilder.RegisterExternalBuffer(PooledCells);
 	R.CellFlow = GraphBuilder.RegisterExternalTexture(PooledCellFlow);
 	R.CellColumn = GraphBuilder.RegisterExternalTexture(PooledCellColumn);
+	R.Climate = GraphBuilder.RegisterExternalBuffer(PooledClimate);
 	const TRDGUniformBufferRef<FFlowSimUniformParameters> FrameUniforms = CreateUniforms(GraphBuilder, Params);
 
 	R.Uniforms = FrameUniforms;
@@ -874,6 +948,15 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 
 	R.Output = GraphBuilder.RegisterExternalTexture(
 		CreateRenderTarget(Params.FlowTexture, TEXT("FlowSim.Flow")));
+
+	// Stage A9: the ground on the sim's grid for this frame's passes (a frame's
+	// texture: the map can change between frames, and the pass is one small
+	// dispatch).
+	R.Surface = GraphBuilder.CreateTexture(
+		FRDGTextureDesc::Create2D(FIntPoint(Params.GridSize.X, Params.GridSize.Y), PF_A32B32G32R32F,
+			FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_UAV),
+		TEXT("FlowSim.Surface"));
+	AddSurfacePass(GraphBuilder, Params, R);
 
 	if (Params.DebugTexture.IsValid() && Params.DebugSize.X > 0 && Params.DebugSize.Y > 0)
 	{
@@ -920,6 +1003,9 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 		bInitialised = true;
 		LatestKey.Reset();
 
+		// Stage A11: the climate starts again from the new state.
+		bClimateFresh = true;
+
 		// The start state is also the previous state, until a step replaces it;
 		// a first substep writes the same pair itself.
 		if (NumSubsteps <= 0)
@@ -937,6 +1023,10 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 		StepParams.StepIndex = Params.StepIndex + Step;
 		StepParams.Time = Params.TimeAt(StepParams.StepIndex);
 		StepParams.PerpetualTime = Params.TimeAt(StepParams.StepIndex + 1);
+
+		// Stage A11: the first step after a seed or restore starts the climate's means.
+		StepParams.ClimateParams.Y = bClimateFresh ? 1.0f : 0.0f;
+		bClimateFresh = false;
 
 		AddSubstep(GraphBuilder, StepParams, R);
 	}
