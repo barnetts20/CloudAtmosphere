@@ -262,7 +262,17 @@ void FAtmosphereWeatherReadback::Poll_RenderThread()
 
 FVector4f FAtmosphereClimateMap::Sample(const FVector& PlanetDir) const
 {
-	if (Width <= 0 || Height <= 0 || Cells.Num() != Width * Height)
+	return SampleGrid(Cells, Width, Height, PlanetDir);
+}
+
+FVector4f FAtmosphereClimateMap::SampleDrift(const FVector& PlanetDir) const
+{
+	return SampleGrid(Drift, Width, Height, PlanetDir);
+}
+
+FVector4f FAtmosphereClimateMap::SampleGrid(const TArray<FVector4f>& Grid, int32 GridWidth, int32 GridHeight, const FVector& PlanetDir)
+{
+	if (GridWidth <= 0 || GridHeight <= 0 || Grid.Num() != GridWidth * GridHeight)
 	{
 		return FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
 	}
@@ -272,20 +282,20 @@ FVector4f FAtmosphereClimateMap::Sample(const FVector& PlanetDir) const
 	Lon = Lon < 0.0 ? Lon + 2.0 * UE_DOUBLE_PI : Lon;
 
 	// The sim's grid: centres at integers, longitude from 0, rows even in sin(latitude).
-	const double X = Lon / (2.0 * UE_DOUBLE_PI) * Width - 0.5;
-	const double Y = FMath::Clamp((FMath::Clamp(D.Z, -1.0, 1.0) + 1.0) * 0.5 * Height - 0.5, 0.0, (double)(Height - 1));
+	const double X = Lon / (2.0 * UE_DOUBLE_PI) * GridWidth - 0.5;
+	const double Y = FMath::Clamp((FMath::Clamp(D.Z, -1.0, 1.0) + 1.0) * 0.5 * GridHeight - 0.5, 0.0, (double)(GridHeight - 1));
 
 	const int32 X0 = FMath::FloorToInt32(X);
-	const int32 Y0 = FMath::Min(FMath::FloorToInt32(Y), Height - 1);
+	const int32 Y0 = FMath::Min(FMath::FloorToInt32(Y), GridHeight - 1);
 	const float FX = (float)(X - X0);
 	const float FY = (float)(Y - Y0);
 
-	const int32 XA = ((X0 % Width) + Width) % Width;
-	const int32 XB = (XA + 1) % Width;
-	const int32 YB = FMath::Min(Y0 + 1, Height - 1);
+	const int32 XA = ((X0 % GridWidth) + GridWidth) % GridWidth;
+	const int32 XB = (XA + 1) % GridWidth;
+	const int32 YB = FMath::Min(Y0 + 1, GridHeight - 1);
 
-	const FVector4f A = FMath::Lerp(Cells[Y0 * Width + XA], Cells[Y0 * Width + XB], FX);
-	const FVector4f B = FMath::Lerp(Cells[YB * Width + XA], Cells[YB * Width + XB], FX);
+	const FVector4f A = FMath::Lerp(Grid[Y0 * GridWidth + XA], Grid[Y0 * GridWidth + XB], FX);
+	const FVector4f B = FMath::Lerp(Grid[YB * GridWidth + XA], Grid[YB * GridWidth + XB], FX);
 
 	return FMath::Lerp(A, B, FY);
 }
@@ -297,7 +307,8 @@ FAtmosphereClimateReadback::FAtmosphereClimateReadback(const TSharedRef<FAtmosph
 
 FAtmosphereClimateReadback::~FAtmosphereClimateReadback() = default;
 
-void FAtmosphereClimateReadback::Request_RenderThread(FRHICommandListImmediate& RHICmdList, FFlowSimulation* Simulation)
+void FAtmosphereClimateReadback::Request_RenderThread(FRHICommandListImmediate& RHICmdList, FFlowSimulation* Simulation, float Turnovers, bool bSpinningUp,
+	bool bSnapshot, double RequestSeconds)
 {
 	check(IsInRenderingThread());
 
@@ -310,6 +321,10 @@ void FAtmosphereClimateReadback::Request_RenderThread(FRHICommandListImmediate& 
 
 	FInFlight Copy;
 	Copy.Buffer = MakeUnique<FRHIGPUBufferReadback>(TEXT("CloudAtmosphere.ClimateReadback"));
+	Copy.Turnovers = Turnovers;
+	Copy.bSpinningUp = bSpinningUp;
+	Copy.bSnapshot = bSnapshot;
+	Copy.RequestSeconds = RequestSeconds;
 
 	const bool bCopied = Simulation->AddClimateCapturePass_RenderThread(GraphBuilder, Copy.Buffer.Get(), Copy.Grid);
 
@@ -345,13 +360,20 @@ void FAtmosphereClimateReadback::Poll_RenderThread()
 
 	if (Cells > 0)
 	{
-		if (const void* Data = Pending[Landed].Buffer->Lock(Cells * sizeof(FVector4f)))
+		if (const void* Data = Pending[Landed].Buffer->Lock(2 * Cells * sizeof(FVector4f)))
 		{
 			TSharedPtr<FAtmosphereClimateMap, ESPMode::ThreadSafe> Map = MakeShared<FAtmosphereClimateMap, ESPMode::ThreadSafe>();
 			Map->Width = Grid.X;
 			Map->Height = Grid.Y;
+			Map->Turnovers = Pending[Landed].Turnovers;
+			Map->bSpinningUp = Pending[Landed].bSpinningUp;
+			Map->bSnapshot = Pending[Landed].bSnapshot;
+			Map->RequestSeconds = Pending[Landed].RequestSeconds;
 			Map->Cells.SetNumUninitialized(Cells);
 			FMemory::Memcpy(Map->Cells.GetData(), Data, Cells * sizeof(FVector4f));
+			// Stage T5c: the sand's drift, after the cells.
+			Map->Drift.SetNumUninitialized(Cells);
+			FMemory::Memcpy(Map->Drift.GetData(), static_cast<const FVector4f*>(Data) + Cells, Cells * sizeof(FVector4f));
 			Pending[Landed].Buffer->Unlock();
 
 			Map->Serial = ++Serial;

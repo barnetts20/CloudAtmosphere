@@ -505,9 +505,10 @@ bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 		TEXT("FlowSim.CellColumn"));
 
 	// Stage A11: the climate's running means, a float4 per column (a buffer: the pass reads and
-	// writes it in place, which a typed texture needs typed UAV loads for).
+	// writes it in place, which a typed texture needs typed UAV loads for). Stage T5c: then the
+	// sand's drift, another float4 per column.
 	PooledClimate = AllocatePooledBuffer(
-		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), (uint32)(Size.X * Size.Y)),
+		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), (uint32)(2 * Size.X * Size.Y)),
 		TEXT("FlowSim.Climate"));
 	bClimateFresh = true;
 
@@ -837,7 +838,7 @@ bool FFlowSimulation::AddClimateCapturePass_RenderThread(FRDGBuilder& GraphBuild
 	}
 
 	FRDGBufferRef Climate = GraphBuilder.RegisterExternalBuffer(PooledClimate);
-	AddEnqueueCopyPass(GraphBuilder, Readback, Climate, (uint32)(AllocatedGrid.X * AllocatedGrid.Y) * sizeof(FVector4f));
+	AddEnqueueCopyPass(GraphBuilder, Readback, Climate, (uint32)(2 * AllocatedGrid.X * AllocatedGrid.Y) * sizeof(FVector4f));
 
 	return true;
 }
@@ -1024,8 +1025,21 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 		StepParams.Time = Params.TimeAt(StepParams.StepIndex);
 		StepParams.PerpetualTime = Params.TimeAt(StepParams.StepIndex + 1);
 
-		// Stage A11: the first step after a seed or restore starts the climate's means.
-		StepParams.ClimateParams.Y = bClimateFresh ? 1.0f : 0.0f;
+		// Stage A11: the first step after a seed or restore starts the climate's means. Stage
+		// T5b: with the snapshot's window, its first step starts them, each of its steps weighs
+		// 1 / (k + 1) (a plain average), and every step outside it leaves them (held).
+		if (Params.ClimateWindowStart >= 0 && Params.ClimateWindowEnd > Params.ClimateWindowStart)
+		{
+			const int64 K = StepParams.StepIndex - Params.ClimateWindowStart;
+			const bool bInWindow = K >= 0 && StepParams.StepIndex < Params.ClimateWindowEnd;
+			StepParams.ClimateParams.Y = K == 0 ? 1.0f : 0.0f;
+			StepParams.ClimateParams.Z = bInWindow ? 1.0f / (float)(K + 1) : 0.0f;
+			StepParams.ClimateParams.W = 1.0f;
+		}
+		else
+		{
+			StepParams.ClimateParams.Y = bClimateFresh ? 1.0f : 0.0f;
+		}
 		bClimateFresh = false;
 
 		AddSubstep(GraphBuilder, StepParams, R);

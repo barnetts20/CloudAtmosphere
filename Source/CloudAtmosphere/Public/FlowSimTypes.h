@@ -650,6 +650,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Climate", meta = (ClampMin = "0.1", UIMax = "200.0"))
 	float ClimateTurnovers = 20.0f;
 
+	/** Stage T5b: THE CLIMATE AS A SNAPSHOT. On, every reset or restore ends its spin-up
+	 *  with a climate window (ClimateWindowTurnovers more at the spin-up step) over which the
+	 *  means are a plain average, then holds them: the climate is the spun-up sim's, fixed
+	 *  until the next reset (a planet's biomes, and the terrain they shape, never drift).
+	 *  The window also runs after a restore that skips the spin-up. Off: stage A11's running
+	 *  means over ClimateTurnovers. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Climate")
+	bool bClimateSnapshot = true;
+
+	/** Stage T5b: the climate window's length in turnovers (at the spin-up step, about 23
+	 *  steps a turnover: 8 is about 180 steps, a second or so of frames). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet|Climate", meta = (ClampMin = "0.5", UIMax = "50.0", EditCondition = "bClimateSnapshot"))
+	float ClimateWindowTurnovers = 8.0f;
+
 	// -- Planet: storms -----------------------------------------------------
 	// An advected storm intensity, 0 to 1, grown where condensation is
 	// intense and the air spins cyclonically. The deck draws it as storm cloud.
@@ -1121,6 +1135,14 @@ public:
 		return (int32)FMath::Min(FMath::CeilToDouble(FMath::Max((double)SpinUpTurnovers, 0.0) / FlowSimStep::SpinUp), (double)MAX_int32);
 	}
 
+	/** Stage T5b: the climate window's steps at the spin-up step (0 without the snapshot). */
+	int32 GetClimateWindowSteps() const
+	{
+		return bClimateSnapshot
+			? (int32)FMath::Min(FMath::CeilToDouble(FMath::Max((double)ClimateWindowTurnovers, 0.5) / FlowSimStep::SpinUp), (double)MAX_int32)
+			: 0;
+	}
+
 	/** NoiseDriftSpeed as an angular rate, radians per unit sim time. */
 	float GetNoiseDriftRate() const;
 
@@ -1255,8 +1277,14 @@ struct FFlowSimParams
 	 *  rate, w LandEvaporation; SurfaceTexture the map (none: all sea). */
 	FVector4f SurfaceParams = FVector4f::Zero();
 
-	/** Stage A11: x ClimateTurnovers, y 1 on the step that starts the means. */
+	/** Stage A11: x ClimateTurnovers, y 1 on the step that starts the means. Stage T5b: z the
+	 *  step's weight and w 1 when the snapshot's window sets it (FFlowSimulation, per substep). */
 	FVector4f ClimateParams = FVector4f::Zero();
+
+	/** Stage T5b: the climate window's steps [Start, End) (the subsystem's step count; -1: no
+	 *  window, the running means). */
+	int64 ClimateWindowStart = -1;
+	int64 ClimateWindowEnd = -1;
 
 	float NudgeRate = 0.0f;
 	float ForcingAmplitude = 0.0f;

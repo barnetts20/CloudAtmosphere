@@ -95,9 +95,32 @@ struct CLOUDATMOSPHERE_API FAtmosphereClimateMap
 	/** Counts the maps published by its feed. */
 	uint64 Serial = 0;
 
+	/** Stage T5a: how long the means had run past the spin-up when the map was copied, in the
+	 *  sim's turnovers (UFlowSimSubsystem::GetClimateTurnovers; 0 while spinning up), and whether
+	 *  the sim was still spinning up. A reader that wants a settled climate waits for a few
+	 *  ClimateTurnovers. It drops back toward 0 when the sim resets. */
+	float Turnovers = 0.0f;
+	bool bSpinningUp = false;
+
+	/** Stage T5b: the climate window's snapshot (UFlowSimConfig::bClimateSnapshot), the one
+	 *  read back as the window ended; and FPlatformTime::Seconds at the request (a reader that
+	 *  restarted the sim takes only a snapshot requested after it). */
+	bool bSnapshot = false;
+	double RequestSeconds = 0.0;
+
+	/** Stage T5c: THE SAND'S DRIFT per cell (the same grid), from the lowest layer's wind V
+	 *  (east, north; sim units): x, y the resultant drift (the mean of V |V|^2), z the drift
+	 *  potential (the mean of |V|^3), w the mean speed. |(x, y)| / z is Fryberger's directional
+	 *  variability (about 1: one wind; low: many). */
+	TArray<FVector4f> Drift;
+
 	/** Bilinear at a planet-local direction (any length): wraps in longitude, clamps at the
 	 *  poles' rows. */
 	FVector4f Sample(const FVector& PlanetDir) const;
+	FVector4f SampleDrift(const FVector& PlanetDir) const;
+
+private:
+	static FVector4f SampleGrid(const TArray<FVector4f>& Grid, int32 GridWidth, int32 GridHeight, const FVector& PlanetDir);
 };
 
 /** Stage A11: the latest climate map, published by the render thread and read by any thread. */
@@ -131,8 +154,10 @@ public:
 	FAtmosphereClimateReadback(const FAtmosphereClimateReadback&) = delete;
 	FAtmosphereClimateReadback& operator=(const FAtmosphereClimateReadback&) = delete;
 
-	/** Copies the sim's climate back (UFlowSimSubsystem::GetSimulation). Render thread. */
-	void Request_RenderThread(FRHICommandListImmediate& RHICmdList, FFlowSimulation* Simulation);
+	/** Copies the sim's climate back (UFlowSimSubsystem::GetSimulation). Render thread. Stage
+	 *  T5a: Turnovers and bSpinningUp, the sim's at the request (the game thread's), go on the map. */
+	void Request_RenderThread(FRHICommandListImmediate& RHICmdList, FFlowSimulation* Simulation, float Turnovers = 0.0f, bool bSpinningUp = false,
+		bool bSnapshot = false, double RequestSeconds = 0.0);
 
 	/** Publishes the newest copy that has landed. Render thread. */
 	void Poll_RenderThread();
@@ -142,6 +167,10 @@ private:
 	{
 		TUniquePtr<FRHIGPUBufferReadback> Buffer;
 		FIntVector Grid = FIntVector::ZeroValue;
+		float Turnovers = 0.0f;
+		bool bSpinningUp = false;
+		bool bSnapshot = false;
+		double RequestSeconds = 0.0;
 	};
 
 	TSharedRef<FAtmosphereClimateFeed, ESPMode::ThreadSafe> Feed;

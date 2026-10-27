@@ -1103,6 +1103,11 @@ void UFlowSimSubsystem::ResetSimulation()
 {
 	SimulatedTime = 0.0f;
 	StepsCompleted = 0;
+	ClimateStartTime = 0.0;
+	ClimateSpinUpTurnovers = 0.0;
+	ClimateWindowStart = -1;
+	ClimateWindowEnd = -1;
+	ClimateWindowSerial++;
 	ClockStep = 0.0f;
 	PendingManualSteps = 0;
 	StepLoadLevel = 0;
@@ -1175,6 +1180,43 @@ void UFlowSimSubsystem::ResetSimulation()
 				*Config->GetName(), (int32)(SpinUpTarget - StepsCompleted));
 		}
 	}
+
+	// Stage T5a: the climate's means start again with the state (FFlowSimulation's bClimateFresh),
+	// and the spin-up ahead of them (its steps are FlowSimStep::SpinUp turnovers each) doesn't
+	// count toward their age.
+	ClimateStartTime = SimulatedTime;
+
+	// Stage T5b: the climate window ends the spin-up (after a restore that skips it too): the
+	// means' plain average over it is the snapshot, held from its last step.
+	const int32 WindowSteps = Config ? Config->GetClimateWindowSteps() : 0;
+	if (WindowSteps > 0)
+	{
+		ClimateWindowStart = FMath::Max<int64>((int64)SpinUpTarget, StepsCompleted);
+		ClimateWindowEnd = ClimateWindowStart + WindowSteps;
+		SpinUpTarget = (int32)FMath::Min<int64>(ClimateWindowEnd, MAX_int32);
+	}
+
+	ClimateSpinUpTurnovers = (double)FMath::Max<int64>((int64)SpinUpTarget - StepsCompleted, 0) * (double)FlowSimStep::SpinUp;
+}
+
+bool UFlowSimSubsystem::IsAdvancing() const
+{
+	if (!bRunning || !Config)
+	{
+		return false;
+	}
+
+	const int32 PauseOverride = CVarFlowSimPaused.GetValueOnGameThread();
+	const bool bPaused = (PauseOverride >= 0) ? (PauseOverride != 0) : Config->bPaused;
+
+	return !bPaused;
+}
+
+double UFlowSimSubsystem::GetClimateTurnovers() const
+{
+	const double Turnover = Config ? (double)FMath::Max(Config->GetTurnover(), 1e-6f) : 1.0;
+
+	return FMath::Max(FMath::Max(SimulatedTime - ClimateStartTime, 0.0) / Turnover - ClimateSpinUpTurnovers, 0.0);
 }
 
 bool UFlowSimSubsystem::QueueInitialState()
@@ -1496,6 +1538,8 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 
 	// Stage A11: the climate's memory.
 	Out.ClimateParams = FVector4f(FMath::Max(Config->ClimateTurnovers, 0.1f), 0.0f, 0.0f, 0.0f);
+	Out.ClimateWindowStart = ClimateWindowStart;
+	Out.ClimateWindowEnd = ClimateWindowEnd;
 
 	// Stage A9: the ground (SurfaceMap; its resource below).
 	Out.SurfaceParams = FVector4f(

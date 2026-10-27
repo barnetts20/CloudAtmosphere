@@ -149,6 +149,29 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	int64 GetStepsCompleted() const { return StepsCompleted; }
 
+	/** Stage T5a: how long the climate's means (UFlowSimConfig::ClimateTurnovers) have run past
+	 *  the spin-up, in turnovers of sim time (0 while spinning up), since the reset or restore that
+	 *  started them. */
+	double GetClimateTurnovers() const;
+
+	/** Stage T5b: the climate window has run and its snapshot is held (UFlowSimConfig::
+	 *  bClimateSnapshot), until the next reset. */
+	bool IsClimateSnapshotReady() const { return ClimateWindowEnd >= 0 && StepsCompleted >= ClimateWindowEnd; }
+
+	/** Stage T5b: the running state has a climate window (it was reset with bClimateSnapshot on;
+	 *  the config's flag changed since applies at the next reset). */
+	bool HasClimateWindow() const { return ClimateWindowEnd >= 0; }
+
+	/** Stage T5b: counts the resets, each a new climate window: a reader takes each window's
+	 *  snapshot once. */
+	uint32 GetClimateWindowSerial() const { return ClimateWindowSerial; }
+
+	/** Stage T5b: whether any planet drives the sim. */
+	bool HasOwner() const { return Owner.IsValid(); }
+
+	/** Stage T5b: whether the sim steps (running, and not paused by its config or an override). */
+	bool IsAdvancing() const;
+
 	/** Steps the last frame took: the cost readout for SimSpeed. */
 	UFUNCTION(BlueprintCallable, Category = "Flow Sim")
 	int32 GetStepsLastFrame() const { return LastSubsteps; }
@@ -299,6 +322,17 @@ private:
 	/** Double precision: a float stops resolving a small step within hours. */
 	double SimulatedTime = 0.0;
 	int64 StepsCompleted = 0;
+
+	/** Stage T5a: SimulatedTime at the reset or restore that started the climate's means, and
+	 *  the turnovers of spin-up ahead of them then. */
+	double ClimateStartTime = 0.0;
+	double ClimateSpinUpTurnovers = 0.0;
+
+	/** Stage T5b: the climate window's steps [Start, End), the spin-up's last (-1: none), and
+	 *  the resets' count. */
+	int64 ClimateWindowStart = -1;
+	int64 ClimateWindowEnd = -1;
+	uint32 ClimateWindowSerial = 0;
 
 	/** The step clock, FFlowSimParams::AnchorTime and AnchorStep at ClockStep:
 	 *  re-anchored at the current time when the step changes, and at zero

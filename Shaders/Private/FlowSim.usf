@@ -406,7 +406,9 @@ SamplerState SimSurfaceMapSampler;
 
 /** Stage A11: the climate's running means, a float4 per column, row-major from
  *  the south (MainClimateCS): x precipitation, y the bottom layer's relative
- *  humidity, z cloud cover, w warmth. */
+ *  humidity, z cloud cover, w warmth. Stage T5c: then as many again, the sand's
+ *  drift (the resultant drift east and north, the drift potential, the mean
+ *  speed). */
 RWStructuredBuffer<float4> SimClimateUAV;
 
 /** Snapshot transfer, one plane per float; see MainCaptureCS. A restore reads
@@ -3700,11 +3702,27 @@ void MainClimateCS(uint3 Id : SV_DispatchThreadID)
     const float4 Sample = float4(Precipitation / Unit, Humidity, 1.0f - Clear, Thickness / max(Depth, 1e-6f));
 
     const uint Index = Id.y * (uint) SimGridSize.x + Id.x;
+    // Stage T5b: the snapshot's window gives the weight (a plain average; 0 holds the means).
     const float Weight = (SimClimateParams.y > 0.5f)
 		? 1.0f
-		: 1.0f - exp(-SimDeltaTime / max(SimClimateParams.x * SimTurnover, 1e-6f));
+		: (SimClimateParams.w > 0.5f)
+			? SimClimateParams.z
+			: 1.0f - exp(-SimDeltaTime / max(SimClimateParams.x * SimTurnover, 1e-6f));
 
     SimClimateUAV[Index] = lerp(SimClimateUAV[Index], Sample, Weight);
+
+    // Stage T5c: THE SAND'S DRIFT, after the cells' entries: the lowest layer's wind as Fryberger &
+    // Dean (1979) weigh it for dunes (the drift potential goes as V^2 (V - Vt); here V^3, with no
+    // threshold in the sim's units): x, y the resultant drift (east, north: the mean of V |V|^2),
+    // z the drift potential (the mean of |V|^3), w the mean speed. Their ratio RDP / DP is
+    // Fryberger's directional variability (near 1 one wind: transverse and barchan dunes; mid two:
+    // linear; low many: star).
+    const float2 Wind = SimLatLonSRV.Load(int4(C, L - 1u, 0)).xy;
+    const float Speed = length(Wind);
+    const float4 Drift = float4(Wind * (Speed * Speed), Speed * Speed * Speed, Speed);
+    const uint WindIndex = Index + (uint) SimGridSize.x * (uint) SimGridSize.y;
+
+    SimClimateUAV[WindIndex] = lerp(SimClimateUAV[WindIndex], Drift, Weight);
 }
 
 // ---------------------------------------------------------------------------

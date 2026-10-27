@@ -1248,23 +1248,88 @@ void APlanetAtmosphereActor::UpdateClimateReadback()
     }
 
     const double Now = FPlatformTime::Seconds();
-    const bool bDue = Now - ClimateReadbackTime >= (double)ClimateReadbackSeconds;
+    bool bDue = false;
+    bool bSnapshot = false;
+
+    // Stage T5b: with a climate window (the running state's: the config's flag applies at a
+    // reset), one read-back as each window ends (the means are held after it, so later copies
+    // would only repeat it): each reset's window once, by its serial; else every
+    // ClimateReadbackSeconds.
+    if (Sim->HasClimateWindow())
+    {
+        if (Sim->IsClimateSnapshotReady() && Sim->GetClimateWindowSerial() != ClimateSnapshotSerialRead)
+        {
+            ClimateSnapshotSerialRead = Sim->GetClimateWindowSerial();
+            bDue = true;
+            bSnapshot = true;
+        }
+    }
+    else
+    {
+        bDue = Now - ClimateReadbackTime >= (double)ClimateReadbackSeconds;
+    }
 
     if (bDue)
     {
         ClimateReadbackTime = Now;
     }
 
+    // Stage T5a: the means' age goes with the copy (a reader waits for a settled climate).
+    const float Turnovers = (float)Sim->GetClimateTurnovers();
+    const bool bSpinningUp = Sim->IsSpinningUp();
+
     ENQUEUE_RENDER_COMMAND(CloudAtmosphereClimateReadback)(
-        [Readback = ClimateReadback, Simulation = Sim->GetSimulation(), bDue](FRHICommandListImmediate& RHICmdList)
+        [Readback = ClimateReadback, Simulation = Sim->GetSimulation(), bDue, Turnovers, bSpinningUp, bSnapshot, Now](FRHICommandListImmediate& RHICmdList)
         {
             Readback->Poll_RenderThread();
 
             if (bDue)
             {
-                Readback->Request_RenderThread(RHICmdList, Simulation);
+                Readback->Request_RenderThread(RHICmdList, Simulation, Turnovers, bSpinningUp, bSnapshot, Now);
             }
         });
+}
+
+bool APlanetAtmosphereActor::DrivesSimulation() const
+{
+    const UWorld* World = GetWorld();
+    const UFlowSimSubsystem* Sim = World ? World->GetSubsystem<UFlowSimSubsystem>() : nullptr;
+
+    return Sim && Sim->IsOwner(this);
+}
+
+void APlanetAtmosphereActor::RestartSimulation()
+{
+    UWorld* World = GetWorld();
+    UFlowSimSubsystem* Sim = World ? World->GetSubsystem<UFlowSimSubsystem>() : nullptr;
+
+    if (Sim && Sim->IsOwner(this))
+    {
+        // The surface the restart is for (a new SetSurfaceMap), on the running config now: the
+        // claim that would put it there runs only at this actor's next tick, after the window's
+        // first steps (stage A9's rule: an own config only).
+        if (UFlowSimConfig* Running = Sim->GetConfig(); Running && Running->GetOuter() == this)
+        {
+            Running->SurfaceMap = (&ActiveModel() == &GasGiant) ? nullptr : SurfaceMap.Get();
+        }
+
+        Sim->ResetSimulation();
+    }
+}
+
+bool APlanetAtmosphereActor::CanProvideClimateSnapshot() const
+{
+    const UWorld* World = GetWorld();
+    const UFlowSimSubsystem* Sim = World ? World->GetSubsystem<UFlowSimSubsystem>() : nullptr;
+
+    if (!Sim || !Sim->IsOwner(this) || ClimateReadbackSeconds <= 0.0f || !Sim->IsAdvancing())
+    {
+        return false;
+    }
+
+    // The running state's window, or the next reset's (the config's flag).
+    const UFlowSimConfig* Running = Sim->GetConfig();
+    return Sim->HasClimateWindow() || (Running && Running->bClimateSnapshot);
 }
 
 void APlanetAtmosphereActor::ReleaseViewExtension()

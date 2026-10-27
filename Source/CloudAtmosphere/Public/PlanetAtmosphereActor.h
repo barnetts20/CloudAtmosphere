@@ -348,6 +348,21 @@ public:
      *  does. Any thread reads it; empty until the first lands. */
     TSharedRef<FAtmosphereClimateFeed, ESPMode::ThreadSafe> GetClimateFeed() const { return ClimateFeed; }
 
+    /** Stage T5b: restarts the sim from its start (the seed's state or InitialState: a new spin-up
+     *  and climate window, so a new climate snapshot) when this planet drives it; nothing else. A
+     *  planet whose ground changed (a new surface map) calls it for a climate of the new ground. */
+    UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
+    void RestartSimulation();
+
+    /** Stage T5b: whether this planet drives the sim (its weather and climate are this planet's). */
+    UFUNCTION(BlueprintPure, Category = "CloudAtmosphere")
+    bool DrivesSimulation() const;
+
+    /** Stage T5b: whether a climate snapshot can come from this planet's sim: it drives the sim,
+     *  the sim steps (not paused), has (or will have at its next reset) a climate window, and the
+     *  climate reads back (ClimateReadbackSeconds above 0). */
+    bool CanProvideClimateSnapshot() const;
+
 private:
     /** Root component; carries the planet radius as scale. */
     UPROPERTY()
@@ -455,6 +470,9 @@ private:
     TSharedPtr<FAtmosphereClimateReadback, ESPMode::ThreadSafe> ClimateReadback;
     double ClimateReadbackTime = -1.0e9;
     uint64 ClimateViewSerial = 0;
+    /** Stage T5b: the sim's climate window (UFlowSimSubsystem::GetClimateWindowSerial) whose
+     *  snapshot was read back (0: none yet). */
+    uint32 ClimateSnapshotSerialRead = 0;
 
     /** Stage A11: reads the climate back when due (this planet driving the sim), publishes what has
      *  landed, and remakes the view texture from a new map. */
