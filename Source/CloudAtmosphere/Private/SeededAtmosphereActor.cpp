@@ -1,16 +1,26 @@
 #include "SeededAtmosphereActor.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 #include "AtmosphereGenerator.h"
 #include "FlowSimTypes.h"
 
-void ASeededAtmosphereActor::Tick(float DeltaTime)
+void ASeededAtmosphereActor::PrepareForInitialize()
 {
-	// Before the base tick, which bids for the sim with the slot's config.
+	TRACE_CPUPROFILER_EVENT_SCOPE(ASeededAtmosphereActor::PrepareForInitialize);
+	// Before the first bid for the sim (Initialize's), so it is made with the seed's config, not
+	// the shared default's: the sim would start on that and restart a frame later (R1, ATM-3).
 	if (bPendingGenerate)
 	{
 		bPendingGenerate = false;
 		Generate();
 	}
+}
+
+void ASeededAtmosphereActor::Tick(float DeltaTime)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(ASeededAtmosphereActor::Tick);
+	// Before the base tick, which bids for the sim with the slot's config.
+	PrepareForInitialize();
 
 	Super::Tick(DeltaTime);
 }
@@ -140,6 +150,7 @@ void ASeededAtmosphereActor::Generate()
 
 void ASeededAtmosphereActor::GenerateParts(bool bSim)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(ASeededAtmosphereActor::GenerateParts);
 	// A class default or template generates nothing: only placed actors own state.
 	if (HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject))
 	{

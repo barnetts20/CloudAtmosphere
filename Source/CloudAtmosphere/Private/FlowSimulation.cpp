@@ -1,4 +1,5 @@
 #include "FlowSimulation.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 #include "FlowSimShaders.h"
 #include "FlowSnapshot.h"
@@ -15,6 +16,8 @@
 // TStaticSamplerState, for the wrapped trilinear forcing sampler.
 #include "RHIStaticStates.h"
 #include "TextureResource.h"
+
+DECLARE_GPU_STAT(CloudAtmosphereFlowSim);   // P1a: its own row in stat gpu
 
 DEFINE_LOG_CATEGORY(LogFlowSim);
 
@@ -410,6 +413,7 @@ void FFlowSimulation::Release_RenderThread()
 
 bool FFlowSimulation::EnsureResources(const FFlowSimParams& Params)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FFlowSimulation::EnsureResources);
 	const bool bGridChanged = (AllocatedGrid != Params.GridSize);
 
 	if (!bGridChanged && !bResetRequested && PooledPhi.IsValid())
@@ -906,6 +910,7 @@ void FFlowSimulation::AddDebugPass(FRDGBuilder& GraphBuilder, const FFlowSimPara
 
 void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlowSimParams& Params, int32 NumSubsteps)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FFlowSimulation::Enqueue_RenderThread);
 	check(IsInRenderingThread());
 
 	if (!Params.FlowTexture.IsValid())
@@ -915,7 +920,7 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 
 	const bool bNeedsSeeding = EnsureResources(Params);
 
-	RDG_EVENT_SCOPE(GraphBuilder, "FlowSim");
+	RDG_EVENT_SCOPE_STAT(GraphBuilder, CloudAtmosphereFlowSim, "FlowSim");
 
 	FFlowSimResources R;
 	R.Face[0] = GraphBuilder.RegisterExternalTexture(PooledFace[0]);
@@ -1078,4 +1083,4 @@ void FFlowSimulation::Enqueue_RenderThread(FRDGBuilder& GraphBuilder, const FFlo
 	// three times per substep and the tracers once, so both genuinely alternate.
 	CurrentFace = R.Current;
 	CurrentTracer = R.TracerCurrent;
-}
+}

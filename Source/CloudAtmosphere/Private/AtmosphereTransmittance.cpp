@@ -1,4 +1,5 @@
 #include "AtmosphereTransmittance.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 #include "DataDrivenShaderPlatformInfo.h"
 #include "RenderGraphBuilder.h"
@@ -8,6 +9,8 @@
 
 #include "RenderUtils.h"
 #include "TextureResource.h"
+
+DECLARE_GPU_STAT(CloudAtmosphereTransmittance);   // P1a: its own row in stat gpu
 
 bool FAtmosphereTransmittanceCS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 {
@@ -43,7 +46,7 @@ namespace AtmosphereTransmittance
 			return;
 		}
 
-		RDG_EVENT_SCOPE(GraphBuilder, "AtmosphereTransmittance");
+		RDG_EVENT_SCOPE_STAT(GraphBuilder, CloudAtmosphereTransmittance, "AtmosphereTransmittance");
 
 		FRDGTextureRef Table = GraphBuilder.RegisterExternalTexture(
 			CreateRenderTarget(TableRHI, TEXT("Atmosphere.Transmittance")));
@@ -80,6 +83,7 @@ namespace AtmosphereTransmittance
 		ENQUEUE_RENDER_COMMAND(AtmosphereTransmittanceBake)(
 			[Params](FRHICommandListImmediate& RHICmdList)
 			{
+				TRACE_CPUPROFILER_EVENT_SCOPE_STR("RT AtmosphereTransmittanceBake");
 				FRDGBuilder GraphBuilder(RHICmdList);
 
 				AddBakePass_RenderThread(GraphBuilder, Params);
@@ -87,4 +91,4 @@ namespace AtmosphereTransmittance
 				GraphBuilder.Execute();
 			});
 	}
-}
+}

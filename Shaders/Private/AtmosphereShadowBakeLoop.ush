@@ -31,7 +31,13 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 {
     const int Level = int(DispatchThreadId.z) + ShadowFirstLevel;
 
-    if (any(DispatchThreadId.xy >= uint2(ShadowMapSize))
+	// Stage P1b: the dispatch's group rows are every ShadowRowStride-th block of
+	// ATMO_BAKE_THREADS map rows, from ShadowRowPhase. Stride 1 is the identity.
+    const uint BlockRows = uint(ATMO_BAKE_THREADS);
+    const uint Block = (DispatchThreadId.y / BlockRows) * uint(max(ShadowRowStride, 1)) + uint(max(ShadowRowPhase, 0));
+    const uint2 MapTexel = uint2(DispatchThreadId.x, Block * BlockRows + DispatchThreadId.y % BlockRows);
+
+    if (any(MapTexel >= uint2(ShadowMapSize))
 		|| Level < 0 || Level >= ATMO_SHADOW_CASCADES)
     {
         return;
@@ -39,7 +45,10 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 
 	// One slice per cascade. Extent and centre derive from the same functions the
 	// reconstruction calls, so the two cannot disagree about where a slice is.
-    const uint3 Texel = uint3(DispatchThreadId.xy, uint(Level));
+    const uint3 Texel = uint3(MapTexel, uint(Level));
+
+	// Where the result goes: the level's slice, or the staging slice of a spread bake.
+    const uint3 OutTexel = uint3(MapTexel, (ShadowWriteSlice >= 0) ? uint(ShadowWriteSlice) : uint(Level));
 
     BakeFieldParams F = BakeField_Params();
 
@@ -57,7 +66,10 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 	// A collapsed level writes the sentinel, which the reader's walk skips.
     if (ShadowExtent <= 0.0f)
     {
-        ShadowMapUAV[Texel] = ATMO_SHADOW_NO_DECK;
+        if (AtmoBakeQuadLane == 0u)
+        {
+            ShadowMapUAV[OutTexel] = ATMO_SHADOW_NO_DECK;
+        }
         return;
     }
 
@@ -91,7 +103,10 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 
     if (HalfChordSq <= 0.0f)
     {
-        ShadowMapUAV[Texel] = ATMO_SHADOW_NO_DECK;
+        if (AtmoBakeQuadLane == 0u)
+        {
+            ShadowMapUAV[OutTexel] = ATMO_SHADOW_NO_DECK;
+        }
         return;
     }
 
@@ -348,5 +363,9 @@ void AtmoBake_Texel(uint3 DispatchThreadId)
 	// PITFALL: no debug remap here. The march reads this map, so rescaling what is
 	// written rescales the lighting (a shadowed planet with a lit terminator sliver)
 	// and looks like a reconstruction bug. Scale where the map is visualised.
-    ShadowMapUAV[Texel] = Out;
+    // The quad's lanes hold the same texel and the same result (ATMO_BAKE_QUAD).
+    if (AtmoBakeQuadLane == 0u)
+    {
+        ShadowMapUAV[OutTexel] = Out;
+    }
 }

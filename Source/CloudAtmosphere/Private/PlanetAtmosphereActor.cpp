@@ -1,4 +1,5 @@
 #include "PlanetAtmosphereActor.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "CloudAtmosphere.h"
 #include "CoreGlobals.h"
 #include "Misc/Crc.h"
@@ -19,6 +20,7 @@
 #include "FlowSimShaders.h"
 #include "FlowSimSubsystem.h"
 #include "FlowSimTypes.h"
+#include "HAL/IConsoleManager.h"
 
 // --------------------------------------------------------------------------
 // Constructor
@@ -213,6 +215,7 @@ void APlanetAtmosphereActor::OnConstruction(const FTransform& Transform)
 
 void APlanetAtmosphereActor::Tick(float DeltaTime)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::Tick);
     Super::Tick(DeltaTime);
 
     const UWorld* World = GetWorld();
@@ -304,6 +307,7 @@ void APlanetAtmosphereActor::OnTransformUpdated(USceneComponent* Component, EUpd
 void APlanetAtmosphereActor::InitializeFromPlanet(USceneComponent* InAttachParent,
     FVector InScale)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::InitializeFromPlanet);
     bIsPlanetOwned = true;
 
     // Apply scale BEFORE binding the transform guard -- prevents the old guard
@@ -331,7 +335,9 @@ void APlanetAtmosphereActor::InitializeFromPlanet(USceneComponent* InAttachParen
 
 void APlanetAtmosphereActor::Initialize()
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::Initialize);
     DestroyLegacyChildActors();
+    PrepareForInitialize();
 
     // The components' switches are saved with them; parking is runtime state.
     SetAtmosphereActive(bAtmosphereActive);
@@ -402,6 +408,7 @@ void APlanetAtmosphereActor::ReleaseSimulation(bool bKeepField)
 
 void APlanetAtmosphereActor::UpdateAtmosphere()
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::UpdateAtmosphere);
     const FVector PlanetCenter = GetActorLocation();
     const float PlanetRadius = static_cast<float>(GetActorScale3D().GetMax());
 
@@ -422,6 +429,11 @@ void APlanetAtmosphereActor::UpdateAtmosphere()
     UpdateTransmittanceTable(PlanetRadius);
     UpdateComputeMarch(PlanetRadius, PlanetCenter, LightDir);
 }
+
+static TAutoConsoleVariable<int32> CVarCloudAtmosphereClimateView(
+    TEXT("r.CloudAtmosphere.ClimateView"), 0,
+    TEXT("1: each planet atmosphere keeps its latest climate map as a texture to look at (its ClimateView property; a transient texture per map). 0 (default): none."),
+    ECVF_Default);
 
 /** How far the lift can lower a column's base below CloudBase, in atmosphere
  *  thicknesses: TR_FieldReach's BaseDown. */
@@ -621,8 +633,56 @@ static uint32 MakeShadowFieldKey(const FTerrestrialFieldParameters& F, float Pla
  *  chord, so an unbaked texel reads as fully lit. */
 static constexpr float ShadowNoDeck = 60000.0f;
 
+// -- Stage P1b: the cloud shadow bake's schedule ------------------------------
+//
+// R1a rebaked one whole level every frame, in turn, whatever had changed: one
+// 256-step, 4-subsample march per texel of a slice, 4.6-6.9 ms of GPU a frame at
+// the Max preset (Design/Performance.md). P1b spreads each level's bake over
+// FramesPerLevel frames, a share of its row blocks a frame, into a staging slice
+// that replaces the level's when the last share is in (amortised shadow-map
+// updates, as cloud and sky systems spread theirs), and skips a level whose
+// field clock, light and camera have not moved.
+
+static TAutoConsoleVariable<int32> CVarShadowBakeAmortize(
+    TEXT("r.CloudAtmosphere.ShadowBake.Amortize"), 1,
+    TEXT("Stage P1b. 1 (default): each cloud shadow level is rebaked only when its clock, light or camera moved, spread over FramesPerLevel frames. ")
+    TEXT("0: the R1a schedule, one whole level every frame in turn, for A/B."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarShadowBakeFramesPerLevel(
+    TEXT("r.CloudAtmosphere.ShadowBake.FramesPerLevel"), 4,
+    TEXT("Stage P1b. Frames one cloud shadow level's rebake is spread over (1 to 16): the bake's GPU time a frame divides by about this, ")
+    TEXT("and each level is refreshed every 3 x this frames while the clouds move. Default 4."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarShadowBakeMinInterval(
+    TEXT("r.CloudAtmosphere.ShadowBake.MinInterval"), 0.0f,
+    TEXT("Stage P1b. Least world seconds between two rebakes of one cloud shadow level; frames with no level due bake nothing. 0 (default): no floor."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarShadowBakeCameraTexels(
+    TEXT("r.CloudAtmosphere.ShadowBake.CameraTexels"), 1.0f,
+    TEXT("Stage P1b. Camera travel, in the level's texels, that makes an inner cloud shadow level due on a still field. Default 1."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarShadowBakeQuad(
+    TEXT("r.CloudAtmosphere.ShadowBake.QuadSubsamples"), 1,
+    TEXT("Stage P1b2. 1 (default): each cloud shadow texel's four subsamples run on a quad of lanes and are summed in order, ")
+    TEXT("four times the threads for the same result, where the platform has wave operations. 0: one thread a texel, for A/B."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarShadowBakeLog(
+    TEXT("r.CloudAtmosphere.ShadowBake.Log"), 0,
+    TEXT("Stage P1b. 1: log each cloud shadow level as its rebake completes, with the seconds since its last one."),
+    ECVF_Default);
+
+/** Least light turn that makes a level due on a still field: well under a
+ *  texel at any cascade (2 degrees drops the history altogether). */
+static constexpr float ShadowDueLightCosine = 0.99999995f;   // ~0.02 degrees
+
 void APlanetAtmosphereActor::PrepareShadowTarget()
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::PrepareShadowTarget);
     if (!ShadowTarget)
     {
         ShadowTarget = NewObject<UTextureRenderTarget2DArray>(this, TEXT("ShadowTarget"), RF_Transient);
@@ -692,6 +752,7 @@ void APlanetAtmosphereActor::PrepareCoverageTarget()
 
 void APlanetAtmosphereActor::PrepareTransmittanceTable()
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::PrepareTransmittanceTable);
     if (!TransmittanceTable)
     {
         TransmittanceTable = NewObject<UTextureRenderTarget2D>(
@@ -732,6 +793,7 @@ void APlanetAtmosphereActor::PrepareTransmittanceTable()
 
 void APlanetAtmosphereActor::UpdateTransmittanceTable(float PlanetRadius)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::UpdateTransmittanceTable);
     PrepareTransmittanceTable();
 
     FTextureRenderTargetResource* TableRes = TransmittanceTable->GameThread_GetRenderTargetResource();
@@ -818,26 +880,28 @@ bool APlanetAtmosphereActor::FillShadowRequest(
 
     Params.CameraLocal = ToLocal(CameraWorld - PlanetCenter);
 
-    // -- Rotation -----------------------------------------------------------
+    // NO EXTENT AND NO CENTRE PUSHED. Every cascade derives its half-width from
+    // CascadeRadii and its centre from the camera, on both sides, so the level
+    // index is the only thing that distinguishes them -- and that comes from the
+    // dispatch rather than from here.
+    Params.MapSize = FIntPoint(ShadowTarget->SizeX, ShadowTarget->SizeY);
+    Params.MapSlices = ShadowTarget->Slices;
+
+    // -- Schedule -----------------------------------------------------------
     //
-    // One level this request, taken in turn, so each is rebaked every third
-    // frame and the stagger adds to the shadows' temporal smoothing; every
-    // level on the first request into a fresh target, which holds nothing yet.
-    // NOTHING IS RECORDED HERE: CommitShadowBake does that once the request is
-    // taken.
+    // Every level on the first request into a fresh target, which holds
+    // nothing yet. After that, R1a's rotation took one whole level a frame, in
+    // turn (r.CloudAtmosphere.ShadowBake.Amortize 0). P1b's (1) carries on a
+    // level's spread bake if one is under way; otherwise starts the next due
+    // level in turn; otherwise bakes nothing, and the request runs only the
+    // coverage pass the march reads. NOTHING IS RECORDED HERE: CommitShadowBake
+    // does that once the request is taken.
     const int32 LevelCount = AtmoShadowBake::CascadeCount;
 
     // A fresh target holds nothing to blend from.
     const bool bHasHistory = bShadowPrimed;
 
-    if (!bShadowPrimed)
-    {
-        Params.LevelMask = (1u << LevelCount) - 1u;
-    }
-    else
-    {
-        Params.LevelMask = 1u << (ShadowLevelCursor % LevelCount);
-    }
+    const double Now = World->GetTimeSeconds();
 
     // -- History ------------------------------------------------------------
     //
@@ -846,39 +910,117 @@ bool APlanetAtmosphereActor::FillShadowRequest(
     // with the game. Per level, so the fade is the same whatever the frame rate
     // or the rotation's cadence. A light that jumped drops it: the reprojection
     // holds for a light that turns, not for one that teleports.
-    const double Now = World->GetTimeSeconds();
-
-    for (int32 Level = 0; Level < LevelCount; ++Level)
-    {
-        if ((Params.LevelMask & (1u << Level)) == 0)
+    auto MakeHistory = [this, bHasHistory, Now](int32 Level, const FVector3f& Light)
         {
-            continue;
+            FAtmoShadowHistory History;
+
+            History.LightDir = ShadowBakedLight[Level];
+            History.CameraLocal = ShadowBakedCamera[Level];
+            History.Weight = 0.0f;
+
+            const bool bLightHeld = FVector3f::DotProduct(Light, ShadowBakedLight[Level])
+                >= AtmoShadowBake::HistoryLightCosine;
+
+            if (bHasHistory && bLightHeld && ShadowTemporalSmoothing > 0.0f && ShadowBakeTime[Level] > 0.0)
+            {
+                const float Age = static_cast<float>(FMath::Max(Now - ShadowBakeTime[Level], 0.0));
+
+                History.Weight = FMath::Min(
+                    FMath::Exp(-Age / ShadowTemporalSmoothing), AtmoShadowBake::MaxHistoryWeight);
+            }
+
+            return History;
+        };
+
+    Params.RowStride = 1;
+    Params.RowPhase = 0;
+    Params.bStaged = false;
+    Params.bResolveStaging = false;
+    Params.StagingResource = nullptr;
+    Params.bQuadSubsamples = CVarShadowBakeQuad.GetValueOnGameThread() > 0;
+
+    // This frame's light and camera, before a spread bake replaces them with its own.
+    const FVector3f LightNow = Params.LightDir;
+    const FVector3f CameraNow = Params.CameraLocal;
+
+    if (!bShadowPrimed)
+    {
+        Params.LevelMask = (1u << LevelCount) - 1u;
+    }
+    else if (CVarShadowBakeAmortize.GetValueOnGameThread() <= 0)
+    {
+        Params.LevelMask = 1u << (ShadowLevelCursor % LevelCount);
+    }
+    else
+    {
+        // A staging slice remade mid-bake lost the rows already baked: start over.
+        const bool bStagingLost = ShadowSpread.Level != INDEX_NONE && PrepareShadowStaging();
+
+        if (ShadowSpread.Level != INDEX_NONE && !bStagingLost)
+        {
+            // Carried on with the light, camera and history it started with, so
+            // its row blocks are one bake and the march reads it with those.
+            Params.LevelMask = 1u << ShadowSpread.Level;
+            Params.RowStride = ShadowSpread.Stride;
+            Params.RowPhase = ShadowSpread.Phase;
+            Params.LightDir = ShadowSpread.LightDir;
+            Params.CameraLocal = ShadowSpread.CameraLocal;
+            Params.History[ShadowSpread.Level] = ShadowSpread.History;
+        }
+        else
+        {
+            Params.LevelMask = 0u;
+
+            for (int32 Step = 0; Step < LevelCount; ++Step)
+            {
+                const int32 Level = (ShadowLevelCursor + Step) % LevelCount;
+
+                if (IsShadowLevelDue(Level, Params.LightDir, Params.CameraLocal, PlanetRadius, Now))
+                {
+                    Params.LevelMask = 1u << Level;
+                    break;
+                }
+            }
+
+            // No more requests than the level has row blocks.
+            const int32 RowBlocks = FMath::DivideAndRoundUp(Params.MapSize.Y, AtmoShadowBake::ThreadGroupSize);
+
+            Params.RowStride = FMath::Clamp(CVarShadowBakeFramesPerLevel.GetValueOnGameThread(), 1,
+                FMath::Min(16, FMath::Max(RowBlocks, 1)));
         }
 
-        FAtmoShadowHistory& History = Params.History[Level];
-
-        History.LightDir = ShadowBakedLight[Level];
-        History.CameraLocal = ShadowBakedCamera[Level];
-        History.Weight = 0.0f;
-
-        const bool bLightHeld = FVector3f::DotProduct(Params.LightDir, ShadowBakedLight[Level])
-            >= AtmoShadowBake::HistoryLightCosine;
-
-        if (bHasHistory && bLightHeld && ShadowTemporalSmoothing > 0.0f && ShadowBakeTime[Level] > 0.0)
+        if (Params.LevelMask != 0u && Params.RowStride > 1)
         {
-            const float Age = static_cast<float>(FMath::Max(Now - ShadowBakeTime[Level], 0.0));
+            PrepareShadowStaging();
 
-            History.Weight = FMath::Min(
-                FMath::Exp(-Age / ShadowTemporalSmoothing), AtmoShadowBake::MaxHistoryWeight);
+            Params.StagingResource = ShadowStaging ? ShadowStaging->GameThread_GetRenderTargetResource() : nullptr;
+        }
+
+        if (Params.StagingResource)
+        {
+            Params.bStaged = true;
+            Params.bResolveStaging = Params.RowPhase == Params.RowStride - 1;
+        }
+        else
+        {
+            // Whole and in place: one level, or no staging slice to spread it into.
+            Params.RowStride = 1;
+            Params.RowPhase = 0;
+            Params.LightDir = LightNow;
+            Params.CameraLocal = CameraNow;
         }
     }
 
-    // NO EXTENT AND NO CENTRE PUSHED. Every cascade derives its half-width from
-    // CascadeRadii and its centre from the camera, on both sides, so the level
-    // index is the only thing that distinguishes them -- and that comes from the
-    // dispatch rather than from here.
-    Params.MapSize = FIntPoint(ShadowTarget->SizeX, ShadowTarget->SizeY);
-    Params.MapSlices = ShadowTarget->Slices;
+    for (int32 Level = 0; Level < LevelCount; ++Level)
+    {
+        // A spread bake's history was fixed when it started.
+        const bool bCarried = Params.bStaged && Params.RowPhase > 0;
+
+        if ((Params.LevelMask & (1u << Level)) != 0 && !bCarried)
+        {
+            Params.History[Level] = MakeHistory(Level, Params.LightDir);
+        }
+    }
 
     // -- Field --------------------------------------------------------------
     //
@@ -910,6 +1052,7 @@ bool APlanetAtmosphereActor::FillShadowRequest(
 void APlanetAtmosphereActor::RequestShadowBake(
     float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::RequestShadowBake);
     UWorld* World = GetWorld();
 
     UFlowSimSubsystem* Sim = World ? World->GetSubsystem<UFlowSimSubsystem>() : nullptr;
@@ -953,32 +1096,154 @@ void APlanetAtmosphereActor::RequestShadowBake(
 
     if (Sim->RequestShadowBake(Params))
     {
-        CommitShadowBake(Params.LevelMask, Params.LightDir, Params.CameraLocal);
+        CommitShadowBake(Params);
     }
 }
 
-void APlanetAtmosphereActor::CommitShadowBake(
-    uint32 LevelMask, const FVector3f& LightDir, const FVector3f& CameraLocal)
+void APlanetAtmosphereActor::CommitShadowBake(const FTerrestrialShadowParams& Params)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::CommitShadowBake);
     const int32 LevelCount = AtmoShadowBake::CascadeCount;
     const UWorld* World = GetWorld();
     const double Now = World ? World->GetTimeSeconds() : 0.0;
+
+    const uint32 LevelMask = Params.LevelMask;
+
+    // A spread bake's request before its last: only its progress. The level's
+    // slice still holds its previous bake, which the march goes on reading with
+    // the camera and light recorded for it.
+    if (Params.bStaged && !Params.bResolveStaging)
+    {
+        if (Params.RowPhase == 0)
+        {
+            ShadowSpread.Level = static_cast<int32>(FMath::CountTrailingZeros(LevelMask));
+            ShadowSpread.Stride = Params.RowStride;
+            ShadowSpread.LightDir = Params.LightDir;
+            ShadowSpread.CameraLocal = Params.CameraLocal;
+            ShadowSpread.History = Params.History[ShadowSpread.Level];
+        }
+
+        ShadowSpread.Phase = Params.RowPhase + 1;
+        return;
+    }
+
+    const FAtmosphereFieldClock& Clock = GetFieldClock();
 
     for (int32 Level = 0; Level < LevelCount; ++Level)
     {
         if (LevelMask & (1u << Level))
         {
-            ShadowBakedCamera[Level] = CameraLocal;
-            ShadowBakedLight[Level] = LightDir;
+            if (CVarShadowBakeLog.GetValueOnGameThread() > 0 && bShadowPrimed)
+            {
+                UE_LOG(LogCloudAtmosphere, Log, TEXT("%s: cloud shadow level %d rebaked over %d frame(s), %.3f s after its last (history weight %.2f)."),
+                    *GetName(), Level, Params.RowStride, Now - ShadowBakeTime[Level], Params.History[Level].Weight);
+            }
+
+            ShadowBakedCamera[Level] = Params.CameraLocal;
+            ShadowBakedLight[Level] = Params.LightDir;
             ShadowBakeTime[Level] = Now;
+            ShadowBakedClock[Level] = FVector2D(Clock.Time, Clock.SpinTime);
         }
     }
 
-    ShadowLevelCursor = bShadowPrimed
-        ? (ShadowLevelCursor + FMath::CountBits(LevelMask)) % LevelCount
-        : 0;
+    // A whole bake, or a spread one's last rows: nothing is under way. The
+    // cursor moves past the level baked, so the levels take turns.
+    ShadowSpread = FShadowSpread();
+
+    if (!bShadowPrimed)
+    {
+        ShadowLevelCursor = 0;
+    }
+    else if (LevelMask != 0u)
+    {
+        ShadowLevelCursor = (static_cast<int32>(FMath::CountTrailingZeros(LevelMask))
+            + static_cast<int32>(FMath::CountBits(LevelMask))) % LevelCount;
+    }
 
     bShadowPrimed = true;
+}
+
+bool APlanetAtmosphereActor::IsShadowLevelDue(int32 Level, const FVector3f& LightDir, const FVector3f& CameraLocal,
+    float PlanetRadius, double Now) const
+{
+    if (ShadowBakeTime[Level] <= 0.0)
+    {
+        return true;
+    }
+
+    if (Now - ShadowBakeTime[Level] < FMath::Max(CVarShadowBakeMinInterval.GetValueOnGameThread(), 0.0f))
+    {
+        return false;
+    }
+
+    // The field moves with its clocks: the sim's display time (the flow, the
+    // noise's drift and phases) and the spin time (the field's turn).
+    const FAtmosphereFieldClock& Clock = GetFieldClock();
+
+    if (Clock.Time != ShadowBakedClock[Level].X || Clock.SpinTime != ShadowBakedClock[Level].Y)
+    {
+        return true;
+    }
+
+    if (FVector3f::DotProduct(LightDir, ShadowBakedLight[Level]) < ShadowDueLightCosine)
+    {
+        return true;
+    }
+
+    // An inner level's window follows the camera, snapped to its texels. Its
+    // texel is about the cascade's width over the map's; level 0 is planet-centred.
+    if (Level > 0 && ShadowTarget && ShadowTarget->SizeX > 0)
+    {
+        const FVector2D& Radii = ActiveModel().SurfaceShadow.CascadeRadii;
+        const double Radius = (Level == 1) ? Radii.X : FMath::Min(Radii.X, Radii.Y);
+        const double Texel = 2.0 * Radius * PlanetRadius / ShadowTarget->SizeX;
+        const double Travel = FVector3f::Distance(CameraLocal, ShadowBakedCamera[Level]);
+
+        if (Texel > 0.0 && Travel > Texel * FMath::Max(CVarShadowBakeCameraTexels.GetValueOnGameThread(), 0.0f))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool APlanetAtmosphereActor::PrepareShadowStaging()
+{
+    if (!ShadowTarget)
+    {
+        return false;
+    }
+
+    if (!ShadowStaging)
+    {
+        ShadowStaging = NewObject<UTextureRenderTarget2DArray>(this, TEXT("ShadowStaging"), RF_Transient);
+    }
+
+    UTextureRenderTarget2DArray* Staging = ShadowStaging;
+
+    const bool bMismatch =
+        Staging->SizeX != ShadowTarget->SizeX ||
+        Staging->SizeY != ShadowTarget->SizeY ||
+        Staging->Slices != 1 ||
+        Staging->OverrideFormat != ShadowTarget->OverrideFormat ||
+        !Staging->bCanCreateUAV;
+
+    if (!bMismatch)
+    {
+        return false;
+    }
+
+    // bCanCreateUAV before the resource exists, or every dispatch into it
+    // silently does nothing. The format is the map's: the copy into a level's
+    // slice is a raw copy.
+    Staging->bCanCreateUAV = true;
+    Staging->OverrideFormat = ShadowTarget->OverrideFormat;
+    Staging->ClearColor = ShadowTarget->ClearColor;
+    Staging->Init(ShadowTarget->SizeX, ShadowTarget->SizeY, 1, ShadowTarget->OverrideFormat);
+    Staging->UpdateResourceImmediate(true);
+
+    return true;
 }
 
 // --------------------------------------------------------------------------
@@ -991,6 +1256,7 @@ void APlanetAtmosphereActor::CommitShadowBake(
 bool APlanetAtmosphereActor::FillMarchParams(
     FAtmosphereMarchParams& Out, float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::FillMarchParams);
     const auto ToVector3 = [](const FLinearColor& C) { return FVector3f(C.R, C.G, C.B); };
     const auto ToVector4 = [](const FLinearColor& C) { return FVector4f(C.R, C.G, C.B, C.A); };
 
@@ -1133,6 +1399,7 @@ bool APlanetAtmosphereActor::FillMarchParams(
 void APlanetAtmosphereActor::UpdateComputeMarch(
     float PlanetRadius, const FVector& PlanetCenter, const FVector& LightDir)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::UpdateComputeMarch);
     FAtmosphereMarchParams Params;
 
     bool bWant = FillMarchParams(Params, PlanetRadius, PlanetCenter, LightDir);
@@ -1164,6 +1431,7 @@ void APlanetAtmosphereActor::UpdateComputeMarch(
 
 void APlanetAtmosphereActor::UpdateWeatherReadback(const FAtmosphereMarchParams& March)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::UpdateWeatherReadback);
     // Only while someone reads it (the actor holds one reference), with a field to read.
     if (WeatherReadbackSeconds <= 0.0f || WeatherFeed.GetSharedReferenceCount() <= 1
         || March.Model == AtmosphereMarchModel::AirOnly || !March.FlowResource)
@@ -1188,6 +1456,7 @@ void APlanetAtmosphereActor::UpdateWeatherReadback(const FAtmosphereMarchParams&
     ENQUEUE_RENDER_COMMAND(CloudAtmosphereWeatherReadback)(
         [Readback = WeatherReadback, Flow = March.FlowResource, Spin = March.Field.CloudMotion.W, bDue](FRHICommandListImmediate& RHICmdList)
         {
+            TRACE_CPUPROFILER_EVENT_SCOPE_STR("RT CloudAtmosphereWeatherReadback");
             Readback->Poll_RenderThread();
 
             if (bDue)
@@ -1199,9 +1468,12 @@ void APlanetAtmosphereActor::UpdateWeatherReadback(const FAtmosphereMarchParams&
 
 void APlanetAtmosphereActor::UpdateClimateReadback()
 {
-    // The view of the latest map, on the game thread.
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::UpdateClimateReadback);
+    // The view of the latest map, on the game thread: only while asked for (nothing reads it but
+    // a person in the details panel; a transient texture per map otherwise: R1, ATM-5).
     if (const TSharedPtr<const FAtmosphereClimateMap, ESPMode::ThreadSafe> Map = ClimateFeed->Latest();
-        Map.IsValid() && Map->Serial != ClimateViewSerial && Map->Width > 0 && Map->Height > 0)
+        CVarCloudAtmosphereClimateView.GetValueOnGameThread() != 0
+        && Map.IsValid() && Map->Serial != ClimateViewSerial && Map->Width > 0 && Map->Height > 0)
     {
         ClimateViewSerial = Map->Serial;
 
@@ -1281,6 +1553,7 @@ void APlanetAtmosphereActor::UpdateClimateReadback()
     ENQUEUE_RENDER_COMMAND(CloudAtmosphereClimateReadback)(
         [Readback = ClimateReadback, Simulation = Sim->GetSimulation(), bDue, Turnovers, bSpinningUp, bSnapshot, Now](FRHICommandListImmediate& RHICmdList)
         {
+            TRACE_CPUPROFILER_EVENT_SCOPE_STR("RT CloudAtmosphereClimateReadback");
             Readback->Poll_RenderThread();
 
             if (bDue)
@@ -1300,21 +1573,33 @@ bool APlanetAtmosphereActor::DrivesSimulation() const
 
 void APlanetAtmosphereActor::RestartSimulation()
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::RestartSimulation);
     UWorld* World = GetWorld();
     UFlowSimSubsystem* Sim = World ? World->GetSubsystem<UFlowSimSubsystem>() : nullptr;
 
     if (Sim && Sim->IsOwner(this))
     {
+        UFlowSimConfig* Running = Sim->GetConfig();
+        // A config change pending (the seed regenerated this tick): the claim's resolve restarts
+        // the sim on the new config anyway; a reset of the outgoing one would be a second spin-up
+        // start and InitialState upload for nothing (R1, ATM-2).
+        if (Running && Running != ActiveSimConfig())
+            return;
         // The surface the restart is for (a new SetSurfaceMap), on the running config now: the
         // claim that would put it there runs only at this actor's next tick, after the window's
         // first steps (stage A9's rule: an own config only).
-        if (UFlowSimConfig* Running = Sim->GetConfig(); Running && Running->GetOuter() == this)
+        if (Running && Running->GetOuter() == this)
         {
             Running->SurfaceMap = (&ActiveModel() == &GasGiant) ? nullptr : SurfaceMap.Get();
         }
 
         Sim->ResetSimulation();
     }
+}
+
+bool APlanetAtmosphereActor::BidsForSimulation() const
+{
+    return bAtmosphereActive && HasClouds() && Simulation.bClaimSimulation && ActiveSimConfig() != nullptr;
 }
 
 bool APlanetAtmosphereActor::CanProvideClimateSnapshot() const
@@ -1422,6 +1707,7 @@ void APlanetAtmosphereActor::ReleaseCloudResources()
 
 void APlanetAtmosphereActor::SetPlanetType(EPlanetAtmosphereType InType)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::SetPlanetType);
 #if WITH_EDITOR
     Modify();
 #endif
@@ -1534,6 +1820,7 @@ UFlowSimConfig* APlanetAtmosphereActor::ActiveSimConfig() const
 
 void APlanetAtmosphereActor::ClaimSimulation(const FVector& PlanetCenter, float PlanetRadius)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::ClaimSimulation);
     UWorld* World = GetWorld();
     UFlowSimSubsystem* Sim = World ? World->GetSubsystem<UFlowSimSubsystem>() : nullptr;
 
@@ -1661,6 +1948,7 @@ void APlanetAtmosphereActor::ClaimSimulation(const FVector& PlanetCenter, float 
 
 void APlanetAtmosphereActor::SetSurfaceMap(int32 Width, int32 Height, TConstArrayView<FVector2f> Cells)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(APlanetAtmosphereActor::SetSurfaceMap);
     check(IsInGameThread());
 
     if (Width <= 0 || Height <= 0 || Cells.Num() != Width * Height)

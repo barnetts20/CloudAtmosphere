@@ -101,6 +101,28 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	 *  next one keeps. Read only for levels in LevelMask. */
 	TStaticArray<FAtmoShadowHistory, AtmoShadowBake::CascadeCount> History;
 
+	// -- Spread bake (Stage P1b) -------------------------------------------
+	//
+	// A level's bake taken over RowStride requests: each bakes every
+	// RowStride-th block of AtmoShadowBake::ThreadGroupSize rows from RowPhase
+	// into the staging slice, and the last one (bResolveStaging) copies it over
+	// the level's slice. The level's slice, and the camera and light the march
+	// reads it with, stay the previous bake's until then. One level per spread
+	// request. Stride 1 and no staging: the whole level, written in place.
+
+	int32 RowStride = 1;
+	int32 RowPhase = 0;
+
+	/** Writes the staging slice instead of the level's. */
+	bool bStaged = false;
+
+	/** Copies the staging slice over the level's after this request's rows. */
+	bool bResolveStaging = false;
+
+	/** Stage P1b2: each texel's subsamples on a quad of lanes (ATMO_BAKE_QUAD),
+	 *  where the platform has wave operations; otherwise ignored. */
+	bool bQuadSubsamples = true;
+
 	// -- Field --------------------------------------------------------------
 
 	/** The gas giant's deep deck (TR_DEEP_DECK), or the terrestrial slab. */
@@ -140,12 +162,17 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 	/** One texel the coverage pass writes and the bake and the march read. */
 	FTextureRenderTargetResource* CoverageResource = nullptr;
 
+	/** Stage P1b: one slice the map's size and format, which a spread bake
+	 *  fills before it replaces a level. Needed only when bStaged. */
+	FTextureRenderTargetResource* StagingResource = nullptr;
+
 	/** Render thread only, filled by ResolveTextures_RenderThread. */
 	FTextureRHIRef FlowTexture;
 	FTextureRHIRef DetailTexture;
 	FTextureRHIRef StructureTexture;
 	FTextureRHIRef MapTexture;
 	FTextureRHIRef CoverageTexture;
+	FTextureRHIRef StagingTexture;
 
 	void ResolveTextures_RenderThread();
 
@@ -160,7 +187,10 @@ struct CLOUDATMOSPHERE_API FTerrestrialShadowParams
 			&& MapSize.X > 0
 			&& MapSize.X == MapSize.Y
 			&& MapSlices >= AtmoShadowBake::CascadeCount
-			&& PlanetRadius > 0.0f;
+			&& PlanetRadius > 0.0f
+			&& RowStride >= 1
+			&& RowPhase >= 0 && RowPhase < RowStride
+			&& (!bStaged || (StagingResource && FMath::CountBits(LevelMask) == 1));
 	}
 };
 
@@ -175,6 +205,9 @@ SHADER_PARAMETER(FVector2f, ShadowInvMapSize)
 SHADER_PARAMETER(FVector3f, ShadowLightDir)
 SHADER_PARAMETER(FVector3f, ShadowCameraLocal)
 SHADER_PARAMETER(int32, ShadowFirstLevel)
+SHADER_PARAMETER(int32, ShadowRowStride)
+SHADER_PARAMETER(int32, ShadowRowPhase)
+SHADER_PARAMETER(int32, ShadowWriteSlice)
 SHADER_PARAMETER(FVector3f, ShadowHistoryLightDir)
 SHADER_PARAMETER(FVector3f, ShadowHistoryCameraLocal)
 SHADER_PARAMETER(float, ShadowHistoryWeight)
@@ -238,7 +271,16 @@ public:
 
 	/** The gas giant's deep deck. */
 	class FDeepDeck : SHADER_PERMUTATION_BOOL("TR_DEEP_DECK");
-	using FPermutationDomain = TShaderPermutationDomain<FDeepDeck>;
+
+	/** Stage P1b2: a texel's subsamples on a quad of lanes; compiled only for
+	 *  platforms with wave operations. */
+	class FQuadSubsamples : SHADER_PERMUTATION_BOOL("ATMO_BAKE_QUAD");
+
+	using FPermutationDomain = TShaderPermutationDomain<FDeepDeck, FQuadSubsamples>;
+
+	/** Whether this frame's bake can take the quad permutation: the platform
+	 *  compiles it and the RHI runs wave operations. Render thread. */
+	static bool SupportsQuadSubsamples();
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
 	static void ModifyCompilationEnvironment(
@@ -251,4 +293,4 @@ namespace TerrestrialShadow
 	 *  Render thread; Params must already be resolved. */
 	CLOUDATMOSPHERE_API void AddBakePass_RenderThread(
 		FRDGBuilder& GraphBuilder, const FTerrestrialShadowParams& Params);
-}
+}

@@ -127,6 +127,35 @@ float TRShadow_Sigma(
 
     float Density = 0.0f;
 
+#if ATMO_BAKE_QUAD
+	// Stage P1b2: this lane's subsample only, then the quad's four in subsample
+	// order, the same products summed the same way as the loop below. Every lane
+	// of the quad ends with the same Density, so the march stays quad-uniform.
+    float SubDensity;
+    float SubAmount;
+
+    {
+        const float2 Offset = AtmoBake_SubOffsets[AtmoBakeQuadLane] * TexelWorld;
+
+        const float3 SubPos = Pos + BasisU * Offset.x + BasisV * Offset.y;
+
+        const float4 Deck = TR_Density(
+			FlowTarget, FlowTargetSampler,
+			DetailVolume, DetailVolumeSampler,
+			StructureVolume, StructureVolumeSampler,
+			SubPos, StepHalfHeight, F);
+
+        SubDensity = Deck.x;
+        SubAmount = TRShadow_Amount(Deck);
+    }
+
+    UNROLL
+
+    for (uint Lane = 0u; Lane < 4u; Lane++)
+    {
+        Density += QuadReadLaneAt(SubDensity, Lane) * QuadReadLaneAt(SubAmount, Lane);
+    }
+#else
     UNROLL
 
     for (int Sub = 0; Sub < ATMO_BAKE_SUBSAMPLES; Sub++)
@@ -147,6 +176,7 @@ float TRShadow_Sigma(
 		// cloud, and it arrives on the same fetch the density came from.
         Density += Deck.x * TRShadow_Amount(Deck);
     }
+#endif
 
     return Density * AbsMax / float(ATMO_BAKE_SUBSAMPLES);
 }
@@ -235,11 +265,40 @@ float BakeField_Sigma(float3 Pos, float3 BasisU, float3 BasisV, float TexelWorld
 
 #include "/Plugin/CloudAtmosphere/Private/AtmosphereShadowBakeLoop.ush"
 
+#if ATMO_BAKE_QUAD
+
+#if ATMO_BAKE_THREADS != 8
+#error The quad bake maps four 64-lane groups onto one 8x8 texel tile.
+#endif
+
+// Stage P1b2: one lane per subsample. A 1D group, so its quads are four
+// consecutive lanes on every platform (SM 6.6 defines it so; earlier, every
+// implementation lays 1D groups out linearly). Each group takes a band of two
+// rows of an 8x8 tile, four groups a tile: the tile is what the row blocks of a
+// spread bake count, so the C++ side dispatches 4 x its tile rows.
+[numthreads(64, 1, 1)]
+void MainShadowBakeCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+    AtmoBakeQuadLane = GroupIndex & 3u;
+
+    const uint TexelInGroup = GroupIndex >> 2;
+    const uint Band = GroupId.y & 3u;
+    const uint TileRow = GroupId.y >> 2;
+
+    const uint2 InTile = uint2(TexelInGroup & 7u, Band * 2u + (TexelInGroup >> 3));
+
+    AtmoBake_Texel(uint3(GroupId.x * 8u + InTile.x, TileRow * 8u + InTile.y, GroupId.z));
+}
+
+#else
+
 [numthreads(ATMO_BAKE_THREADS, ATMO_BAKE_THREADS, 1)]
 void MainShadowBakeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
     AtmoBake_Texel(DispatchThreadId);
 }
+
+#endif
 
 // ---------------------------------------------------------------------------
 // The coverage threshold

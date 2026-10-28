@@ -12,6 +12,10 @@
 #error Include TerrestrialField.ush before AtmosphereMarch.ush.
 #endif
 
+#ifndef ATMO_ABLATE
+#define ATMO_ABLATE(Bit) false
+#endif
+
 /** The per-pixel draw in [0, 1) for index Index: the samples' jitter and the
  *  lattice phase, from the blue noise, moved each frame by
  *  mainRayParams.jitterShift so the resolve's history averages the draws. */
@@ -351,8 +355,16 @@ float3 Atmo_LightMarch(
 		Atmo_HashJitter(P.Atmo.mainRayParams.svxy, ShadowSalt + 11u) - 0.5f,
 		Atmo_HashJitter(P.Atmo.mainRayParams.svxy, ShadowSalt + 23u) - 0.5f);
 
-    const float ShadowTau = AtmoShadow_ReadTau(
-		ShadowMap, ShadowSampler, C.Shadow, LocalPos, ShadowJitter, C.Ceiling);
+    float ShadowTau = 0.0f;
+
+	// (Stage P1e, measurement: bit 4 skips the read.)
+    BRANCH
+
+    if (!ATMO_ABLATE(4u))
+    {
+        ShadowTau = AtmoShadow_ReadTau(
+			ShadowMap, ShadowSampler, C.Shadow, LocalPos, ShadowJitter, C.Ceiling);
+    }
 
 	// PITFALL: no saturation snap, which draws the map's lattice as a staircase
 	// along the shadow edge. The fold is per world unit: no floor, 0 is no cloud.
@@ -719,7 +731,7 @@ float4 Atmo_MainMarchDepth(
 					// and the step is taken again as substeps.
                     if (Pos >= RefineUntil)
                     {
-                        if (RefineArmed && Sample.x > 0.0f)
+                        if (RefineArmed && Sample.x > 0.0f && !ATMO_ABLATE(16u))
                         {
                             RefineArmed = false;
                             RefineUntil = Atmo_LatticeDistance(CloudLattice,
@@ -756,7 +768,7 @@ float4 Atmo_MainMarchDepth(
                     {
                         LightTint = Field_SampleLightTint(Sample, P.Scatter);
                     }
-                    else
+                    else if (!ATMO_ABLATE(8u))
                     {
                         LightTint = Field_LightTint(FlowField, FlowSampler, LocalPos, P.Field, P.Scatter);
                     }
@@ -1009,7 +1021,7 @@ float4 Atmo_MainMarchDepth(
 	// already-opaque ray is skipped because the multiply cannot change it.
     BRANCH
 
-    if (P.Atmo.surfaceShadowParams.enabled > 0.0f
+    if (P.Atmo.surfaceShadowParams.enabled > 0.0f && !ATMO_ABLATE(64u)
 		&& P.Atmo.mainRayParams.sceneDepth < ATMO_NO_OCCLUDER_DISTANCE
 		&& max(Transmittance.x, max(Transmittance.y, Transmittance.z)) > 0.0f)
     {

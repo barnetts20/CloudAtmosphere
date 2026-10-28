@@ -95,6 +95,9 @@ public:
 
 	virtual void Tick(float DeltaTime) override;
 
+	/** The pending generation, before the first bid for the sim (R1, ATM-3). */
+	virtual void PrepareForInitialize() override;
+
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif

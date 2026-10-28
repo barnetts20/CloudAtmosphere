@@ -1,4 +1,5 @@
 #include "AtmosphereWeather.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "FlowSimulation.h"
 
 #include "DataDrivenShaderPlatformInfo.h"
@@ -58,6 +59,7 @@ FVector4f FAtmosphereWeatherMap::SampleBroad(const FVector& PlanetDir) const
 
 void FAtmosphereWeatherMap::Finish(int32 BroadCells)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAtmosphereWeatherMap::Finish);
 	Broad.Reset();
 	MeanSpeed = 0.0f;
 
@@ -174,6 +176,7 @@ FAtmosphereWeatherReadback::~FAtmosphereWeatherReadback() = default;
 void FAtmosphereWeatherReadback::Request_RenderThread(FRHICommandListImmediate& RHICmdList,
 	FTextureRenderTargetResource* Flow, float SpinAngle)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAtmosphereWeatherReadback::Request_RenderThread);
 	check(IsInRenderingThread());
 
 	FTextureRHIRef FlowTexture = Flow ? FTextureRHIRef(Flow->GetRenderTargetTexture()) : FTextureRHIRef();
@@ -218,6 +221,7 @@ void FAtmosphereWeatherReadback::Request_RenderThread(FRHICommandListImmediate& 
 
 void FAtmosphereWeatherReadback::Poll_RenderThread()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAtmosphereWeatherReadback::Poll_RenderThread);
 	check(IsInRenderingThread());
 
 	// In order: the newest that has landed wins, and those before it go with it.
@@ -310,6 +314,7 @@ FAtmosphereClimateReadback::~FAtmosphereClimateReadback() = default;
 void FAtmosphereClimateReadback::Request_RenderThread(FRHICommandListImmediate& RHICmdList, FFlowSimulation* Simulation, float Turnovers, bool bSpinningUp,
 	bool bSnapshot, double RequestSeconds)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAtmosphereClimateReadback::Request_RenderThread);
 	check(IsInRenderingThread());
 
 	if (!Simulation || Pending.Num() >= 3)
@@ -338,6 +343,7 @@ void FAtmosphereClimateReadback::Request_RenderThread(FRHICommandListImmediate& 
 
 void FAtmosphereClimateReadback::Poll_RenderThread()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAtmosphereClimateReadback::Poll_RenderThread);
 	check(IsInRenderingThread());
 
 	int32 Landed = INDEX_NONE;

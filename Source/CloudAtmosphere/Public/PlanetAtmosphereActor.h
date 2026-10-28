@@ -199,7 +199,8 @@ public:
     float ClimateReadbackSeconds = 10.0f;
 
     /** Stage A11: the latest climate map as a texture to look at (on the sim's grid: R
-     *  precipitation, G humidity, B cloud cover, A warmth + 0.5), remade as each lands. */
+     *  precipitation, G humidity, B cloud cover, A warmth + 0.5), remade as each lands while
+     *  r.CloudAtmosphere.ClimateView is 1. */
     UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline")
     TObjectPtr<UTexture2D> ClimateView;
 
@@ -223,6 +224,12 @@ public:
      *  solves each frame, read by the bake and the march. */
     UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
     TObjectPtr<UTextureRenderTarget2D> CoverageTarget;
+
+    /** Stage P1b: one slice the shadow target's size and format, where a level's
+     *  spread bake (r.CloudAtmosphere.ShadowBake.FramesPerLevel) collects before
+     *  it replaces the level's slice. Made on the first spread bake. */
+    UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "CloudAtmosphere|Pipeline|Baked Lighting")
+    TObjectPtr<UTextureRenderTarget2DArray> ShadowStaging;
 
     /** The flow atlas this planet draws: the sim's while it drives the sim,
      *  KeptFlow while another planet does. */
@@ -362,6 +369,18 @@ public:
      *  the sim steps (not paused), has (or will have at its next reset) a climate window, and the
      *  climate reads back (ClimateReadbackSeconds above 0). */
     bool CanProvideClimateSnapshot() const;
+
+    /** R1 (ATM-1): whether this atmosphere bids for the sim at all (active, with clouds, claiming
+     *  on, a sim config): a planet waiting for a climate snapshot from one that doesn't takes its
+     *  provisional model at once instead of waiting out its timeout. */
+    bool BidsForSimulation() const;
+
+protected:
+    /** R1 (ATM-3): called at the top of Initialize, before the first bid for the sim: a subclass
+     *  that generates its sim config (the seeded atmosphere) does so here, so the first bid is
+     *  made with it and the sim isn't started once on the shared default config and restarted
+     *  a frame later. */
+    virtual void PrepareForInitialize() {}
 
 private:
     /** Root component; carries the planet radius as scale. */
@@ -513,8 +532,19 @@ private:
         const FVector& PlanetCenter, const FVector& LightDir);
 
     /** Records an accepted bake: the cameras the march reads the fine levels
-     *  against, and the light and time the next bake reprojects from. */
-    void CommitShadowBake(uint32 LevelMask, const FVector3f& LightDir, const FVector3f& CameraLocal);
+     *  against, and the light and time the next bake reprojects from. A spread
+     *  bake's request records only its progress until its last rows are in. */
+    void CommitShadowBake(const FTerrestrialShadowParams& Params);
+
+    /** Stage P1b: whether a primed level wants rebaking: never baked, or its
+     *  field clock, its light or (an inner level) its camera moved since, and at
+     *  least r.CloudAtmosphere.ShadowBake.MinInterval seconds ago. */
+    bool IsShadowLevelDue(int32 Level, const FVector3f& LightDir, const FVector3f& CameraLocal,
+        float PlanetRadius, double Now) const;
+
+    /** Stage P1b: creates the staging slice if absent or not the shadow
+     *  target's size; true when it was (re)made, losing what it held. */
+    bool PrepareShadowStaging();
 
     /** Creates the shadow target if absent and forces it to RGBA16F with UAV
      *  support at ShadowResolution, cleared to the no-deck sentinel,
@@ -535,6 +565,25 @@ private:
      *  history by. */
     FVector3f ShadowBakedLight[AtmoShadowBake::CascadeCount];
     double ShadowBakeTime[AtmoShadowBake::CascadeCount] = {};
+
+    /** The field clock (Time, SpinTime) each level was baked at: unchanged
+     *  with the light and camera, the level's bake is still current. */
+    FVector2D ShadowBakedClock[AtmoShadowBake::CascadeCount];
+
+    /** Stage P1b: a level's bake in progress over several requests. Its light,
+     *  camera and history are fixed when it starts, so every row block is baked
+     *  in the frame the march will read it with; Phase is the next block phase. */
+    struct FShadowSpread
+    {
+        int32 Level = INDEX_NONE;
+        int32 Phase = 0;
+        int32 Stride = 1;
+        FVector3f LightDir = FVector3f(0.0f, 0.0f, 1.0f);
+        FVector3f CameraLocal = FVector3f::ZeroVector;
+        FAtmoShadowHistory History;
+    };
+
+    FShadowSpread ShadowSpread;
 
     /** False until every level is baked into the current target; cleared on a
      *  new target, model or field, or a wake, so the next request bakes all. */

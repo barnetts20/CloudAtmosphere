@@ -1,4 +1,5 @@
 #include "AtmosphereGenerator.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 #include "AtmosphereArchetype.h"
 #include "AtmospherePreset.h"
@@ -599,6 +600,7 @@ bool FAtmosphereGenerator::Generate(int32 Seed, EPlanetAtmosphereType Model, con
 	const FAtmosphereModelParams& CurrentLook, const FAtmosphereGenerateOptions& Options, UObject* Outer,
 	FAtmosphereGeneration& Out)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAtmosphereGenerator::Generate);
 	Out = FAtmosphereGeneration();
 	Out.Genome.Seed = Seed;
 	Out.Genome.GeneratorVersion = GeneratorVersion;
@@ -677,6 +679,7 @@ bool FAtmosphereGenerator::Generate(int32 Seed, EPlanetAtmosphereType Model, con
 void FAtmosphereGenerator::GenerateSim(int32 Seed, const UAtmosphereArchetype& Archetype, const FAtmosphereGenerateOptions& Options,
 	UObject* Outer, FAtmosphereGeneration& Out)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAtmosphereGenerator::GenerateSim);
 	UObject* Owner = Outer ? Outer : GetTransientPackage();
 
 	UFlowSimConfig* Config = DuplicateObject<UFlowSimConfig>(Archetype.Template.Get(), Owner,

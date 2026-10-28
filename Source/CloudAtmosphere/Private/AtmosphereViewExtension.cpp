@@ -1,6 +1,8 @@
 #include "AtmosphereViewExtension.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 #include "AtmosphereTransmittance.h"
+#include "AtmosphereMarchSweep.h"
 #include "DataDrivenShaderPlatformInfo.h"
 #include "GlobalShader.h"
 #include "HAL/IConsoleManager.h"
@@ -16,6 +18,8 @@
 #include "ShaderParameterStruct.h"
 #include "ShaderPermutation.h"
 #include "TextureResource.h"
+
+DECLARE_GPU_STAT(CloudAtmosphereMarch);   // P1a: its own row in stat gpu
 
 // ---------------------------------------------------------------------------
 // Console variables
@@ -95,6 +99,10 @@ BEGIN_SHADER_PARAMETER_STRUCT(FAtmosphereCommonParameters, )
 	SHADER_PARAMETER(float, CloudSteps)
 	SHADER_PARAMETER(float, ChordSpread)
 	SHADER_PARAMETER(FVector4f, SurfaceShadow)
+
+	// Stage P1e (measurement): r.CloudAtmosphere.March.Ablate's bits for the view's march; 0 for
+	// every other pass.
+	SHADER_PARAMETER(uint32, MarchAblate)
 
 	SHADER_PARAMETER(FVector3f, ShadowCamera1)
 	SHADER_PARAMETER(FVector3f, ShadowCamera2)
@@ -494,6 +502,7 @@ FAtmosphereViewExtension::FAtmosphereViewExtension(const FAutoRegister& AutoRegi
 
 void FAtmosphereViewExtension::SetFrame_GameThread(const FAtmosphereMarchParams& InMarch)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAtmosphereViewExtension::SetFrame_GameThread);
 	check(IsInGameThread());
 
 	TSharedRef<FAtmosphereViewExtension, ESPMode::ThreadSafe> Self =
@@ -652,6 +661,7 @@ namespace
 		P.CloudSteps = March.CloudSteps;
 		P.ChordSpread = March.ChordSpread;
 		P.SurfaceShadow = March.SurfaceShadow;
+		P.MarchAblate = 0u;
 
 		P.ShadowCamera1 = March.ShadowCamera1;
 		P.ShadowCamera2 = March.ShadowCamera2;
@@ -697,6 +707,7 @@ bool FAtmosphereViewExtension::IsSurfaceShadowOn_RenderThread() const
 bool FAtmosphereViewExtension::AddSurfaceSunPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View,
 	FRDGBufferSRVRef Points, uint32 Count, const FMatrix44f& PointsToView, FRDGBufferUAVRef Out)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAtmosphereViewExtension::AddSurfaceSunPass_RenderThread);
 	check(IsInRenderingThread());
 
 	if (!Points || !Out || Count == 0u || !IsSurfaceShadowOn_RenderThread()
@@ -735,6 +746,7 @@ bool FAtmosphereViewExtension::AddSurfaceSunPass_RenderThread(FRDGBuilder& Graph
 bool FAtmosphereViewExtension::AddSurfaceWeatherPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View,
 	FRDGBufferSRVRef Points, uint32 Count, const FMatrix44f& PointsToView, FRDGBufferUAVRef Out)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAtmosphereViewExtension::AddSurfaceWeatherPass_RenderThread);
 	check(IsInRenderingThread());
 
 	if (!Points || !Out || Count == 0u || !bEnabled.load() || !CanMarch_RenderThread()
@@ -772,6 +784,7 @@ bool FAtmosphereViewExtension::AddSurfaceWeatherPass_RenderThread(FRDGBuilder& G
 bool FAtmosphereViewExtension::AddReflectionPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View,
 	FRDGBufferSRVRef Rays, uint32 Count, uint32 GridWidth, int32 AtmosphereSteps, int32 CloudSteps, FRDGBufferUAVRef Out)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAtmosphereViewExtension::AddReflectionPass_RenderThread);
 	check(IsInRenderingThread());
 
 	if (!Rays || !Out || Count == 0u || !bEnabled.load() || !CanMarch_RenderThread()
@@ -810,6 +823,7 @@ bool FAtmosphereViewExtension::AddReflectionPass_RenderThread(FRDGBuilder& Graph
 bool FAtmosphereViewExtension::GetSkyTables_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View,
 	FRDGTextureRef& OutSky, FRDGTextureRef& OutIrradiance)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAtmosphereViewExtension::GetSkyTables_RenderThread);
 	check(IsInRenderingThread());
 
 	OutSky = nullptr;
@@ -924,6 +938,7 @@ bool FAtmosphereViewExtension::GetSkyTables_RenderThread(FRDGBuilder& GraphBuild
 void FAtmosphereViewExtension::SetSelfLitMask_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View,
 	FRDGTextureRef Mask)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAtmosphereViewExtension::SetSelfLitMask_RenderThread);
 	check(IsInRenderingThread());
 
 	const uint64 Frame = GFrameCounterRenderThread;
@@ -983,6 +998,7 @@ const FAtmosphereViewExtension::FSelfLitMask* FAtmosphereViewExtension::FindSelf
 FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 	FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessMaterialInputs& Inputs)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAtmosphereViewExtension::Render_RenderThread);
 	const FScreenPassTextureSlice SceneColorSlice = Inputs.GetInput(EPostProcessMaterialInput::SceneColor);
 
 	const FSceneTextureUniformParameters* SceneTextures = Inputs.SceneTextures.SceneTextures
@@ -998,7 +1014,7 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 		return Inputs.ReturnUntouchedSceneColorForPostProcessing(GraphBuilder);
 	}
 
-	RDG_EVENT_SCOPE(GraphBuilder, "CloudAtmosphere");
+	RDG_EVENT_SCOPE_STAT(GraphBuilder, CloudAtmosphereMarch, "CloudAtmosphere");
 
 	const FScreenPassTexture SceneColor = FScreenPassTexture::CopyFromSlice(GraphBuilder, SceneColorSlice);
 	const FIntRect Rect = SceneColor.ViewRect;
@@ -1187,9 +1203,18 @@ FScreenPassTexture FAtmosphereViewExtension::Render_RenderThread(
 
 		TShaderMapRef<FAtmosphereMarchCS> Shader(ShaderMap, Permutation);
 
+		// Stage P1e (measurement): the ablation bits, and the pass timed while
+		// CloudAtmosphere.MarchSweep runs (AtmosphereMarchSweep.h).
+		const uint32 Ablate = AtmosphereMarchSweep::GetAblate_RenderThread();
+		P->Common.MarchAblate = Ablate;
+
+		const TSharedPtr<AtmosphereMarchSweep::FSpan> SweepSpan = AtmosphereMarchSweep::Begin(GraphBuilder, Ablate);
+
 		FComputeShaderUtils::AddPass(GraphBuilder,
 			RDG_EVENT_NAME("AtmosphereMarch %dx%d", MarchCells.X, MarchCells.Y),
 			Shader, P, FComputeShaderUtils::GetGroupCount(MarchCells, ThreadGroupSize));
+
+		AtmosphereMarchSweep::End(GraphBuilder, SweepSpan);
 	}
 
 	// -- Resolve --------------------------------------------------------------

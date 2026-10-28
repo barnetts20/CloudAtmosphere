@@ -27,6 +27,11 @@
 #endif
 
 #define TR_DEEP_DECK (ATMO_MODEL == 1)
+
+/** Stage P1e (measurement): r.CloudAtmosphere.March.Ablate's bits, 0 but in the
+ *  view's march while measuring (AtmosphereMarchSweep.h). */
+uint MarchAblate;
+#define ATMO_ABLATE(Bit) ((MarchAblate & (Bit)) != 0u)
 #define ATMO_FIELD_CLOUDS (ATMO_MODEL != 2)
 
 #include "/Plugin/CloudAtmosphere/Private/TerrestrialField.ush"
@@ -217,6 +222,17 @@ void MainMarchCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     P.Scatter = TR_BUILD_SCATTER();
     P.Atmo = TR_BUILD_ATMO(Svxy, RayDir, SceneRayDistance, F);
     P.Atmo.mainRayParams.jitterShift = JitterShift;
+
+	// Stage P1e (measurement): half the steps.
+    if (ATMO_ABLATE(32u))
+    {
+        P.Atmo.mainRayParams.cloudSteps = max(P.Atmo.mainRayParams.cloudSteps / 2, 1);
+    }
+
+    if (ATMO_ABLATE(128u))
+    {
+        P.Atmo.mainRayParams.atmoSteps = max(P.Atmo.mainRayParams.atmoSteps / 2, 1);
+    }
 
 	// A self-lit pixel has had its sun dimmed already, by the same
 	// Atmo_SurfaceSun, and what it drew behind itself by this multiply: a

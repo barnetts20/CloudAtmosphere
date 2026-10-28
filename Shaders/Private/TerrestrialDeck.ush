@@ -62,6 +62,14 @@
 #endif
 
 /** 1 for the deep deck, 0 for the slab: the model's permutation. */
+/** Stage P1e (measurement): a part of the field switched off for timing, by bit
+ *  (r.CloudAtmosphere.March.Ablate; AtmosphereMarchPass.usf defines it over its
+ *  MarchAblate uniform). Never set elsewhere: the bake and the other passes take
+ *  every normal path. */
+#ifndef ATMO_ABLATE
+#define ATMO_ABLATE(Bit) false
+#endif
+
 #ifndef TR_DEEP_DECK
 #define TR_DEEP_DECK 0
 #endif
@@ -1165,7 +1173,7 @@ float4 TR_DensityInColumn(
 
     BRANCH
 
-    if (F.StructureActive && (Fill < 1.0f || bFloorBand))
+    if (F.StructureActive && (Fill < 1.0f || bFloorBand) && !ATMO_ABLATE(2u))
     {
         const float Inherit = F.StructureFlowInherit;
         const float Rise = Col.Base + Above * TR_StretchFlatten(Strain, Inherit, F.StructureStretchFlatten);
@@ -1241,7 +1249,7 @@ float4 TR_DensityInColumn(
 
         BRANCH
 
-        if (Strength > 0.0f)
+        if (Strength > 0.0f && !ATMO_ABLATE(1u))
         {
 			// Wispy at the base, billowy toward the top, fibrous in cirrus.
             const float Billow = saturate(HeightFraction / F.DetailBillowHeight);

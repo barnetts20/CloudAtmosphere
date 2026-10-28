@@ -1,4 +1,5 @@
 #include "FlowSimSubsystem.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 #include "TerrestrialShadowMap.h"
 #include "FlowSimulation.h"
@@ -701,6 +702,7 @@ TStatId UFlowSimSubsystem::GetStatId() const
 
 void UFlowSimSubsystem::StartSimulation(UFlowSimConfig* InConfig)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UFlowSimSubsystem::StartSimulation);
 	if (!InConfig)
 	{
 		UE_LOG(LogFlowSim, Warning, TEXT("StartSimulation called with a null config."));
@@ -1101,6 +1103,7 @@ void UFlowSimSubsystem::StopSimulation()
 
 void UFlowSimSubsystem::ResetSimulation()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UFlowSimSubsystem::ResetSimulation);
 	SimulatedTime = 0.0f;
 	StepsCompleted = 0;
 	ClimateStartTime = 0.0;
@@ -1221,6 +1224,7 @@ double UFlowSimSubsystem::GetClimateTurnovers() const
 
 bool UFlowSimSubsystem::QueueInitialState()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UFlowSimSubsystem::QueueInitialState);
 	if (!Config || !Config->InitialState || !Simulation)
 	{
 		return false;
@@ -1297,6 +1301,7 @@ bool UFlowSimSubsystem::SaveSnapshot(UFlowSnapshot* Target)
 	ENQUEUE_RENDER_COMMAND(FlowSimCapture)(
 		[Sim, Params, &Result, &Grid, &bSucceeded, &bNoState](FRHICommandListImmediate& RHICmdList) mutable
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE_STR("RT FlowSimCapture");
 			// PITFALL: between a start or reset and the next step the pooled
 			// state is the previous config's, or none.
 			if (!Sim->HasState_RenderThread())
@@ -1391,6 +1396,7 @@ void UFlowSimSubsystem::StepOnce(int32 NumSteps)
 
 bool UFlowSimSubsystem::PrepareTargets()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UFlowSimSubsystem::PrepareTargets);
 	if (!Config)
 	{
 		return false;
@@ -1453,6 +1459,7 @@ bool UFlowSimSubsystem::PrepareTargets()
 
 bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UFlowSimSubsystem::BuildParams);
 	if (!Config)
 	{
 		return false;
@@ -1843,6 +1850,7 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 
 void UFlowSimSubsystem::TryAutoStart()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UFlowSimSubsystem::TryAutoStart);
 	const UFlowSimSettings* Settings = GetDefault<UFlowSimSettings>();
 
 	if (!Settings || Settings->DefaultConfig.IsNull())
@@ -1903,6 +1911,7 @@ void UFlowSimSubsystem::OnPreActorTick(UWorld* InWorld, ELevelTick TickType, flo
 
 void UFlowSimSubsystem::Advance(float DeltaTime)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UFlowSimSubsystem::Advance);
 	ResolveClaims();
 
 	// On the second frame rather than in Initialize: resolving a soft reference
@@ -1986,6 +1995,7 @@ static constexpr double OwnerHandoverRatio = 0.8;
 
 void UFlowSimSubsystem::ResolveClaims()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UFlowSimSubsystem::ResolveClaims);
 	TArray<FSimClaim> Bids = MoveTemp(Claims);
 	Claims.Reset();
 
@@ -2063,6 +2073,7 @@ bool UFlowSimSubsystem::TakeKeptClock(const UObject* Claimant, double& OutTime, 
 
 void UFlowSimSubsystem::KeepFlow(UTextureRenderTarget2DArray* Keep, const UObject* KeptFor)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UFlowSimSubsystem::KeepFlow);
 	if (!Keep || !FlowTarget || !KeptFor)
 	{
 		return;
@@ -2106,6 +2117,7 @@ void UFlowSimSubsystem::KeepFlow(UTextureRenderTarget2DArray* Keep, const UObjec
 	ENQUEUE_RENDER_COMMAND(FlowSimKeep)(
 		[Source, Dest, Slices](FRHICommandListImmediate& RHICmdList)
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE_STR("RT FlowSimKeep");
 			FTextureRHIRef SourceTexture = Source->GetRenderTargetTexture();
 			FTextureRHIRef DestTexture = Dest->GetRenderTargetTexture();
 
@@ -2130,6 +2142,7 @@ void UFlowSimSubsystem::KeepFlow(UTextureRenderTarget2DArray* Keep, const UObjec
 
 void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UFlowSimSubsystem::StepSimulation);
 	if (!bRunning || !Config || !Simulation)
 	{
 		return;
@@ -2270,6 +2283,7 @@ void UFlowSimSubsystem::StepSimulation(float DeltaTime)
 	ENQUEUE_RENDER_COMMAND(FlowSimAdvance)(
 		[Sim, Params, Substeps](FRHICommandListImmediate& RHICmdList) mutable
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE_STR("RT FlowSimAdvance");
 			Params.ResolveTextures_RenderThread();
 
 			FRDGBuilder GraphBuilder(RHICmdList);
@@ -2293,6 +2307,7 @@ bool UFlowSimSubsystem::RequestShadowBake(const FTerrestrialShadowParams& InPara
 
 void UFlowSimSubsystem::BakeShadowMap()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UFlowSimSubsystem::BakeShadowMap);
 	// CONSUMED, NOT HELD. A planet that stops asking stops baking on the next
 	// tick, rather than leaving a map frozen at its last light direction.
 	TArray<FTerrestrialShadowParams> Requests = MoveTemp(ShadowRequests);
@@ -2309,6 +2324,7 @@ void UFlowSimSubsystem::BakeShadowMap()
 		ENQUEUE_RENDER_COMMAND(CloudShadowBake)(
 			[Params](FRHICommandListImmediate& RHICmdList) mutable
 			{
+				TRACE_CPUPROFILER_EVENT_SCOPE_STR("RT CloudShadowBake");
 				Params.ResolveTextures_RenderThread();
 
 				FRDGBuilder GraphBuilder(RHICmdList);

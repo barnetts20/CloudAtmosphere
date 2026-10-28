@@ -59,6 +59,24 @@
 #define ATMO_BAKE_ENTRY_BACKOFF 1.5f
 #endif
 
+/** Stage P1b2: 1 to split each texel's subsamples across a quad of lanes, one
+ *  subsample a lane, summed in subsample order by quad reads, so every lane of
+ *  the quad holds the texel's same extinction and walks the same march. Four
+ *  times the threads, a quarter of the fetch chain per thread: the march is
+ *  latency-bound, and a spread bake's small dispatches most of all. Needs wave
+ *  operations; the pass falls back to 0 without them. */
+#ifndef ATMO_BAKE_QUAD
+#define ATMO_BAKE_QUAD 0
+#endif
+
+#if ATMO_BAKE_QUAD && ATMO_BAKE_SUBSAMPLES != 4
+#error ATMO_BAKE_QUAD splits exactly four subsamples across a quad.
+#endif
+
+/** The lane's place in its quad, its subsample; 0 without ATMO_BAKE_QUAD.
+ *  Only lane 0 writes the texel the quad shares. Set by the entry point. */
+static uint AtmoBakeQuadLane = 0u;
+
 /** Rotated grid: one subsample per row and per column of the texel. */
 static const float2 AtmoBake_SubOffsets[4] =
 {
@@ -83,6 +101,19 @@ float3 ShadowCameraLocal;
 
 /** Cascade written by this dispatch's first Z slice. */
 int ShadowFirstLevel;
+
+/** Stage P1b: the rows this dispatch bakes, in blocks of ATMO_BAKE_THREADS rows.
+ *  Thread group row g bakes block g * ShadowRowStride + ShadowRowPhase, so a
+ *  level's bake spread over ShadowRowStride dispatches takes every stride-th
+ *  block on each, and each dispatch costs about the same wherever the disc's
+ *  chords are long. Stride 1, phase 0: every row (one dispatch per level). */
+int ShadowRowStride;
+int ShadowRowPhase;
+
+/** Stage P1b: the slice written, or below 0 for the level's own. A spread bake
+ *  writes a staging slice, copied over the level's when its last block is in, so
+ *  the march never reads a level half-baked around two cameras. */
+int ShadowWriteSlice;
 
 /** The level's previous bake (a one-slice copy), the light and camera it was
  *  baked with, and the share of it kept. A weight of 0 skips history. */
