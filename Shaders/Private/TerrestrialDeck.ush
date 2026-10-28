@@ -1179,11 +1179,26 @@ float4 TR_DensityInColumn(
         const float Rise = Col.Base + Above * TR_StretchFlatten(Strain, Inherit, F.StructureStretchFlatten);
         const float UVWScale = TR_NoiseFrequency(F.StructureScale, F.StructureRate, Rise, F);
 
-        const float Noise = TR_BlendNoise(TR_StructureChannels(TR_SampleLayer(
+        const float StructureWeightA = TR_StretchWeightA(Strain, Inherit, F.StructureStretchBias, F);
+        const float StructureLod = TR_NoiseLod(StructureVolume, UVWScale, F.StructureMipBias, F);
+
+        float4 StructureRaw = TR_SampleLayer(
 			StructureVolume, StructureSampler, N, DisplacementA, DisplacementB, Inherit,
-			TR_StretchWeightA(Strain, Inherit, F.StructureStretchBias, F), UVWScale,
-			TR_NoiseLod(StructureVolume, UVWScale, F.StructureMipBias, F), F)),
-			Col.Genus);
+			StructureWeightA, UVWScale, StructureLod, F);
+
+		// Stage P1e (measurement, bit 256): the fetches taken twice, the second at a
+		// 3% higher frequency (other texels, the same locality) and scaled to
+		// nothing: the fetches' cost, the field and so the rays unchanged.
+        BRANCH
+
+        if (ATMO_ABLATE(256u))
+        {
+            StructureRaw += 1e-20f * TR_SampleLayer(
+				StructureVolume, StructureSampler, N, DisplacementA, DisplacementB, Inherit,
+				StructureWeightA, UVWScale * 1.03f, StructureLod, F);
+        }
+
+        const float Noise = TR_BlendNoise(TR_StructureChannels(StructureRaw), Col.Genus);
 
 #if TR_DEEP_DECK
         StructureNoise = Noise;
@@ -1258,9 +1273,23 @@ float4 TR_DensityInColumn(
 				float4(1.0f - Billow, Billow, 0.0f, 0.0f) * (1.0f - Col.Cirrus)
 				+ float4(0.0f, 0.0f, Col.Cirrus, 0.0f);
 
-            const float4 Channels = TR_DetailChannels(TR_SampleLayer(
+            const float DetailWeightA = TR_StretchWeightA(Strain, Inherit, F.DetailStretchBias, F);
+
+            float4 DetailRaw = TR_SampleLayer(
 				DetailVolume, DetailSampler, N, DisplacementA, DisplacementB, Inherit,
-				TR_StretchWeightA(Strain, Inherit, F.DetailStretchBias, F), UVWScale, Lod, F));
+				DetailWeightA, UVWScale, Lod, F);
+
+			// Stage P1e (measurement, bit 512): as bit 256, for the detail.
+            BRANCH
+
+            if (ATMO_ABLATE(512u))
+            {
+                DetailRaw += 1e-20f * TR_SampleLayer(
+					DetailVolume, DetailSampler, N, DisplacementA, DisplacementB, Inherit,
+					DetailWeightA, UVWScale * 1.03f, Lod, F);
+            }
+
+            const float4 Channels = TR_DetailChannels(DetailRaw);
 
             Modifier = lerp(F.DetailFadeMean, TR_BlendNoise(Channels, Weights), Strength);
 
@@ -1337,8 +1366,19 @@ float4 TR_Density(
 
     const float3 N = normalize(Atmo_RotateZ(LocalPos / max(Radius, 1e-4f), F.SpinAngle));
 
-    const FlowColumnSample S = Flow_SampleColumn(
+    FlowColumnSample S = Flow_SampleColumn(
 		FlowField, FlowSampler, N, TR_FlowLayer(FlowField, F.CloudLayer), true);
+
+	// Stage P1e (measurement, bit 1024): the column read twice, as bit 256.
+    BRANCH
+
+    if (ATMO_ABLATE(1024u))
+    {
+        const FlowColumnSample Twice = Flow_SampleColumn(
+			FlowField, FlowSampler, normalize(N + 0.003f), TR_FlowLayer(FlowField, F.CloudLayer), true);
+
+        S.Weather += 1e-20f * (Twice.Weather + Twice.Flow + Twice.NoiseA + Twice.NoiseB);
+    }
 
     const TRColumn Col = TR_ColumnFromInputs(TR_InputsFromSample(S), N, F);
 

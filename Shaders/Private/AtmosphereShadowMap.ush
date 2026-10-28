@@ -425,13 +425,14 @@ bool AtmoShadow_LevelCoords(AtmoShadowReader R, int Level, float3 LocalPos, out 
     return HalfChordSq > 0.0f;
 }
 
-/** Optical depth between a planet-local position and the light, on the fastest
+/** R1a's walk, every containing level read (kept for the A/B of P1f: bit 2048 of
+ *  r.CloudAtmosphere.March.Ablate). Optical depth between a planet-local position and the light, on the fastest
  *  channel; Ceiling bounds the tail. Every cascade holds the whole field at its
  *  own extent from the same shell entry, walked outermost inward, a finer level
  *  replacing the result where it contains the point and blending at its edge.
  *  Valid anywhere inside the shell, so geometry below the deck reads its
  *  column the same way. */
-float AtmoShadow_ReadTau(
+float AtmoShadow_ReadTauAllLevels(
 	Texture2DArray ShadowMap,
 	SamplerState ShadowSampler,
 	AtmoShadowReader R,
@@ -485,6 +486,113 @@ float AtmoShadow_ReadTau(
 			JitterTexels, R.MapSize, Ceiling);
 
         Tau = lerp(Finer, Tau, smoothstep(ATMO_SHADOW_NEAR_BLEND, 1.0f, Edge));
+    }
+
+    return Tau;
+}
+
+#ifndef ATMO_ABLATE
+#define ATMO_ABLATE(Bit) false
+#endif
+
+/** Optical depth between a planet-local position and the light, on the fastest
+ *  channel; Ceiling bounds the tail. Every cascade holds the whole field at its
+ *  own extent from the same shell entry, walked outermost inward, a finer level
+ *  replacing the result where it contains the point and blending at its edge.
+ *  Valid anywhere inside the shell, so geometry below the deck reads its
+ *  column the same way.
+ *
+ *  Stage P1f: ONLY THE LEVELS THAT REACH THE RESULT ARE READ. A level whose
+ *  blend weight is exactly 0 (Edge at or inside ATMO_SHADOW_NEAR_BLEND) replaces
+ *  everything coarser: lerp(Finer, Tau, 0) is Finer whatever Tau was. So the walk
+ *  starts at the finest such level and reads only the finer levels after it,
+ *  in the same order with the same operands: the same result as reading every
+ *  level (AtmoShadow_ReadTauAllLevels), bit for bit, for one 4-tap slice in most
+ *  of the view instead of three. */
+float AtmoShadow_ReadTau(
+	Texture2DArray ShadowMap,
+	SamplerState ShadowSampler,
+	AtmoShadowReader R,
+	float3 LocalPos,
+	float2 JitterTexels,
+	float Ceiling)
+{
+    BRANCH
+
+    if (ATMO_ABLATE(2048u))
+    {
+        return AtmoShadow_ReadTauAllLevels(ShadowMap, ShadowSampler, R, LocalPos, JitterTexels, Ceiling);
+    }
+
+	// Outside the shell and on its lit side, nothing lies toward the light.
+    if (dot(LocalPos, LocalPos) >= R.CullRadius * R.CullRadius && dot(LocalPos, R.L) >= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    float2 Discs[ATMO_SHADOW_CASCADES];
+    float Depths[ATMO_SHADOW_CASCADES];
+    float Weights[ATMO_SHADOW_CASCADES];
+    bool Inside[ATMO_SHADOW_CASCADES];
+
+    if (!AtmoShadow_LevelCoords(R, 0, LocalPos, Discs[0], Depths[0]))
+    {
+        return 0.0f;
+    }
+
+    Inside[0] = true;
+    Weights[0] = 0.0f;
+
+	// Each level's coordinates and blend weight, which cost no fetch; and the
+	// finest level that wholly replaces the ones before it.
+    int First = 0;
+
+    UNROLL
+
+    for (int Level = 1; Level < ATMO_SHADOW_CASCADES; Level++)
+    {
+        const float HalfWidth = R.HalfWidth[Level];
+
+        Discs[Level] = float2(0.0f, 0.0f);
+        Depths[Level] = 0.0f;
+
+        Inside[Level] = HalfWidth > 0.0f && AtmoShadow_LevelCoords(R, Level, LocalPos, Discs[Level], Depths[Level]);
+        Weights[Level] = 1.0f;
+
+        if (Inside[Level])
+        {
+			// Square support, so the edge measure is the larger axis.
+            const float2 Relative = (Discs[Level] - R.Centre[Level]) / HalfWidth;
+            const float Edge = max(abs(Relative.x), abs(Relative.y));
+
+            Inside[Level] = Edge < 1.0f;
+            Weights[Level] = smoothstep(ATMO_SHADOW_NEAR_BLEND, 1.0f, Edge);
+
+            if (Inside[Level] && Weights[Level] <= 0.0f)
+            {
+                First = Level;
+            }
+        }
+    }
+
+    float Tau = 0.0f;
+
+	// The first level read, then each finer one blended over it as the full walk
+	// blends it.
+    UNROLL
+
+    for (int Read = 0; Read < ATMO_SHADOW_CASCADES; Read++)
+    {
+        if (Read < First || !Inside[Read])
+        {
+            continue;
+        }
+
+        const float Slice = AtmoShadow_TauSlice(
+			ShadowMap, ShadowSampler, Read, Discs[Read], R.Centre[Read], R.HalfWidth[Read], Depths[Read],
+			JitterTexels, R.MapSize, Ceiling);
+
+        Tau = (Read == First) ? Slice : lerp(Slice, Tau, Weights[Read]);
     }
 
     return Tau;
