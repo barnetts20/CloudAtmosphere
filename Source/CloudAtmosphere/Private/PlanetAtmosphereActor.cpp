@@ -21,6 +21,8 @@
 #include "FlowSimSubsystem.h"
 #include "FlowSimTypes.h"
 #include "HAL/IConsoleManager.h"
+#include "Serialization/CustomVersion.h"
+#include "UObject/PropertyPortFlags.h"
 
 // --------------------------------------------------------------------------
 // Constructor
@@ -173,11 +175,57 @@ APlanetAtmosphereActor::APlanetAtmosphereActor()
     GasGiant.SurfaceShadow = Terrestrial.SurfaceShadow;
 
     SyncModelFlags();
+
+    // R2 (J4): the preset shown is the preset run: the struct defaults matched no row (a 1024^2
+    // shadow map, 16 times every preset's texels, under a panel reading "High").
+    ApplyGraphicsPresetValues();
 }
 
 // --------------------------------------------------------------------------
 // Lifecycle
 // --------------------------------------------------------------------------
+
+namespace PlanetAtmosphereVersionDetail
+{
+    /** The actor's saved-data versions. */
+    enum Type : int32
+    {
+        BeforeVersions = 0,
+        /** R2 (J4): the constructor applies the graphics preset's values. */
+        PresetDefaults = 1,
+        Latest = PresetDefaults
+    };
+    const FGuid Guid(0x255DBAA8, 0x1ADB49D5, 0xBE1E8DCD, 0x6E93F60E);
+    FCustomVersionRegistration Registration(Guid, Latest, TEXT("PlanetAtmosphereActor"));
+}
+
+void APlanetAtmosphereActor::Serialize(FArchive& Ar)
+{
+    Ar.UsingCustomVersion(PlanetAtmosphereVersionDetail::Guid);
+    // Properties are saved as differences from the archetype: a value an older
+    // level left at the old default wasn't written, and would now load the
+    // preset's. Those values are put back first, so whatever was saved still
+    // overrides them. Only against the native class's defaults: a Blueprint's
+    // own defaults were loaded through this same path.
+    if (Ar.IsLoading() && Ar.IsPersistent() && !Ar.HasAnyPortFlags(PPF_Duplicate)
+        && Ar.CustomVer(PlanetAtmosphereVersionDetail::Guid) < PlanetAtmosphereVersionDetail::PresetDefaults)
+    {
+        const UObject* LoadedFrom = GetArchetype();
+        if (LoadedFrom && LoadedFrom->GetClass()->HasAnyClassFlags(CLASS_Native))
+        {
+            const FAtmosphereSamplingParams OldSampling;
+            const FAtmosphereRaymarchParams OldRaymarch;
+            Sampling.CellSize = OldSampling.CellSize;
+            Sampling.FreshWeight = OldSampling.FreshWeight;
+            Sampling.LatticeGrowth = OldSampling.LatticeGrowth;
+            Raymarch.AtmosphereSteps = OldRaymarch.AtmosphereSteps;
+            Raymarch.CloudSteps = OldRaymarch.CloudSteps;
+            Raymarch.ChordSpread = OldRaymarch.ChordSpread;
+            ShadowResolution = 1024;   // the member's initialiser
+        }
+    }
+    Super::Serialize(Ar);
+}
 
 void APlanetAtmosphereActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
@@ -676,9 +724,12 @@ static TAutoConsoleVariable<int32> CVarShadowBakeLog(
     TEXT("Stage P1b. 1: log each cloud shadow level as its rebake completes, with the seconds since its last one."),
     ECVF_Default);
 
-/** Least light turn that makes a level due on a still field: well under a
- *  texel at any cascade (2 degrees drops the history altogether). */
-static constexpr float ShadowDueLightCosine = 0.99999995f;   // ~0.02 degrees
+/** Least light turn that makes a level due on a still field, as 1 - cos: well
+ *  under a texel at any cascade (2 degrees drops the history altogether). R2
+ *  (J1): above float noise; the cosine 0.99999995 rounded to 1 - 1 ulp, and the
+ *  self-dot of an unchanged unit vector fell below it for ~1 direction in 5, so
+ *  a still field rebaked every frame. */
+static constexpr float ShadowDueLightTurn = 1.0e-6f;   // ~0.08 degrees
 
 void APlanetAtmosphereActor::PrepareShadowTarget()
 {
@@ -955,6 +1006,15 @@ bool APlanetAtmosphereActor::FillShadowRequest(
     {
         // A staging slice remade mid-bake lost the rows already baked: start over.
         const bool bStagingLost = ShadowSpread.Level != INDEX_NONE && PrepareShadowStaging();
+        // (R2, J2: and a field that jumped: another flow, its clock gone back, or the sim
+        // reset.)
+        const bool bFieldJumped = ShadowSpread.Level != INDEX_NONE
+            && (ShadowSpread.Flow.Get() != FlowTarget || GetFieldClock().Time < ShadowSpread.ClockTime
+                || ShadowSpread.SimSerial != FieldSimSerial);
+        if (bFieldJumped)
+        {
+            ShadowSpread = FShadowSpread();
+        }
 
         if (ShadowSpread.Level != INDEX_NONE && !bStagingLost)
         {
@@ -1121,6 +1181,9 @@ void APlanetAtmosphereActor::CommitShadowBake(const FTerrestrialShadowParams& Pa
             ShadowSpread.LightDir = Params.LightDir;
             ShadowSpread.CameraLocal = Params.CameraLocal;
             ShadowSpread.History = Params.History[ShadowSpread.Level];
+            ShadowSpread.Flow = FlowTarget;
+            ShadowSpread.ClockTime = GetFieldClock().Time;
+            ShadowSpread.SimSerial = FieldSimSerial;
         }
 
         ShadowSpread.Phase = Params.RowPhase + 1;
@@ -1142,7 +1205,9 @@ void APlanetAtmosphereActor::CommitShadowBake(const FTerrestrialShadowParams& Pa
             ShadowBakedCamera[Level] = Params.CameraLocal;
             ShadowBakedLight[Level] = Params.LightDir;
             ShadowBakeTime[Level] = Now;
-            ShadowBakedClock[Level] = FVector2D(Clock.Time, Clock.SpinTime);
+            // (R2, J1: the spin time only where the field spins: a terrestrial
+            // planet's ratio is 0, and a kept field's spin clock runs on.)
+            ShadowBakedClock[Level] = FVector2D(Clock.Time, ActiveModel().Planet.SpinRatio > 0.0f ? Clock.SpinTime : 0.0);
         }
     }
 
@@ -1180,12 +1245,13 @@ bool APlanetAtmosphereActor::IsShadowLevelDue(int32 Level, const FVector3f& Ligh
     // noise's drift and phases) and the spin time (the field's turn).
     const FAtmosphereFieldClock& Clock = GetFieldClock();
 
-    if (Clock.Time != ShadowBakedClock[Level].X || Clock.SpinTime != ShadowBakedClock[Level].Y)
+    const double SpinKey = ActiveModel().Planet.SpinRatio > 0.0f ? Clock.SpinTime : 0.0;
+    if (Clock.Time != ShadowBakedClock[Level].X || SpinKey != ShadowBakedClock[Level].Y)
     {
         return true;
     }
 
-    if (FVector3f::DotProduct(LightDir, ShadowBakedLight[Level]) < ShadowDueLightCosine)
+    if (1.0f - FVector3f::DotProduct(LightDir, ShadowBakedLight[Level]) > ShadowDueLightTurn)
     {
         return true;
     }
@@ -1413,6 +1479,11 @@ void APlanetAtmosphereActor::UpdateComputeMarch(
 
     bWant = bWant && ViewExtension.IsValid();
 
+    // R2 (J3): the climate's read-back whether or not the march draws: it reads the sim, not the
+    // march, and the planet's build waits on it while this atmosphere drives the sim (a march
+    // that can't draw, e.g. its blue noise cleared, stalled the terrain's build for good).
+    UpdateClimateReadback();
+
     if (!ViewExtension)
     {
         return;
@@ -1423,7 +1494,6 @@ void APlanetAtmosphereActor::UpdateComputeMarch(
     {
         ViewExtension->SetFrame_GameThread(Params);
         UpdateWeatherReadback(Params);
-        UpdateClimateReadback();
     }
 
     ViewExtension->SetEnabled(bWant);
@@ -1584,7 +1654,11 @@ void APlanetAtmosphereActor::RestartSimulation()
         // the sim on the new config anyway; a reset of the outgoing one would be a second spin-up
         // start and InitialState upload for nothing (R1, ATM-2).
         if (Running && Running != ActiveSimConfig())
+        {
+            // (R2, K2: but the outgoing config's window is over for the planet now.)
+            Sim->InvalidateClimateWindow();
             return;
+        }
         // The surface the restart is for (a new SetSurfaceMap), on the running config now: the
         // claim that would put it there runs only at this actor's next tick, after the window's
         // first steps (stage A9's rule: an own config only).
@@ -1746,6 +1820,11 @@ void APlanetAtmosphereActor::ApplyGraphicsPreset()
     Modify();
 #endif
 
+    ApplyGraphicsPresetValues();
+}
+
+void APlanetAtmosphereActor::ApplyGraphicsPresetValues()
+{
     const FAtmosphereGraphicsPresetRow& Row = GraphicsPresetRows[FMath::Clamp(
         static_cast<int32>(GraphicsPreset), 0, static_cast<int32>(UE_ARRAY_COUNT(GraphicsPresetRows)) - 1)];
 
@@ -1899,6 +1978,7 @@ void APlanetAtmosphereActor::ClaimSimulation(const FVector& PlanetCenter, float 
     {
         FlowTarget = Sim->GetFlowTarget();
         SimDebugView = Sim->GetDebugTarget();
+        FieldSimSerial = Sim->GetClimateWindowSerial();
 
         FieldClock.Time = Sim->GetDisplayTime();
         FieldClock.SpinTime = FieldClock.Time;

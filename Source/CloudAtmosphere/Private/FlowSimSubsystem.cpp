@@ -1,4 +1,5 @@
 #include "FlowSimSubsystem.h"
+#include "UObject/Package.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
 #include "TerrestrialShadowMap.h"
@@ -199,6 +200,17 @@ static FAutoConsoleCommandWithWorldAndArgs GFlowSimSaveCmd(
 				}
 			}
 
+			// R2 (K3): a seeded atmosphere's state is a transient roll of its archetype's: saving
+			// into it persists nothing, whatever the log would say.
+			if (Target->HasAnyFlags(RF_Transient) || Target->GetOutermost() == GetTransientPackage()
+				|| (Target->GetOuter() && Target->GetOuter()->HasAnyFlags(RF_Transient)))
+			{
+				UE_LOG(LogFlowSim, Error,
+					TEXT("The running InitialState (%s) is transient (a seeded atmosphere's roll): nothing saved. ")
+					TEXT("Name a FlowSnapshot asset to save into, or use FlowSim.Capture."), *Target->GetName());
+				return;
+			}
+
 			Sub->SaveSnapshot(Target);
 		}));
 
@@ -388,7 +400,9 @@ namespace
 			// zeta = 2 mu R - (1 - mu^2) dR/dmu for an angular rate R(mu).
 			Speed += W * Rate * FMath::Cos(Lat);
 			Vorticity += W * (2.0f * M * Rate - (1.0f - M * M) * Slope);
-
+			// R2 (K1): the weights' sum (it was never added: the speed came out ~5e6 times too
+			// large, and a steered perpetual storm jumped to a random longitude every step).
+			Weight += W;
 		}
 
 		FPerpetualBackground Out;
@@ -1547,6 +1561,9 @@ bool UFlowSimSubsystem::BuildParams(FFlowSimParams& Out, float Step) const
 	Out.ClimateParams = FVector4f(FMath::Max(Config->ClimateTurnovers, 0.1f), 0.0f, 0.0f, 0.0f);
 	Out.ClimateWindowStart = ClimateWindowStart;
 	Out.ClimateWindowEnd = ClimateWindowEnd;
+	// R2 (K4): the frame's uniforms place the perpetual storms at the sim's time too (the
+	// substeps set their own); they were left at time zero.
+	Out.PerpetualTime = SimulatedTime;
 
 	// Stage A9: the ground (SurfaceMap; its resource below).
 	Out.SurfaceParams = FVector4f(

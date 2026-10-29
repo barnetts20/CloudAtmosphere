@@ -49,5 +49,7 @@ float Atmo_SceneDepthAt(float2 bufferUV)
  *  the pixel the depth was read at. */
 float Atmo_SceneRayDistance(float depth, float3 rayDir)
 {
-    return depth / max(dot(rayDir, View.ViewForward), 1e-3f);
+    // R2 (L1): the cosine held at 1 (two normalised vectors can dot to 1.0000001), so the
+    // no-occluder sentinel stays exactly the sentinel and still reads as "nothing drawn here".
+    return depth / clamp(dot(rayDir, View.ViewForward), 1e-3f, 1.0f);
 }

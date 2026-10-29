@@ -3,6 +3,7 @@
 #include "CloudAtmosphere.h"
 #include "Containers/Ticker.h"
 #include "DynamicRHI.h"
+#include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/ScopeLock.h"
 #include "RHI.h"
@@ -31,6 +32,7 @@ static TAutoConsoleVariable<int32> CVarAtmosphereMarchAblate(
 	TEXT("512 the detail fetches taken twice (likewise)\n")
 	TEXT("1024 the flow column read twice (likewise)\n")
 	TEXT("2048 the cloud shadow read walking every cascade (R1a's walk; P1f reads only the levels that reach the result)\n")
+	TEXT("4096 nothing (the sweep's control: a nonzero value alone)\n")
 	TEXT("0 (default): the march as it is. CloudAtmosphere.MarchSweep steps through them."),
 	ECVF_RenderThreadSafe);
 
@@ -247,6 +249,8 @@ namespace AtmosphereMarchSweepDetail
 		/** Other plugins' cvars held while the sweep runs (name, value before). */
 		TArray<TPair<FString, FString>> Held;
 		FTSTicker::FDelegateHandle Ticker;
+		/** R2 (J5): the sweep ends with the world it measures (PIE stop, a map change). */
+		FDelegateHandle WorldCleanup;
 		/** Per config, every round's median, the passes a frame and the GPU frame's median. */
 		TArray<float> Medians[NumConfigs];
 		TArray<float> Passes[NumConfigs];
@@ -315,6 +319,8 @@ namespace AtmosphereMarchSweepDetail
 		GTiming.store(false);
 		// (Called from Tick, which returns false: the ticker goes with that.)
 		GSweep.Ticker.Reset();
+		FWorldDelegates::OnWorldCleanup.Remove(GSweep.WorldCleanup);
+		GSweep.WorldCleanup.Reset();
 		GSweep.bActive = false;
 
 		if (!bComplete)
@@ -437,6 +443,17 @@ namespace AtmosphereMarchSweepDetail
 		Drain(Stale);
 
 		GSweep.Ticker = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateStatic(&Tick));
+		// R2 (J5): a world torn down mid-sweep ends it at once, so the next world's terrain isn't
+		// held unmeshed until the stuck timeout.
+		// (Game and editor worlds only: an asset editor's preview world closing doesn't end it.)
+		GSweep.WorldCleanup = FWorldDelegates::OnWorldCleanup.AddLambda([](UWorld* CleanedWorld, bool, bool)
+			{
+				if (!GSweep.bActive) return;
+				if (CleanedWorld && !CleanedWorld->IsGameWorld() && CleanedWorld->WorldType != EWorldType::Editor) return;
+				UE_LOG(LogCloudAtmosphere, Log, TEXT("CloudAtmosphere.MarchSweep: the world was torn down; sweep ended."));
+				FTSTicker::GetCoreTicker().RemoveTicker(GSweep.Ticker);
+				Finish(false);
+			});
 
 		UE_LOG(LogCloudAtmosphere, Log, TEXT("CloudAtmosphere.MarchSweep: %d configurations x %d frames x %d rounds; hold the camera still.%s"),
 			NumConfigs, GSweep.FramesPerSegment, GSweep.Rounds,

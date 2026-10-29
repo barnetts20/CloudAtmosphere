@@ -3735,7 +3735,8 @@ void MainClimateCS(uint3 Id : SV_DispatchThreadID)
 //   0 u   1 v   2 phi   3 cloud   4 cloud ascent   5 vapour   6 storm
 //   7-9 noise A xyz   10-12 noise B xyz   13 low-passed ascent   14 eye tracer
 //
-// then the storm cells, eight floats a slot, after every plane.
+// then the storm cells, eight floats a slot, and their seeds, four floats a slot
+// (MainCaptureCS), after every plane.
 // ---------------------------------------------------------------------------
 
 int SimFlatIndex(uint3 Id)

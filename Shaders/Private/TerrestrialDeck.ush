@@ -61,7 +61,6 @@
 #define TR_SLAB_ENTRY_PROBES 24
 #endif
 
-/** 1 for the deep deck, 0 for the slab: the model's permutation. */
 /** Stage P1e (measurement): a part of the field switched off for timing, by bit
  *  (r.CloudAtmosphere.March.Ablate; AtmosphereMarchPass.usf defines it over its
  *  MarchAblate uniform). Never set elsewhere: the bake and the other passes take
@@ -70,6 +69,7 @@
 #define ATMO_ABLATE(Bit) false
 #endif
 
+/** 1 for the deep deck, 0 for the slab: the model's permutation. */
 #ifndef TR_DEEP_DECK
 #define TR_DEEP_DECK 0
 #endif

@@ -143,6 +143,9 @@ public:
     UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
     void ApplyGraphicsPreset();
 
+    /** R2 (J4): ApplyGraphicsPreset's values without the transaction (the constructor's). */
+    void ApplyGraphicsPresetValues();
+
     /** Selects a preset and applies it, as from a settings menu. */
     UFUNCTION(BlueprintCallable, Category = "CloudAtmosphere")
     void SetGraphicsPreset(EAtmosphereGraphicsPreset InPreset);
@@ -301,6 +304,9 @@ public:
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
     virtual void Destroyed() override;
     virtual void BeginDestroy() override;
+    /** R2 (J4): an actor saved before the constructor applied the preset's
+     *  values loads the old defaults for the values it didn't save. */
+    virtual void Serialize(FArchive& Ar) override;
     virtual bool ShouldTickIfViewportsOnly() const override { return true; }
     virtual void Tick(float DeltaTime) override;
 
@@ -581,7 +587,19 @@ private:
         FVector3f LightDir = FVector3f(0.0f, 0.0f, 1.0f);
         FVector3f CameraLocal = FVector3f::ZeroVector;
         FAtmoShadowHistory History;
+        /** R2 (J2): the field it started on: the flow it read and its clock. A
+         *  restart (a new config, the climate capture) or a change of owner
+         *  (the sim's atlas or the kept one) starts it over, so a level is never
+         *  installed from row blocks of two fields. The sim's reset serial too:
+         *  a restart whose initial state starts later than the running clock
+         *  keeps the atlas and moves the clock forward. */
+        TWeakObjectPtr<UTextureRenderTarget2DArray> Flow;
+        double ClockTime = 0.0;
+        uint32 SimSerial = 0;
     };
+    /** R2 (J2): the sim's reset serial (GetClimateWindowSerial) as of the last
+     *  frame this atmosphere drew the sim's own field. */
+    uint32 FieldSimSerial = 0;
 
     FShadowSpread ShadowSpread;
 

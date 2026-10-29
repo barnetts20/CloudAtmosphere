@@ -103,7 +103,10 @@ float3 ShadowCameraLocal;
 int ShadowFirstLevel;
 
 /** Stage P1b: the rows this dispatch bakes, in blocks of ATMO_BAKE_THREADS rows.
- *  Thread group row g bakes block g * ShadowRowStride + ShadowRowPhase, so a
+ *  Tile row t (DispatchThreadId.y / ATMO_BAKE_THREADS, as AtmoBake_Texel computes it)
+ *  bakes block t * ShadowRowStride + ShadowRowPhase (the 8x8 entry: one thread group
+ *  row a tile row; the quad entry, ATMO_BAKE_QUAD: four 64-lane group rows a tile
+ *  row, one band each; the dispatch's TileRows * 4 matches), so a
  *  level's bake spread over ShadowRowStride dispatches takes every stride-th
  *  block on each, and each dispatch costs about the same wherever the disc's
  *  chords are long. Stride 1, phase 0: every row (one dispatch per level). */

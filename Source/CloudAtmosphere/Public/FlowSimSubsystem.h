@@ -166,6 +166,16 @@ public:
 	 *  snapshot once. */
 	uint32 GetClimateWindowSerial() const { return ClimateWindowSerial; }
 
+	/** R2 (K2): the running window no longer counts (no snapshot from it; a new serial), without
+	 *  a reset: a restart deferred to the claims' resolve (a new config next frame) must not let
+	 *  the outgoing config's window, ending meanwhile, pass for the new seed's. */
+	void InvalidateClimateWindow()
+	{
+		ClimateWindowStart = -1;
+		ClimateWindowEnd = -1;
+		ClimateWindowSerial++;
+	}
+
 	/** Stage T5b: whether any planet drives the sim. */
 	bool HasOwner() const { return Owner.IsValid(); }
 
@@ -353,4 +363,4 @@ private:
 	int32 PendingManualSteps = 0;
 
 	bool bRunning = false;
-};
+};
